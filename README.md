@@ -26,6 +26,7 @@
 - [常见问题排查](#常见问题排查)
 - [项目结构](#项目结构)
 - [界面预览](#界面预览)
+- [维护与升级](docs/MAINTENANCE.md) —— 改完代码要同步动哪些文件、升级步骤、验证门禁
 
 ## 核心概念
 
@@ -510,7 +511,7 @@ Register/
 ├── frontend/             React + TypeScript + Vite 管理台（构建产物进 static/）
 ├── scripts/              运行时脚本（camoufox 安装、Turnstile 铸造等）
 ├── tests/                pytest 测试
-├── docs/                 主题专文（接口、扩展、分库、目录规范）
+├── docs/                 主题专文（接口、扩展、维护、分库、目录规范）
 ├── data/                 运行时数据（见「数据目录与迁移」，不进版本控制）
 ├── docker/               容器启动脚本
 ├── main.py               应用入口

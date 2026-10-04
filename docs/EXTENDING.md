@@ -3,6 +3,9 @@
 本文说明如何在本项目里新增一个平台、一条注册流程或一种邮箱渠道，以及
 数据库分库、邮箱唯一键这些公共能力怎么用。
 
+> **接线清单在 [MAINTENANCE.md §2](MAINTENANCE.md)** —— 本文讲「怎么写代码」，
+> 那篇讲「改完还要同步动哪些文件、漏了会怎样」。两篇配合看。
+
 ## 0. 分层总览
 
 ```
@@ -13,7 +16,7 @@ core/            基础设施（不依赖具体平台）
 ├── mailboxes/         邮箱渠道包（一渠道一文件 + 注册表）
 │   ├── base.py            MailboxAccount / BaseMailbox
 │   ├── registry.py        渠道注册表（新增渠道 = 加文件 + 一行注册）
-│   └── channels/          各渠道实现（luckmail.py / outlook/ / ...）
+│   └── channels/          各渠道实现（outlook/ / ...）
 ├── mail_import_sources.py  邮箱导入视图映射（纯数据）
 ├── base_captcha.py    验证码方案基类
 ├── db/                数据层（分库 / 仓储 / 迁移）
@@ -155,7 +158,7 @@ def my_flow(ctx):
 
 result = pipeline.run(
     RegistrationRequest(
-        mail_provider="mailtm",
+        mail_provider="icloud_local",   # 现存的渠道只有 icloud_local / outlook
         executor_type="protocol",
         settings={"foo_option": "1"},
     ),
@@ -244,17 +247,20 @@ from . import foo  # noqa: F401
 
 | 范式 | 例子 | `get_email()` 做什么 | 收码凭证 |
 |---|---|---|---|
-| **自建地址** | `mailtm`、`duckmail`、`tempmail_lol` | 向上游注册一个新邮箱 | 上游返回的 token |
-| **复用已有地址** | `icloud_hme`、`icloud_local` | 让主号创建/取用别名 | 主号 id + 别名地址 |
+| **自建地址** | （一次性临时邮箱渠道已整体删除，见下） | 向上游注册一个新邮箱 | 上游返回的 token |
+| **复用已有地址** | `outlook`（别名 `microsoft` / `mail_import`）、`icloud_local` | 让主号创建/取用别名 | 主号 id + 别名地址 |
 
-复用型渠道的参考实现：`modules/mail/icloud_hme.py`（远程）与
-`modules/mail/icloud_local.py`（本地）。两者的 `account_id` 都存成
+现存渠道只有两条，都是**复用型 / 本地号池型**：`outlook`（微软号池，挂
+`microsoft` / `mail_import` 两个别名）与 `icloud_local`（iCloud 主号开隐私邮箱）。
+参考实现：`modules/mail/icloud_local.py`。`account_id` 存成
 `"<主号 id>:<别名地址>"` —— 收件要按主号取邮件、按别名过滤，两者缺一不可。
 
-**远程服务型渠道**：`icloud_hme` 的凭据（Apple ID 密码 / Cookie / SRP 登录）不在
-本项目里，全部留在独立的 icloud-hme 服务中，本机只调它的 HTTP API
-（`services/icloud_hme_client.py`，管理员密码换会话 + CSRF 头）。新增同类渠道时
-照这个模式：把凭据留在服务端，本机只配 URL + 管理员密码。
+> 一次性临时邮箱（Mail.tm / DuckMail / TempMail.lol / MoeMail / SkyMail /
+> CloudMail / MaliAPI / GPTMail / OpenTrashMail / CF Worker / Laoudo / Aitre）与
+> 远程服务型 `icloud_hme` 已按用户要求整体删除 —— 所以上面「自建地址」一栏没有
+> 现存例子。新增这类渠道时照本节骨架写，并在
+> `core/mail_import_sources.py` 的 `_LEGACY_PROVIDER_ALIASES` 里登记旧名收敛
+> （老库里的值要能读，否则升级后报「未知邮箱提供商」）。
 
 **本地号池型渠道**：`icloud_local` 与 `outlook` 的凭据在本机分库里
 （`data/platforms/<key>.db`），渠道方法体内延迟 import `services.icloud_service`
