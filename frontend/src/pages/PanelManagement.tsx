@@ -208,6 +208,7 @@ export default function PanelManagement() {
           panelKey={selectedPanel.key}
           panelLabel={selectedPanel.label}
           platform={selectedPanel.platform || ''}
+          platforms={selectedPanel.platforms}
           platformActions={{
             upload: selectedPanel.upload_actions,
             sync: selectedPanel.sync_actions,

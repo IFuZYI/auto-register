@@ -386,7 +386,7 @@ iCloud 业务错误不使用 `401`，以免被前端误判为面板登录过期�
 | --- | --- | --- | --- |
 | GET | `/api/integrations/panels` | — | 面板清单 + 当前地址 + **可跑的动作**（`platform` / `upload_action` / `sync_action`）；口令只回 `secret_set` 布尔，不回明文 |
 | GET | `/api/integrations/panels/{key}/comparison` | — | 本地账号 ↔ 远端面板对比；`?refresh=1` 绕过缓存 |
-| POST | `/api/integrations/panels/{key}/sync` | — | **同步到最新**：把远端较新的凭证拉回本地（覆盖 AT/RT/id_token，其它字段保留） |
+| POST | `/api/integrations/panels/{key}/sync` | — | **同步到最新**：把远端较新的凭证拉回本地（覆盖 AT/RT/id_token，其它字段保留）；`?platform=chatgpt\|grok` 只处理该平台（多平台面板用，缺省全量） |
 | POST | `/api/integrations/backfill` | `{platforms?,account_ids?,pending_only?,status?,email?,plus_status?}` | 将筛选账号补传到已配置外部系统 |
 
 > **面板管理页的动作**（用户要求把账号页那批操作集成进来）：上传 / 同步远端状态
@@ -451,6 +451,10 @@ iCloud 业务错误不使用 `401`，以免被前端误判为面板登录过期�
   `id_token` / `sso`，本地其它字段保留）；
 - 本地较新 / 同小时 / 无法判定时间 / 远端没有凭证 → 不动（保守，不拿不确定
   的数据覆盖本地）。
+
+可选查询参数 `platform`（`chatgpt` / `grok`）：多平台面板（CPA）用 —— 界面上的
+平台筛选只作用在前端，用户筛了 Grok 再点同步时后端必须按同一口径过滤，否则
+ChatGPT 的凭证也会被一起拉回（「看到的」与「被改的」对不上）。缺省 = 全量。
 
 返回 `{panel,total,pulled,skipped,items:[{email,platform,pulled,reason,fields}],
 remote_error}`；`reason` ∈ `synced` / `local_newer` / `remote_newer` /

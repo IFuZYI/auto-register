@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { App, Button, Empty, Popconfirm, Space, Spin, Table, Tag, Tooltip, Typography } from 'antd'
+import { App, Button, Empty, Popconfirm, Segmented, Space, Spin, Table, Tag, Tooltip, Typography } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
 import {
   CloudDownloadOutlined,
@@ -8,6 +8,12 @@ import {
 } from '@ant-design/icons'
 import { apiFetch } from '@/lib/utils'
 import { formatLocalTime, localTimezoneLabel } from '@/lib/time'
+import {
+  countByPlatform,
+  filterRowsByPlatform,
+  shouldShowPlatformFilter,
+  summarizeRows,
+} from '@/lib/panelComparison'
 
 /**
  * 选中面板后的本地管理面板：本地账号 ↔ 远端账号的对比 + **面板操作**。
@@ -347,6 +353,7 @@ export function PanelComparisonPanel({
   panelKey,
   panelLabel,
   platform = '',
+  platforms = [],
   platformActions = {},
   uploadAction = '',
   syncAction = '',
@@ -355,6 +362,14 @@ export function PanelComparisonPanel({
   panelLabel: string
   /** 这个面板对应的平台（来自注册表），批量动作要用 */
   platform?: string
+  /**
+   * 面板涉及的**全部**平台（CPA 是 `['chatgpt', 'grok']`）。
+   *
+   * 与 `platform` 的区别：`platform` 是兼容字段（老消费方读它，取第一个平台），
+   * 多平台面板要靠这个列表才知道该渲染平台选择器 —— 只看 `platform` 的话
+   * CPA 永远只显示「chatgpt」一个平台，平台选择器就不会出现。
+   */
+  platforms?: string[]
   /**
    * 平台 → 动作 id 的映射（CPA 这类多平台面板用）。
    *
@@ -373,6 +388,13 @@ export function PanelComparisonPanel({
   const [loading, setLoading] = useState(false)
   const [syncing, setSyncing] = useState(false)
   const [stateFilter, setStateFilter] = useState('')
+  /**
+   * 平台筛选（`''` = 全部）。只对多平台面板有意义（见 `shouldShowPlatformFilter`）。
+   *
+   * 它**同时**作用在三处：表格行、筛选条计数、批量动作的 id 集合 —— 只筛表格
+   * 的话，用户看着 32 个 Grok 行点「上传」，实际会把 ChatGPT 的一起传上去。
+   */
+  const [platformFilter, setPlatformFilter] = useState('')
   // 操作进行中的标记：`upload:<scope>` / `sync:<scope>`
   const [running, setRunning] = useState('')
 
@@ -400,16 +422,31 @@ export function PanelComparisonPanel({
   useEffect(() => {
     setPayload(null)
     setStateFilter('')
+    setPlatformFilter('')
     void load(false)
   }, [load])
 
-  const rows = useMemo(() => {
-    const all = payload?.rows || []
-    if (!stateFilter) return all
-    return all.filter((row) => row.state === stateFilter)
-  }, [payload, stateFilter])
+  /**
+   * 平台筛选后的行 —— **表格、筛选条计数、批量动作都读它**。
+   *
+   * 只筛表格的话会出「看到的和传出去的不是同一批」：用户筛了 Grok 看 32 行，
+   * 点「上传未上传 (32)」却把 ChatGPT 的一起传了。
+   */
+  const platformRows = useMemo(
+    () => filterRowsByPlatform(payload?.rows || [], platformFilter),
+    [payload, platformFilter],
+  )
 
-  const summary = payload?.summary || {}
+  const rows = useMemo(() => {
+    if (!stateFilter) return platformRows
+    return platformRows.filter((row) => row.state === stateFilter)
+  }, [platformRows, stateFilter])
+
+  // 计数在**前端**重算（不直接读后端的 summary）：平台筛选后统计条与筛选项
+  // 的数字必须跟着变，读后端全量值会出现「筛了 Grok 还显示 181」。
+  const summary = useMemo(() => summarizeRows(platformRows), [platformRows])
+  // 平台选择器上的数字（全部 / ChatGPT / Grok 各多少个账号）
+  const platformCounts = useMemo(() => countByPlatform(payload?.rows || []), [payload])
   const stateLabels = payload?.labels || {}
   const fetchTime = shortTime(payload?.fetched_at || '')
   /**
@@ -424,18 +461,18 @@ export function PanelComparisonPanel({
   // 未上传的本地账号（对比已经算出来了，不用再查一遍）
   const unuploadedIds = useMemo(
     () =>
-      (payload?.rows || [])
+      platformRows
         .filter((row) => row.state === 'local_only' && row.local_id)
         .map((row) => row.local_id as number),
-    [payload],
+    [platformRows],
   )
   // 凭证不同的本地账号（上传能把这批刷新到远端）
   const staleIds = useMemo(
     () =>
-      (payload?.rows || [])
+      platformRows
         .filter((row) => row.state === 'credential_diff' && row.local_id)
         .map((row) => row.local_id as number),
-    [payload],
+    [platformRows],
   )
   /**
    * 远端较新的本地账号（拉回能把本地刷新到最新）。
@@ -446,7 +483,7 @@ export function PanelComparisonPanel({
    */
   const remoteNewerIds = useMemo(
     () =>
-      (payload?.rows || [])
+      platformRows
         .filter(
           (row) =>
             row.state === 'credential_diff' &&
@@ -454,7 +491,7 @@ export function PanelComparisonPanel({
             row.time_relation === 'remote_newer',
         )
         .map((row) => row.local_id as number),
-    [payload],
+    [platformRows],
   )
 
   /**
@@ -552,7 +589,10 @@ export function PanelComparisonPanel({
     const toastKey = 'panel-sync-from-remote'
     message.loading({ content: '同步中（拉取远端较新的凭证）...', key: toastKey, duration: 0 })
     try {
-      const result = (await apiFetch(`/integrations/panels/${panelKey}/sync`, {
+      // `platform` 带上当前筛选：后端按它只拉该平台的行。不带的话用户筛了
+      // Grok 点同步，ChatGPT 的凭证也会被一起改（「看到的」与「被改的」对不上）。
+      const query = platformFilter ? `?platform=${encodeURIComponent(platformFilter)}` : ''
+      const result = (await apiFetch(`/integrations/panels/${panelKey}/sync${query}`, {
         method: 'POST',
       })) as { pulled: number; skipped: number; total: number; remote_error?: string }
       if (result.remote_error) {
@@ -575,7 +615,7 @@ export function PanelComparisonPanel({
     } finally {
       setRunning('')
     }
-  }, [panelKey, message, load])
+  }, [panelKey, platformFilter, message, load])
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
@@ -665,8 +705,10 @@ export function PanelComparisonPanel({
                 loading={running === 'sync-remote'}
                 disabled={Boolean(running)}
                 onClick={() => {
-                  // 全部本地账号都要同步 —— 这不是"只处理某一档"的动作
-                  const ids = (payload?.rows || [])
+                  // 全部（当前平台筛选下的）本地账号都要同步 —— 这不是"只处理
+                  // 某一档"的动作。读 `platformRows` 而不是原始行：筛了 Grok
+                  // 就只同步 Grok 的账号。
+                  const ids = platformRows
                     .filter((row) => row.local_id)
                     .map((row) => row.local_id as number)
                   void runBatch('sync', syncAction, '同步远端状态', ids, 'sync-remote')
@@ -734,6 +776,26 @@ export function PanelComparisonPanel({
         </div>
       ) : null}
 
+      {/* 平台选择（只对多平台面板出现：CPA 同时托管 ChatGPT 与 Grok）。
+          单平台面板不渲染 —— 只有「全部」一个选项的选择器是纯噪声。
+          选中的平台**同时**作用于表格、下面的状态筛选计数与批量动作按钮。 */}
+      {shouldShowPlatformFilter(platforms) ? (
+        <Space wrap size={8}>
+          <Segmented
+            value={platformFilter}
+            onChange={(value) => setPlatformFilter(String(value))}
+            options={[
+              { value: '', label: `全部 ${platformCounts.total ?? 0}` },
+              ...platforms.map((item) => ({
+                value: item,
+                label: `${PLATFORM_LABELS[item] || item} ${platformCounts[item] ?? 0}`,
+              })),
+            ]}
+            aria-label="按平台筛选"
+          />
+        </Space>
+      ) : null}
+
       <Space wrap size={6}>
         <FilterTag
           label={`全部 ${summary.total ?? 0}`}
@@ -753,7 +815,10 @@ export function PanelComparisonPanel({
       <Spin spinning={loading}>
         {rows.length ? (
           <Table
-            rowKey={(row) => row.email}
+            // key 必须带平台：同一个邮箱在 CPA 上可能同时有 codex 与 xai 两条
+            // （邮箱池按平台消耗），选「全部」时两行的 email 相同 —— 只用
+            // email 当 key 会被 React 认成同一个节点（渲染错行 + key 冲突警告）。
+            rowKey={(row) => `${row.platform || ''}|${row.email}`}
             columns={COLUMNS}
             dataSource={rows}
             size="small"

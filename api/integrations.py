@@ -75,7 +75,7 @@ def get_panel_comparison_endpoint(panel_key: str, refresh: bool = False):
 
 
 @router.post("/panels/{panel_key}/sync")
-def sync_panel_endpoint(panel_key: str):
+def sync_panel_endpoint(panel_key: str, platform: str = ""):
     """把远端较新的凭证拉回本地（「同步到最新」的动作面）。
 
     与「重新拉取对比」的区别：那个只重拉**对比表**，这个会**改本地账号**
@@ -83,6 +83,10 @@ def sync_panel_endpoint(panel_key: str):
 
     方向规则（见 `services/panel_sync.py`）：只有「远端较新」的账号会被拉回；
     本地较新/同小时/远端没有凭证的都不动。返回逐账号的原因，界面展示汇总。
+
+    `platform`（`chatgpt` / `grok`）给多平台面板用（CPA）：界面上的平台筛选
+    只作用在前端，用户筛了 Grok 再点同步时，这里不按平台过滤就会把 ChatGPT
+    的凭证也一起拉回 ——「看到的」与「被改的」对不上。空串 = 全部（老行为）。
     """
     from services.panel_comparison_cache import fetch_panel_raw
     from services.panel_registry import resolve_panel_key
@@ -102,6 +106,12 @@ def sync_panel_endpoint(panel_key: str):
             "items": [],
             "remote_error": remote_error,
         }
+    wanted = str(platform or "").strip().lower()
+    if wanted:
+        local_rows = [
+            row for row in local_rows
+            if str(row.get("platform") or "").strip().lower() == wanted
+        ]
     summary = sync_local_from_remote(local_rows, remote_accounts)
     summary["panel"] = key
     summary["remote_error"] = ""

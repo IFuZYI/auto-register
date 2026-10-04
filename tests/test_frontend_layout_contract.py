@@ -190,8 +190,12 @@ class PanelComparisonTableLayoutTests(unittest.TestCase):
         src = (
             FRONTEND / "src" / "components" / "settings" / "PanelComparisonPanel.tsx"
         ).read_text(encoding="utf-8")
-        # 操作区：含「上传未上传」按钮的那个 Space 必须 wrap
-        upload_idx = src.index("上传未上传 (")
+        # 操作区：含「上传未上传」按钮的那个 Space 必须 wrap。
+        # 锚点是按钮的 JSX（`data-hermes-action`），不是文案 —— 文案在注释里
+        # 也会出现（平台筛选的说明就引用过「上传未上传 (32)」），用文案当锚点
+        # 会让 `rindex` 找到注释上方的另一个 Space（实测踩过：断言在
+        # `<Space size={4}>` 上失败）。
+        upload_idx = src.index('data-hermes-action="upload-unuploaded"')
         # 往上找最近的 <Space
         space_idx = src.rindex("<Space", 0, upload_idx)
         space_tag = src[space_idx : src.index(">", space_idx) + 1]

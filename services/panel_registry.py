@@ -20,6 +20,12 @@
    批量上传的结果落库在 `api/actions.py::_apply_action_result`（漏了界面永远
    看不到上传状态）；
 4. 配置键：后端 `api/config.py` 的白名单 + 前端 `PanelConfigPanel.tsx` 的表单。
+
+**多平台面板**（同时服务多个平台，如 CPA）额外要在注册表里声明 `platforms`
+列表与 `upload_actions` / `sync_actions`（平台 → 动作 id）—— 对比页靠 `platforms`
+决定是否渲染平台选择器（`shouldShowPlatformFilter`），靠后两个映射把批量动作
+分发到账号各自的平台。只写兼容字段 `platform`（取第一个平台）的话，选择器
+不会出现、批量动作也只会走第一个平台的接口。
 """
 
 from __future__ import annotations
