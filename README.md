@@ -356,6 +356,8 @@ docker compose logs -f app        # 日志
 
 首次构建会额外下载 Python 依赖、Playwright Chromium 和 Camoufox，耗时明显更长。
 Dockerfile 通过固定直链安装 Camoufox，避免构建时访问 GitHub Releases API 触发匿名限流。
+uBlock Origin 附加组件为可选增强：优先从 AMO 下载，失败自动回退 GitHub 官方签名版，
+两者都不可达时跳过（不影响构建）。
 
 **数据持久化**：整站运行数据都在一个目录下（见 [数据目录与迁移](#数据目录与迁移)），
 宿主机只需挂载 `./data` 这一个卷。容器内数据根由 `DATA_DIR=/runtime` 指定，

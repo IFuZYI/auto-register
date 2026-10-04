@@ -18,6 +18,8 @@ backend.stderr.log
 reference/
 .hermes/
 .agents/
+# 本地 git worktree（研发分支工作树，镜像里不需要）
+.worktrees/
 # 旧版凭据密钥位置（现位于 data/secrets/，见 .gitignore）—— 绝不能烤进镜像层
 .secrets/
 .pytest_cache/

@@ -83,3 +83,6 @@ account_manager.db
 
 # 参考资料（含嵌套 git 仓库，仅本地参考）
 reference/
+
+# 本地 git worktree（研发分支工作树，仅本地）
+.worktrees/

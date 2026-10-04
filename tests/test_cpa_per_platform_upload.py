@@ -123,13 +123,14 @@ class CpaAutoMaintenanceRemovedTests(unittest.TestCase):
 
         评审指出旧版只检查 main.py（`for rel in ("main.py",)`），其它模块
         残留 import 不会变红，与测试名声称的范围不符。现在扫全仓 .py
-        （排除 tests/ 自身、reference/、__pycache__、以及本文件）。
+        （排除 tests/ 自身、reference/、.worktrees/（本地工作树检出）、
+        __pycache__、以及本文件）。
         """
         offenders = []
         for path in ROOT.rglob("*.py"):
             rel = path.relative_to(ROOT)
             parts = rel.parts
-            if parts[0] in {"reference", "tests"} or "__pycache__" in parts:
+            if parts[0] in {"reference", "tests", ".worktrees"} or "__pycache__" in parts:
                 continue
             try:
                 src = path.read_text(encoding="utf-8")
