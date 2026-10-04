@@ -18,18 +18,13 @@ import {
 } from '@/lib/panelComparison'
 
 /**
- * 选中面板后的本地管理面板：本地账号 ↔ 远端账号的对比 + **面板操作**。
+ * 选中面板后的本地管理面板：本地账号 ↔ 远端账号的对比 + 面板操作。
  *
- * 数据来自 `GET /api/integrations/panels/{key}/comparison`（带缓存，`refresh=1`
- * 绕过）。对比口径在服务端（`services/panel_comparison.py`）：**按凭证本体**
- * 判定是否同步 —— AT/RT/session 这些全相同就是「已同步」，有任一不同就是
- * 「凭证不同」；时间只作辅助信息说明是哪边动的（按小时）。
- *
- * 操作区（用户要求「CPA 未上传 / Sub2API 未上传 / 同步 CLIProxyAPI 状态这类
- * 都集成到面板管理里面去」）：对比结果已经知道**哪些本地账号没传上去**，
- * 动作直接在这个页面上发 —— 不用再跳到账号列表去筛一遍。
- * 上传/同步走 `POST /api/actions/{platform}/{action_id}/batch`，
- * 账号 ID 由对比行的 `local_id` 提供。
+ * 数据来自 `GET /api/integrations/panels/{key}/comparison`（带缓存，
+ * `refresh=1` 绕过）；对比口径与方向规则见 `docs/API_REFERENCE.md` 的
+ * 「集成服务」一节。动作走 `POST /api/actions/{platform}/{action_id}/batch`
+ * （同步状态）与 `POST /api/integrations/panels/{key}/{sync,push}`
+ * （更新本地/远程凭证），账号 ID 由对比行的 `local_id` 提供。
  */
 
 interface ComparisonRow {
@@ -88,11 +83,10 @@ const PLATFORM_LABELS: Record<string, string> = {
 }
 
 /**
- * 状态筛选条的展示顺序（标签文案来自后端 `labels`，不在这里再抄一份）。
+ * 状态筛选条的展示顺序（标签文案来自后端 `labels`）。
  *
- * **不含 `unknown_time`**：它是「时间比不了」，而现在时间只是辅助信息
- * （`time_relation`），行状态由凭证比对决定 —— `unknown_time` 永远不会是某行的
- * `state`，摆成筛选项的话那个标签会恒为 0，看着像坏了。
+ * 不含 `unknown_time` —— 它永远不会是行状态（时间只是辅助信息），
+ * 摆成筛选项会恒为 0。
  */
 const STATE_ORDER = [
   'local_only',
@@ -102,21 +96,12 @@ const STATE_ORDER = [
   'synced',
 ]
 
-/** 面板上存的时间串 → 浏览器本地时区显示（带时区标注，见 `@/lib/time`）。
- *
- * 为什么不再直接截断 ISO 串：远端面板用 `+08:00` 写时间、本地库写 UTC，
- * 后端归一成 UTC 后直接显示，对 +08:00 的用户每个时间都差 8 小时且无标注。
- * 现在转成**浏览器本地时区**显示，界面上另有 `UTC+8` 这样的标注说明口径。
- */
+/** 时间串 → 浏览器本地时区显示（远端时区可能不同，后端已归一）。 */
 function shortTime(value: string): string {
   return formatLocalTime(value)
 }
 
-/**
- * 批量平台动作的单次账号数上限 —— 与后端 `api/actions.py` 的
- * `_resolve_batch_accounts` 保持一致（超过 1000 个 ID 会被 400 拒掉）。
- * 超出时由 `runBatch` 分批串行发。
- */
+/** 批量动作单次上限（与后端 `_resolve_batch_accounts` 的 1000 一致）。 */
 const BATCH_ACTION_LIMIT = 1000
 
 /**
@@ -424,12 +409,8 @@ export function PanelComparisonPanel({
     void load(false)
   }, [load])
 
-  /**
-   * 平台筛选后的行 —— **表格、筛选条计数、批量动作都读它**。
-   *
-   * 只筛表格的话会出「看到的和传出去的不是同一批」：用户筛了 Grok 看 32 行，
-   * 点「上传未上传 (32)」却把 ChatGPT 的一起传了。
-   */
+  /** 平台筛选后的行 —— 表格、筛选条计数、批量动作都读它（只筛表格会「看到的
+   * 和传出去的不是同一批」）。 */
   const platformRows = useMemo(
     () => filterRowsByPlatform(payload?.rows || [], platformFilter),
     [payload, platformFilter],
@@ -440,50 +421,29 @@ export function PanelComparisonPanel({
     return platformRows.filter((row) => row.state === stateFilter)
   }, [platformRows, stateFilter])
 
-  // 计数在**前端**重算（不直接读后端的 summary）：平台筛选后统计条与筛选项
-  // 的数字必须跟着变，读后端全量值会出现「筛了 Grok 还显示 181」。
+  // 计数在前端重算：平台筛选后统计条的数字必须跟着变（读后端全量值会「筛了
+  // Grok 还显示 181」）。
   const summary = useMemo(() => summarizeRows(platformRows), [platformRows])
-  // 平台选择器上的数字（全部 / ChatGPT / Grok 各多少个账号）
   const platformCounts = useMemo(() => countByPlatform(payload?.rows || []), [payload])
   const stateLabels = payload?.labels || {}
   const fetchTime = shortTime(payload?.fetched_at || '')
-  /**
-   * 远端读取失败。
-   *
-   * 此时所有本地账号都会退化成 `local_only`（对比拿不到远端那一侧），
-   * 「上传未上传」按钮上的数字会变成**全部本地账号** —— 用户以为在补传几个，
-   * 实际会把全部重传一遍。所以这个状态下按钮改成危险样式并在确认框里说清楚。
-   */
+  /** 远端读取失败：此时所有本地账号都退化成 `local_only`，推送方向判定失效
+   * （会把全部本地账号重传）—— 推送按钮据此禁用。 */
   const remoteUnavailable = Boolean(payload?.remote_error)
 
-  /**
-   * 「更新远程凭证」的目标：未上传 + 本地较新的凭证不同行（推送方向）。
-   *
-   * 方向判定抽到 lib（`selectPushIds` / `selectPullIds`）才能被 node 真实
-   * 执行验证；两个方向互斥，详见 lib 里的说明。
-   */
+  /** 更新远程凭证的目标（推送方向，见 lib 的 `selectPushIds`）。 */
   const pushIds = useMemo(
     () => selectPushIds(platformRows),
     [platformRows],
   )
-  /**
-   * 「更新本地凭证」的目标：远端较新的凭证不同行（拉回方向）。
-   *
-   * 与 `pushIds` 互斥；同小时/无法判定时间的都不动（不拿不确定的数据
-   * 覆盖任何一边）。
-   */
+  /** 更新本地凭证的目标（拉回方向，与 `pushIds` 互斥）。 */
   const pullIds = useMemo(
     () => selectPullIds(platformRows),
     [platformRows],
   )
 
-  /**
-   * 跑「同步远端状态」批量动作（账号 ID 由对比结果给）。
-   *
-   * 面板可能同时服务多个平台（CPA 托管 ChatGPT + Grok），必须按**每个账号
-   * 自己的平台**分发 —— 用第一个平台的接口去传另一个平台的账号会报
-   * 「账号不存在」。
-   */
+  /** 跑「同步远端状态」批量动作：按**每个账号自己的平台**分发接口
+   * （CPA 同时托管 ChatGPT + Grok，用错平台的接口会报「账号不存在」）。 */
   const runBatch = useCallback(
     async (
       fallbackActionId: string,
@@ -591,14 +551,8 @@ export function PanelComparisonPanel({
     }
   }, [panelKey, platformFilter, message, load])
 
-  /**
-   * 「更新远程凭证」：把「未上传 + 本地较新」的凭证推到远端。
-   *
-   * 面板级调用（`POST .../push`）：方向判定（未上传 / 本地较新才推）在后端
-   * 做 —— 与「更新本地」互斥，绝不拿旧凭证覆盖新的。`delete_old=true`：
-   * 对新建式面板（sub2api / chatgpt2api）推成功后删掉旧远端记录避免重复，
-   * 覆盖式面板（CPA / grok2api）后端自动忽略。
-   */
+  /** 更新远程凭证：未上传 + 本地较新的推上去（面板级 `POST .../push`，方向
+   * 判定在后端）。`delete_old=true`：新建式面板推成功后清理旧记录。 */
   const runRemotePush = useCallback(async () => {
     setRunning('push-to-remote')
     const toastKey = 'panel-push-to-remote'
@@ -646,29 +600,24 @@ export function PanelComparisonPanel({
           <Typography.Text type="secondary" style={{ fontSize: 12 }}>
             本地 {payload?.local_count ?? 0} · 远端 {payload?.remote_count ?? 0}
           </Typography.Text>
-          {/* 时区标注：本地库写 UTC、远端面板写 +08:00（实测），后端已归一，
-              时间列统一按**浏览器本地时区**显示 —— 不标出时区的话用户会把
-              显示值按自己的钟面读，对不上时误以为同步出了问题。 */}
+          {/* 时区标注：时间列统一按浏览器本地时区显示（后端已归一）。 */}
           <Tooltip title="所有时间列均按浏览器本地时区显示（后端已把本地 UTC 与远端面板时间归一后比较）">
             <Typography.Text type="secondary" style={{ fontSize: 12 }}>
               时区 {localTimezoneLabel()}
             </Typography.Text>
           </Tooltip>
         </Space>
-        {/* 按钮组要允许换行：窄屏（实测 390px）下按钮一排超宽，
-            不 wrap 会被容器裁掉 —— 「重新拉取对比」实测 right=519 > 视口 390，
-            只有 15px 可见、点不到。 */}
+        {/* 按钮组要允许换行：窄屏下按钮一排超宽，不 wrap 会被容器裁掉。 */}
         <Space wrap>
           {syncAction || Object.keys(platformActions.sync || {}).length ? (
-            <Tooltip title="读远端状态回写本地账号（含封禁/失效判定）—— 会修改本地账号记录">
+            <Tooltip title="读远端状态回写本地（含封禁/失效判定）">
               <Button
                 icon={<SyncOutlined />}
                 loading={running === 'sync-remote'}
                 disabled={Boolean(running)}
                 onClick={() => {
-                  // 全部（当前平台筛选下的）本地账号都要同步 —— 这不是"只处理
-                  // 某一档"的动作。读 `platformRows` 而不是原始行：筛了 Grok
-                  // 就只同步 Grok 的账号。
+                  // 当前平台筛选下的全部本地账号都要同步 —— 不是「只处理某一档」
+                  // 的动作。读 `platformRows`：筛了 Grok 就只同步 Grok 的账号。
                   const ids = platformRows
                     .filter((row) => row.local_id)
                     .map((row) => row.local_id as number)
@@ -680,9 +629,8 @@ export function PanelComparisonPanel({
               </Button>
             </Tooltip>
           ) : null}
-          {/* 「更新远程凭证」：未上传 + 本地较新的推上去（推送方向）。
-              远端较新的行不在此列 —— 推上去会用本地旧凭证覆盖远端新的。 */}
-          <Tooltip title="把「未上传 + 本地较新」的凭证推到远端；新建式面板会清理被替换的旧记录。远端较新的账号不在此列（那些用「更新本地凭证」）">
+          {/* 更新远程凭证：未上传 + 本地较新的推上去（推送方向）。 */}
+          <Tooltip title="推送「未上传 + 本地较新」的凭证；远端较新的用「更新本地凭证」">
             <Popconfirm
               title={
                 pushIds.length
@@ -706,10 +654,8 @@ export function PanelComparisonPanel({
               </Button>
             </Popconfirm>
           </Tooltip>
-          {/* 「更新本地凭证」：远端较新的拉回来（拉回方向）。远端面板刷新过
-              token 后本地存的就是死值（x.ai 的 RT 轮换），不拉回本地就换不出
-              新 token。 */}
-          <Tooltip title="把远端较新的凭证（AT/RT）拉回本地 —— 会覆盖本地账号的凭证字段；只处理「远端较新」的账号">
+          {/* 更新本地凭证：远端较新的拉回来（拉回方向）。 */}
+          <Tooltip title="拉回「远端较新」的凭证（AT/RT）—— 覆盖本地凭证字段">
             <Popconfirm
               title={
                 pullIds.length
@@ -732,8 +678,7 @@ export function PanelComparisonPanel({
               </Button>
             </Popconfirm>
           </Tooltip>
-          {/* 只重拉**对比表**，不碰账号数据（绕服务端缓存）。 */}
-          <Tooltip title="重新拉取本地与远端的账号清单（强制绕过缓存，不修改任何账号）">
+          <Tooltip title="重新拉取账号清单（绕缓存，不改任何账号）">
             <Button
               icon={<SyncOutlined />}
               loading={syncing}

@@ -386,7 +386,8 @@ iCloud 业务错误不使用 `401`，以免被前端误判为面板登录过期�
 | --- | --- | --- | --- |
 | GET | `/api/integrations/panels` | — | 面板清单 + 当前地址 + **可跑的动作**（`platform` / `upload_action` / `sync_action`）；口令只回 `secret_set` 布尔，不回明文 |
 | GET | `/api/integrations/panels/{key}/comparison` | — | 本地账号 ↔ 远端面板对比；`?refresh=1` 绕过缓存 |
-| POST | `/api/integrations/panels/{key}/sync` | — | **同步到最新**：把远端较新的凭证拉回本地（覆盖 AT/RT/id_token，其它字段保留）；`?platform=chatgpt\|grok` 只处理该平台（多平台面板用，缺省全量） |
+| POST | `/api/integrations/panels/{key}/sync` | — | **更新本地凭证**：把远端较新的凭证拉回本地（覆盖 AT/RT/id_token，其它字段保留）；`?platform=chatgpt\|grok` 只处理该平台（多平台面板用，缺省全量） |
+| POST | `/api/integrations/panels/{key}/push` | — | **更新远程凭证**：把「未上传 + 本地较新」的凭证推到远端；`?platform=` 同 sync，`?delete_old=true` 对新建式面板清理被替换的旧记录 |
 | POST | `/api/integrations/backfill` | `{platforms?,account_ids?,pending_only?,status?,email?,plus_status?}` | 将筛选账号补传到已配置外部系统 |
 
 > **面板管理页的动作**（用户要求把账号页那批操作集成进来）：上传 / 同步远端状态
@@ -442,7 +443,7 @@ iCloud 业务错误不使用 `401`，以免被前端误判为面板登录过期�
 - 结果缓存 60 秒（`services/panel_comparison_cache.py`）；失败结果按 5 秒短 TTL
   （一次抖动不该被钉在界面上整整一分钟）；`?refresh=1` 绕过。
 
-### 同步到最新 `POST /api/integrations/panels/{key}/sync`
+### 更新本地凭证 `POST /api/integrations/panels/{key}/sync`
 
 把**远端较新**的凭证拉回本地（与「重新拉取对比」不同：那个只重拉对比表，
 这个会改本地账号）。方向判定在 `services/panel_sync.py`：
@@ -468,6 +469,28 @@ remote_error}`；`reason` ∈ `synced` / `local_newer` / `remote_newer` /
 `+08:00`，本地库写 UTC）。比较在服务端**先归一成 epoch**（`parse_timestamp`）；
 界面上的时间列统一按**浏览器本地时区**显示，并在表头标注当前时区
 （`UTC+8` 等）—— 见 `frontend/src/lib/time.ts`。
+
+### 更新远程凭证 `POST /api/integrations/panels/{key}/push`
+
+与「更新本地凭证」是一对**方向互斥**的动作：把「未上传 + 本地较新」的凭证
+推到远端。方向判定在 `services/panel_push.py`：
+
+- 远端没有（未上传）→ 推送（补传）；
+- 凭证不同且**本地较新** → 推送；
+- 远端较新 / 同小时 / 无法判定时间 / 凭证相同 / 无法比对 → 不动
+  （推上去会用本地旧凭证覆盖远端新的）。
+
+查询参数：
+
+- `platform`（`chatgpt` / `grok`）：多平台面板用，同 `/sync`；
+- `delete_old=true`：**新建式面板**（sub2api / chatgpt2api）推成功后删除被
+  替换的旧远端记录 —— 它们的上传每次新增一条，不删会留重复。覆盖式面板
+  （CPA / grok2api）的重传是原地更新，后端自动忽略该参数。
+
+返回 `{panel,total,pushed,deleted,skipped,items:[{email,platform,push,reason,
+remote_id,pushed,deleted,message,fields}],remote_error}`；`reason` ∈
+`not_uploaded` / `local_newer` / `remote_newer` / `synced` / `unknown_time` /
+`unknown_credential` / `no_pushable_field`。
 
 ---
 
