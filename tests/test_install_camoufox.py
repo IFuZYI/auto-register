@@ -1,4 +1,4 @@
-"""scripts/install_camoufox.py 的下载行为契约。
+"""scripts/install_camoufox.py 的下载与安装布局契约。
 
 背景一：受限网络（Docker Hub 被墙那类环境）下下载会偶发连接重置 / 超时；
 一次抖动就炸掉整个镜像构建。与 Dockerfile 里 playwright 安装的重试口径
@@ -12,6 +12,16 @@
 - 4xx 属确定性失败：立即换下一源，不做无谓重试；
 - UBO 全部源失败 → 警告并继续（构建不因可选组件失败）；
 - 主资产（camoufox 包）失败 → 仍然致命（不能产出半残镜像）。
+
+背景三（配对事故）：pip 解析到的 camoufox 包（0.5.7）自带 browser-pin.json，
+钉死它配对的浏览器 build（156.0.1-beta.34），且只认多版本布局
+（browsers/<repo>/<version>-<build>/ + version.json + .0.5_FLAG）。脚本
+写死下载 135.0.1-beta.24 平铺布局 → 运行时 CamoufoxNotInstalled 拒绝启动
+（且旧版本低于新版库的 playwright 最低要求）。修复后的契约：
+- 浏览器版本**优先读包自带 pin**（库升级时浏览器自动跟着升，永不错配）；
+- 包不带 pin 时退回 CAMOUFOX_VERSION / CAMOUFOX_RELEASE 环境变量，
+  两者都没有则报错退出（不存在安全的默认值）；
+- 安装到多版本布局 + .0.5_FLAG + config.json（active_version）。
 """
 
 from __future__ import annotations
@@ -19,7 +29,9 @@ from __future__ import annotations
 import contextlib
 import io
 import importlib.util
+import json
 import os
+import shutil
 import sys
 import tempfile
 import unittest
@@ -176,8 +188,9 @@ class MainFlowTests(unittest.TestCase):
     def setUp(self):
         self.mod = _load_script_module()
 
-    def _run_main(self, fake, install_dir: Path) -> str:
+    def _run_main(self, fake, install_dir: Path, env_extra: dict | None = None) -> str:
         env = {"CAMOUFOX_VERSION": "135.0.1", "CAMOUFOX_RELEASE": "beta.24"}
+        env.update(env_extra or {})
         stderr = io.StringIO()
         with mock.patch.dict(os.environ, env), \
              mock.patch.object(self.mod, "user_cache_dir", lambda _app: str(install_dir)), \
@@ -195,13 +208,18 @@ class MainFlowTests(unittest.TestCase):
             calls.append(url)
             if url.startswith("https://addons.mozilla.org/"):
                 raise _http_error(406, "Not Acceptable")
-            Path(target).write_bytes(_zip_bytes())
+            if "ublock" in url.lower():
+                Path(target).write_bytes(_zip_bytes())
+            else:
+                Path(target).write_bytes(_zip_bytes({"camoufox-bin": b"#!/bin/sh\n"}))
 
         with tempfile.TemporaryDirectory() as tmp:
             install_dir = Path(tmp) / "camoufox"
             self._run_main(fake, install_dir)
-            self.assertTrue((install_dir / "addons" / "UBO" / "manifest.json").exists(),
-                            "UBO 应经 GitHub 回退就位")
+            self.assertTrue(
+                any("manifest.json" == p.name for p in install_dir.rglob("manifest.json")),
+                "UBO 应经 GitHub 回退就位（多版本布局下 addons 在 install 根）",
+            )
             self.assertTrue(any("github.com/gorhill" in u for u in calls))
 
     def test_main_continues_when_all_ubo_sources_fail(self):
@@ -209,7 +227,7 @@ class MainFlowTests(unittest.TestCase):
         def fake(url, target):
             if "ublock" in url.lower():
                 raise _http_error(404, "Not Found")
-            Path(target).write_bytes(_zip_bytes())
+            Path(target).write_bytes(_zip_bytes({"camoufox-bin": b"#!/bin/sh\n"}))
 
         with tempfile.TemporaryDirectory() as tmp:
             install_dir = Path(tmp) / "camoufox"
@@ -236,14 +254,18 @@ class MainFlowTests(unittest.TestCase):
             calls.append(url)
             if url.startswith("https://addons.mozilla.org/"):
                 Path(target).write_bytes(b"<html>captive portal</html>")
-            else:
+            elif "ublock" in url.lower():
                 Path(target).write_bytes(_zip_bytes())
+            else:
+                Path(target).write_bytes(_zip_bytes({"camoufox-bin": b"#!/bin/sh\n"}))
 
         with tempfile.TemporaryDirectory() as tmp:
             install_dir = Path(tmp) / "camoufox"
             self._run_main(fake, install_dir)
-            self.assertTrue((install_dir / "addons" / "UBO" / "manifest.json").exists(),
-                            "内容校验失败也应回退到下一源")
+            self.assertTrue(
+                any("manifest.json" == p.name for p in install_dir.rglob("manifest.json")),
+                "内容校验失败也应回退到下一源",
+            )
             self.assertTrue(any("github.com/gorhill" in u for u in calls))
 
     def test_ubo_all_payloads_corrupt_continues_with_warning(self):
@@ -252,7 +274,7 @@ class MainFlowTests(unittest.TestCase):
             if "ublock" in url.lower():
                 Path(target).write_bytes(b"<html>error</html>")
                 return
-            Path(target).write_bytes(_zip_bytes())
+            Path(target).write_bytes(_zip_bytes({"camoufox-bin": b"#!/bin/sh\n"}))
 
         with tempfile.TemporaryDirectory() as tmp:
             install_dir = Path(tmp) / "camoufox"
@@ -271,6 +293,149 @@ class MainFlowTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             with self.assertRaises(SystemExit):
                 self._run_main(fake, Path(tmp) / "camoufox")
+
+
+class PinDrivenLayoutTests(unittest.TestCase):
+    """配对驱动：浏览器版本跟包走，布局按 0.5.x 多版本约定。"""
+
+    def setUp(self):
+        self.mod = _load_script_module()
+
+    def _fake_pkg_tree(self, tmp: Path, pin: dict | None) -> Path:
+        """造一个假 site-packages/camoufox 包目录（含可选 browser-pin.json）。
+
+        同时放置 multiversion.py 以模拟 0.5.x+ 包（新布局检测依据）。
+        """
+        pkg = Path(tmp) / "site-packages" / "camoufox"
+        pkg.mkdir(parents=True)
+        (pkg / "multiversion.py").write_text("# fake", encoding="utf-8")
+        if pin is not None:
+            (pkg / "browser-pin.json").write_text(json.dumps(pin), encoding="utf-8")
+        return pkg
+
+    def _fake_legacy_pkg_tree(self, tmp: Path) -> Path:
+        """造一个 0.4.x 风格包（无 multiversion.py、无 pin）。"""
+        pkg = Path(tmp) / "site-packages" / "camoufox"
+        pkg.mkdir(parents=True)
+        (pkg / "pkgman.py").write_text("# fake", encoding="utf-8")
+        return pkg
+
+    def test_legacy_package_uses_flat_layout(self):
+        """0.4.x 包（无 multiversion.py）→ 平铺布局：版本目录在安装根。"""
+        calls = []
+
+        def fake(url, target):
+            calls.append(url)
+            if "ublock" in url.lower():
+                Path(target).write_bytes(_zip_bytes())
+            else:
+                Path(target).write_bytes(_zip_bytes({"camoufox-bin": b"#!/bin/sh\n"}))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            install_dir = Path(tmp) / "camoufox"
+            pkg = self._fake_legacy_pkg_tree(tmp)
+            stderr = io.StringIO()
+            with mock.patch.dict(os.environ, {
+                     "CAMOUFOX_VERSION": "135.0.1", "CAMOUFOX_RELEASE": "beta.24"}), \
+                 mock.patch.object(self.mod, "user_cache_dir", lambda _app: str(install_dir)), \
+                 mock.patch.object(self.mod, "_camoufox_package_dir", lambda: pkg), \
+                 mock.patch.object(self.mod.urllib.request, "urlretrieve", fake), \
+                 mock.patch.object(self.mod.time, "sleep", lambda _s: None), \
+                 contextlib.redirect_stderr(stderr):
+                self.mod.main()
+            # 平铺布局：安装根直接有 version.json 与 camoufox-bin
+            self.assertTrue((install_dir / "version.json").exists(), "平铺布局应有根 version.json")
+            self.assertTrue((install_dir / "camoufox-bin").exists())
+            self.assertFalse((install_dir / ".0.5_FLAG").exists(), "旧布局不应写 .0.5_FLAG")
+            self.assertFalse((install_dir / "browsers").exists(), "旧布局不应建 browsers/")
+
+    def test_read_pin_prefers_browser_pin_json(self):
+        """包自带 pin 时读它（版本 + build + repo 名）。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            pkg = self._fake_pkg_tree(tmp, {
+                "tag": "v156.0.1-beta.34", "repo": "daijro/camoufox",
+                "repo_name": "Official", "version": "156.0.1", "build": "beta.34",
+            })
+            info, _src = self.mod._resolve_target(pkg, {})
+            self.assertEqual((info.version, info.build), ("156.0.1", "beta.34"))
+            self.assertEqual(info.repo_name.lower(), "official")
+
+    def test_read_pin_falls_back_to_env_when_no_pin(self):
+        """包不带 pin（开发版）→ 回退 CAMOUFOX_VERSION / CAMOUFOX_RELEASE。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            pkg = self._fake_pkg_tree(tmp, None)
+            info, _src = self.mod._resolve_target(
+                pkg, {"CAMOUFOX_VERSION": "135.0.1", "CAMOUFOX_RELEASE": "beta.24"}
+            )
+            self.assertEqual((info.version, info.build), ("135.0.1", "beta.24"))
+            self.assertEqual(info.repo_name.lower(), "official")
+
+    def test_read_pin_requires_some_source(self):
+        """既无 pin 又无环境变量 → 报错退出（不存在安全的默认版本）。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            pkg = self._fake_pkg_tree(tmp, None)
+            with self.assertRaises(SystemExit):
+                self.mod._resolve_target(pkg, {})
+
+    def test_pin_ignores_env_override(self):
+        """有 pin 时环境变量不参与（库升级自动带动浏览器升级，永不错配）。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            pkg = self._fake_pkg_tree(tmp, {
+                "tag": "v156.0.1-beta.34", "repo": "daijro/camoufox",
+                "repo_name": "Official", "version": "156.0.1", "build": "beta.34",
+            })
+            info, _src = self.mod._resolve_target(
+                pkg, {"CAMOUFOX_VERSION": "135.0.1", "CAMOUFOX_RELEASE": "beta.24"}
+            )
+            self.assertEqual((info.version, info.build), ("156.0.1", "beta.34"))
+
+    def test_layout_uses_multiversion_dirs_and_compat_flag(self):
+        """安装布局：browsers/<repo>/<version>-<build>/ + version.json +
+        .0.5_FLAG + config.json(active_version)。"""
+        calls = []
+
+        def fake(url, target):
+            calls.append(url)
+            if "ublock" in url.lower():
+                Path(target).write_bytes(_zip_bytes())
+            else:
+                Path(target).write_bytes(_zip_bytes({"camoufox-bin": b"#!/bin/sh\n"}))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            install_dir = Path(tmp) / "camoufox"
+            self._run_main_pinned(fake, install_dir)
+            version_dir = install_dir / "browsers" / "official" / "156.0.1-beta.34"
+            self.assertTrue((version_dir / "version.json").exists(), "版本目录应含 version.json")
+            meta = json.loads((version_dir / "version.json").read_text())
+            self.assertEqual((meta["version"], meta["build"]), ("156.0.1", "beta.34"))
+            self.assertTrue((install_dir / ".0.5_FLAG").exists(), "缺少 .0.5_FLAG 会被库当旧布局清掉")
+            config = json.loads((install_dir / "config.json").read_text())
+            self.assertEqual(config["active_version"], "browsers/official/156.0.1-beta.34")
+            self.assertTrue((version_dir / "camoufox-bin").exists())
+            self.assertTrue(any("daijro/camoufox/releases/download/v156.0.1-beta.34" in u for u in calls),
+                            f"应下载 pin 指定的构建: {calls}")
+
+    def _run_main_pinned(self, fake, install_dir: Path) -> str:
+        """跑 main()，其中伪装 site-packages 里有带 pin 的 camoufox 包（0.5.x 布局）。"""
+        tmp_pkg_root = Path(install_dir).parent / "site-packages"
+        pkg = tmp_pkg_root / "camoufox"
+        pkg.mkdir(parents=True, exist_ok=True)
+        (pkg / "multiversion.py").write_text("# fake", encoding="utf-8")
+        (pkg / "browser-pin.json").write_text(json.dumps({
+            "tag": "v156.0.1-beta.34", "repo": "daijro/camoufox",
+            "repo_name": "Official", "version": "156.0.1", "build": "beta.34",
+        }), encoding="utf-8")
+        stderr = io.StringIO()
+        with mock.patch.dict(os.environ, {}, clear=False), \
+             mock.patch.object(self.mod, "user_cache_dir", lambda _app: str(install_dir)), \
+             mock.patch.object(self.mod, "_camoufox_package_dir", lambda: pkg), \
+             mock.patch.object(self.mod.urllib.request, "urlretrieve", fake), \
+             mock.patch.object(self.mod.time, "sleep", lambda _s: None), \
+             contextlib.redirect_stderr(stderr):
+            os.environ.pop("CAMOUFOX_VERSION", None)
+            os.environ.pop("CAMOUFOX_RELEASE", None)
+            self.mod.main()
+        return stderr.getvalue()
 
 
 if __name__ == "__main__":

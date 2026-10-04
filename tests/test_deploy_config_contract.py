@@ -202,6 +202,23 @@ def test_dockerfiles_install_curl_for_healthcheck(name):
     )
 
 
+@pytest.mark.parametrize("name", DOCKERFILES)
+def test_dockerfile_wraps_entrypoint_with_tini(name):
+    """ENTRYPOINT 必须用 tini 包裹。
+
+    实测：xvfb-run 作为 PID 1 时永远卡死（Xvfb 就绪后不向 PID 1 发 USR1，
+    xvfb-run 的 wait 无限阻塞；同一脚本加 --init 立刻正常）。compose 有
+    init: true 所以线上没炸，但裸 docker run 永远起不来。镜像内自带 tini
+    后两种启动方式都正常。
+    """
+    joined = _joined(name)
+    assert re.search(r"apt-get install[^\n]*\btini\b", joined), f"{name} 未安装 tini"
+    match = re.search(r"^ENTRYPOINT\s+(.+)$", _text(name), re.MULTILINE)
+    assert match and "tini" in match.group(1), (
+        f"{name} 的 ENTRYPOINT 未用 tini 包裹 —— xvfb-run 作 PID 1 会挂起"
+    )
+
+
 # ── 构建上下文 ──────────────────────────────────────────────────────────────
 
 

@@ -8,6 +8,8 @@ services:
         # 例 NODE_IMAGE=docker.m.daocloud.io/library/node:20-bookworm-slim
         NODE_IMAGE: ${NODE_IMAGE:-node:20-bookworm-slim}
         PYTHON_IMAGE: ${PYTHON_IMAGE:-python:3.12-slim}
+        # 浏览器版本兜底值：正常情况下脚本读 camoufox 包自带的 browser-pin.json
+        # （库升级自动带动浏览器升级）；这里仅在包不带 pin（开发版）时生效。
         CAMOUFOX_VERSION: ${CAMOUFOX_VERSION:-135.0.1}
         CAMOUFOX_RELEASE: ${CAMOUFOX_RELEASE:-beta.24}
     container_name: account-manager

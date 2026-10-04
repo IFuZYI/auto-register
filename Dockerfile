@@ -24,6 +24,9 @@ RUN npm run build
 
 FROM ${PYTHON_IMAGE} AS runtime
 
+# 浏览器版本说明：脚本**优先读 camoufox 包自带的 browser-pin.json**（库升级时
+# 浏览器自动跟着升，永不错配）。这两个 ARG 只是兜底 —— 仅当包不带 pin
+# （开发版）时使用；两者都没有时构建会明确报错退出。
 ARG CAMOUFOX_VERSION=135.0.1
 ARG CAMOUFOX_RELEASE=beta.24
 
@@ -50,8 +53,11 @@ COPY scripts/install_camoufox.py /tmp/install_camoufox.py
 
 # nodejs 不是构建期依赖：ChatGPT 的 Sentinel PoW 求解器要在运行时起 node 子进程
 # 跑 OpenAI 的 sdk.js，缺它注册链路会静默收不到验证码。
+# tini 是 PID 1 的 init：xvfb-run 作为 PID 1 会卡死（实测 Xvfb 就绪后不向
+# PID 1 发 USR1，xvfb-run 的 wait 无限阻塞；同一脚本加 --init 立刻正常），
+# 镜像内自带 tini 后裸 docker run 与 compose 两种启动方式都正常。
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        curl ca-certificates nodejs \
+        curl ca-certificates nodejs tini \
         libgtk-3-0 libx11-xcb1 libasound2 xvfb xauth \
     && rm -rf /var/lib/apt/lists/*
 
@@ -86,4 +92,6 @@ EXPOSE 8000 8889
 
 VOLUME ["/runtime"]
 
-ENTRYPOINT ["/app/docker/entrypoint.sh"]
+# ENTRYPOINT 用 tini 包裹：容器 PID 1 的职责是转发信号 + 收尸，xvfb-run
+# 自己干不了这活（作 PID 1 时卡死，见上面 tini 注释）。
+ENTRYPOINT ["/usr/bin/tini", "--", "/app/docker/entrypoint.sh"]
