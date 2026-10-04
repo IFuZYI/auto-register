@@ -154,7 +154,12 @@ def upload_chatgpt_account_to_cpa(account: Any, api_url: str | None = None, api_
         from platforms.chatgpt.cpa_upload import generate_token_json, upload_to_cpa
 
         token_data = generate_token_json(sync_account)
-        return upload_to_cpa(token_data, api_url=api_url, api_key=api_key)
+        return upload_to_cpa(
+            token_data,
+            api_url=api_url,
+            api_key=api_key,
+            proxy=upload_proxy_for("cpa", _get_account_extra(account)),
+        )
     except Exception as exc:
         return False, f"上传异常: {exc}"
 
@@ -406,3 +411,37 @@ def backfill_chatgpt_account_to_cpa(
         session.commit()
         session.refresh(account)
     return {"ok": True, "uploaded": True, "skipped": False, "message": verify_msg, "results": results}
+
+
+#: 支持「上传代理」的面板 → 开关配置键。
+#:
+#: 只有导入格式本身带代理字段的面板才支持（读参考实现确认）：
+#: - CPA：auth 文件 JSON 顶层 `proxy_url`（`sdk/auth/filestore.go`）
+#: - chatgpt2api：导入对象 `proxy` 字段（`_add_account_payloads`）
+#: sub2api 需要先在面板里建代理记录拿 proxy_id、grok2api 的导入格式不含代理
+#: —— 都不做（避免半吊子实现，见 `docs/` 的面板接线说明）。
+_UPLOAD_PROXY_SWITCHES: dict[str, str] = {
+    "cpa": "cpa_upload_proxy_enabled",
+    "chatgpt2api": "chatgpt2api_upload_proxy_enabled",
+}
+
+
+def upload_proxy_for(panel: str, extra: dict[str, Any]) -> str:
+    """按「上传代理」开关返回要随凭据上传的代理（账号绑定的 `register_proxy`）。
+
+    开关关闭 / 未设置 / 面板不支持 / 账号没有绑定 —— 都返回空串（不改行为）。
+    开关按面板分开：CPA 与 chatgpt2api 的导入格式各自独立，合成一个会让
+    用户开了一边连带另一边。
+    """
+    switch_key = _UPLOAD_PROXY_SWITCHES.get(str(panel or "").strip().lower())
+    if not switch_key:
+        return ""
+    try:
+        from core.config_store import config_store
+
+        raw = str(config_store.get(switch_key, "") or "").strip().lower()
+    except Exception:
+        return ""
+    if raw not in {"1", "true", "yes", "on", "enabled"}:
+        return ""
+    return str((extra or {}).get("register_proxy") or "").strip()

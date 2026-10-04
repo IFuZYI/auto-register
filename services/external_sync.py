@@ -244,11 +244,13 @@ def sync_account(account) -> list[dict[str, Any]]:
         )
         if c2a_enabled and c2a_url and c2a_key:
             from platforms.chatgpt.chatgpt2api_upload import upload_to_chatgpt2api
+            from services.chatgpt_sync import upload_proxy_for
 
             ok, msg = upload_to_chatgpt2api(
                 upload_account,
                 api_url=c2a_url,
                 api_key=c2a_key,
+                proxy=upload_proxy_for("chatgpt2api", _get_account_extra(account)),
             )
             persist_chatgpt2api_sync_result(account, ok, msg)
             results.append({"name": "chatgpt2api", "ok": ok, "msg": msg})

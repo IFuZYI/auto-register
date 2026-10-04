@@ -72,12 +72,15 @@ def _first_non_empty(*values: Any) -> str:
     return ""
 
 
-def build_chatgpt2api_account(account) -> dict[str, Any]:
+def build_chatgpt2api_account(account, proxy: str = "") -> dict[str, Any]:
     """把本地账号转成 chatgpt2api 的导入对象。
 
     只放对端认的字段：`access_token`（必需）+ 可选的 `email` / `account_id` /
     `type`（套餐类型，对端自己再归一）。**不放** `refresh_token` / `id_token`
     —— 普通网页号用不上，且多传会让对端把它当另一种源。
+
+    `proxy` 非空时作为 `proxy` 字段带上（对端 `_add_account_payloads` 认它，
+    custom 模式直接是代理 URL）。由「上传代理」开关控制。
     """
     token_data = generate_token_json(account)
     access_token = str(
@@ -113,6 +116,9 @@ def build_chatgpt2api_account(account) -> dict[str, Any]:
         item["email"] = email
     if account_id:
         item["account_id"] = account_id
+    proxy_url = str(proxy or "").strip()
+    if proxy_url:
+        item["proxy"] = proxy_url
     if plan_type:
         # 对端会把这个值当归一化前的套餐类型（free / Plus / Pro…）。
         #
@@ -135,8 +141,12 @@ def upload_to_chatgpt2api(
     account,
     api_url: str | None = None,
     api_key: str | None = None,
+    proxy: str = "",
 ) -> Tuple[bool, str]:
     """上传单个账号到 chatgpt2api。
+
+    `proxy` 非空时随导入对象带上（对端认 `proxy` 字段）。由「上传代理」
+    开关控制（见 `services.chatgpt_sync.upload_proxy_for`）。
 
     返回 `(ok, message)`。失败不抛异常 —— 调用方（注册链路 / 批量动作）
     要能把单号失败当成一条结果记下来，而不是中断整批。
@@ -150,7 +160,7 @@ def upload_to_chatgpt2api(
         return False, "chatgpt2api 管理密钥未配置"
 
     try:
-        payload = {"accounts": [build_chatgpt2api_account(account)]}
+        payload = {"accounts": [build_chatgpt2api_account(account, proxy=proxy)]}
     except ValueError as exc:
         # 预期的业务错误（如「账号没有 access_token」）：消息本身就是给用户看的
         return False, str(exc)

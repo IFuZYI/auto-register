@@ -77,6 +77,11 @@ CONFIG_KEYS = [
     # 的兜底（老配置 cpa_enabled=true 的语义是「都传」，见 services/external_sync.py）。
     "cpa_upload_chatgpt_enabled",
     "cpa_upload_grok_enabled",
+    # 上传凭据时是否带上账号绑定的代理（`register_proxy`）。CPA 的 auth 文件
+    # 顶层支持 `proxy_url`、chatgpt2api 的导入对象支持 `proxy` 字段 —— 开关
+    # 按面板分开（导入格式各自独立，合成一个会连带另一边）。默认关。
+    "cpa_upload_proxy_enabled",
+    "chatgpt2api_upload_proxy_enabled",
     "sub2api_enabled",
     "sub2api_api_url",
     "sub2api_api_key",

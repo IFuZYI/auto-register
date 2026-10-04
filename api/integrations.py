@@ -162,6 +162,7 @@ def _push_account_uploader(panel_key: str, platform: str, row: dict):
 
     if panel_key == "cpa":
         from core.base_platform import Account, AccountStatus
+        from services.chatgpt_sync import upload_proxy_for
 
         if plat == "grok":
             from platforms.grok.oauth_device import token_to_cpa_record
@@ -179,7 +180,7 @@ def _push_account_uploader(panel_key: str, platform: str, row: dict):
                     email=email,
                     sso=str(extra.get("sso") or ""),
                 )
-            return upload_to_cpa(record)
+            return upload_to_cpa(record, proxy=upload_proxy_for("cpa", extra))
 
         # ChatGPT：走 generate_token_json（与手动动作 / 自动上传同一条路径）
         from platforms.chatgpt.cpa_upload import generate_token_json, upload_to_cpa
@@ -189,7 +190,9 @@ def _push_account_uploader(panel_key: str, platform: str, row: dict):
             token=str(extra.get("access_token") or ""),
             status=AccountStatus.REGISTERED, extra=extra,
         )
-        return upload_to_cpa(generate_token_json(account))
+        return upload_to_cpa(
+            generate_token_json(account), proxy=upload_proxy_for("cpa", extra)
+        )
 
     if panel_key == "sub2api":
         from core.base_platform import Account, AccountStatus
@@ -205,13 +208,16 @@ def _push_account_uploader(panel_key: str, platform: str, row: dict):
     if panel_key == "chatgpt2api":
         from core.base_platform import Account, AccountStatus
         from platforms.chatgpt.chatgpt2api_upload import upload_to_chatgpt2api
+        from services.chatgpt_sync import upload_proxy_for
 
         account = Account(
             platform=plat or "chatgpt", email=email, password="",
             token=str(extra.get("access_token") or ""),
             status=AccountStatus.REGISTERED, extra=extra,
         )
-        return upload_to_chatgpt2api(account)
+        return upload_to_chatgpt2api(
+            account, proxy=upload_proxy_for("chatgpt2api", extra)
+        )
 
     return False, f"面板 {panel_key} 没有推送器"
 

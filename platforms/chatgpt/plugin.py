@@ -456,12 +456,14 @@ class ChatGPTPlatform(BasePlatform):
 
         if action_id == "upload_cpa":
             from platforms.chatgpt.cpa_upload import generate_token_json, upload_to_cpa
+            from services.chatgpt_sync import upload_proxy_for
 
             token_data = generate_token_json(a)
             ok, msg = upload_to_cpa(
                 token_data,
                 api_url=params.get("api_url"),
                 api_key=params.get("api_key"),
+                proxy=upload_proxy_for("cpa", a.extra or {}),
             )
             return {"ok": ok, "data": msg}
 
@@ -477,11 +479,13 @@ class ChatGPTPlatform(BasePlatform):
 
         if action_id == "upload_chatgpt2api":
             from platforms.chatgpt.chatgpt2api_upload import upload_to_chatgpt2api
+            from services.chatgpt_sync import upload_proxy_for
 
             ok, msg = upload_to_chatgpt2api(
                 a,
                 api_url=params.get("api_url"),
                 api_key=params.get("api_key"),
+                proxy=upload_proxy_for("chatgpt2api", a.extra or {}),
             )
             return {"ok": ok, "data": msg}
 

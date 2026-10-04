@@ -32,6 +32,7 @@ def upload_to_cpa(
     record: dict,
     api_url: str = "",
     api_key: str = "",
+    proxy: str = "",
     timeout: int = 30,
 ) -> tuple[bool, str]:
     """上传 CPA auth 记录到 CLIProxyAPI Management API。
@@ -42,6 +43,9 @@ def upload_to_cpa(
     的 JSON —— 实测三个候选路径全 404（`/v0/management/auth-files` 收到 JSON
     体时没有匹配路由），于是 Grok 的 CPA 上传从来没成功过。
     对照实现：`platforms/chatgpt/cpa_upload.py` 用的就是 multipart。
+
+    `proxy` 非空时写进记录顶层 `proxy_url`（CPA 读它给这个账号固定出口）。
+    由「上传代理」开关控制（见 `services.chatgpt_sync.upload_proxy_for`）。
 
     出处：sso_to_auth_json.py:745-786（原参考实现）+ CLIProxyAPI
     `internal/api/handlers/management/auth_files_crud.go:UploadAuthFile`。
@@ -59,7 +63,13 @@ def upload_to_cpa(
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
 
-    content = json.dumps(record, ensure_ascii=False, indent=2).encode("utf-8")
+    # 代理写进记录本体（上传请求本身不走代理 —— 代理是给 CPA 调上游用的）。
+    payload_record = dict(record)
+    proxy_url = str(proxy or "").strip()
+    if proxy_url:
+        payload_record["proxy_url"] = proxy_url
+
+    content = json.dumps(payload_record, ensure_ascii=False, indent=2).encode("utf-8")
     mime = None
     try:
         from curl_cffi import CurlMime

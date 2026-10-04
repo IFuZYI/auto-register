@@ -75,6 +75,7 @@ const PANEL_SECTIONS: PanelSection[] = [
       fields: [
         { key: 'cpa_upload_chatgpt_enabled', label: '自动上传 ChatGPT 账号', type: 'boolean' },
         { key: 'cpa_upload_grok_enabled', label: '自动上传 Grok 账号', type: 'boolean' },
+        { key: 'cpa_upload_proxy_enabled', label: '上传代理（账号绑定的代理）', type: 'boolean' },
         { key: 'cpa_api_url', label: 'API URL', placeholder: 'http://127.0.0.1:8317' },
         { key: 'cpa_api_key', label: '管理口令', secret: true, placeholder: '默认 cliproxyapi' },
       ],
@@ -113,6 +114,7 @@ const PANEL_SECTIONS: PanelSection[] = [
       desc: 'ChatGPT 网页号池（只认 access_token，与 CPA 的 codex 凭据互不相干）。',
       fields: [
         { key: 'chatgpt2api_enabled', label: '启用自动上传', type: 'boolean' },
+        { key: 'chatgpt2api_upload_proxy_enabled', label: '上传代理（账号绑定的代理）', type: 'boolean' },
         { key: 'chatgpt2api_api_url', label: 'API URL', placeholder: 'http://127.0.0.1:8000' },
         { key: 'chatgpt2api_api_key', label: '管理密钥', secret: true },
       ],
@@ -124,9 +126,11 @@ const PANEL_SECTIONS: PanelSection[] = [
 const BOOLEAN_KEYS = [
   'cpa_upload_chatgpt_enabled',
   'cpa_upload_grok_enabled',
+  'cpa_upload_proxy_enabled',
   'sub2api_enabled',
   'grok2api_enabled',
   'chatgpt2api_enabled',
+  'chatgpt2api_upload_proxy_enabled',
 ] as const
 
 /**

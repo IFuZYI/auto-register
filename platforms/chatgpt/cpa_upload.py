@@ -199,7 +199,12 @@ def upload_to_cpa(
     proxy: str = None,
 ) -> Tuple[bool, str]:
     """上传单个账号到 CPA 管理平台（不走代理）。
-    api_url / api_key 为空时自动从 ConfigStore 读取。"""
+    api_url / api_key 为空时自动从 ConfigStore 读取。
+
+    `proxy` 非空时写进 auth 记录顶层 `proxy_url` —— CPA 读它给这个账号
+    固定出口（`sdk/auth/filestore.go`）。传的是**账号绑定的代理**
+    （`register_proxy`），由「上传代理」开关控制（见 `services.chatgpt_sync.upload_proxy_for`）。
+    """
     if not api_url:
         api_url = _get_config_value("cpa_api_url")
     if not api_key:
@@ -209,8 +214,15 @@ def upload_to_cpa(
 
     upload_url = f"{api_url.rstrip('/')}/v0/management/auth-files"
 
-    filename = f"{token_data['email']}.json"
-    file_content = json.dumps(token_data, ensure_ascii=False, indent=2).encode("utf-8")
+    # 代理写进记录本体（不是请求头）—— 上传请求本身不走代理，代理是给
+    # CPA 后续调用上游时用的。
+    record = dict(token_data)
+    proxy_url = str(proxy or "").strip()
+    if proxy_url:
+        record["proxy_url"] = proxy_url
+
+    filename = f"{record['email']}.json"
+    file_content = json.dumps(record, ensure_ascii=False, indent=2).encode("utf-8")
 
     headers = {
         "Authorization": f"Bearer {api_key or ''}",

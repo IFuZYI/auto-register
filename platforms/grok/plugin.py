@@ -515,11 +515,13 @@ class GrokPlatform(BasePlatform):
             # 面板管理页批量上传时不带 params —— 不带回落的话每个账号都报
             # 「未配置 CPA API URL」，而配置明明填好了（实测踩过）。
             from core.config_store import config_store
+            from services.chatgpt_sync import upload_proxy_for
 
             ok, msg = upload_to_cpa(
                 record,
                 api_url=params.get("api_url") or str(config_store.get("cpa_api_url", "") or ""),
                 api_key=params.get("api_key") or str(config_store.get("cpa_api_key", "") or ""),
+                proxy=upload_proxy_for("cpa", extra),
             )
             return {"ok": ok, "data": msg, "error": "" if ok else msg}
 
