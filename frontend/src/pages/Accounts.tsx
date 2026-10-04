@@ -13,6 +13,7 @@ import {
   codexStateMeta,
   plusTrialMeta,
   planMeta,
+  atLifecycleMeta,
 } from '@/lib/accountFormat'
 import {
   Table,
@@ -1386,6 +1387,23 @@ export default function Accounts() {
                 <Input.TextArea rows={2} style={{ fontFamily: 'monospace' }} />
               </Form.Item>
             </Form>
+            {(() => {
+              // AT 生成时间 / 到期时间（从 JWT 的 iat / exp 解出，纯前端计算）。
+              const at = atLifecycleMeta(currentAccount.token)
+              if (at.status === 'invalid' && !at.issuedText && !at.expiresText) return null
+              return (
+                <div style={{ marginTop: 8 }}>
+                  <div style={{ marginBottom: 4, fontWeight: 500, fontSize: 13 }}>
+                    AT 有效期 <Tag color={at.color} style={{ marginInlineStart: 4 }}>{at.label}</Tag>
+                  </div>
+                  <Text type="secondary" style={{ fontSize: 12 }}>
+                    {at.issuedText ? `生成于 ${at.issuedText}` : '生成时间未知'}
+                    {at.expiresText ? ` · 到期 ${at.expiresText}` : ''}
+                    {at.remainingText ? ` · ${at.remainingText}` : ''}
+                  </Text>
+                </div>
+              )
+            })()}
             {(() => {
               const rt = getRefreshToken(currentAccount)
               if (!rt) return null

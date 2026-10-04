@@ -16,7 +16,9 @@ const code = output[0].code
 const mod = await import('data:text/javascript;base64,' + Buffer.from(code).toString('base64'))
 
 const failures = []
+let checked = 0
 function eq(actual, expected, label) {
+  checked++
   const a = JSON.stringify(actual)
   const e = JSON.stringify(expected)
   if (a !== e) failures.push(`${label}: got ${a}, want ${e}`)
@@ -67,5 +69,35 @@ eq(nb.totpSecret, '', 'normalizeAccount(bad json).totpSecret')
 const nc = mod.normalizeAccount({})
 eq(nc.extra, {}, 'normalizeAccount(no extra).extra')
 
-console.log(JSON.stringify({ passed: failures.length === 0, checked: 24, failures }, null, 2))
+// ── AT 生命周期：从 JWT 解出生成/到期时间 ──
+// 与后端 `services/chatgpt_token_lifecycle.py` 同口径（三档 valid/expiring/
+// invalid + unknown）。前端算一份是为了详情弹窗即时显示 —— 不必为看一眼
+// 到期时间再发一次请求。
+eq(mod.atLifecycleMeta(''), { status: 'invalid', label: '无 AT', color: 'default', issuedText: '', expiresText: '', remainingText: '' }, 'atLifecycleMeta(empty)')
+eq(mod.atLifecycleMeta('garbage'), { status: 'unknown', label: '无法解析', color: 'default', issuedText: '', expiresText: '', remainingText: '' }, 'atLifecycleMeta(garbage)')
+
+// 造一个只有 payload 的假 JWT（header/签名随便填）
+function fakeJwt(payload) {
+  const b64 = (obj) => Buffer.from(JSON.stringify(obj)).toString('base64url')
+  return `${b64({ alg: 'RS256' })}.${b64(payload)}.sig`
+}
+// 未来 10 天 → valid
+const future = Math.floor(Date.now() / 1000) + 10 * 86400
+const past = Math.floor(Date.now() / 1000) - 100
+const metaValid = mod.atLifecycleMeta(fakeJwt({ iat: 1000, exp: future }))
+eq(metaValid.status, 'valid', 'atLifecycleMeta(valid).status')
+eq(metaValid.color, 'success', 'atLifecycleMeta(valid).color')
+eq(metaValid.issuedText !== '', true, 'atLifecycleMeta(valid).issuedText non-empty')
+// 剩 1 小时 → expiring
+const metaExpiring = mod.atLifecycleMeta(fakeJwt({ iat: 1000, exp: Math.floor(Date.now() / 1000) + 3600 }))
+eq(metaExpiring.status, 'expiring', 'atLifecycleMeta(expiring).status')
+eq(metaExpiring.color, 'warning', 'atLifecycleMeta(expiring).color')
+// 已过期 → invalid
+const metaInvalid = mod.atLifecycleMeta(fakeJwt({ iat: 1000, exp: past }))
+eq(metaInvalid.status, 'invalid', 'atLifecycleMeta(invalid).status')
+eq(metaInvalid.color, 'error', 'atLifecycleMeta(invalid).color')
+// 没有 exp → unknown（不误判成失效）
+eq(mod.atLifecycleMeta(fakeJwt({ iat: 1000 })).status, 'unknown', 'atLifecycleMeta(no exp)')
+
+console.log(JSON.stringify({ passed: failures.length === 0, checked, failures }, null, 2))
 process.exit(failures.length === 0 ? 0 : 1)

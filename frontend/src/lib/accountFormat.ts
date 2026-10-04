@@ -153,3 +153,95 @@ export function formatStructuredText(value?: string) {
   }
   return trimmed
 }
+
+// ── AT 生命周期（与后端 `services/chatgpt_token_lifecycle.py` 同口径）──
+
+/** 到期前多久算「即将过期」：24 小时（与后端 / 参考实现一致）。 */
+export const AT_EXPIRING_SKEW_SECONDS = 24 * 60 * 60
+
+export interface AtLifecycleMeta {
+  status: 'valid' | 'expiring' | 'invalid' | 'unknown'
+  label: string
+  color: string
+  /** 生成时间（浏览器本地时区，无值时空串） */
+  issuedText: string
+  /** 到期时间（浏览器本地时区，无值时空串） */
+  expiresText: string
+  /** 剩余时间的人话（「3 天 4 小时」/「已过期」/空串） */
+  remainingText: string
+}
+
+function decodeJwtPayload(token: string): Record<string, unknown> {
+  try {
+    const parts = String(token || '').split('.')
+    if (parts.length < 2) return {}
+    const payload = parts[1].replace(/-/g, '+').replace(/_/g, '/')
+    const padded = payload + '='.repeat((4 - (payload.length % 4)) % 4)
+    const json = atob(padded)
+    const claims = JSON.parse(json)
+    return claims && typeof claims === 'object' ? claims : {}
+  } catch {
+    return {}
+  }
+}
+
+function formatRemaining(seconds: number): string {
+  if (seconds <= 0) return '已过期'
+  const days = Math.floor(seconds / 86400)
+  const hours = Math.floor((seconds % 86400) / 3600)
+  const minutes = Math.floor((seconds % 3600) / 60)
+  if (days > 0) return `${days} 天 ${hours} 小时`
+  if (hours > 0) return `${hours} 小时 ${minutes} 分`
+  return `${minutes} 分`
+}
+
+/**
+ * AT → 展示用元数据（状态 / 标签 / 颜色 / 生成与到期时间 / 剩余时间）。
+ *
+ * 与后端同口径：`valid` / `expiring`（剩余 ≤ 24h）/ `invalid`（已过期）/
+ * `unknown`（没有 exp claim，不误判成失效）。空 token 单独标「无 AT」。
+ */
+export function atLifecycleMeta(accessToken?: string): AtLifecycleMeta {
+  const token = String(accessToken || '').trim()
+  if (!token) {
+    return {
+      status: 'invalid', label: '无 AT', color: 'default',
+      issuedText: '', expiresText: '', remainingText: '',
+    }
+  }
+  const claims = decodeJwtPayload(token)
+  const issuedAt = Number(claims.iat) > 0 ? Number(claims.iat) : null
+  const expiresAt = Number(claims.exp) > 0 ? Number(claims.exp) : null
+  if (issuedAt === null && expiresAt === null) {
+    return {
+      status: 'unknown', label: '无法解析', color: 'default',
+      issuedText: '', expiresText: '', remainingText: '',
+    }
+  }
+  const now = Math.floor(Date.now() / 1000)
+  const remaining = expiresAt !== null ? expiresAt - now : null
+  let status: AtLifecycleMeta['status'] = 'unknown'
+  let label = '未知'
+  let color = 'default'
+  if (remaining !== null && remaining <= 0) {
+    status = 'invalid'
+    label = '已过期'
+    color = 'error'
+  } else if (remaining !== null && remaining <= AT_EXPIRING_SKEW_SECONDS) {
+    status = 'expiring'
+    label = '即将过期'
+    color = 'warning'
+  } else if (remaining !== null) {
+    status = 'valid'
+    label = '有效'
+    color = 'success'
+  }
+  return {
+    status,
+    label,
+    color,
+    issuedText: issuedAt !== null ? new Date(issuedAt * 1000).toLocaleString() : '',
+    expiresText: expiresAt !== null ? new Date(expiresAt * 1000).toLocaleString() : '',
+    remainingText: remaining !== null ? formatRemaining(remaining) : '',
+  }
+}
