@@ -18,6 +18,7 @@ import sys
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -135,6 +136,103 @@ class PlanPushDirectionTests(unittest.TestCase):
             "远端 11:00Z 比本地 12:00Z 早，应当推（时区归一失效？）",
         )
         self.assertEqual(outcome.reason, "local_newer")
+
+
+class PushBatchTests(unittest.TestCase):
+    """`push_local_to_remote` 的行为细节。"""
+
+    def test_not_uploaded_outcome_carries_local_email(self):
+        """未上传的行也要带上邮箱（remote 是 None，不能从它取）。"""
+        from services.panel_push import push_local_to_remote
+
+        rows = [{
+            "id": 1, "email": "a@x.com", "platform": "grok",
+            "updated_at": datetime(2026, 10, 4, tzinfo=timezone.utc).isoformat(),
+            "extra": {"sso": "sso-1"},
+        }]
+        summary = push_local_to_remote(
+            rows, [], upload=lambda row: (True, "ok")
+        )
+        self.assertEqual(summary["items"][0]["email"], "a@x.com")
+        self.assertEqual(summary["items"][0]["platform"], "grok")
+
+    def test_failed_push_is_counted_as_failed_not_skipped(self):
+        """推了但失败 ≠ 无需更新 —— 混在一起前端会显示「没有需要推送的账号」。"""
+        from services.panel_push import push_local_to_remote
+
+        rows = [{
+            "id": 1, "email": "a@x.com", "platform": "grok",
+            "updated_at": datetime(2026, 10, 4, tzinfo=timezone.utc).isoformat(),
+            "extra": {"sso": "sso-1"},
+        }]
+        summary = push_local_to_remote(
+            rows, [], upload=lambda row: (False, "未配置 CPA API URL")
+        )
+        self.assertEqual(summary["pushed"], 0)
+        self.assertEqual(summary["failed"], 1, "失败要有独立计数")
+        self.assertEqual(summary["skipped"], 0, "失败不该计入 skipped")
+        self.assertIn("未配置", summary["items"][0]["message"])
+
+    def test_skipped_means_no_action_needed(self):
+        """真正无需更新的（synced 等）才算 skipped。"""
+        from services.panel_comparison import RemoteAccount
+        from services.panel_push import push_local_to_remote
+
+        creds = {"access_token": "same-at"}
+        rows = [{
+            "id": 1, "email": "a@x.com", "platform": "grok",
+            "updated_at": datetime(2026, 10, 4, tzinfo=timezone.utc).isoformat(),
+            "extra": dict(creds),
+        }]
+        remote = [RemoteAccount(
+            email="a@x.com", platform="grok", remote_id="r-1",
+            updated_at=datetime(2026, 10, 4, tzinfo=timezone.utc),
+            credentials=dict(creds),
+        )]
+        summary = push_local_to_remote(rows, remote, upload=lambda row: (True, "ok"))
+        self.assertEqual(summary["skipped"], 1)
+        self.assertEqual(summary["failed"], 0)
+
+
+class GrokUploadConfigFallbackTests(unittest.TestCase):
+    """Grok 的 CPA 上传要回落全局配置（与 ChatGPT 侧同口径）。
+
+    面板 push 端点 / 批量动作不带 params 时，`upload_to_cpa` 必须自己读
+    `cpa_api_url` / `cpa_api_key` —— 否则每个账号都报「未配置 CPA API URL」，
+    而配置明明填好了（实测踩过同类问题）。
+    """
+
+    def test_reads_global_config_when_not_given(self):
+        import json as _json
+
+        from platforms.grok.upload import upload_to_cpa
+
+        captured = {}
+
+        class _FakeMime:
+            def addpart(self, name, data, filename, content_type):
+                captured["data"] = data
+
+            def close(self):
+                pass
+
+        def _cfg_get(key, default=""):
+            return {
+                "cpa_api_url": "https://cpa.example",
+                "cpa_api_key": "k-1",
+            }.get(key, default)
+
+        with mock.patch("core.config_store.config_store.get", side_effect=_cfg_get), \
+             mock.patch("curl_cffi.CurlMime", _FakeMime), \
+             mock.patch("curl_cffi.requests.post") as post:
+            post.return_value = mock.MagicMock(status_code=200, text="{}")
+            ok, _ = upload_to_cpa({"email": "g@x.com", "type": "xai", "access_token": "at"})
+
+        self.assertTrue(ok)
+        self.assertEqual(post.call_args[0][0], "https://cpa.example/v0/management/auth-files")
+        self.assertEqual(
+            post.call_args.kwargs["headers"]["Authorization"], "Bearer k-1"
+        )
 
 
 if __name__ == "__main__":

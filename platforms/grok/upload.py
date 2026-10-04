@@ -52,11 +52,21 @@ def upload_to_cpa(
     """
     api_url = str(api_url or "").strip().rstrip("/")
     if not api_url:
+        # 回落全局配置（面板 push 端点 / 批量动作不带 params —— 不回落的话
+        # 每个账号都报「未配置 CPA API URL」，而配置明明填好了，实测踩过）。
+        from core.config_store import config_store
+
+        api_url = str(config_store.get("cpa_api_url", "") or "").strip().rstrip("/")
+    if not api_url:
         return False, "未配置 CPA API URL"
 
     # 密钥也要 strip：配置页粘贴时极易带上首尾空白/换行，拼进 Bearer 头
     # 会被对端判为鉴权失败（`Bearer  xxx` 与 `Bearer xxx` 不等价）。
     api_key = str(api_key or "").strip()
+    if not api_key:
+        from core.config_store import config_store
+
+        api_key = str(config_store.get("cpa_api_key", "") or "").strip()
 
     filename = cpa_auth_filename(record)
     headers = {}

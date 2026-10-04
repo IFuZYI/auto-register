@@ -88,15 +88,20 @@ def plan_push(
     remote: Optional[RemoteAccount],
     *,
     local_updated: Optional[str] = None,
+    email: str = "",
+    platform: str = "",
 ) -> PushOutcome:
     """决定这个账号该不该把本地凭证推到远端（纯函数，不落库）。
 
     规则见模块 docstring。时间用 `parse_timestamp` 归一后比 epoch ——
     远端时区与本地不同（`+08:00` vs UTC），比字符串会得出错误结论。
+
+    `email` / `platform` 是本地行的标识：远端没有记录时（`remote is None`）
+    结果里也要带上它，否则界面上的条目没有邮箱、无从定位是哪个账号。
     """
-    email = str((remote.email if remote else "") or "")
-    platform = str((remote.platform if remote else "") or "")
-    outcome = PushOutcome(email=email, platform=platform)
+    resolved_email = str((remote.email if remote else "") or email or "")
+    resolved_platform = str((remote.platform if remote else "") or platform or "")
+    outcome = PushOutcome(email=resolved_email, platform=resolved_platform)
 
     pushable = {
         aliases[0]: _first_present(local_extra or {}, aliases)
@@ -113,7 +118,6 @@ def plan_push(
         outcome.reason = "not_uploaded"
         outcome.fields = sorted(pushable.keys())
         return outcome
-
     remote_creds = remote.credentials if isinstance(remote.credentials, dict) else {}
     state, _diff = compare_credentials(local_extra or {}, remote_creds)
     if state == "synced":
@@ -165,7 +169,7 @@ def push_local_to_remote(
     remote_by_key = {
         _match_key(getattr(r, "platform", ""), r.email): r for r in remote_accounts
     }
-    summary = {"total": 0, "pushed": 0, "deleted": 0, "skipped": 0, "items": []}
+    summary = {"total": 0, "pushed": 0, "deleted": 0, "failed": 0, "skipped": 0, "items": []}
 
     for row in local_rows:
         platform = str(row.get("platform") or "")
@@ -175,7 +179,11 @@ def push_local_to_remote(
         extra = row.get("extra")
         if not isinstance(extra, dict):
             extra = {}
-        outcome = plan_push(extra, remote, local_updated=row.get("updated_at"))
+        outcome = plan_push(
+            extra, remote,
+            local_updated=row.get("updated_at"),
+            email=email, platform=platform,
+        )
         summary["total"] += 1
 
         if not outcome.push:
@@ -203,7 +211,9 @@ def push_local_to_remote(
         if outcome.pushed:
             summary["pushed"] += 1
         else:
-            summary["skipped"] += 1
+            # 推了但失败 ≠ 无需更新 —— 混进 skipped 会让界面显示
+            # 「没有需要推送的账号」，把配置缺失/网络错误藏起来（实测踩过）。
+            summary["failed"] += 1
         if outcome.deleted:
             summary["deleted"] += 1
         summary["items"].append(outcome.to_dict())

@@ -562,15 +562,21 @@ export function PanelComparisonPanel({
       if (platformFilter) params.set('platform', platformFilter)
       const result = (await apiFetch(`/integrations/panels/${panelKey}/push?${params.toString()}`, {
         method: 'POST',
-      })) as { pushed: number; deleted: number; skipped: number; total: number; remote_error?: string }
+      })) as { pushed: number; deleted: number; failed: number; skipped: number; total: number; remote_error?: string }
       if (result.remote_error) {
         message.error({ content: `更新远程失败：${result.remote_error}`, key: toastKey })
       } else if (result.pushed) {
         const deleted = result.deleted ? `，已清理 ${result.deleted} 条旧记录` : ''
-        message.success({
-          content: `已推送 ${result.pushed} 个账号到远端${deleted}（其余 ${result.skipped} 个无需更新）`,
-          key: toastKey,
-        })
+        const failed = result.failed ? `，失败 ${result.failed} 个` : ''
+        const content = `已推送 ${result.pushed} 个账号到远端${deleted}${failed}`
+        if (result.failed) {
+          message.warning({ content, key: toastKey })
+        } else {
+          message.success({ content, key: toastKey })
+        }
+      } else if (result.failed) {
+        // 推了但全失败（配置缺失/网络错误）—— 不能报「无需更新」。
+        message.error({ content: `更新远程失败：${result.failed} 个账号推送失败`, key: toastKey })
       } else {
         message.info({
           content: `没有需要推送的账号（${result.skipped} 个无需更新）`,

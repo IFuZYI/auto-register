@@ -269,6 +269,7 @@ def push_panel_endpoint(
             "total": 0,
             "pushed": 0,
             "deleted": 0,
+            "failed": 0,
             "skipped": 0,
             "items": [],
             "remote_error": remote_error,
