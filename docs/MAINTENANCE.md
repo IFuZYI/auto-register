@@ -132,6 +132,21 @@ chatgpt2api 时漏了三处、面板页直接 404）：
   而两边邮箱 100% 重合）；
 - 前端会自动出现平台选择器（`shouldShowPlatformFilter`），单平台面板不渲染。
 
+**面板动作接线**（每个面板三个动作，用户要求四个面板都有）：
+
+| 动作 | 实现位置 | 说明 |
+| --- | --- | --- |
+| 同步远端状态 | `services/panel_status_sync.py`（CPA 走 `services/cliproxyapi_sync.py`） | 读远端状态回写本地；CPA 必须探活（列表无状态），其余读列表自带状态 |
+| 更新远程凭证 | `POST /api/integrations/panels/{key}/push`（`services/panel_push.py`） | 推「未上传 + 本地较新」；新建式面板（sub2api/chatgpt2api）配 `_PANEL_PUSH_KIND` 与删除器 |
+| 更新本地凭证 | `POST /api/integrations/panels/{key}/sync`（`services/panel_sync.py`） | 拉「远端较新」 |
+
+新增面板时三处都要有对应实现（对比页按钮按 `sync_action` + 端点存在与否渲染）。
+
+**上传代理开关**（可选）：面板导入格式支持代理字段时，在
+`services/chatgpt_sync.py` 的 `_UPLOAD_PROXY_SWITCHES` 加一项 +
+`api/config.py` 白名单 + `PanelConfigPanel.tsx` 的字段与 `BOOLEAN_KEYS`。
+上传路径要把 `upload_proxy_for(panel, extra)` 传给上传函数。
+
 **自动上传**（注册完自动推过去）在 `services/external_sync.py` 的 `sync_account()`
 里加分支，并按需加 `<panel>_enabled` 开关键。
 
