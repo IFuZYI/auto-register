@@ -1,0 +1,59 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        # 基础镜像可覆盖：受限网络（Docker Hub 被墙等）时换成可达的镜像源，
+        # 例 NODE_IMAGE=docker.m.daocloud.io/library/node:20-bookworm-slim
+        NODE_IMAGE: ${NODE_IMAGE:-node:20-bookworm-slim}
+        PYTHON_IMAGE: ${PYTHON_IMAGE:-python:3.12-slim}
+        CAMOUFOX_VERSION: ${CAMOUFOX_VERSION:-135.0.1}
+        CAMOUFOX_RELEASE: ${CAMOUFOX_RELEASE:-beta.24}
+    container_name: account-manager
+    init: true
+    restart: unless-stopped
+    # .env 里的应用变量（OPENAI_* 等）注入容器；没建 .env 的机器照常启动。
+    # 注意：environment 段的值优先于 .env（compose 规则），数据目录等以本文件为准。
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      HOST: 0.0.0.0
+      PORT: "8000"
+      APP_RELOAD: "0"
+      APP_CONDA_ENV: docker
+      APP_RUNTIME_DIR: /runtime
+      # 数据目录（见 docs/DATA_DIRECTORY.md）；默认库与凭据密钥都在它下面，
+      # 所以只需挂这一个卷，备份/迁移就是拷一个目录。
+      DATA_DIR: /runtime
+      # 必须落在挂载卷里，否则每次重建容器都会换密钥，库里的凭据全部作废
+      CREDENTIAL_ENCRYPTION_KEY_FILE: /runtime/secrets/credential_key
+      APP_ENABLE_SOLVER: "1"
+      SOLVER_PORT: "8889"
+      SOLVER_BIND_HOST: 0.0.0.0
+      LOCAL_SOLVER_URL: http://127.0.0.1:8889
+      SOLVER_BROWSER_TYPE: ${SOLVER_BROWSER_TYPE:-camoufox}
+      PLAYWRIGHT_HEADLESS: ${PLAYWRIGHT_HEADLESS:-}
+    ports:
+      # 端口可由 .env 覆盖；默认 8000 对外、Solver 只绑本机
+      - "${APP_PORT_BIND:-8000}:8000"
+      - "${SOLVER_PORT_BIND:-127.0.0.1:8889}:8889"
+    volumes:
+      # 一个卷装全部运行数据：默认库、平台分库、密钥、邮箱池、日志
+      - ${APP_RUNTIME_BIND:-./data}:/runtime
+    # 探豁免鉴权的端点（/api/auth/* 不走登录），设了面板密码也能过；
+    # start_period 给建库/加载平台留时间，避免正常启动被误判 unhealthy。
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/api/auth/status"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    # 日志上限：长跑服务器上 json-file 不设限会撑爆磁盘
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    shm_size: "1gb"

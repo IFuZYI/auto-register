@@ -1,0 +1,85 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+
+# 数据库（默认库与平台分库都在 data/ 下，见 core/paths.py）
+*.db
+*.sqlite
+*.sqlite3
+
+# 数据目录：运行时数据统一落这里（见 docs/DATA_DIRECTORY.md）
+data/
+
+# 日志
+logs/
+*.log
+*.out
+
+# 账号数据
+accounts.txt
+*_accounts.txt
+account.txt
+proxies.txt
+smstome_all_numbers.txt
+smstome*_numbers.txt
+smstome_used/
+
+# 前端
+frontend/node_modules/
+frontend/dist/
+
+# 前端构建产物（npm run build 输出到 static/，由 FastAPI 托管）
+static/
+
+# Docker 数据
+# （data/ 已在文件顶部「数据目录」一节统一声明，此处不重复）
+
+# 凭据加密密钥（现位于 data/secrets/，旧的根目录位置一并忽略以便迁移）
+.secrets/
+
+# 环境变量
+.env
+.env.local
+.env.*
+# 模板文件要提交（上面的 .env.* 会把它一并忽略）
+!.env.example
+
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.swp
+.claude/
+CLAUDE.md
+.ace-tool/
+.codex-review/
+.hermes/
+
+# 运行时 / 缓存
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# 本地截图 / 调试文件
+# 不要全局忽略图片/HTML，避免误伤 docs/images 等正式资源
+# 如有本地调试截图，请按需补充更精确的文件名规则
+kiro_error.*
+
+# 本地数据文件
+# （默认库现位于 data/account_manager.db；根目录旧位置一并忽略以便迁移）
+account_manager.db
+
+# 参考资料（含嵌套 git 仓库，仅本地参考）
+reference/

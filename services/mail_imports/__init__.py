@@ -1,0 +1,45 @@
+from .import_source import (
+    MAIL_IMPORT_PROVIDERS,
+    MAIL_IMPORT_SOURCES,
+    POOL_ACCOUNT_TYPE_MAILAPI_URL,
+    POOL_ACCOUNT_TYPE_MICROSOFT_OAUTH,
+    align_source_with_provider,
+    describe_pool_account_type,
+    normalize_mail_import_source,
+    normalize_mail_provider,
+    resolve_mail_provider_from_source,
+    resolve_pool_account_type,
+)
+from .registry import mail_import_registry
+from .schemas import (
+    MailImportBatchDeleteRequest,
+    MailImportDeleteItem,
+    MailImportDeleteRequest,
+    MailImportExecuteRequest,
+    MailImportProviderDescriptor,
+    MailImportResponse,
+    MailImportSnapshot,
+    MailImportSnapshotRequest,
+)
+
+__all__ = [
+    "MAIL_IMPORT_PROVIDERS",
+    "MAIL_IMPORT_SOURCES",
+    "POOL_ACCOUNT_TYPE_MAILAPI_URL",
+    "POOL_ACCOUNT_TYPE_MICROSOFT_OAUTH",
+    "align_source_with_provider",
+    "describe_pool_account_type",
+    "normalize_mail_import_source",
+    "normalize_mail_provider",
+    "resolve_mail_provider_from_source",
+    "resolve_pool_account_type",
+    "mail_import_registry",
+    "MailImportBatchDeleteRequest",
+    "MailImportDeleteItem",
+    "MailImportDeleteRequest",
+    "MailImportExecuteRequest",
+    "MailImportProviderDescriptor",
+    "MailImportResponse",
+    "MailImportSnapshot",
+    "MailImportSnapshotRequest",
+]

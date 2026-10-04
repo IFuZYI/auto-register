@@ -1,0 +1,942 @@
+/* 变量在 theme.ts 里按主题注入，这里放一份暗色默认值兜首屏 */
+:root {
+  --bg-layout: #000000;
+  --bg-container: #1c1c1e;
+  --bg-elevated: #2c2c2e;
+  --bg-subtle: rgba(255, 255, 255, 0.06);
+  --border: rgba(255, 255, 255, 0.1);
+  --border-strong: rgba(255, 255, 255, 0.18);
+  --text: #f5f5f7;
+  --text-secondary: #a1a1a6;
+  --text-muted: #8e8e93;
+  --accent: #2997ff;
+  --accent-hover: #54aaff;
+  --accent-soft: rgba(41, 151, 255, 0.16);
+  --accent-text: #54aaff;
+  --purple: #c9a6ff;
+  --purple-soft: rgba(201, 166, 255, 0.15);
+  --success: #30d158;
+  --success-soft: rgba(48, 209, 88, 0.15);
+  --warning: #ff9f0a;
+  --warning-soft: rgba(255, 159, 10, 0.15);
+  --danger: #ff453a;
+  --danger-soft: rgba(255, 69, 58, 0.15);
+  --log-bg: #0a0a0b;
+  --log-border: rgba(255, 255, 255, 0.08);
+  --log-text: #d1d1d6;
+  --log-muted: #7c7c81;
+  --log-success: #30d158;
+  --log-warning: #ff9f0a;
+  --log-danger: #ff453a;
+  --selection-bg: rgba(41, 151, 255, 0.35);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.5);
+  --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.55);
+  --shadow-lg: 0 20px 56px rgba(0, 0, 0, 0.65);
+  --glass-bg: rgba(28, 28, 30, 0.72);
+  --glass-border: rgba(255, 255, 255, 0.08);
+  --accent-ring: rgba(41, 151, 255, 0.4);
+  --gradient-from: #0a6fd8;
+  --gradient-to: #5e5ce6;
+  --ease-standard: cubic-bezier(0.4, 0, 0.2, 1);
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  color-scheme: dark;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  font-family: var(--font-stack, -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'PingFang SC', 'Microsoft YaHei', sans-serif);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  background: var(--bg-layout);
+  color: var(--text);
+  letter-spacing: -0.01em;
+}
+
+#root {
+  min-height: 100vh;
+}
+
+/* ── 侧栏：毛玻璃 + 极细分隔线 ─────────────────────────── */
+.sider-shell {
+  background: var(--glass-bg) !important;
+  -webkit-backdrop-filter: saturate(180%) blur(20px);
+  backdrop-filter: saturate(180%) blur(20px);
+  border-right: 1px solid var(--border) !important;
+  /* 侧栏固定在视口内：内容区自己滚，页脚不会被顶出屏幕 */
+  position: sticky !important;
+  top: 0;
+  height: 100vh;
+  overflow: hidden;
+}
+
+/* 侧栏内部用 flex 竖排：logo 固定 / 菜单可滚动 / 页脚固定。
+   之前菜单与页脚都用绝对定位，菜单项多时会互相压住。
+   底部要留出 antd 折叠按钮（.ant-layout-sider-trigger，52px）的位置。 */
+.sider-shell .ant-layout-sider-children {
+  display: flex;
+  flex-direction: column;
+  height: calc(100% - 52px);
+}
+
+.sider-logo {
+  flex: 0 0 64px;
+  height: 64px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 20px;
+  border-bottom: 1px solid var(--border);
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.sider-menu {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding-top: 10px;
+  min-height: 0;
+}
+
+.sider-logo__mark {
+  width: 30px;
+  height: 30px;
+  flex: 0 0 30px;
+  border-radius: 9px;
+  display: grid;
+  place-items: center;
+  color: #fff;
+  font-size: 16px;
+  background: linear-gradient(135deg, var(--gradient-from), var(--gradient-to));
+  box-shadow: 0 2px 10px var(--accent-ring);
+}
+
+.sider-logo__text {
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  opacity: 1;
+  transition: opacity 0.22s var(--ease-standard);
+}
+
+.sider-logo__text--hidden {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.sider-footer {
+  flex: 0 0 auto;
+  padding: 10px 12px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-top: 1px solid var(--border);
+}
+
+.ant-layout-sider-trigger {
+  border-top: 1px solid var(--sider-trigger-border, rgba(255, 255, 255, 0.12));
+  -webkit-backdrop-filter: blur(20px);
+  backdrop-filter: blur(20px);
+}
+
+/* ── 顶栏：滚动时毛玻璃吸附 ─────────────────────────────── */
+.page-header {
+  position: sticky;
+  /* top 用 -28px 抵消上面的负 margin-top：sticky 约束的是 margin box，
+     若写 top: 0，边框盒会被顶到 y=28，顶部留出一条未覆盖的裸内容带。 */
+  top: -28px;
+  z-index: 20;
+  margin: -28px -32px 24px;
+  padding: 20px 32px 16px;
+  display: flex;
+  justify-content: space-between;
+  /* flex-start + 标题行高与按钮等高：这样「标题」与「按钮」的中线严格对齐。
+     之前用 flex-end 时按钮被压到底部（与标题中线差 24px）；改 center 后
+     仍有 ~13px 偏差 —— 因为左侧是「标题+副标题」两行，整块居中时标题偏上。
+     让标题的行盒高度等于按钮高度，两者从同一顶端出发，中线自然重合。 */
+  align-items: flex-start;
+  gap: 16px;
+  flex-wrap: wrap;
+  background: var(--glass-bg);
+  -webkit-backdrop-filter: saturate(180%) blur(20px);
+  backdrop-filter: saturate(180%) blur(20px);
+  border-bottom: 1px solid transparent;
+  transition: border-color 0.24s var(--ease-standard);
+}
+
+.page-header--scrolled {
+  border-bottom-color: var(--border);
+}
+
+.page-header__title {
+  font-size: 26px;
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  line-height: 1.2;
+  margin: 0;
+}
+
+.page-header__subtitle {
+  color: var(--text-muted);
+  font-size: 13px;
+  margin-top: 6px;
+  letter-spacing: 0;
+}
+
+/* 标题区左侧块要被右侧按钮挤压时能收缩，否则长副标题会把按钮推出容器。 */
+.page-header > :first-child {
+  min-width: 0;
+}
+/* 按钮组的布局基座。
+   这些声明原先写在 PageHeader.tsx 的行内 style 里，于是窄屏媒体查询里的
+   `gap: 8px` 永远被行内值压掉（行内优先级高于样式表规则）。挪到这里后
+   窄屏覆盖才有意义，也只剩一处定义。 */
+.page-header__actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+/* 让「标题」与右侧按钮的中线对齐：标题行盒做成与按钮同高（36px）并垂直居中，
+   两者都从 flex-start 出发，中线自然重合。
+   用 line-height 而不是 margin —— 行盒高度决定文字基线位置，margin 只会
+   把整块推走（试过，反而拉开到 39px）。 */
+.page-header__title {
+  font-size: 26px;
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  line-height: 36px;
+  margin: 0;
+}
+
+/* ── 设置页左侧 Tab 导航条 ────────────────────────────────
+   antd 在 tabPosition="left" 时把 nav 与内容面板并排塞进 Tabs 根元素内。
+   这个页面只把 Tabs 当导航用（内容渲染在外层 div），所以那个空的内容面板
+   必须压掉，否则它会跟 nav 抢宽度 —— 之前 nav 137px + 空面板 64px，
+   看着像是「标签栏很窄、右边莫名空一块」。
+   width 由 --w-field（200px）给定，够放「手机接码」这类最长项。 */
+.settings-tab-rail {
+  flex: 0 0 auto;
+  width: var(--w-field, 200px);
+}
+.settings-tab-rail .ant-tabs-left > .ant-tabs-content-holder {
+  display: none;
+}
+.settings-tab-rail .ant-tabs-nav {
+  width: 100%;
+  margin: 0;
+}
+.settings-tab-rail .ant-tabs-tab {
+  justify-content: flex-start;
+  border-radius: 10px;
+  margin: 2px 0 !important;
+  padding: 9px 12px !important;
+  transition: background 0.2s var(--ease-standard);
+}
+.settings-tab-rail .ant-tabs-tab:hover {
+  background: var(--bg-subtle);
+}
+.settings-tab-rail .ant-tabs-ink-bar {
+  display: none;
+}
+.settings-tab-rail .ant-tabs-tab.ant-tabs-tab-active {
+  background: var(--accent-soft);
+}
+
+/* ── 表单控件宽度梯度（theme.ts 的 FIELD_WIDTH 写成 CSS 变量）──
+   用法：style={{ maxWidth: 'var(--w-field)' }}
+   不设这些变量时回落到与 FIELD_WIDTH 相同的值，避免主题未应用时宽度失控。 */
+:root {
+  --w-field: 200px;
+  --w-field-md: 360px;
+  --w-field-lg: 480px;
+  --w-prose: 720px;
+  --w-page: 1200px;
+
+  /* 页面内边距与间距：App.tsx / 各页面统一引用，窄屏由媒体查询收紧。
+     之前 28px 32px 写死在 App.tsx 的 Content 上，手机上白边就吃掉 64px。
+     注：Row/Col 的栅格间距不走这里 —— antd 的 gutter 只收 JS 数字，
+     那个值在 theme.ts 的 GRID_GAP（两边刻意手工对齐）。 */
+  --page-pad-x: 32px;
+  --page-pad-y: 28px;
+  --section-gap: 16px;
+}
+
+/* 表单里的短值控件不该被拉满。antd 默认 width:100%，这里按语义收窄。
+   刻意不用 .ant-form-item 全局收窄 —— 那会连 URL、密钥一起变窄。 */
+.form-field--sm { max-width: var(--w-field); }
+.form-field--md { max-width: var(--w-field-md); }
+.form-field--lg { max-width: var(--w-field-lg); }
+.form-field--prose { max-width: var(--w-prose); }
+
+/* 状态徽章：antd 会用 status 色自己混一个底色，混出来的底比预期深，
+   导致「未安装」这类橙色徽章只有 4.26:1（AA 要求 4.5:1）。
+   这里直接指定底与文字，让对比度可控 —— 5.75:1。
+   （不用改全局 warning 色：那会连带影响所有警告文案与图标。） */
+.ant-tag.ant-tag-warning {
+  background: var(--warning-soft);
+  border-color: var(--warning-soft);
+  color: var(--warning);
+}
+.ant-tag.ant-tag-success {
+  background: var(--success-soft);
+  border-color: var(--success-soft);
+  color: var(--success);
+}
+/* 预设色标签（green / purple）：antd 用**固定**色板（green 取 #389e0d、
+   purple 取 #9333ea），不吃主题的 success/purple —— 亮色下分别是 3.37:1 /
+   4.48:1，都低于 AA。这里统一钉到主题变量上，两套主题各自取过线的值。 */
+.ant-tag.ant-tag-green {
+  background: var(--success-soft);
+  border-color: var(--success-soft);
+  color: var(--success);
+}
+.ant-tag.ant-tag-purple {
+  background: var(--purple-soft);
+  border-color: var(--purple-soft);
+  color: var(--purple);
+}
+/* `processing` 标签（对比面板的「远端较新」、任务状态等）。antd 从 colorPrimary
+   派生，dark 下得到 #2683dc —— 压在它自己混出的底上只有 4.29:1。钉到
+   accentText + accentSoft（dark 5.51:1、light 5.80:1）。 */
+.ant-tag.ant-tag-processing {
+  background: var(--accent-soft);
+  border-color: var(--accent-soft);
+  color: var(--accent-text);
+}
+/* 可选中的筛选标签：选中态是白字压 colorPrimary（亮色 #0071e3 → 3.79:1）。
+   与 Switch 同因同解 —— 钉成 #005bb5（白字 6.64:1）。 */
+.ant-tag.ant-tag-checkable-checked {
+  background: #005bb5 !important;
+}
+.ant-tag.ant-tag-checkable-checked:hover {
+  background: #0066cc !important;
+}
+/* 可点标签的点击目标：antd 默认高度约 22px，低于 WCAG 2.5.8 的 24×24。
+   只给可交互的（checkable）加高，普通展示标签不动 —— 那会撑乱表格行。 */
+.ant-tag.ant-tag-checkable {
+  min-height: 24px;
+  display: inline-flex;
+  align-items: center;
+}
+
+/* Typography 的复制按钮：antd 默认 13×15px（跟着行内字号走），低于
+   WCAG 2.5.8 的 24×24。全站有十几处 `copyable`（面板地址、账号 ID、
+   2FA 密钥、代理串…），逐个改调用点不如在这里统一给足点击区 ——
+   与上面 `.ant-tag-checkable` 同一个理由。
+   只加 min 尺寸与居中，不改字号/颜色：视觉上图标大小不变。 */
+.ant-typography-copy {
+  min-width: 24px;
+  min-height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* 同一行并排多个短字段：容器自行折行，子项各自带宽度类。
+   比 antd Space + flex:1 好在：子项不会被拉伸，窄屏也不会挤出横向滚动。 */
+.form-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 20px;
+  align-items: flex-start;
+}
+.form-grid > .ant-form-item {
+  flex: 0 0 auto;
+  margin-bottom: 16px;
+}
+/* 并排时没有宽度类的子项给个合理兜底 */
+.form-grid > .ant-form-item:not([class*='form-field--']) {
+  flex: 1 1 var(--w-field);
+  min-width: var(--w-field);
+}
+
+/* 注册任务页：字段多、语义杂，逐个标注宽度容易漏。
+   这里给一个统一的「最长不超过 URL 档」兜底 —— 924px 的输入框填一个
+   邮箱域名太浪费，也让整页显得松散。需要更宽的字段自己加 form-field--prose。
+   （form-grid 内的字段都带 form-field-- 类，已被上面的规则接管，不会命中这里。） */
+.register-form .ant-form-item:not([class*='form-field--']) {
+  max-width: var(--w-field-lg);
+}
+.register-form .ant-form-item.form-field--prose {
+  max-width: var(--w-prose);
+}
+
+/* ── 全局动画 ────────────────────────────── */
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes slideInUp {
+  from { opacity: 0; transform: translateY(14px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes slideInRight {
+  from { opacity: 0; transform: translateX(14px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+@keyframes scaleIn {
+  from { opacity: 0; transform: scale(0.96); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+.animate-fade-in {
+  animation: fadeIn 0.4s var(--ease-out) backwards;
+}
+
+.animate-slide-in-up {
+  animation: slideInUp 0.42s var(--ease-out) backwards;
+}
+
+.animate-slide-in-right {
+  animation: slideInRight 0.42s var(--ease-out) backwards;
+}
+
+.animate-scale-in {
+  animation: scaleIn 0.3s var(--ease-out) backwards;
+}
+
+/* 列表项依次入场：给 stagger 用，父级设 --stagger-index 即可 */
+.stagger-item {
+  animation: slideInUp 0.42s var(--ease-out) backwards;
+  animation-delay: calc(var(--stagger-index, 0) * 40ms);
+}
+
+/* ── 页面过渡 ───────────────────────────── */
+.page-enter {
+  animation: slideInUp 0.4s var(--ease-out) backwards;
+}
+
+/* ── 卡片：细边框 + 柔和投影 + 悬停微抬 ─────────────────── */
+.app-card {
+  background: var(--bg-container);
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  transition: box-shadow 0.3s var(--ease-standard),
+              transform 0.3s var(--ease-standard),
+              border-color 0.3s var(--ease-standard);
+}
+
+.app-card:hover {
+  box-shadow: var(--shadow-md);
+  border-color: var(--border-strong);
+}
+
+/* ── 悬停效果 ────────────────────────────── */
+.hover-lift {
+  transition: transform 0.3s var(--ease-standard),
+              box-shadow 0.3s var(--ease-standard),
+              border-color 0.3s var(--ease-standard);
+}
+
+.hover-lift:hover {
+  transform: translateY(-3px);
+  box-shadow: var(--shadow-md);
+}
+
+/* 统计卡：悬停时描边亮起，强调可点 */
+.stat-card {
+  position: relative;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  background: var(--bg-container);
+  transition: transform 0.3s var(--ease-standard),
+              box-shadow 0.3s var(--ease-standard),
+              border-color 0.3s var(--ease-standard);
+}
+
+.stat-card::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  background: linear-gradient(135deg, var(--accent-soft), transparent 60%);
+  opacity: 0;
+  transition: opacity 0.3s var(--ease-standard);
+}
+
+.stat-card:hover {
+  transform: translateY(-3px);
+  box-shadow: var(--shadow-md);
+  border-color: var(--border-strong);
+}
+
+.stat-card:hover::after {
+  opacity: 1;
+}
+
+/* ── 滚动条：细、圆、悬停才明显 ──────────────────────────── */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 6px;
+  border: 3px solid transparent;
+  background-clip: content-box;
+  transition: background 0.2s var(--ease-standard);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-muted);
+  background-clip: content-box;
+}
+
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* Firefox */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
+
+/* ── 选择颜色 ────────────────────────────── */
+::selection {
+  background: var(--selection-bg);
+  color: inherit;
+}
+
+/* ── 键盘焦点：只在键盘操作时显示，鼠标点击不打扰 ─────────── */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+/* ── 弹窗：遮罩加毛玻璃，内容带缩放入场 ──────────────────── */
+.ant-modal-mask {
+  background: rgba(0, 0, 0, 0.5) !important;
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
+}
+
+.light .ant-modal-mask {
+  background: rgba(0, 0, 0, 0.28) !important;
+}
+
+.ant-modal-content,
+.ant-drawer-content {
+  box-shadow: var(--shadow-lg) !important;
+}
+
+.ant-modal-content {
+  border: 1px solid var(--border);
+}
+
+.ant-modal-header {
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 14px;
+  margin-bottom: 18px;
+}
+
+/* ── 表格：去重边框，行悬停更轻 ──────────────────────────── */
+.ant-table-wrapper .ant-table {
+  background: transparent;
+}
+
+.ant-table-wrapper .ant-table-thead > tr > th {
+  font-weight: 500;
+  font-size: 12px;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  border-bottom: 1px solid var(--border) !important;
+}
+
+.ant-table-wrapper .ant-table-tbody > tr > td {
+  transition: background 0.2s var(--ease-standard);
+}
+
+.ant-table-wrapper .ant-table-tbody > tr:last-child > td {
+  border-bottom: none;
+}
+
+/* ── 按钮：按下有轻微回弹，悬停有底色过渡 ─────────────────── */
+.ant-btn {
+  transition: all 0.22s var(--ease-standard) !important;
+}
+
+.ant-btn:not(:disabled):active {
+  transform: scale(0.97);
+}
+
+.ant-btn-primary {
+  background: linear-gradient(135deg, var(--gradient-from), var(--gradient-to)) !important;
+  border: none !important;
+}
+
+.ant-btn-primary:not(:disabled):hover {
+  filter: brightness(1.08);
+  box-shadow: 0 4px 16px var(--accent-ring) !important;
+}
+
+/* ── 开关：轨道上是白字，必须保证 4.5:1 ─────────────────────
+   antd 的 checked 轨道取 colorPrimary 再经算法派生，dark 下得到 #2683dc，
+   白字压上去只有 3.92:1（AA 需 4.5:1）。组件级 token 也会被算法二次派生，
+   所以这里直接钉住渲染结果。#005bb5 实测 6.64:1，与品牌蓝同色系。 */
+.ant-switch.ant-switch-checked {
+  background: #005bb5 !important;
+}
+
+.ant-switch.ant-switch-checked:hover:not(.ant-switch-disabled) {
+  background: #0066cc !important;
+}
+
+/* 未选中态的轨道：antd 用 colorTextTertiary 派生，浅灰底 + 白字同样不达标。
+   文字在未选中态是深色（antd 会翻转），所以轨道要浅一些才看得清。 */
+.ant-switch:not(.ant-switch-checked) {
+  background: rgba(120, 120, 128, 0.45) !important;
+}
+
+/* 未选中态的标签文字。antd 一律用 `colorTextLightSolid`（白）——
+   dark 下轨道合成底 (54,54,58)，白字 12.03:1 没问题；light 下轨道是浅灰
+   (189,189,193)，白字只有 1.87:1，等于看不见。light 下换深色字（8.99:1）。 */
+.light .ant-switch:not(.ant-switch-checked) .ant-switch-inner-unchecked {
+  color: var(--text) !important;
+}
+
+/* ── 输入控件：聚焦时描边柔和扩散 ─────────────────────────── */
+.ant-input,
+.ant-input-affix-wrapper,
+.ant-input-number,
+.ant-picker,
+.ant-select-selector {
+  transition: border-color 0.22s var(--ease-standard),
+              box-shadow 0.22s var(--ease-standard) !important;
+}
+
+/* ── 任务日志面板（注册 / 补 RT 共用）───────── */
+.log-panel {
+  background: var(--log-bg);
+  border: 1px solid var(--log-border);
+  color: var(--log-text);
+  border-radius: 14px;
+}
+
+.log-panel .log-line {
+  line-height: 1.65;
+  color: var(--log-text);
+  animation: fadeIn 0.3s var(--ease-out) backwards;
+}
+
+.log-panel .log-line--success { color: var(--log-success); }
+.log-panel .log-line--danger { color: var(--log-danger); }
+.log-panel .log-line--warning { color: var(--log-warning); }
+.log-panel .log-placeholder { color: var(--log-muted); }
+.log-panel .log-error { color: var(--log-danger); }
+
+.log-stat {
+  border: 1px solid transparent;
+  background: var(--bg-subtle);
+  color: var(--text-secondary);
+  border-radius: 10px;
+  transition: background 0.24s var(--ease-standard);
+}
+
+.log-stat--success {
+  background: var(--success-soft);
+  border-color: var(--success-soft);
+  color: var(--success);
+}
+
+.log-stat--info {
+  background: var(--accent-soft);
+  border-color: var(--accent-soft);
+  color: var(--accent-hover);
+}
+
+/* ── 尊重「减少动态效果」系统设置 ────────────────────────── */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+
+/* ══════════════════════════════════════════════════════════
+   响应式：断点与 antd Grid 对齐（md=768 / lg=992），只处理
+   「布局真的需要换挡」的地方，不做无谓的逐像素调整。
+   ══════════════════════════════════════════════════════════ */
+
+/* ── 跳到主内容：默认藏起来，键盘聚焦时才现身 ─────────────── */
+.skip-link {
+  position: fixed;
+  top: 8px;
+  left: 8px;
+  z-index: 2000;
+  padding: 10px 16px;
+  border-radius: 10px;
+  /* 白字压 --accent(#2997ff) 只有 3.02:1（WCAG AA 正文需 4.5:1）——
+     这是键盘用户第一眼看到的控件，更要看清。改用更深的蓝：
+     #005bb5 实测 6.64:1，且与品牌蓝同色系。不要动 --accent 本身，
+     它是品牌色，大量描边/软底依赖它。 */
+  background: #005bb5;
+  color: #fff;
+  font-size: 14px;
+  font-weight: 500;
+  text-decoration: none;
+  /* 用 transform 移出视口而不是 display:none —— 后者不可聚焦 */
+  transform: translateY(-200%);
+  transition: transform 0.2s var(--ease-out);
+}
+.skip-link:focus-visible {
+  transform: translateY(0);
+  outline: 2px solid var(--text);
+  outline-offset: 2px;
+}
+
+/* ── 表格横向滚动区：键盘可达时给一圈焦点提示 ─────────────── */
+.ant-table-content:focus-visible,
+.ant-table-body:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 8px;
+}
+
+/* ── 移动端抽屉导航 ────────────────────────────────────────
+   抽屉里挂的是 navContent 的裸结构（没有 Sider 包裹），
+   所以这里只声明与常驻侧栏的**差异**，不复述基类布局。 */
+.mobile-nav-drawer .ant-drawer-body {
+  /* 与常驻侧栏同构：logo 固定 / 菜单滚动 / 页脚固定 */
+  display: flex;
+  flex-direction: column;
+}
+.mobile-nav-drawer .sider-menu {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  min-height: 0;
+}
+.mobile-nav-drawer .sider-footer {
+  border-top: 1px solid var(--border);
+}
+
+/* ── <992px：平板竖屏与手机（与 App.tsx 的抽屉阈值一致）───── */
+@media (max-width: 991px) {
+  :root {
+    --page-pad-x: 16px;
+    --page-pad-y: 12px;
+    --section-gap: 12px;
+  }
+
+  /* 顶栏的负 margin 与内边距要跟着一起收，否则标题会被推出屏幕 */
+  .page-header {
+    margin: -12px -16px 16px;
+    padding: 12px 16px 12px;
+    top: -12px;
+  }
+
+  .page-header__title {
+    font-size: 22px;
+    line-height: 32px;
+  }
+
+  /* 操作按钮在窄屏下换到标题下方独占一行。
+     注意不要给按钮本身 width:100%（那会让「注册」撑满一行、
+     其余按钮被挤到下一行），只需让容器可折行即可。
+     实测 390px 上四个按钮共 356px / 可用 358px —— 再窄的机型
+     （如 360px 的安卓机）会折成两行，这是预期行为。 */
+  .page-header__actions {
+    width: 100%;
+    flex-wrap: wrap;
+  }
+  .page-header__actions > .ant-space {
+    flex-wrap: wrap;
+    width: 100%;
+  }
+
+  /* 触摸目标：≥44px 是 iOS HIG / Material 的下限。
+     桌面端 36px 的控件在手机上太挤，这里抬到 40px —— 取 44 会让
+     「保存配置」这类按钮在 390px 上把操作区撑成三行，实测 40px 已够点。
+     小号按钮（表格行内操作）保持 32px：它们本就密集排列，抬到 40 会让
+     账号列表每行高度翻倍，反而更难扫读。 */
+  .ant-btn {
+    min-height: 40px;
+  }
+  /* 菜单项实测 42px，差 2px 到 44 —— 手指点在边缘容易误触相邻项。
+     抬到 44 而不是更高：15 项（含 6 个子项）在 390×844 上正好放得下，
+     46px 会让最后一项被裁掉 23px。
+     注：这段规则在 <992px 生效，桌面侧栏仍是 antd 默认的 42px。 */
+  .ant-menu-inline .ant-menu-item,
+  .ant-menu-inline .ant-menu-submenu-title {
+    min-height: 44px;
+    line-height: 44px;
+  }
+  .mobile-nav-drawer .ant-menu-inline .ant-menu-item,
+  .mobile-nav-drawer .ant-menu-inline .ant-menu-submenu-title {
+    margin-block: 1px;
+  }
+  .ant-btn-sm {
+    min-height: 32px;
+  }
+  .ant-input,
+  .ant-input-affix-wrapper,
+  .ant-input-number,
+  .ant-picker,
+  .ant-select-single .ant-select-selector {
+    min-height: 44px;
+  }
+
+  /* 表单控件不再按桌面档位收窄 —— 窄屏本来就没多少宽度可浪费。
+     注意 `.register-form .ant-form-item` 的选择器特异性（0,2,0）压不过基础
+     规则里的 `.register-form .ant-form-item:not([class*='form-field--'])`
+     （0,3,0），必须按同样形状写全，否则未带 form-field-- 类的字段在窄屏
+     仍被限宽 480px（实测 /register 12 个字段全部命中）。 */
+  .form-field--sm,
+  .form-field--md,
+  .form-field--lg,
+  .form-field--prose,
+  .register-form .ant-form-item,
+  .register-form .ant-form-item:not([class*='form-field--']),
+  .register-form .ant-form-item.form-field--prose {
+    max-width: 100%;
+  }
+
+  /* 并排字段在窄屏改为纵向堆叠 */
+  .form-grid > .ant-form-item,
+  .form-grid > .ant-form-item:not([class*='form-field--']) {
+    flex: 1 1 100%;
+    min-width: 0;
+  }
+
+  /* 设置页左侧 Tab 导航改为顶部横向滚动 —— 200px 的竖栏在手机上
+     会把内容区压到 94px（实测）。
+     关键是让外层 .settings-layout 从「nav | 内容」的行布局改成纵向堆叠：
+     只把 rail 设成 width:100% 的话，flex row 仍会把内容挤到 rail 右侧
+     （实测内容被推到 x=398，整个表单看不见）。 */
+  .settings-layout {
+    flex-direction: column;
+    gap: 12px !important;
+    align-items: stretch !important;
+  }
+  .settings-tab-rail {
+    width: 100%;
+  }
+  .settings-tab-rail .ant-tabs-left {
+    display: block;
+  }
+  .settings-tab-rail .ant-tabs-nav {
+    width: 100%;
+  }
+  .settings-tab-rail .ant-tabs-nav-list {
+    flex-direction: row !important;
+    overflow-x: auto;
+    overflow-y: hidden;
+    gap: 6px;
+    padding-bottom: 4px;
+    /* 隐藏横向滚动条，避免在导航条下压出一条灰带；
+       右侧渐隐提示「还能往右滑」，否则用户不知道后面还有标签 */
+    scrollbar-width: none;
+    -webkit-mask-image: linear-gradient(to right, #000 0, #000 calc(100% - 24px), transparent 100%);
+    mask-image: linear-gradient(to right, #000 0, #000 calc(100% - 24px), transparent 100%);
+  }
+  .settings-tab-rail .ant-tabs-nav-list::-webkit-scrollbar {
+    display: none;
+  }
+  .settings-tab-rail .ant-tabs-tab {
+    flex: 0 0 auto !important;
+    margin: 0 !important;
+    padding: 8px 14px !important;
+    white-space: nowrap;
+  }
+
+  /* 表格：手机上一屏放不下多列，靠横向滚动（已补 tabindex 可键盘滚）。
+     给个更窄的最小宽度，避免每列都被压成两个字换行。 */
+  .ant-table-wrapper .ant-table {
+    font-size: 13px;
+  }
+
+  /* 卡片内边距收紧，手机上 24px 的白边太奢侈 */
+  .ant-card .ant-card-body {
+    padding: 16px;
+  }
+  .ant-card-head {
+    padding: 0 16px;
+    min-height: 46px;
+  }
+
+  /* 弹窗与抽屉在窄屏贴边 */
+  .ant-modal {
+    max-width: calc(100vw - 24px);
+    margin: 12px auto;
+  }
+
+  /* 统计数字在窄屏不必那么大，避免与标题挤成两行 */
+  .stat-card .ant-statistic-content {
+    font-size: 26px;
+  }
+}
+
+/* ── <480px：小屏手机 ────────────────────────────────────── */
+@media (max-width: 479px) {
+  .page-header__title {
+    font-size: 20px;
+    line-height: 30px;
+  }
+  /* 顶栏按钮组：小屏下按钮文字可能换行，让它们至少不挤在一起。
+     基座 gap 在文件上半部分的 .page-header__actions 里（10px）—— 那里
+     原来是行内样式，行内值会压掉本媒体查询，所以先把它挪进了 CSS。 */
+  .page-header__actions {
+    gap: 8px;
+  }
+}
+
+/* ── 宽屏：内容区限宽，避免超宽屏上表单被拉成一条 ─────────────
+   上限取 1440px 而不是 FIELD_WIDTH.page（1200）：账号列表这类宽表
+   实测需要 1328px，卡到 1200 会让它横向溢出 64px —— 限宽是为了「别太散」，
+   不是为了把数据挤出屏幕。
+
+   `margin-inline: auto` 不能少：只设 max-width 的话，2200px 上内容贴左
+   （实测左边距 264px / 右边距 32px，差 232px），看起来像没对齐。 */
+@media (min-width: 1600px) {
+  .page-header,
+  .page-enter > div {
+    max-width: 1440px;
+    margin-inline: auto;
+  }
+}
+
+/* ── 触摸设备：去掉 hover 才有的位移，避免「点一下就跳」──────── */
+@media (hover: none) {
+  .hover-lift:hover,
+  .stat-card:hover,
+  .app-card:hover {
+    transform: none;
+  }
+}

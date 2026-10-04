@@ -1,0 +1,92 @@
+"""iCloud 业务包：主号、别名（号池）、收件三大块。
+
+真实现分布在 accounts / aliases / messages 三个子模块，共享锁与时间工具在
+`_locks.py`，门面转发代理在 `_facade.py`。对外契约名由门面
+`services/icloud_service.py` 统一重导出。
+"""
+from services.icloud._locks import (  # noqa: F401
+    DEFAULT_MESSAGE_LIMIT,
+    HOURLY_ALIAS_LIMIT,
+    _account_lock,
+    _as_utc,
+    _utcnow,
+)
+from services.icloud.accounts import (  # noqa: F401
+    _account_to_dict,
+    _registered_platforms_for,
+    _registered_platforms_one,
+    alias_quota,
+    cancel_login,
+    complete_login,
+    delete_account,
+    find_account_by_email,
+    get_account,
+    import_session,
+    list_accounts,
+    load_credentials,
+    login_state,
+    resend_login_code,
+    resolve_account,
+    send_login_sms,
+    set_account_enabled,
+    start_login,
+    verify_login,
+)
+from services.icloud.aliases import (  # noqa: F401
+    _alias_to_dict,
+    _record_sync_error,
+    _set_pool_status_many,
+    _upsert_alias,
+    claim_alias,
+    delete_alias,
+    delete_aliases,
+    generate_alias,
+    import_aliases_to_pool,
+    list_aliases,
+    mark_alias_used,
+    pool_summary,
+    release_alias_claim,
+    release_stale_claims,
+    set_alias_active,
+    set_alias_pool_status,
+    sync_aliases,
+    unpool_aliases,
+)
+from services.icloud.messages import (  # noqa: F401
+    _fetch_via_web,
+    fetch_account_messages,
+    fetch_account_messages_detailed,
+    fetch_alias_messages,
+    fetch_alias_messages_detailed,
+    fetch_latest_shared_message,
+)
+
+__all__ = [
+    "claim_alias",
+    "delete_account",
+    "delete_alias",
+    "delete_aliases",
+    "fetch_account_messages",
+    "fetch_account_messages_detailed",
+    "fetch_alias_messages",
+    "fetch_alias_messages_detailed",
+    "fetch_latest_shared_message",
+    "find_account_by_email",
+    "generate_alias",
+    "get_account",
+    "import_aliases_to_pool",
+    "import_session",
+    "list_accounts",
+    "list_aliases",
+    "load_credentials",
+    "mark_alias_used",
+    "pool_summary",
+    "release_alias_claim",
+    "release_stale_claims",
+    "resolve_account",
+    "set_account_enabled",
+    "set_alias_active",
+    "set_alias_pool_status",
+    "sync_aliases",
+    "unpool_aliases",
+]

@@ -1,0 +1,25 @@
+.venv/
+frontend/node_modules/
+__pycache__/
+*.pyc
+*.pyo
+.git/
+# 运行数据统一在 data/ 下（见 docs/DATA_DIRECTORY.md），构建镜像时全部排除
+data/
+static/
+*.egg-info/
+dist/
+build/
+backend.stdout.log
+backend.stderr.log
+.env
+# 构建上下文瘦身：以下目录镜像里一个字节都不需要，但体积可观
+# （reference/ 约 1.1GB 的本地参考仓库）
+reference/
+.hermes/
+.agents/
+# 旧版凭据密钥位置（现位于 data/secrets/，见 .gitignore）—— 绝不能烤进镜像层
+.secrets/
+.pytest_cache/
+.ruff_cache/
+tests/
