@@ -288,6 +288,12 @@ class GrokPlatform(BasePlatform):
                 "params": [],
             },
             {
+                "id": "sync_grok2api_status",
+                "label": "同步 grok2api 状态",
+                "scope": "panel",
+                "params": [],
+            },
+            {
                 "id": "upload_sub2api",
                 "label": "上传 Sub2API",
                 "scope": "panel",
@@ -564,6 +570,26 @@ class GrokPlatform(BasePlatform):
                 group=params.get("group") or "",
             )
             return {"ok": ok, "data": msg, "error": "" if ok else msg}
+
+        if action_id == "sync_grok2api_status":
+            # 单账号版（批量端点有专用分支，一次拉列表写回所有账号）。
+            # 读 grok2api 列表里的 `authStatus` + `enabled` 写回本地。
+            from services.panel_status_sync import sync_panel_status_batch
+
+            account_id = getattr(account, "id", None) or int(extra.get("account_id") or 0) or 0
+            probe = type("A", (), {
+                "id": account_id, "email": account.email, "platform": "grok",
+            })()
+            updates = sync_panel_status_batch("grok2api", [probe])
+            update = updates.get(int(account_id), {})
+            ok = bool(update.get("ok"))
+            message = str(update.get("message") or "同步完成")
+            return {
+                "ok": ok,
+                "data": {"message": f"grok2api 状态同步完成：{message}"},
+                "error": "" if ok else message,
+                "account_extra_patch": update.get("patch") or {},
+            }
 
         if action_id == "upload_grok2api":
             return self._action_upload_grok2api(account, extra, params, proxy)

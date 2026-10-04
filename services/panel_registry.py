@@ -88,8 +88,8 @@ PANELS: list[dict[str, Any]] = [
         "secret_key": "sub2api_api_key",
         "platform": "chatgpt",
         "upload_action": "upload_sub2api",
-        # Sub2API 没有"拉远端状态"这个动作（它只接收上传）。
-        "sync_action": "",
+        # 列表接口自带权威状态（active / inactive / error），读回来写回本地。
+        "sync_action": "sync_sub2api_status",
     },
     {
         "key": "grok2api",
@@ -99,7 +99,8 @@ PANELS: list[dict[str, Any]] = [
         "github": "https://github.com/chenyme/grok2api",
         "platform": "grok",
         "upload_action": "upload_grok2api",
-        "sync_action": "",
+        # 列表接口自带 `authStatus` + `enabled`，读回来写回本地。
+        "sync_action": "sync_grok2api_status",
     },
     {
         "key": "chatgpt2api",
@@ -113,10 +114,10 @@ PANELS: list[dict[str, Any]] = [
         "secret_key": "chatgpt2api_api_key",
         "secret_label": "管理密钥",
         "url_placeholder": "http://127.0.0.1:8000",
-        # 只接收上传，没有"拉远端状态"这回事（与 Sub2API 同类）。
         "platform": "chatgpt",
         "upload_action": "upload_chatgpt2api",
-        "sync_action": "",
+        # 列表自带 `status_label` + `credential_availability`，读回来写回本地。
+        "sync_action": "sync_chatgpt2api_status",
     },
 ]
 

@@ -68,9 +68,13 @@ class PanelActionDeclarationTests(unittest.TestCase):
             PANELS_BY_KEY["cpa"].get("sync_action"), "sync_cliproxyapi_status"
         )
 
-    def test_sub2api_has_no_sync_action(self):
-        """Sub2API 只接收上传，没有"拉远端状态"这回事 —— 声明成空而不是编一个。"""
-        self.assertEqual(PANELS_BY_KEY["sub2api"].get("sync_action"), "")
+    def test_sub2api_declares_the_sync_action(self):
+        """Sub2API 列表自带权威状态（active/inactive/error）—— 读回来写回本地。
+
+        用户要求「每个平台都最好都有 同步远端状态」。早前声明为空是因为当时
+        只想到「拉状态」这件事不存在；实际上列表接口本身就返回状态。
+        """
+        self.assertEqual(PANELS_BY_KEY["sub2api"].get("sync_action"), "sync_sub2api_status")
 
     def test_panel_platforms_match_the_comparison_mapping(self):
         """注册表声明的 platform 要与对比模块的面板→平台映射一致。

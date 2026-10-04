@@ -255,6 +255,68 @@ def _resolve_batch_accounts(platform: str, body: BatchActionRequest, session: Se
     return rows, []
 
 
+#: 各面板「同步远端状态」的批量执行表（面板 key → 动作 id）。
+#:
+#: 这三个面板的列表接口自带权威状态，读回来即可（不做探活 —— 它们自己跑
+#: token 刷新，再用本地 token 打一遍会与面板抢 RT，见 `services/panel_status_sync.py`）。
+_PANEL_STATUS_ACTIONS: dict[str, str] = {
+    "sync_sub2api_status": "sub2api",
+    "sync_chatgpt2api_status": "chatgpt2api",
+    "sync_grok2api_status": "grok2api",
+}
+
+
+def _execute_batch_panel_status(
+    action_id: str,
+    accounts: list[AccountModel],
+    session: Session,
+) -> dict[str, Any]:
+    """批量「同步远端状态」：一次拉远端列表，把状态写回每个账号。
+
+    逐账号拉会 N 次打远端（列表接口没有按账号过滤的变体）—— 拉一次，
+    在内存里按 (平台, 邮箱) 匹配。结果写进 `sync_statuses.<面板>`。
+    """
+    from services.panel_status_sync import sync_panel_status_batch
+
+    panel_key = _PANEL_STATUS_ACTIONS[action_id]
+    updates = sync_panel_status_batch(panel_key, accounts)
+
+    items = []
+    success_count = 0
+    failed_count = 0
+    for acc_model in accounts:
+        update = updates.get(int(acc_model.id or 0), {})
+        ok = bool(update.get("ok"))
+        if ok:
+            success_count += 1
+        else:
+            failed_count += 1
+        patch = update.get("patch") if isinstance(update.get("patch"), dict) else {}
+        if patch:
+            extra = acc_model.get_extra()
+            _merge_extra_patch(extra, patch)
+            acc_model.set_extra(extra)
+            from datetime import datetime, timezone
+
+            acc_model.updated_at = datetime.now(timezone.utc)
+            session.add(acc_model)
+        items.append(
+            {
+                "id": acc_model.id,
+                "email": acc_model.email,
+                "ok": ok,
+                "message": str(update.get("message") or "同步完成"),
+                "status": acc_model.status,
+            }
+        )
+    return {
+        "total": len(items),
+        "success": success_count,
+        "failed": failed_count,
+        "items": items,
+    }
+
+
 def _result_message(result: dict[str, Any]) -> str:
     data = result.get("data")
     if isinstance(data, dict):
@@ -352,6 +414,24 @@ def execute_batch_action(
 
     if platform == "chatgpt" and action_id == "sync_cliproxyapi_status":
         batch_result = _execute_batch_cliproxy_sync(accounts, session)
+        if missing_ids:
+            for missing_id in missing_ids:
+                batch_result["failed"] += 1
+                batch_result["total"] += 1
+                batch_result["items"].append(
+                    {
+                        "id": missing_id,
+                        "email": "",
+                        "ok": False,
+                        "message": "账号不存在",
+                        "status": "",
+                    }
+                )
+        session.commit()
+        return batch_result
+
+    if action_id in _PANEL_STATUS_ACTIONS:
+        batch_result = _execute_batch_panel_status(action_id, accounts, session)
         if missing_ids:
             for missing_id in missing_ids:
                 batch_result["failed"] += 1

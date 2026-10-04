@@ -60,8 +60,8 @@ class RegistryTests(unittest.TestCase):
         self.assertEqual(panel["secret_key"], "chatgpt2api_api_key")
         self.assertEqual(panel["upload_action"], "upload_chatgpt2api")
         self.assertEqual(panel["platform"], "chatgpt")
-        # 只接收上传，没有拉远端状态这回事
-        self.assertEqual(panel.get("sync_action"), "")
+        # 列表自带 `status_label` + `credential_availability` —— 读回来写回本地
+        self.assertEqual(panel.get("sync_action"), "sync_chatgpt2api_status")
 
     def test_config_keys_exist_and_are_whitelisted(self):
         from api.config import CONFIG_KEYS, SECRET_CONFIG_KEYS

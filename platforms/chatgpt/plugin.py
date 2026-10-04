@@ -143,6 +143,10 @@ class ChatGPTPlatform(BasePlatform):
             # 按动作 id 找到它们（`services/panel_registry.py` 的 upload_action /
             # sync_action），批量端点也要靠 `execute_action` 分发。
             {"id": "sync_cliproxyapi_status", "label": "同步 CLIProxyAPI 状态", "params": [], "scope": "panel"},
+            # Sub2API / chatgpt2api 的「同步远端状态」：列表接口自带权威状态，
+            # 读回来写回本地（批量端点有专用分支，一次拉远端列表）。
+            {"id": "sync_sub2api_status", "label": "同步 Sub2API 状态", "params": [], "scope": "panel"},
+            {"id": "sync_chatgpt2api_status", "label": "同步 chatgpt2api 状态", "params": [], "scope": "panel"},
             {"id": "refresh_token", "label": "刷新 Token", "params": []},
             {"id": "backfill_refresh_token", "label": "补 RT", "params": []},
             {"id": "bind_2fa", "label": "绑定 2FA", "params": []},
@@ -480,5 +484,26 @@ class ChatGPTPlatform(BasePlatform):
                 api_key=params.get("api_key"),
             )
             return {"ok": ok, "data": msg}
+
+        if action_id in ("sync_sub2api_status", "sync_chatgpt2api_status"):
+            # 单账号版（批量端点有专用分支，一次拉列表写回所有账号）。
+            # 读面板列表里的状态字段写回本地（不做探活 —— 面板自己跑 token 刷新）。
+            from services.panel_status_sync import sync_panel_status_batch
+
+            panel_key = "sub2api" if action_id == "sync_sub2api_status" else "chatgpt2api"
+            account_id = getattr(a, "id", None) or int((a.extra or {}).get("account_id") or 0) or 0
+            probe = type("A", (), {
+                "id": account_id, "email": a.email, "platform": "chatgpt",
+            })()
+            updates = sync_panel_status_batch(panel_key, [probe])
+            update = updates.get(int(account_id), {})
+            ok = bool(update.get("ok"))
+            message = str(update.get("message") or "同步完成")
+            return {
+                "ok": ok,
+                "data": {"message": f"{panel_key} 状态同步完成：{message}"},
+                "error": "" if ok else message,
+                "account_extra_patch": update.get("patch") or {},
+            }
 
         raise NotImplementedError(f"未知操作: {action_id}")
