@@ -221,7 +221,7 @@ class PanelScopeTests(unittest.TestCase):
             Path(__file__).resolve().parents[1]
             / "frontend/src/components/settings/PanelComparisonPanel.tsx"
         ).read_text(encoding="utf-8")
-        for needed in ("upload-unuploaded", "upload-stale", "sync-remote"):
+        for needed in ("upload-unuploaded", "upload-local-newer", "sync-remote"):
             with self.subTest(action=needed):
                 self.assertIn(needed, src, f"面板页缺少 {needed} 操作")
 

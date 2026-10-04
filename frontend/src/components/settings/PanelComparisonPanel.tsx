@@ -11,6 +11,8 @@ import { formatLocalTime, localTimezoneLabel } from '@/lib/time'
 import {
   countByPlatform,
   filterRowsByPlatform,
+  selectLocalNewerDiffIds,
+  selectRemoteNewerDiffIds,
   shouldShowPlatformFilter,
   summarizeRows,
 } from '@/lib/panelComparison'
@@ -466,31 +468,26 @@ export function PanelComparisonPanel({
         .map((row) => row.local_id as number),
     [platformRows],
   )
-  // 凭证不同的本地账号（上传能把这批刷新到远端）
-  const staleIds = useMemo(
-    () =>
-      platformRows
-        .filter((row) => row.state === 'credential_diff' && row.local_id)
-        .map((row) => row.local_id as number),
+  /**
+   * 「本地较新」的凭证不同行 —— 上传方向（本地 → 远端）。
+   *
+   * 只推 `time_relation === 'local_newer'` 的：凭证不同只说明两边不一致，
+   * **不说哪边对**。远端较新的行推上去 = 用本地死凭证覆盖远端好凭证
+   * （x.ai 的 RT 轮换，实测事故：本地 22 个账号 RT 全部 `invalid_grant`）。
+   * 方向判定抽到 lib（`selectLocalNewerDiffIds`）才能被 node 真实执行验证。
+   */
+  const localNewerIds = useMemo(
+    () => selectLocalNewerDiffIds(platformRows),
     [platformRows],
   )
   /**
-   * 远端较新的本地账号（拉回能把本地刷新到最新）。
+   * 「远端较新」的凭证不同行 —— 拉回方向（远端 → 本地）。
    *
-   * 只挑 `time_relation === 'remote_newer'` 的：同小时/本地较新的不动 ——
-   * 那些拉回来等于用更旧的凭证覆盖本地（后端 `plan_sync` 也是同一口径，
-   * 这里只用来显示计数，实际方向由后端判定）。
+   * 与 `localNewerIds` 对称且互斥（同一行不可能两边都在）；同小时/无法判定
+   * 时间的都不动（不拿不确定的数据覆盖任何一边）。
    */
   const remoteNewerIds = useMemo(
-    () =>
-      platformRows
-        .filter(
-          (row) =>
-            row.state === 'credential_diff' &&
-            row.local_id &&
-            row.time_relation === 'remote_newer',
-        )
-        .map((row) => row.local_id as number),
+    () => selectRemoteNewerDiffIds(platformRows),
     [platformRows],
   )
 
@@ -676,23 +673,23 @@ export function PanelComparisonPanel({
                   上传未上传 ({unuploadedIds.length})
                 </Button>
               </Popconfirm>
-              {staleIds.length ? (
+              {localNewerIds.length ? (
                 <Popconfirm
-                  title={`把 ${staleIds.length} 个「凭证不同」的账号重新传到 ${panelLabel}？`}
-                  description="本地凭证比远端新，重传可让远端跟上。"
+                  title={`把 ${localNewerIds.length} 个「本地较新」的账号传到 ${panelLabel}？`}
+                  description="这些账号本地凭证比远端新（按小时判定），上传让远端跟上。远端较新的账号不在此列 —— 那些用「同步到最新」拉回。"
                   okText="上传"
                   cancelText="取消"
                   disabled={Boolean(running)}
                   onConfirm={() =>
-                    void runBatch('upload', uploadAction, `上传 ${panelLabel}`, staleIds, 'upload-stale')
+                    void runBatch('upload', uploadAction, `上传 ${panelLabel}`, localNewerIds, 'upload-local-newer')
                   }
                 >
                   <Button
                     icon={<CloudUploadOutlined />}
-                    loading={running === 'upload-stale'}
-                    data-hermes-action="upload-stale"
+                    loading={running === 'upload-local-newer'}
+                    data-hermes-action="upload-local-newer"
                   >
-                    上传凭证不同 ({staleIds.length})
+                    上传本地较新 ({localNewerIds.length})
                   </Button>
                 </Popconfirm>
               ) : null}

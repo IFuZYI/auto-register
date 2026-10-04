@@ -105,3 +105,51 @@ export function shouldShowPlatformFilter(platforms?: string[] | null): boolean {
   )
   return unique.size > 1
 }
+
+/** 方向筛选要读的最小形状。 */
+export interface DirectionFilterableRow extends PlatformFilterableRow {
+  state?: string
+  /** local_newer / remote_newer / time_synced / '' */
+  time_relation?: string
+  local_id?: number | null
+}
+
+/**
+ * 上传方向：只推「本地较新」的凭证不同行。
+ *
+ * 为什么必须判方向：凭证不同只说明两边不一致，**不说哪边对**。x.ai 的 RT
+ * 每次刷新都轮换 —— 远端面板自己刷新过之后，本地存的就是死 RT。不判方向
+ * 全推上去 = 用本地死值覆盖远端好值（实测事故：本地 22 个账号 RT 全部
+ * `invalid_grant`，而远端可用）。
+ *
+ * 同小时（`time_synced`）/ 无法判定（`''`）不动：分秒差异是噪声，
+ * 不拿不确定的数据覆盖任何一边。远端独有（无 local_id）不是上传对象。
+ */
+export function selectLocalNewerDiffIds(rows: DirectionFilterableRow[]): number[] {
+  return (Array.isArray(rows) ? rows : [])
+    .filter(
+      (row) =>
+        row?.state === 'credential_diff' &&
+        row?.time_relation === 'local_newer' &&
+        row?.local_id,
+    )
+    .map((row) => row.local_id as number)
+}
+
+/**
+ * 拉回方向：只拉「远端较新」的凭证不同行。
+ *
+ * 与 `selectLocalNewerDiffIds` 对称且**互斥**（同一行不可能两边都在）：
+ * 上传只推 local_newer，拉回只拉 remote_newer。两侧用同一套口径写，
+ * 一处改了另一处忘了就会再次出现「用旧覆盖新」。
+ */
+export function selectRemoteNewerDiffIds(rows: DirectionFilterableRow[]): number[] {
+  return (Array.isArray(rows) ? rows : [])
+    .filter(
+      (row) =>
+        row?.state === 'credential_diff' &&
+        row?.time_relation === 'remote_newer' &&
+        row?.local_id,
+    )
+    .map((row) => row.local_id as number)
+}

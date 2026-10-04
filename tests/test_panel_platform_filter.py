@@ -17,6 +17,11 @@
 筛选要**同时**作用在三处，漏一处就会出现「看到的和传出去的不是同一批」：
 1. 表格行；2. 筛选条计数；3. 批量动作的账号 id 集合。
 
+另有**方向**筛选（`selectLocalNewerDiffIds` / `selectRemoteNewerDiffIds`）：
+上传/拉回是一对对称动作 —— 上传只推「本地较新」的行，拉回只拉「远端较新」
+的行。写错方向等于用旧凭证覆盖新的（x.ai 的 RT 每次刷新都轮换，覆盖后
+持有方拿到死值）。
+
 测试分两层（与 `test_account_format_contract.py` 同一套做法）：
 - 行为层：node + rolldown 真实执行 `frontend/src/lib/panelComparison.ts` 的纯函数；
 - 接线层：静态断言页面确实调了这些函数、并把 `platforms` 透传下去。
@@ -121,7 +126,7 @@ class PanelPlatformFilterWiringTests(unittest.TestCase):
         读原始 `payload.rows` 的话，用户筛了 Grok 却把 ChatGPT 的一起传了。
         """
         src = self._panel()
-        for name in ("unuploadedIds", "staleIds", "remoteNewerIds"):
+        for name in ("unuploadedIds", "localNewerIds", "remoteNewerIds"):
             block = src.split(f"const {name} = useMemo(", 1)
             self.assertEqual(len(block), 2, f"找不到 {name} 的定义")
             # 定义体到依赖数组（`\n    [`）为止。切在依赖数组之前很重要 ——
@@ -144,6 +149,29 @@ class PanelPlatformFilterWiringTests(unittest.TestCase):
                 body,
                 f"{name} 直接读了原始行 —— 平台筛选被绕过，会传错平台的账号",
             )
+
+    def test_upload_and_pull_use_the_direction_helpers(self):
+        """上传/拉回两个方向必须走 lib 的纯函数（组件里不再自己判方向）。
+
+        方向判定是「谁较新就动谁」的核心：写错方向 = 用旧凭证覆盖新的
+        （x.ai 的 RT 每次刷新都轮换，覆盖后持有方拿到死值）。抽到 lib 才能被
+        `run_panel_filter_checks.mjs` 真实执行验证。
+        """
+        src = self._panel()
+        self.assertIn(
+            "selectLocalNewerDiffIds(platformRows)", src,
+            "上传方向没接纯函数（selectLocalNewerDiffIds）",
+        )
+        self.assertIn(
+            "selectRemoteNewerDiffIds(platformRows)", src,
+            "拉回方向没接纯函数（selectRemoteNewerDiffIds）",
+        )
+        # 组件里不该再有「不判方向就上传」的凭证过滤 —— 那正是被修掉的 bug。
+        self.assertNotIn(
+            "row.state === 'credential_diff' && row.local_id",
+            src,
+            "出现了不带时间条件的凭证过滤（会把本地旧凭证推上去覆盖远端新的）",
+        )
 
     def test_table_key_includes_platform(self):
         """`rowKey` 必须带平台。
