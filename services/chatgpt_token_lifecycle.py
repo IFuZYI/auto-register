@@ -12,7 +12,11 @@ reference/panel/chatgpt2api 这个里面的。」
   `unknown`（没有 exp claim —— 不是标准 JWT，不误判成失效）；
 - 只解 JWT payload，**不验签**（拿到的 token 本来就是可信来源写进库的）。
 
-只读纯函数，不落库。账号页展示与上传前预检共用。
+只读纯函数，不落库。**生产展示路径在前端**（`frontend/src/lib/accountFormat.ts`
+的 `atLifecycleMeta`，账号详情弹窗即时显示）；本模块是后端口径的基准实现 ——
+`tests/test_chatgpt_token_lifecycle.py` 用它对照参考实现验证三档判定，前端
+harness（`run_account_format_checks.mjs`）镜像同一组断言。后续若需要后端
+计算（如上传前预检），从这里取。
 """
 
 from __future__ import annotations
