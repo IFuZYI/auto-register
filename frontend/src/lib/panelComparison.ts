@@ -115,35 +115,32 @@ export interface DirectionFilterableRow extends PlatformFilterableRow {
 }
 
 /**
- * 上传方向：只推「本地较新」的凭证不同行。
+ * 「更新远程凭证」的目标：未上传 + 本地较新的凭证不同行。
  *
- * 为什么必须判方向：凭证不同只说明两边不一致，**不说哪边对**。x.ai 的 RT
- * 每次刷新都轮换 —— 远端面板自己刷新过之后，本地存的就是死 RT。不判方向
- * 全推上去 = 用本地死值覆盖远端好值（实测事故：本地 22 个账号 RT 全部
- * `invalid_grant`，而远端可用）。
+ * 这是**推送方向**（本地 → 远端）：远端没有的（未上传）要补传；
+ * 凭证不同且本地较新的要覆盖。远端较新的**不在此列** —— 推上去会用
+ * 本地旧凭证覆盖远端新的（x.ai 的 RT 轮换，覆盖后远端拿到死值）。
  *
- * 同小时（`time_synced`）/ 无法判定（`''`）不动：分秒差异是噪声，
- * 不拿不确定的数据覆盖任何一边。远端独有（无 local_id）不是上传对象。
+ * 同小时（`time_synced`）/ 无法判定（`''`）不动：分秒差异是噪声。
  */
-export function selectLocalNewerDiffIds(rows: DirectionFilterableRow[]): number[] {
+export function selectPushIds(rows: DirectionFilterableRow[]): number[] {
   return (Array.isArray(rows) ? rows : [])
     .filter(
       (row) =>
-        row?.state === 'credential_diff' &&
-        row?.time_relation === 'local_newer' &&
-        row?.local_id,
+        row?.local_id &&
+        (row?.state === 'local_only' ||
+          (row?.state === 'credential_diff' && row?.time_relation === 'local_newer')),
     )
     .map((row) => row.local_id as number)
 }
 
 /**
- * 拉回方向：只拉「远端较新」的凭证不同行。
+ * 「更新本地凭证」的目标：远端较新的凭证不同行。
  *
- * 与 `selectLocalNewerDiffIds` 对称且**互斥**（同一行不可能两边都在）：
- * 上传只推 local_newer，拉回只拉 remote_newer。两侧用同一套口径写，
- * 一处改了另一处忘了就会再次出现「用旧覆盖新」。
+ * 这是**拉回方向**（远端 → 本地），与 `selectPushIds` 互斥：同一行不可能
+ * 同时在两个方向的目标里（`local_newer` 与 `remote_newer` 不可能同时成立）。
  */
-export function selectRemoteNewerDiffIds(rows: DirectionFilterableRow[]): number[] {
+export function selectPullIds(rows: DirectionFilterableRow[]): number[] {
   return (Array.isArray(rows) ? rows : [])
     .filter(
       (row) =>

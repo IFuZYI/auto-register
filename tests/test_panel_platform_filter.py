@@ -126,7 +126,7 @@ class PanelPlatformFilterWiringTests(unittest.TestCase):
         读原始 `payload.rows` 的话，用户筛了 Grok 却把 ChatGPT 的一起传了。
         """
         src = self._panel()
-        for name in ("unuploadedIds", "localNewerIds", "remoteNewerIds"):
+        for name in ("pushIds", "pullIds"):
             block = src.split(f"const {name} = useMemo(", 1)
             self.assertEqual(len(block), 2, f"找不到 {name} 的定义")
             # 定义体到依赖数组（`\n    [`）为止。切在依赖数组之前很重要 ——
@@ -150,8 +150,8 @@ class PanelPlatformFilterWiringTests(unittest.TestCase):
                 f"{name} 直接读了原始行 —— 平台筛选被绕过，会传错平台的账号",
             )
 
-    def test_upload_and_pull_use_the_direction_helpers(self):
-        """上传/拉回两个方向必须走 lib 的纯函数（组件里不再自己判方向）。
+    def test_push_and_pull_use_the_direction_helpers(self):
+        """更新远程/更新本地两个方向必须走 lib 的纯函数（组件里不再自己判方向）。
 
         方向判定是「谁较新就动谁」的核心：写错方向 = 用旧凭证覆盖新的
         （x.ai 的 RT 每次刷新都轮换，覆盖后持有方拿到死值）。抽到 lib 才能被
@@ -159,12 +159,12 @@ class PanelPlatformFilterWiringTests(unittest.TestCase):
         """
         src = self._panel()
         self.assertIn(
-            "selectLocalNewerDiffIds(platformRows)", src,
-            "上传方向没接纯函数（selectLocalNewerDiffIds）",
+            "selectPushIds(platformRows)", src,
+            "推送方向没接纯函数（selectPushIds）",
         )
         self.assertIn(
-            "selectRemoteNewerDiffIds(platformRows)", src,
-            "拉回方向没接纯函数（selectRemoteNewerDiffIds）",
+            "selectPullIds(platformRows)", src,
+            "拉回方向没接纯函数（selectPullIds）",
         )
         # 组件里不该再有「不判方向就上传」的凭证过滤 —— 那正是被修掉的 bug。
         self.assertNotIn(

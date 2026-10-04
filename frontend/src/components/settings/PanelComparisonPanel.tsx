@@ -11,8 +11,8 @@ import { formatLocalTime, localTimezoneLabel } from '@/lib/time'
 import {
   countByPlatform,
   filterRowsByPlatform,
-  selectLocalNewerDiffIds,
-  selectRemoteNewerDiffIds,
+  selectPullIds,
+  selectPushIds,
   shouldShowPlatformFilter,
   summarizeRows,
 } from '@/lib/panelComparison'
@@ -357,7 +357,6 @@ export function PanelComparisonPanel({
   platform = '',
   platforms = [],
   platformActions = {},
-  uploadAction = '',
   syncAction = '',
 }: {
   panelKey: string
@@ -373,15 +372,12 @@ export function PanelComparisonPanel({
    */
   platforms?: string[]
   /**
-   * 平台 → 动作 id 的映射（CPA 这类多平台面板用）。
+   * 平台 → 「同步远端状态」动作 id 的映射（CPA 这类多平台面板用）。
    *
    * 面板同时服务多个平台时（CPA 托管 ChatGPT + Grok），同一个动作在两个平台上
    * 是两份实现、两条接口 —— 批量时必须按**行自己的平台**分发，不能全用第一个。
-   * 单平台面板走 `platform` + `uploadAction` 那两个参数即可。
    */
-  platformActions?: { upload?: Record<string, string>; sync?: Record<string, string> }
-  /** 上传动作 id（如 `upload_cpa`）；空串表示这个面板没有上传动作 */
-  uploadAction?: string
+  platformActions?: { sync?: Record<string, string> }
   /** 拉远端状态的动作 id（如 `sync_cliproxyapi_status`）；空串表示没有 */
   syncAction?: string
 }) {
@@ -397,7 +393,7 @@ export function PanelComparisonPanel({
    * 的话，用户看着 32 个 Grok 行点「上传」，实际会把 ChatGPT 的一起传上去。
    */
   const [platformFilter, setPlatformFilter] = useState('')
-  // 操作进行中的标记：`upload:<scope>` / `sync:<scope>`
+  // 操作进行中的标记（`sync-remote` / `push-to-remote` / `sync-from-remote`）
   const [running, setRunning] = useState('')
 
   const load = useCallback(
@@ -460,47 +456,36 @@ export function PanelComparisonPanel({
    */
   const remoteUnavailable = Boolean(payload?.remote_error)
 
-  // 未上传的本地账号（对比已经算出来了，不用再查一遍）
-  const unuploadedIds = useMemo(
-    () =>
-      platformRows
-        .filter((row) => row.state === 'local_only' && row.local_id)
-        .map((row) => row.local_id as number),
+  /**
+   * 「更新远程凭证」的目标：未上传 + 本地较新的凭证不同行（推送方向）。
+   *
+   * 方向判定抽到 lib（`selectPushIds` / `selectPullIds`）才能被 node 真实
+   * 执行验证；两个方向互斥，详见 lib 里的说明。
+   */
+  const pushIds = useMemo(
+    () => selectPushIds(platformRows),
     [platformRows],
   )
   /**
-   * 「本地较新」的凭证不同行 —— 上传方向（本地 → 远端）。
+   * 「更新本地凭证」的目标：远端较新的凭证不同行（拉回方向）。
    *
-   * 只推 `time_relation === 'local_newer'` 的：凭证不同只说明两边不一致，
-   * **不说哪边对**。远端较新的行推上去 = 用本地死凭证覆盖远端好凭证
-   * （x.ai 的 RT 轮换，实测事故：本地 22 个账号 RT 全部 `invalid_grant`）。
-   * 方向判定抽到 lib（`selectLocalNewerDiffIds`）才能被 node 真实执行验证。
+   * 与 `pushIds` 互斥；同小时/无法判定时间的都不动（不拿不确定的数据
+   * 覆盖任何一边）。
    */
-  const localNewerIds = useMemo(
-    () => selectLocalNewerDiffIds(platformRows),
-    [platformRows],
-  )
-  /**
-   * 「远端较新」的凭证不同行 —— 拉回方向（远端 → 本地）。
-   *
-   * 与 `localNewerIds` 对称且互斥（同一行不可能两边都在）；同小时/无法判定
-   * 时间的都不动（不拿不确定的数据覆盖任何一边）。
-   */
-  const remoteNewerIds = useMemo(
-    () => selectRemoteNewerDiffIds(platformRows),
+  const pullIds = useMemo(
+    () => selectPullIds(platformRows),
     [platformRows],
   )
 
   /**
-   * 跑一个批量平台动作（账号 ID 由对比结果给）。
+   * 跑「同步远端状态」批量动作（账号 ID 由对比结果给）。
    *
-   * `kind` 决定用哪个平台的接口：面板可能同时服务多个平台（CPA 托管
-   * ChatGPT + Grok），必须按**每个账号自己的平台**分发 —— 用第一个平台的
-   * 接口去传另一个平台的账号会报「账号不存在」。
+   * 面板可能同时服务多个平台（CPA 托管 ChatGPT + Grok），必须按**每个账号
+   * 自己的平台**分发 —— 用第一个平台的接口去传另一个平台的账号会报
+   * 「账号不存在」。
    */
   const runBatch = useCallback(
     async (
-      kind: 'upload' | 'sync',
       fallbackActionId: string,
       actionLabel: string,
       accountIds: number[],
@@ -510,10 +495,8 @@ export function PanelComparisonPanel({
         message.info(`没有需要${actionLabel}的账号`)
         return
       }
-      // 平台 → 动作 id：优先按平台的映射，没有就退回面板级动作 id
       const actionFor = (plat: string) =>
-        platformActions[kind]?.[plat] || (plat === platform ? fallbackActionId : '')
-      // 行上的平台 → 该平台的账号 id（顺序稳定，便于分批）
+        platformActions.sync?.[plat] || (plat === platform ? fallbackActionId : '')
       const idsByPlatform = new Map<string, number[]>()
       for (const row of payload?.rows || []) {
         if (!row.local_id || !accountIds.includes(row.local_id)) continue
@@ -532,23 +515,15 @@ export function PanelComparisonPanel({
         let total = 0, success = 0, failed = 0
         for (const [plat, ids] of idsByPlatform) {
           const actionId = actionFor(plat)
-          // 后端单次上限 1000（`api/actions.py` 的 `_resolve_batch_accounts`）——
-          // 本地账号超过 1000 时直接发会整批 400，一个都处理不了。分批串行发。
+          // 后端单次上限 1000（`api/actions.py` 的 `_resolve_batch_accounts`）
           const chunks: number[][] = []
           for (let i = 0; i < ids.length; i += BATCH_ACTION_LIMIT) {
             chunks.push(ids.slice(i, i + BATCH_ACTION_LIMIT))
           }
-          for (let i = 0; i < chunks.length; i++) {
-            if (chunks.length > 1) {
-              message.loading({
-                content: `${actionLabel}进行中（${plat} 第 ${i + 1}/${chunks.length} 批，共 ${ids.length} 个）...`,
-                key: toastKey,
-                duration: 0,
-              })
-            }
+          for (const chunk of chunks) {
             const result = (await apiFetch(`/actions/${plat}/${actionId}/batch`, {
               method: 'POST',
-              body: JSON.stringify({ account_ids: chunks[i], params: {} }),
+              body: JSON.stringify({ account_ids: chunk, params: {} }),
             })) as { total: number; success: number; failed: number }
             total += result.total
             success += result.success
@@ -562,7 +537,6 @@ export function PanelComparisonPanel({
         } else {
           message.warning({ content: `${actionLabel}部分完成：成功 ${success} / ${total}`, key: toastKey })
         }
-        // 动作改的是账号/远端状态，重拉对比才能反映出来
         await load(true)
       } catch (e: unknown) {
         message.error({ content: `${actionLabel}失败：${e instanceof Error ? e.message : e}`, key: toastKey })
@@ -581,34 +555,77 @@ export function PanelComparisonPanel({
    * 后端做，前端只展示汇总。原因：凭证比对的结果（哪些行 remote_newer）
    * 后端手里才有完整上下文，逐账号发动作会 N 次拉远端。
    */
+  /**
+   * 「更新本地凭证」：把远端较新的凭证拉回本地。
+   *
+   * 面板级调用（`POST .../sync`）：方向判定与写库都在后端做，前端只展示
+   * 汇总。`platform` 带当前筛选 —— 后端按它只拉该平台的行。
+   */
   const runRemoteSync = useCallback(async () => {
     setRunning('sync-from-remote')
     const toastKey = 'panel-sync-from-remote'
-    message.loading({ content: '同步中（拉取远端较新的凭证）...', key: toastKey, duration: 0 })
+    message.loading({ content: '更新本地凭证中（拉取远端较新的凭证）...', key: toastKey, duration: 0 })
     try {
-      // `platform` 带上当前筛选：后端按它只拉该平台的行。不带的话用户筛了
-      // Grok 点同步，ChatGPT 的凭证也会被一起改（「看到的」与「被改的」对不上）。
       const query = platformFilter ? `?platform=${encodeURIComponent(platformFilter)}` : ''
       const result = (await apiFetch(`/integrations/panels/${panelKey}/sync${query}`, {
         method: 'POST',
       })) as { pulled: number; skipped: number; total: number; remote_error?: string }
       if (result.remote_error) {
-        message.error({ content: `同步失败：${result.remote_error}`, key: toastKey })
+        message.error({ content: `更新本地失败：${result.remote_error}`, key: toastKey })
       } else if (result.pulled) {
         message.success({
-          content: `已从远端拉回 ${result.pulled} 个账号的凭证（其余 ${result.skipped} 个无需同步）`,
+          content: `已从远端拉回 ${result.pulled} 个账号的凭证（其余 ${result.skipped} 个无需更新）`,
           key: toastKey,
         })
       } else {
         message.info({
-          content: `没有需要拉回的账号（${result.skipped} 个无需同步）`,
+          content: `没有需要更新的账号（${result.skipped} 个无需更新）`,
           key: toastKey,
         })
       }
-      // 拉回改的是本地账号，重拉对比才能反映出来
       await load(true)
     } catch (e: unknown) {
-      message.error({ content: `同步失败：${e instanceof Error ? e.message : e}`, key: toastKey })
+      message.error({ content: `更新本地失败：${e instanceof Error ? e.message : e}`, key: toastKey })
+    } finally {
+      setRunning('')
+    }
+  }, [panelKey, platformFilter, message, load])
+
+  /**
+   * 「更新远程凭证」：把「未上传 + 本地较新」的凭证推到远端。
+   *
+   * 面板级调用（`POST .../push`）：方向判定（未上传 / 本地较新才推）在后端
+   * 做 —— 与「更新本地」互斥，绝不拿旧凭证覆盖新的。`delete_old=true`：
+   * 对新建式面板（sub2api / chatgpt2api）推成功后删掉旧远端记录避免重复，
+   * 覆盖式面板（CPA / grok2api）后端自动忽略。
+   */
+  const runRemotePush = useCallback(async () => {
+    setRunning('push-to-remote')
+    const toastKey = 'panel-push-to-remote'
+    message.loading({ content: '更新远程凭证中（推送本地较新的凭证）...', key: toastKey, duration: 0 })
+    try {
+      const params = new URLSearchParams({ delete_old: 'true' })
+      if (platformFilter) params.set('platform', platformFilter)
+      const result = (await apiFetch(`/integrations/panels/${panelKey}/push?${params.toString()}`, {
+        method: 'POST',
+      })) as { pushed: number; deleted: number; skipped: number; total: number; remote_error?: string }
+      if (result.remote_error) {
+        message.error({ content: `更新远程失败：${result.remote_error}`, key: toastKey })
+      } else if (result.pushed) {
+        const deleted = result.deleted ? `，已清理 ${result.deleted} 条旧记录` : ''
+        message.success({
+          content: `已推送 ${result.pushed} 个账号到远端${deleted}（其余 ${result.skipped} 个无需更新）`,
+          key: toastKey,
+        })
+      } else {
+        message.info({
+          content: `没有需要推送的账号（${result.skipped} 个无需更新）`,
+          key: toastKey,
+        })
+      }
+      await load(true)
+    } catch (e: unknown) {
+      message.error({ content: `更新远程失败：${e instanceof Error ? e.message : e}`, key: toastKey })
     } finally {
       setRunning('')
     }
@@ -638,63 +655,10 @@ export function PanelComparisonPanel({
             </Typography.Text>
           </Tooltip>
         </Space>
-        {/* 按钮组要允许换行：窄屏（实测 390px）下三个按钮一排有 503px，
+        {/* 按钮组要允许换行：窄屏（实测 390px）下按钮一排超宽，
             不 wrap 会被容器裁掉 —— 「重新拉取对比」实测 right=519 > 视口 390，
             只有 15px 可见、点不到。 */}
         <Space wrap>
-          {uploadAction || Object.keys(platformActions.upload || {}).length ? (
-            <>
-              <Popconfirm
-                title={
-                  remoteUnavailable
-                    ? `远端读取失败，无法判断哪些账号没上传 —— 仍要上传全部 ${unuploadedIds.length} 个本地账号？`
-                    : `把 ${unuploadedIds.length} 个未上传的账号传到 ${panelLabel}？`
-                }
-                description={
-                  remoteUnavailable
-                    ? '对比结果里所有本地账号都成了「未上传」，直接上传等于把全部重传一遍。'
-                    : '只处理对比结果里「未上传」的那些账号。'
-                }
-                okText="上传"
-                cancelText="取消"
-                disabled={!unuploadedIds.length || Boolean(running)}
-                onConfirm={() =>
-                  void runBatch('upload', uploadAction, `上传 ${panelLabel}`, unuploadedIds, 'upload-unuploaded')
-                }
-              >
-                <Button
-                  type={remoteUnavailable ? 'default' : 'primary'}
-                  danger={remoteUnavailable}
-                  icon={<CloudUploadOutlined />}
-                  loading={running === 'upload-unuploaded'}
-                  disabled={!unuploadedIds.length}
-                  data-hermes-action="upload-unuploaded"
-                >
-                  上传未上传 ({unuploadedIds.length})
-                </Button>
-              </Popconfirm>
-              {localNewerIds.length ? (
-                <Popconfirm
-                  title={`把 ${localNewerIds.length} 个「本地较新」的账号传到 ${panelLabel}？`}
-                  description="这些账号本地凭证比远端新（按小时判定），上传让远端跟上。远端较新的账号不在此列 —— 那些用「同步到最新」拉回。"
-                  okText="上传"
-                  cancelText="取消"
-                  disabled={Boolean(running)}
-                  onConfirm={() =>
-                    void runBatch('upload', uploadAction, `上传 ${panelLabel}`, localNewerIds, 'upload-local-newer')
-                  }
-                >
-                  <Button
-                    icon={<CloudUploadOutlined />}
-                    loading={running === 'upload-local-newer'}
-                    data-hermes-action="upload-local-newer"
-                  >
-                    上传本地较新 ({localNewerIds.length})
-                  </Button>
-                </Popconfirm>
-              ) : null}
-            </>
-          ) : null}
           {syncAction || Object.keys(platformActions.sync || {}).length ? (
             <Tooltip title="读远端状态回写本地账号（含封禁/失效判定）—— 会修改本地账号记录">
               <Button
@@ -708,27 +672,52 @@ export function PanelComparisonPanel({
                   const ids = platformRows
                     .filter((row) => row.local_id)
                     .map((row) => row.local_id as number)
-                  void runBatch('sync', syncAction, '同步远端状态', ids, 'sync-remote')
+                  void runBatch(syncAction, '同步远端状态', ids, 'sync-remote')
                 }}
                 data-hermes-action="sync-remote-status"
               >
-                同步远端状态到本地
+                同步远端状态
               </Button>
             </Tooltip>
           ) : null}
-          {/* 「同步到最新」：把远端**较新**的凭证拉回本地（覆盖 AT/RT）。
-              与上面的「同步远端状态」不同 —— 那个读的是远端账号的**状态**
-              （封禁/失效），这个拉的是**凭证本体**。远端面板刷新过 token 后
-              本地存的就是死值（x.ai 的 RT 轮换），不拉回本地就换不出新 token。 */}
-          <Tooltip title="把远端面板里较新的凭证（AT/RT）拉回本地 —— 会覆盖本地账号的凭证字段；只处理「远端较新」的账号">
+          {/* 「更新远程凭证」：未上传 + 本地较新的推上去（推送方向）。
+              远端较新的行不在此列 —— 推上去会用本地旧凭证覆盖远端新的。 */}
+          <Tooltip title="把「未上传 + 本地较新」的凭证推到远端；新建式面板会清理被替换的旧记录。远端较新的账号不在此列（那些用「更新本地凭证」）">
             <Popconfirm
               title={
-                remoteNewerIds.length
-                  ? `把 ${remoteNewerIds.length} 个「远端较新」账号的凭证拉回本地？`
+                pushIds.length
+                  ? `把 ${pushIds.length} 个账号的凭证推送到 ${panelLabel}？`
+                  : '按对比结果推送：只处理「未上传」与「本地较新」的账号'
+              }
+              description="未上传的补传；本地较新的覆盖远端。同小时/无法判定时间的不动。"
+              okText="更新"
+              cancelText="取消"
+              disabled={Boolean(running) || remoteUnavailable}
+              onConfirm={() => void runRemotePush()}
+            >
+              <Button
+                type="primary"
+                icon={<CloudUploadOutlined />}
+                loading={running === 'push-to-remote'}
+                disabled={Boolean(running) || remoteUnavailable}
+                data-hermes-action="push-to-remote"
+              >
+                更新远程凭证{pushIds.length ? ` (${pushIds.length})` : ''}
+              </Button>
+            </Popconfirm>
+          </Tooltip>
+          {/* 「更新本地凭证」：远端较新的拉回来（拉回方向）。远端面板刷新过
+              token 后本地存的就是死值（x.ai 的 RT 轮换），不拉回本地就换不出
+              新 token。 */}
+          <Tooltip title="把远端较新的凭证（AT/RT）拉回本地 —— 会覆盖本地账号的凭证字段；只处理「远端较新」的账号">
+            <Popconfirm
+              title={
+                pullIds.length
+                  ? `把 ${pullIds.length} 个「远端较新」账号的凭证拉回本地？`
                   : '按对比结果同步：只拉回「远端较新」的账号'
               }
               description="会覆盖本地账号的 access_token / refresh_token 等凭证字段（其它字段保留）。"
-              okText="同步"
+              okText="更新"
               cancelText="取消"
               disabled={Boolean(running) || remoteUnavailable}
               onConfirm={() => void runRemoteSync()}
@@ -739,13 +728,11 @@ export function PanelComparisonPanel({
                 disabled={Boolean(running) || remoteUnavailable}
                 data-hermes-action="sync-from-remote"
               >
-                同步到最新{remoteNewerIds.length ? ` (${remoteNewerIds.length})` : ''}
+                更新本地凭证{pullIds.length ? ` (${pullIds.length})` : ''}
               </Button>
             </Popconfirm>
           </Tooltip>
-          {/* 「同步到最新」与「刷新」只重拉**对比表**，不碰账号数据。两者的唯一
-              区别是绕不绕服务端缓存 —— 对用户来说结果一样，所以只留一个按钮，
-              并在 tooltip 里说明它会强制重拉。 */}
+          {/* 只重拉**对比表**，不碰账号数据（绕服务端缓存）。 */}
           <Tooltip title="重新拉取本地与远端的账号清单（强制绕过缓存，不修改任何账号）">
             <Button
               icon={<SyncOutlined />}

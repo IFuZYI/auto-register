@@ -118,6 +118,177 @@ def sync_panel_endpoint(panel_key: str, platform: str = ""):
     return summary
 
 
+#: 面板 key → 推送器类型。
+#:
+#: `overwrite`：上传即原地更新（同名/同邮箱记录被覆盖），重推不留重复 ——
+#:   CPA（同名 auth 文件覆写）、grok2api（SSO 按邮箱 upsert）。
+#: `append`：上传即新增一条记录，重推会产生重复 —— sub2api / chatgpt2api，
+#:   推成功后用 `delete_remote` 删掉旧记录（`delete_old=true` 时）。
+_PANEL_PUSH_KIND: dict[str, str] = {
+    "cpa": "overwrite",
+    "grok2api": "overwrite",
+    "sub2api": "append",
+    "chatgpt2api": "append",
+}
+
+
+def _push_account_uploader(panel_key: str, platform: str, row: dict):
+    """把一行本地账号推给对应面板，返回 `(ok, message)`。
+
+    `row` 是 `fetch_panel_raw` 的本地行形状：`{id, email, platform,
+    updated_at, extra}`。上传器按面板 + 账号所属平台分发 —— CPA 同时托管
+    ChatGPT 与 Grok，用错平台的上传器会传错凭据类型。
+    """
+    email = str(row.get("email") or "")
+    raw_extra = row.get("extra")
+    extra: dict = raw_extra if isinstance(raw_extra, dict) else {}
+    plat = str(platform or row.get("platform") or "").strip().lower()
+
+    if panel_key == "grok2api":
+        from platforms.grok.grok2api import Grok2ApiClient
+
+        sso = str(extra.get("sso") or "").strip()
+        if not sso:
+            return False, "账号没有 SSO（grok2api 的 Web 导入需要 SSO）"
+        client = Grok2ApiClient.from_config()
+        if not client.configured:
+            return False, "grok2api 未配置（「全局配置 → 面板配置 → grok2api」）"
+        ok, msg = client.ingest_sso(sso, email)
+        if ok:
+            from services.chatgpt_sync import record_grok2api_sync_result
+
+            record_grok2api_sync_result(extra, ok, msg)
+        return ok, msg
+
+    if panel_key == "cpa":
+        from core.base_platform import Account, AccountStatus
+
+        if plat == "grok":
+            from platforms.grok.oauth_device import token_to_cpa_record
+            from platforms.grok.upload import upload_to_cpa
+
+            record = extra.get("cpa_record")
+            if not isinstance(record, dict) or not record:
+                access = str(extra.get("access_token") or "").strip()
+                if not access:
+                    return False, "账号没有 CPA 记录（也没有 access_token 可重建）"
+                record = token_to_cpa_record(
+                    {"access_token": access,
+                     "refresh_token": str(extra.get("refresh_token") or ""),
+                     "id_token": str(extra.get("id_token") or "")},
+                    email=email,
+                    sso=str(extra.get("sso") or ""),
+                )
+            return upload_to_cpa(record)
+
+        # ChatGPT：走 generate_token_json（与手动动作 / 自动上传同一条路径）
+        from platforms.chatgpt.cpa_upload import generate_token_json, upload_to_cpa
+
+        account = Account(
+            platform=plat or "chatgpt", email=email, password="",
+            token=str(extra.get("access_token") or ""),
+            status=AccountStatus.REGISTERED, extra=extra,
+        )
+        return upload_to_cpa(generate_token_json(account))
+
+    if panel_key == "sub2api":
+        from core.base_platform import Account, AccountStatus
+        from platforms.chatgpt.sub2api_upload import upload_to_sub2api
+
+        account = Account(
+            platform=plat or "chatgpt", email=email, password="",
+            token=str(extra.get("access_token") or ""),
+            status=AccountStatus.REGISTERED, extra=extra,
+        )
+        return upload_to_sub2api(account)
+
+    if panel_key == "chatgpt2api":
+        from core.base_platform import Account, AccountStatus
+        from platforms.chatgpt.chatgpt2api_upload import upload_to_chatgpt2api
+
+        account = Account(
+            platform=plat or "chatgpt", email=email, password="",
+            token=str(extra.get("access_token") or ""),
+            status=AccountStatus.REGISTERED, extra=extra,
+        )
+        return upload_to_chatgpt2api(account)
+
+    return False, f"面板 {panel_key} 没有推送器"
+
+
+def _panel_remote_deleter(panel_key: str):
+    """新建式面板的旧记录删除器；覆盖式面板返回 None（没有可删的重复）。"""
+    if panel_key == "chatgpt2api":
+        from services.panel_push import delete_chatgpt2api_account
+
+        return lambda _platform, remote_id: delete_chatgpt2api_account(remote_id)
+    if panel_key == "sub2api":
+        from services.panel_push import delete_sub2api_account
+
+        return lambda _platform, remote_id: delete_sub2api_account(remote_id)
+    return None
+
+
+@router.post("/panels/{panel_key}/push")
+def push_panel_endpoint(
+    panel_key: str,
+    platform: str = "",
+    delete_old: bool = False,
+):
+    """把「本地较新 / 未上传」的凭证推到远端（「更新远程凭证」的动作面）。
+
+    与 `/sync`（更新本地，只拉 remote_newer）是一对**方向互斥**的动作：
+    这里只推 `local_newer` 与 `local_only` 的行，`remote_newer` 的行不碰
+    （推上去会用本地旧凭证覆盖远端新的）。
+
+    `delete_old=true`：对**新建式面板**（sub2api / chatgpt2api）推成功后删除
+    旧远端记录 —— 它们的上传每次新增一条，不删会留重复。覆盖式面板
+    （CPA / grok2api）传了也无效（没有可删的重复记录）。
+
+    `platform`（`chatgpt` / `grok`）给多平台面板用（CPA）：界面筛了 Grok
+    再点更新时只推 Grok 的行。空串 = 全部（老行为）。
+    """
+    from services.panel_comparison_cache import fetch_panel_raw
+    from services.panel_push import push_local_to_remote
+    from services.panel_registry import resolve_panel_key
+
+    key = resolve_panel_key(panel_key)
+    if key not in FETCHERS:
+        raise HTTPException(404, f"未知面板: {panel_key}")
+
+    local_rows, remote_accounts, remote_error = fetch_panel_raw(key)
+    if remote_error:
+        return {
+            "panel": key,
+            "total": 0,
+            "pushed": 0,
+            "deleted": 0,
+            "skipped": 0,
+            "items": [],
+            "remote_error": remote_error,
+        }
+
+    wanted = str(platform or "").strip().lower()
+    if wanted:
+        local_rows = [
+            row for row in local_rows
+            if str(row.get("platform") or "").strip().lower() == wanted
+        ]
+
+    kind = _PANEL_PUSH_KIND.get(key, "overwrite")
+    deleter = _panel_remote_deleter(key) if (delete_old and kind == "append") else None
+
+    summary = push_local_to_remote(
+        local_rows,
+        remote_accounts,
+        upload=lambda row: _push_account_uploader(key, row.get("platform") or "", row),
+        delete_remote=deleter,
+    )
+    summary["panel"] = key
+    summary["remote_error"] = ""
+    return summary
+
+
 @router.post("/backfill")
 def backfill_integrations(body: BackfillRequest):
     summary = {"total": 0, "success": 0, "failed": 0, "skipped": 0, "items": []}

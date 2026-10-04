@@ -210,10 +210,8 @@ export default function PanelManagement() {
           platform={selectedPanel.platform || ''}
           platforms={selectedPanel.platforms}
           platformActions={{
-            upload: selectedPanel.upload_actions,
             sync: selectedPanel.sync_actions,
           }}
-          uploadAction={selectedPanel.upload_action || ''}
           syncAction={selectedPanel.sync_action || ''}
         />
       ) : null}

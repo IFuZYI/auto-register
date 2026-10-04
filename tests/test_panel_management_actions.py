@@ -221,7 +221,7 @@ class PanelScopeTests(unittest.TestCase):
             Path(__file__).resolve().parents[1]
             / "frontend/src/components/settings/PanelComparisonPanel.tsx"
         ).read_text(encoding="utf-8")
-        for needed in ("upload-unuploaded", "upload-local-newer", "sync-remote"):
+        for needed in ("push-to-remote", "sync-from-remote", "sync-remote"):
             with self.subTest(action=needed):
                 self.assertIn(needed, src, f"面板页缺少 {needed} 操作")
 
@@ -254,8 +254,14 @@ class BatchLimitContractTests(unittest.TestCase):
         # 分批大小与后端一致
         self.assertIn("const BATCH_ACTION_LIMIT = 1000", src)
 
-    def test_frontend_warns_when_remote_is_unavailable(self):
-        """远端读不到时所有本地账号都成了 local_only —— 要提示这是「全部重传」。"""
+    def test_push_is_disabled_when_remote_is_unavailable(self):
+        """远端读不到时禁用「更新远程凭证」。
+
+        此时所有本地账号都退化成 `local_only`（对比拿不到远端那一侧），
+        方向判定（未上传 / 本地较新）全部失效 —— 推上去等于把全部本地账号
+        重传一遍，新建式面板（sub2api / chatgpt2api）会留下整批重复记录。
+        保守做法：直接禁用，等远端恢复再推。
+        """
         from pathlib import Path
 
         src = (
@@ -263,7 +269,13 @@ class BatchLimitContractTests(unittest.TestCase):
             / "frontend/src/components/settings/PanelComparisonPanel.tsx"
         ).read_text(encoding="utf-8")
         self.assertIn("remoteUnavailable", src)
-        self.assertIn("无法判断哪些账号没上传", src)
+        # push 按钮的 disabled 条件必须包含 remoteUnavailable
+        push_block = src.split('data-hermes-action="push-to-remote"', 1)[0]
+        button_block = push_block.rsplit("<Button", 1)[1]
+        self.assertIn(
+            "remoteUnavailable", button_block,
+            "「更新远程凭证」按钮在远端读取失败时没禁用 —— 会把全部本地账号重传",
+        )
 
     def test_filter_bar_has_no_unreachable_state(self):
         """筛选条不摆不可达的状态（unknown_time 现在永远不是行状态）。"""

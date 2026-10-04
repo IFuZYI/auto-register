@@ -75,10 +75,9 @@ eq(mod.shouldShowPlatformFilter(undefined), false, 'undefined hides it')
 // 去重后仍算多平台？重复项不该让单平台看起来像多平台
 eq(mod.shouldShowPlatformFilter(['grok', 'grok']), false, 'duplicate platforms are not multi-platform')
 
-// ── 上传/拉回两个方向（对称的一对：谁较新就动谁）──
-// 背景：上传按钮曾把「凭证不同」不分方向全部推上去 —— 远端较新的行也会被
-// 本地旧凭证覆盖（x.ai 的 RT 轮换，覆盖后远端拿到死值）。修复后：
-// 上传只含 local_newer，拉回只含 remote_newer，同一行不可能同时在两边。
+// ── 更新远程 / 更新本地两个方向（对称的一对：谁较新就动谁）──
+// 更新远程 = 推（未上传 + 本地较新）；更新本地 = 拉（远端较新）。
+// 两个方向互斥：同一行不可能同时在两边。
 const dirRows = [
   { email: 'push@x.com', platform: 'grok', state: 'credential_diff', time_relation: 'local_newer', local_id: 101 },
   { email: 'pull@x.com', platform: 'grok', state: 'credential_diff', time_relation: 'remote_newer', local_id: 102 },
@@ -87,19 +86,22 @@ const dirRows = [
   { email: 'nolocal@x.com', platform: 'grok', state: 'credential_diff', time_relation: 'local_newer', local_id: null },
   { email: 'only@x.com', platform: 'grok', state: 'local_only', local_id: 105 },
   { email: 'synced@x.com', platform: 'grok', state: 'synced', time_relation: 'time_synced', local_id: 106 },
+  { email: 'remoteonly@x.com', platform: 'grok', state: 'remote_only', local_id: null },
 ]
-const pushIds = mod.selectLocalNewerDiffIds(dirRows)
-const pullIds = mod.selectRemoteNewerDiffIds(dirRows)
-eq(pushIds, [101], 'upload direction keeps only local_newer diffs')
-eq(pullIds, [102], 'pull direction keeps only remote_newer diffs')
+const pushIds = mod.selectPushIds(dirRows)
+const pullIds = mod.selectPullIds(dirRows)
+// 更新远程：未上传（补传）+ 本地较新的凭证不同
+eq(pushIds, [101, 105], 'push keeps local_newer diffs and local_only rows')
+// 更新本地：只拉远端较新
+eq(pullIds, [102], 'pull keeps only remote_newer diffs')
 eq(pushIds.filter((id) => pullIds.includes(id)), [], 'the two directions are disjoint')
 // 同小时 / 无法判定时间：两个方向都不动（不拿不确定的数据覆盖任何一边）
 eq(pushIds.includes(103) || pullIds.includes(103), false, 'same-hour diffs are left alone')
 eq(pushIds.includes(104) || pullIds.includes(104), false, 'unknown-time diffs are left alone')
-// 没有本地 id 的行（远端独有）不进上传方向；未上传的行归「上传未上传」
-eq(pushIds.includes(105), false, 'local_only rows are not upload-diff candidates')
-eq(mod.selectLocalNewerDiffIds([]), [], 'empty input stays empty (upload)')
-eq(mod.selectRemoteNewerDiffIds([]), [], 'empty input stays empty (pull)')
+// 没有本地 id 的行（远端独有）不是任何方向的对象
+eq(pushIds.includes(106) === false && pullIds.includes(106) === false, true, 'synced rows are not targets')
+eq(mod.selectPushIds([]), [], 'empty input stays empty (push)')
+eq(mod.selectPullIds([]), [], 'empty input stays empty (pull)')
 
 console.log(JSON.stringify({ passed: failures.length === 0, checked, failures }, null, 2))
 process.exit(failures.length === 0 ? 0 : 1)
