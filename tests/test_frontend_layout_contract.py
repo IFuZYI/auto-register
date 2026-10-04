@@ -204,6 +204,121 @@ class PanelComparisonTableLayoutTests(unittest.TestCase):
         )
 
 
+class ICloudActionColumnStickyTests(unittest.TestCase):
+    """iCloud 页两个表格的「操作」列必须固定到右侧（sticky）。
+
+    实测（dogfood，桌面 1280px，2026-10-04）：
+    * 主号表：操作列 x=1349 / right=1529，初始在视口外 —— 要横向滚动
+      306px 才能看到「同步 / 删除」按钮；
+    * 别名表：操作列 x=1860 / right=2119 —— 要滚动 906px。
+
+    两表都没有 `fixed: 'right'`，而账号页（Accounts.tsx）从初始版本就有，
+    注释写明「不固定的话操作列默认落在视口外」。这是同类表格的一致性问题：
+    同一套「列宽超出容器 → 横向滚动」的表格，操作列的处理必须一致。
+    """
+
+    def _src(self) -> str:
+        return (FRONTEND / "src" / "pages" / "ICloud.tsx").read_text(encoding="utf-8")
+
+    def test_account_table_action_column_is_fixed_right(self):
+        src = self._src()
+        block = src.split("const accountColumns", 1)[1].split("\n  ]", 1)[0]
+        action_idx = block.index("title: '操作'")
+        action_block = block[action_idx : action_idx + 200]
+        self.assertIn(
+            "fixed: 'right'",
+            action_block,
+            "主号表「操作」列没有 fixed: 'right' —— 列宽超出容器时按钮落在视口外",
+        )
+
+    def test_alias_table_action_column_is_fixed_right(self):
+        src = self._src()
+        block = src.split("const aliasColumns", 1)[1].split("\n  ]", 1)[0]
+        action_idx = block.index("title: '操作'")
+        action_block = block[action_idx : action_idx + 200]
+        self.assertIn(
+            "fixed: 'right'",
+            action_block,
+            "别名表「操作」列没有 fixed: 'right' —— 列宽超出容器时按钮落在视口外",
+        )
+
+
+class MeasureRowKeyboardTrapTests(unittest.TestCase):
+    """表格测量行（ant-table-measure-row）里的 checkbox 不能成为键盘陷阱。
+
+    实测（dogfood，2026-10-04）：rc-table 的测量行会克隆各列的 title 用于
+    测宽，`rowSelection` 表头的「Select all」checkbox 因此被克隆一份到
+    `aria-hidden="true"` 的测量行里。antd 只给它 `pointer-events: none`
+    （鼠标点不到），**没有处理键盘焦点** —— 实测 Tab 到第 14 步聚焦到
+    这个不可见 checkbox（outline 渲染在视口外），按 Space 直接全选 32 个
+    账号。这是键盘用户可复现的意外破坏性操作。
+
+    修复：在全局 CSS 里让测量行内的 checkbox 不可聚焦
+    （`visibility: hidden` 或 `display: none`），并保持表头 checkbox 正常。
+    """
+
+    def _css(self) -> str:
+        return (FRONTEND / "src" / "index.css").read_text(encoding="utf-8")
+
+    def test_measure_row_checkbox_is_not_focusable(self):
+        css = self._css()
+        # 找针对测量行 checkbox 的规则
+        idx = css.find(".ant-table-measure-row")
+        self.assertGreater(idx, -1, "index.css 里没有针对 .ant-table-measure-row 的规则")
+        # 该规则块内必须包含 checkbox 且让它不可见/不可聚焦
+        block = css[idx : idx + 400]
+        self.assertIn(".ant-checkbox-input", block, "测量行规则没有覆盖 .ant-checkbox-input")
+        self.assertTrue(
+            "visibility: hidden" in block or "display: none" in block,
+            "测量行的 checkbox 没有隐藏 —— 键盘用户能 Tab 到它并按 Space 全选",
+        )
+
+
+class NotFoundRouteContractTests(unittest.TestCase):
+    """未匹配路由必须有兜底页面（实测 404 内容区空白）。
+
+    dogfood 实测（2026-10-04）：访问 /nonexistent-page-xyz 时内容区完全
+    空白（innerHTML 30 字节），只有侧栏导航 —— 用户不知道是页面不存在
+    还是加载失败。修复：Routes 里加 catch-all 兜底。
+    """
+
+    def _src(self) -> str:
+        return (FRONTEND / "src" / "App.tsx").read_text(encoding="utf-8")
+
+    def test_inner_routes_have_a_catch_all(self):
+        src = self._src()
+        # 内部 Routes（ProtectedLayout 里那个）要有 path="*" 兜底
+        self.assertIn(
+            'path="*"',
+            src,
+            "内部 Routes 没有 catch-all —— 未知路径内容区空白（实测 30 字节）",
+        )
+
+    def test_catch_all_renders_something_visible(self):
+        """兜底页不能是空 div —— 要有可见的提示文案。
+
+        锚点：从 catch-all 的 `element={<X />}` 解出组件名，再检查该组件
+        定义体里有「不存在」字样（路由处只有组件引用，文案在定义里）。
+        """
+        import re
+
+        src = self._src()
+        m = re.search(r'path="\*"\s+element=\{<(\w+)\s*/>\}', src)
+        if m is None:
+            self.fail("catch-all 没有渲染具名组件（element 解不出来）")
+        component = m.group(1)
+
+        def_idx = src.find(f"function {component}(")
+        self.assertGreater(def_idx, -1, f"{component} 组件没有定义")
+        # 组件体（到下一个顶层函数或 800 字符）里要有可见文案
+        body = src[def_idx : def_idx + 800]
+        self.assertIn(
+            "不存在",
+            body,
+            f"{component} 渲染的是空白 —— 用户看不出发生了什么",
+        )
+
+
 class DataBackupPanelContractTests(unittest.TestCase):
     """「全局配置 → 数据迁移」面板的接线契约。
 

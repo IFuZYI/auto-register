@@ -360,6 +360,10 @@ export default function ICloudPage() {
     {
       title: '操作',
       width: 180,
+      // 固定到右侧：列宽合计超出容器时（实测 1240px vs 984px），操作列
+      // 默认落在视口外，用户得横向滚动才能点到「同步 / 删除」——
+      // 与账号页（Accounts.tsx）同款处理。
+      fixed: 'right' as const,
       render: (_: unknown, account: ICloudAccount) => (
         <Space>
           <Button
@@ -477,6 +481,8 @@ export default function ICloudPage() {
     {
       title: '操作',
       width: 260,
+      // 同主号表：列宽合计 1830px 远超容器，不固定操作列就落在视口外。
+      fixed: 'right' as const,
       render: (_: unknown, alias: ICloudAlias) => (
         <Space>
           <Button size="small" icon={<InboxOutlined />} onClick={() => setInboxAlias(alias)}>

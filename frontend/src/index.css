@@ -583,6 +583,17 @@ body {
   border-bottom: none;
 }
 
+/* 测量行（rc-table 用于测列宽的 aria-hidden 行）里的 checkbox 不可聚焦。
+   rc-table 会克隆各列 title 来测宽，rowSelection 表头的「Select all」
+   checkbox 因此被克隆进这一行；antd 只给它 pointer-events: none（鼠标
+   点不到），键盘仍能 Tab 到 —— 实测 Tab 到第 14 步聚焦到这个不可见
+   checkbox，按 Space 直接全选 32 个账号（破坏性操作）。
+   visibility: hidden 让元素不可聚焦（display:none 也行，但 rc-table 用
+   offsetWidth 测宽，display:none 会让测宽失效）。 */
+.ant-table-measure-row .ant-checkbox-input {
+  visibility: hidden;
+}
+
 /* ── 按钮：按下有轻微回弹，悬停有底色过渡 ─────────────────── */
 .ant-btn {
   transition: all 0.22s var(--ease-standard) !important;

@@ -86,6 +86,28 @@ function getSelectedKey(pathname: string): string[] {
   return ['/']
 }
 
+/**
+ * 未匹配路由的兜底页。
+ *
+ * 实测（dogfood 2026-10-04）：访问未知路径时内容区完全空白（30 字节），
+ * 只有侧栏 —— 用户分不清「页面不存在」还是「界面崩了」。这里给出明确
+ * 提示 + 回首页的入口。
+ */
+function NotFoundPage() {
+  return (
+    <div style={{ maxWidth: 480, margin: '80px auto 0', textAlign: 'center' }}>
+      <h1 style={{ fontSize: 56, margin: 0, color: 'var(--text-muted)' }}>404</h1>
+      <p style={{ marginTop: 12, fontSize: 15 }}>页面不存在</p>
+      <p style={{ color: 'var(--text-muted)', fontSize: 13 }}>
+        地址可能已变更或输入有误。从左侧菜单选一个页面，或回到仪表盘。
+      </p>
+      <Button type="primary" onClick={() => { window.location.href = '/' }} style={{ marginTop: 8 }}>
+        回到仪表盘
+      </Button>
+    </div>
+  )
+}
+
 function ProtectedLayout() {
   const navigate = useNavigate()
   const [ready, setReady] = useState(false)
@@ -459,6 +481,9 @@ function AppContent() {
                   <Route path="/mail/outlook" element={<MailOutlookPage />} />
                   <Route path="/mail/temp" element={<Navigate to="/mail/icloud" replace />} />
                   <Route path="/mail/remote-hme" element={<Navigate to="/mail/icloud" replace />} />
+                  {/* 兜底：未知路径不能是空白 —— 实测内容区 30 字节，
+                      用户分不清「页面不存在」与「加载失败」。 */}
+                  <Route path="*" element={<NotFoundPage />} />
                 </Routes>
               </MobileNavContext.Provider>
             </div>
