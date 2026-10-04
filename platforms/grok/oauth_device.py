@@ -46,7 +46,13 @@ class _NoRedirectSession:
         self.s = curl_requests.Session()
         self.s.impersonate = impersonate
         if proxy:
-            from ..proxy_utils import build_requests_proxy_config
+            # 注意：这里是 `core.proxy_utils`，不是 `..proxy_utils`。
+            # 原相对导入（`..proxy_utils` → `platforms.proxy_utils`）从参考项目
+            # （core/executors/ 下 `..proxy_utils` 解析到 core/proxy_utils）移植时
+            # 没改，本仓根本没有这个模块 —— 只要带代理调用就 ModuleNotFoundError。
+            # 而 refresh_oauth 一定会带代理（账号存有 register_proxy），
+            # 等于「刷新 token」功能从未成功执行过（静默表现为 Device Flow 失败）。
+            from core.proxy_utils import build_requests_proxy_config
 
             self.s.proxies = build_requests_proxy_config(proxy)
 

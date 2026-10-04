@@ -32,7 +32,7 @@ from .constants import (
     mail_retries as _mail_retries,
     signup_retries,
 )
-from .oauth_device import cpa_auth_filename, sso_to_token, token_to_cpa_record
+from .oauth_device import cpa_auth_filename, token_to_cpa_record
 from .probe import probe_token
 from .profile import generate_password, random_name
 
@@ -263,7 +263,11 @@ class GrokPlatform(BasePlatform):
     def get_platform_actions(self) -> list:
         return [
             {"id": "probe", "label": "测活（CLI Proxy）", "params": []},
-            {"id": "refresh_oauth", "label": "重换 OAuth", "params": []},
+            {"id": "probe_refresh", "label": "检测有效性（刷新凭证）", "params": []},
+            {"id": "refresh_token", "label": "刷新 Token（登录协议）", "params": []},
+            # 已弃用：纯协议 device flow 被 CF 挡死（实测 403），从未成功过。
+            # 保留 id 转发到 `refresh_token`（老任务/老脚本可能还引用）。
+            {"id": "refresh_oauth", "label": "重换 OAuth（已弃用，等同「刷新 Token」）", "params": []},
             {"id": "export_cpa_json", "label": "导出 CPA JSON", "params": []},
             # 面板动作（`scope: "panel"`）：目标是外部面板，操作面在「面板管理」
             # 页。账号页的菜单按 scope 过滤掉它们（用户要求「平台管理主要管账号」）。
@@ -337,38 +341,143 @@ class GrokPlatform(BasePlatform):
                 },
             }
 
-        if action_id == "refresh_oauth":
-            sso = str(extra.get("sso") or account.token or "")
-            if not sso:
-                return {"ok": False, "error": "账号没有 SSO，无法重换 OAuth"}
-            # 用协议执行器做 device flow（与 `_sso_alive` 同一条基础设施）。
-            # 原先借 `GrokProtocolClient` 的 executor —— 那个类随协议注册路径
-            # 一起删了；device flow 本身是**独立的协议接口**（不经过注册页），
-            # 不需要 CF 通行证，所以这里直接用工厂建一个即可。
-            from modules.execution import BrowserExecutorFactory
+        if action_id == "probe_refresh":
+            # 检测有效性：RT 还能不能换新 token。
+            #
+            # 为什么用它当「有效性检测」（用户需求「参考 grok2api」）：
+            # grok2api 把 OAuth 刷新错误的**分类**当作账号失效的判据 ——
+            # `invalid_grant` 等永久错误 → 标 reauthRequired。这里同一口径：
+            #   - 成功 → 账号有效，顺带把轮换后的新凭证存回去（关键！x.ai 每次
+            #     刷新都会轮换 RT，不存回去下一次就 invalid_grant）；
+            #   - permanent → 账号需要重新授权（提示走「刷新 Token」动作）；
+            #   - configuration → 网关的问题，**不该标账号失效**；
+            #   - retryable/unknown → 瞬时或未知，提示重试。
+            from .token_refresh import refresh_via_grant
 
-            executor = BrowserExecutorFactory().create("protocol", proxy=proxy)
-            try:
-                tokens = sso_to_token(
-                    sso, executor, log=getattr(self, "_log_fn", None), proxy=proxy or ""
-                )
-                if not tokens:
-                    return {"ok": False, "error": "Device Flow 失败"}
-                record = token_to_cpa_record(tokens, email=account.email, sso=sso)
+            refresh_token = str(extra.get("refresh_token") or "").strip()
+            if not refresh_token:
+                return {
+                    "ok": False,
+                    "error": "账号没有 refresh_token，无法刷新检测；请先执行「刷新 Token（登录协议）」获取",
+                }
+            result = refresh_via_grant(
+                refresh_token, proxy=proxy, log=getattr(self, "_log_fn", None)
+            )
+            if result.ok:
+                tokens = result.tokens
+                patch = {
+                    "access_token": tokens.get("access_token", ""),
+                    "refresh_token": tokens.get("refresh_token", ""),
+                    "id_token": tokens.get("id_token", ""),
+                    "expires_in": tokens.get("expires_in", 0),
+                    "token_type": tokens.get("token_type", "Bearer"),
+                    "probe_status": "refresh_ok",
+                    "probe_summary": "refresh grant 成功",
+                }
+                try:
+                    record = token_to_cpa_record(
+                        tokens, email=account.email, sso=str(extra.get("sso") or "")
+                    )
+                    patch["cpa_record"] = record
+                    patch["cpa_auth_filename"] = cpa_auth_filename(record)
+                except Exception as exc:  # noqa: BLE001 - 记录生成失败不该毁刷新结果
+                    log_fn = getattr(self, "_log_fn", None)
+                    if log_fn:
+                        log_fn(f"[Grok] 生成 CPA 记录失败: {type(exc).__name__}")
                 return {
                     "ok": True,
-                    "data": {"expires_in": tokens.get("expires_in")},
-                    "account_extra_patch": {
-                        "access_token": tokens.get("access_token", ""),
-                        "refresh_token": tokens.get("refresh_token", ""),
-                        "id_token": tokens.get("id_token", ""),
-                        "expires_in": tokens.get("expires_in", 0),
-                        "cpa_record": record,
-                        "cpa_auth_filename": cpa_auth_filename(record),
+                    "data": {
+                        "message": "刷新检测通过（凭证有效，已保存轮换后的新值）",
+                        "method": result.method,
+                        "expires_in": tokens.get("expires_in"),
                     },
+                    "account_extra_patch": patch,
                 }
-            finally:
-                executor.close()
+            # 失败：按分类决定是否标账号失效
+            patch: dict[str, Any] = {
+                "probe_status": (
+                    "refresh_invalid" if result.kind == "permanent" else "refresh_error"
+                ),
+                "probe_summary": result.error[:200],
+            }
+            if result.kind == "permanent":
+                hint = "凭证已失效，请执行「刷新 Token（登录协议）」重新授权"
+            elif result.kind == "configuration":
+                hint = "网关配置问题（非账号问题），稍后重试或检查 OAuth 配置"
+            else:
+                hint = "瞬时失败，可稍后重试"
+            # 错误码拼进消息：排障时 `invalid_grant` 这个码比自然语言描述有用
+            # （上游描述文案可能变化，错误码是稳定的）。
+            detail = result.error
+            if result.error_code and result.error_code not in detail:
+                detail = f"{detail} [{result.error_code}]"
+            return {
+                "ok": False,
+                "data": {
+                    "kind": result.kind,
+                    "error_code": result.error_code,
+                    "status": result.status,
+                },
+                "error": f"{detail}；{hint}",
+                "account_extra_patch": patch,
+            }
+
+        if action_id == "refresh_token":
+            # 走登录协议重新获取 token（用户需求：刷新 token 走登录协议）。
+            #
+            # 协议 device flow 被 CF 挡（verify/approve 403），必须用浏览器
+            # 完成授权 —— `refresh_via_device_flow` 封装的就是浏览器 flow。
+            from .token_refresh import refresh_via_device_flow
+
+            sso = str(extra.get("sso") or account.token or "").strip()
+            if not sso:
+                return {"ok": False, "error": "账号没有 SSO，无法走登录协议刷新"}
+            result = refresh_via_device_flow(
+                sso,
+                proxy=proxy,
+                log=getattr(self, "_log_fn", None),
+            )
+            if not result.ok:
+                return {
+                    "ok": False,
+                    "data": {"method": result.method, "kind": result.kind},
+                    "error": result.error or "登录协议刷新失败",
+                }
+            tokens = result.tokens
+            patch = {
+                "access_token": tokens.get("access_token", ""),
+                "refresh_token": tokens.get("refresh_token", ""),
+                "id_token": tokens.get("id_token", ""),
+                "expires_in": tokens.get("expires_in", 0),
+                "token_type": tokens.get("token_type", "Bearer"),
+                "probe_status": "refresh_ok",
+                "probe_summary": "登录协议刷新成功",
+            }
+            try:
+                record = token_to_cpa_record(tokens, email=account.email, sso=sso)
+                patch["cpa_record"] = record
+                patch["cpa_auth_filename"] = cpa_auth_filename(record)
+            except Exception as exc:  # noqa: BLE001
+                log_fn = getattr(self, "_log_fn", None)
+                if log_fn:
+                    log_fn(f"[Grok] 生成 CPA 记录失败: {type(exc).__name__}")
+            return {
+                "ok": True,
+                "data": {
+                    "message": "Token 已刷新（登录协议），新凭证已保存",
+                    "method": result.method,
+                    "expires_in": tokens.get("expires_in"),
+                },
+                "account_extra_patch": patch,
+            }
+
+        if action_id == "refresh_oauth":
+            # 已弃用（2026-10-04）：这个动作走**纯协议** device flow，
+            # 而 device/verify 与 device/approve 被 CF 保护（实测 403）——
+            # 它从未成功过一次（且带代理调用还会因历史 import bug 直接崩）。
+            # 现在由 `refresh_token` 完整取代（同一件事，走浏览器完成授权）。
+            # 保留 id 转发到新实现：老任务/老脚本里可能还引用着它。
+            return self.execute_action("refresh_token", account, params)
 
         if action_id == "export_cpa_json":
             record = extra.get("cpa_record")

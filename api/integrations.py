@@ -19,6 +19,7 @@ from core.config_store import config_store
 from core.db import account_repository, platform_database_registry
 from services.chatgpt_account_state import filter_accounts_by_plus_status
 from services.chatgpt_sync import backfill_chatgpt_account_to_cpa, get_cliproxy_sync_state
+from services.panel_comparison import FETCHERS
 from services.panel_comparison_cache import get_panel_comparison
 from services.panel_registry import list_panels
 
@@ -71,6 +72,40 @@ def get_panel_comparison_endpoint(panel_key: str, refresh: bool = False):
         return get_panel_comparison(panel_key, refresh=refresh)
     except ValueError as exc:
         raise HTTPException(404, str(exc)) from exc
+
+
+@router.post("/panels/{panel_key}/sync")
+def sync_panel_endpoint(panel_key: str):
+    """把远端较新的凭证拉回本地（「同步到最新」的动作面）。
+
+    与「重新拉取对比」的区别：那个只重拉**对比表**，这个会**改本地账号**
+    （覆盖 AT/RT/id_token —— 远端刷新过 token 之后本地存的就是死值）。
+
+    方向规则（见 `services/panel_sync.py`）：只有「远端较新」的账号会被拉回；
+    本地较新/同小时/远端没有凭证的都不动。返回逐账号的原因，界面展示汇总。
+    """
+    from services.panel_comparison_cache import fetch_panel_raw
+    from services.panel_registry import resolve_panel_key
+    from services.panel_sync import sync_local_from_remote
+
+    key = resolve_panel_key(panel_key)
+    if key not in FETCHERS:
+        raise HTTPException(404, f"未知面板: {panel_key}")
+
+    local_rows, remote_accounts, remote_error = fetch_panel_raw(key)
+    if remote_error:
+        return {
+            "panel": key,
+            "total": 0,
+            "pulled": 0,
+            "skipped": 0,
+            "items": [],
+            "remote_error": remote_error,
+        }
+    summary = sync_local_from_remote(local_rows, remote_accounts)
+    summary["panel"] = key
+    summary["remote_error"] = ""
+    return summary
 
 
 @router.post("/backfill")

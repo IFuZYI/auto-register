@@ -137,7 +137,13 @@ class PanelScopeTests(unittest.TestCase):
             "backfill_refresh_token",
             "bind_2fa",
         },
-        "grok": {"probe", "refresh_oauth", "export_cpa_json"},
+        "grok": {
+            "probe",
+            "probe_refresh",
+            "refresh_token",
+            "refresh_oauth",
+            "export_cpa_json",
+        },
     }
 
     def _actions(self, platform: str) -> dict:

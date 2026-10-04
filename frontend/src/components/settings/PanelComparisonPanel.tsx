@@ -2,10 +2,12 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { App, Button, Empty, Popconfirm, Space, Spin, Table, Tag, Tooltip, Typography } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
 import {
+  CloudDownloadOutlined,
   CloudUploadOutlined,
   SyncOutlined,
 } from '@ant-design/icons'
 import { apiFetch } from '@/lib/utils'
+import { formatLocalTime, localTimezoneLabel } from '@/lib/time'
 
 /**
  * 选中面板后的本地管理面板：本地账号 ↔ 远端账号的对比 + **面板操作**。
@@ -92,11 +94,14 @@ const STATE_ORDER = [
   'synced',
 ]
 
-/** 面板上存的时间串直接显示到分钟；小时档位在 tooltip 里说明对比口径。 */
+/** 面板上存的时间串 → 浏览器本地时区显示（带时区标注，见 `@/lib/time`）。
+ *
+ * 为什么不再直接截断 ISO 串：远端面板用 `+08:00` 写时间、本地库写 UTC，
+ * 后端归一成 UTC 后直接显示，对 +08:00 的用户每个时间都差 8 小时且无标注。
+ * 现在转成**浏览器本地时区**显示，界面上另有 `UTC+8` 这样的标注说明口径。
+ */
 function shortTime(value: string): string {
-  const text = String(value || '').trim()
-  if (!text) return '—'
-  return text.replace('T', ' ').replace(/(\+\d{2}:\d{2}|Z)$/, '').slice(0, 16)
+  return formatLocalTime(value)
 }
 
 /**
@@ -229,14 +234,26 @@ const COLUMNS: ColumnsType<ComparisonRow> = [
     title: '本地更新时间',
     dataIndex: 'local_updated_at',
     width: 150,
-    render: (value: string) => <span style={{ fontSize: 12 }}>{shortTime(value)}</span>,
+    render: (value: string, row) => (
+      <Tooltip
+        title={`本地库写的是 UTC，这里按浏览器本地时区（${localTimezoneLabel()}）显示${
+          row.local_updated_hour ? `；小时档位 ${row.local_updated_hour}` : ''
+        }`}
+      >
+        <span style={{ fontSize: 12 }}>{shortTime(value)}</span>
+      </Tooltip>
+    ),
   },
   {
     title: '远端更新时间',
     dataIndex: 'remote_updated_at',
     width: 150,
     render: (value: string, row) => (
-      <Tooltip title={row.remote_updated_at_raw ? `远端原始值：${row.remote_updated_at_raw}` : ''}>
+      <Tooltip
+        title={`远端面板服务器时区可能不同，已归一；这里按浏览器本地时区（${localTimezoneLabel()}）显示${
+          row.remote_updated_at_raw ? `；远端原始值：${row.remote_updated_at_raw}` : ''
+        }`}
+      >
         <span style={{ fontSize: 12 }}>{shortTime(value)}</span>
       </Tooltip>
     ),
@@ -420,6 +437,25 @@ export function PanelComparisonPanel({
         .map((row) => row.local_id as number),
     [payload],
   )
+  /**
+   * 远端较新的本地账号（拉回能把本地刷新到最新）。
+   *
+   * 只挑 `time_relation === 'remote_newer'` 的：同小时/本地较新的不动 ——
+   * 那些拉回来等于用更旧的凭证覆盖本地（后端 `plan_sync` 也是同一口径，
+   * 这里只用来显示计数，实际方向由后端判定）。
+   */
+  const remoteNewerIds = useMemo(
+    () =>
+      (payload?.rows || [])
+        .filter(
+          (row) =>
+            row.state === 'credential_diff' &&
+            row.local_id &&
+            row.time_relation === 'remote_newer',
+        )
+        .map((row) => row.local_id as number),
+    [payload],
+  )
 
   /**
    * 跑一个批量平台动作（账号 ID 由对比结果给）。
@@ -503,6 +539,44 @@ export function PanelComparisonPanel({
     [platform, platformActions, payload, message, load],
   )
 
+  /**
+   * 「同步到最新」：把远端较新的凭证拉回本地。
+   *
+   * 与 `runBatch` 不同 —— 这不是按账号发平台动作，而是**整面板**的一次调用
+   * （`POST /integrations/panels/{key}/sync`）：方向判定（谁较新）与写库都在
+   * 后端做，前端只展示汇总。原因：凭证比对的结果（哪些行 remote_newer）
+   * 后端手里才有完整上下文，逐账号发动作会 N 次拉远端。
+   */
+  const runRemoteSync = useCallback(async () => {
+    setRunning('sync-from-remote')
+    const toastKey = 'panel-sync-from-remote'
+    message.loading({ content: '同步中（拉取远端较新的凭证）...', key: toastKey, duration: 0 })
+    try {
+      const result = (await apiFetch(`/integrations/panels/${panelKey}/sync`, {
+        method: 'POST',
+      })) as { pulled: number; skipped: number; total: number; remote_error?: string }
+      if (result.remote_error) {
+        message.error({ content: `同步失败：${result.remote_error}`, key: toastKey })
+      } else if (result.pulled) {
+        message.success({
+          content: `已从远端拉回 ${result.pulled} 个账号的凭证（其余 ${result.skipped} 个无需同步）`,
+          key: toastKey,
+        })
+      } else {
+        message.info({
+          content: `没有需要拉回的账号（${result.skipped} 个无需同步）`,
+          key: toastKey,
+        })
+      }
+      // 拉回改的是本地账号，重拉对比才能反映出来
+      await load(true)
+    } catch (e: unknown) {
+      message.error({ content: `同步失败：${e instanceof Error ? e.message : e}`, key: toastKey })
+    } finally {
+      setRunning('')
+    }
+  }, [panelKey, message, load])
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 10 }}>
@@ -518,6 +592,14 @@ export function PanelComparisonPanel({
           <Typography.Text type="secondary" style={{ fontSize: 12 }}>
             本地 {payload?.local_count ?? 0} · 远端 {payload?.remote_count ?? 0}
           </Typography.Text>
+          {/* 时区标注：本地库写 UTC、远端面板写 +08:00（实测），后端已归一，
+              时间列统一按**浏览器本地时区**显示 —— 不标出时区的话用户会把
+              显示值按自己的钟面读，对不上时误以为同步出了问题。 */}
+          <Tooltip title="所有时间列均按浏览器本地时区显示（后端已把本地 UTC 与远端面板时间归一后比较）">
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+              时区 {localTimezoneLabel()}
+            </Typography.Text>
+          </Tooltip>
         </Space>
         {/* 按钮组要允许换行：窄屏（实测 390px）下三个按钮一排有 503px，
             不 wrap 会被容器裁掉 —— 「重新拉取对比」实测 right=519 > 视口 390，
@@ -595,6 +677,33 @@ export function PanelComparisonPanel({
               </Button>
             </Tooltip>
           ) : null}
+          {/* 「同步到最新」：把远端**较新**的凭证拉回本地（覆盖 AT/RT）。
+              与上面的「同步远端状态」不同 —— 那个读的是远端账号的**状态**
+              （封禁/失效），这个拉的是**凭证本体**。远端面板刷新过 token 后
+              本地存的就是死值（x.ai 的 RT 轮换），不拉回本地就换不出新 token。 */}
+          <Tooltip title="把远端面板里较新的凭证（AT/RT）拉回本地 —— 会覆盖本地账号的凭证字段；只处理「远端较新」的账号">
+            <Popconfirm
+              title={
+                remoteNewerIds.length
+                  ? `把 ${remoteNewerIds.length} 个「远端较新」账号的凭证拉回本地？`
+                  : '按对比结果同步：只拉回「远端较新」的账号'
+              }
+              description="会覆盖本地账号的 access_token / refresh_token 等凭证字段（其它字段保留）。"
+              okText="同步"
+              cancelText="取消"
+              disabled={Boolean(running) || remoteUnavailable}
+              onConfirm={() => void runRemoteSync()}
+            >
+              <Button
+                icon={<CloudDownloadOutlined />}
+                loading={running === 'sync-from-remote'}
+                disabled={Boolean(running) || remoteUnavailable}
+                data-hermes-action="sync-from-remote"
+              >
+                同步到最新{remoteNewerIds.length ? ` (${remoteNewerIds.length})` : ''}
+              </Button>
+            </Popconfirm>
+          </Tooltip>
           {/* 「同步到最新」与「刷新」只重拉**对比表**，不碰账号数据。两者的唯一
               区别是绕不绕服务端缓存 —— 对用户来说结果一样，所以只留一个按钮，
               并在 tooltip 里说明它会强制重拉。 */}

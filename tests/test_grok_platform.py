@@ -198,8 +198,8 @@ class TestPlatformContract(unittest.TestCase):
         instance = get("grok")()
         actions = instance.get_platform_actions()
         ids = {a["id"] for a in actions}
-        for expected in ("probe", "refresh_oauth", "export_cpa_json",
-                         "upload_cpa", "upload_sub2api"):
+        for expected in ("probe", "probe_refresh", "refresh_token", "refresh_oauth",
+                         "export_cpa_json", "upload_cpa", "upload_sub2api"):
             self.assertIn(expected, ids, f"缺少操作: {expected}")
         # 每个 action 都要有 label 与 params
         for a in actions:

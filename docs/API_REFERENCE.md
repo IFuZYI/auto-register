@@ -237,7 +237,11 @@ grok2api），操作面在界面「面板管理」页（那里有本地 ↔ 远�
 | `chatgpt` | `bind_2fa` | 绑定 TOTP 2FA | — |
 | `chatgpt` | `sync_cliproxyapi_status` | 同步 CLIProxyAPI 状态 | `panel` |
 | `chatgpt` | `upload_cpa` / `upload_sub2api` | 上传到外部系统；通常传 `api_url,api_key` | `panel` |
-| `grok` | `probe` / `refresh_oauth` / `export_cpa_json` | 账号自身的操作 | — |
+| `grok` | `probe` | 测活（CLI Proxy 发一次最小请求） | — |
+| `grok` | `probe_refresh` | 检测有效性（refresh grant 换新凭证；`invalid_grant` 等永久错误判失效） | — |
+| `grok` | `refresh_token` | 刷新 Token（**登录协议**：浏览器完成 Device Flow 授权） | — |
+| `grok` | `refresh_oauth` | 已弃用（协议 device flow 被 CF 挡死）—— 转发到 `refresh_token` | — |
+| `grok` | `export_cpa_json` | 导出 CPA JSON | — |
 | `grok` | `upload_cpa` / `upload_sub2api` / `upload_grok2api` | 上传到外部系统 | `panel` |
 | `icloud` | `fetch_inbox` | 收取隐私邮箱邮件，可传 `limit` | — |
 | `icloud` | `delete_alias` | 删除隐私邮箱 | — |
@@ -382,6 +386,7 @@ iCloud 业务错误不使用 `401`，以免被前端误判为面板登录过期�
 | --- | --- | --- | --- |
 | GET | `/api/integrations/panels` | — | 面板清单 + 当前地址 + **可跑的动作**（`platform` / `upload_action` / `sync_action`）；口令只回 `secret_set` 布尔，不回明文 |
 | GET | `/api/integrations/panels/{key}/comparison` | — | 本地账号 ↔ 远端面板对比；`?refresh=1` 绕过缓存 |
+| POST | `/api/integrations/panels/{key}/sync` | — | **同步到最新**：把远端较新的凭证拉回本地（覆盖 AT/RT/id_token，其它字段保留） |
 | POST | `/api/integrations/backfill` | `{platforms?,account_ids?,pending_only?,status?,email?,plus_status?}` | 将筛选账号补传到已配置外部系统 |
 
 > **面板管理页的动作**（用户要求把账号页那批操作集成进来）：上传 / 同步远端状态
@@ -436,6 +441,29 @@ iCloud 业务错误不使用 `401`，以免被前端误判为面板登录过期�
 - **远端拉不到不是错误**：本地账号照常返回，`remote_error` 说明原因。
 - 结果缓存 60 秒（`services/panel_comparison_cache.py`）；失败结果按 5 秒短 TTL
   （一次抖动不该被钉在界面上整整一分钟）；`?refresh=1` 绕过。
+
+### 同步到最新 `POST /api/integrations/panels/{key}/sync`
+
+把**远端较新**的凭证拉回本地（与「重新拉取对比」不同：那个只重拉对比表，
+这个会改本地账号）。方向判定在 `services/panel_sync.py`：
+
+- 远端较新且远端有凭证 → 拉回（覆盖 `access_token` / `refresh_token` /
+  `id_token` / `sso`，本地其它字段保留）；
+- 本地较新 / 同小时 / 无法判定时间 / 远端没有凭证 → 不动（保守，不拿不确定
+  的数据覆盖本地）。
+
+返回 `{panel,total,pulled,skipped,items:[{email,platform,pulled,reason,fields}],
+remote_error}`；`reason` ∈ `synced` / `local_newer` / `remote_newer` /
+`unknown_time` / `remote_missing_credential` / `no_pullable_field`。
+
+**为什么需要**：x.ai 的 RT 每次刷新都会轮换 —— 远端面板（grok2api / CPA）
+刷新过 token 后，本地存的 RT 就成了死值（实测 22 个账号全部 `invalid_grant`），
+拉回来才能继续用。
+
+**时区**：远端面板服务器时区可能与本地不同（实测 grok2api / CPA 都是
+`+08:00`，本地库写 UTC）。比较在服务端**先归一成 epoch**（`parse_timestamp`）；
+界面上的时间列统一按**浏览器本地时区**显示，并在表头标注当前时区
+（`UTC+8` 等）—— 见 `frontend/src/lib/time.ts`。
 
 ---
 

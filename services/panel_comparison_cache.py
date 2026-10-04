@@ -241,28 +241,40 @@ def get_panel_comparison(
         return _rebuild_panel_comparison(key)
 
 
-def _rebuild_panel_comparison(key: str) -> dict[str, Any]:
-    """真正去拉一次数据并写缓存（调用方需已持有该面板的重建锁）。"""
-    local_rows = _local_accounts_for_panel(key)
-    credentials = _panel_credentials(key)
+def fetch_panel_raw(panel_key: str) -> tuple[list[dict[str, Any]], list, str]:
+    """拉一次面板的**原始数据**：`(local_rows, remote_accounts, remote_error)`。
+
+    对比（`build_comparison`）与同步（`panel_sync.sync_local_from_remote`）共用
+    这条拉取路径 —— 各写一份的话，两边看到的「远端较新」可能来自不同的快照，
+    同步动作会把对比页没显示的东西改掉。
+    """
+    local_rows = _local_accounts_for_panel(panel_key)
+    credentials = _panel_credentials(panel_key)
     remote_accounts: list = []
     remote_error = ""
 
     if not credentials.get("api_url"):
         remote_error = "面板地址未配置，无法读取远端账号"
-    else:
-        # 本地邮箱集合传给 fetcher：只有"两边都有"的账号才需要抓完整凭证
-        # （CPA 逐个 download 有成本；只为不参与比对的行付费没意义）。
-        local_emails = {
-            str(row.get("email") or "").strip().lower()
-            for row in local_rows
-            if str(row.get("email") or "").strip()
-        }
-        try:
-            remote_accounts = _call_fetcher(key, credentials, local_emails)
-        except Exception as exc:  # noqa: BLE001 - 远端故障要变成可展示的原因
-            remote_error = str(exc) or exc.__class__.__name__
-            logger.warning("面板 %s 远端拉取失败: %s", key, remote_error)
+        return local_rows, remote_accounts, remote_error
+
+    # 本地邮箱集合传给 fetcher：只有"两边都有"的账号才需要抓完整凭证
+    # （CPA 逐个 download 有成本；只为不参与比对的行付费没意义）。
+    local_emails = {
+        str(row.get("email") or "").strip().lower()
+        for row in local_rows
+        if str(row.get("email") or "").strip()
+    }
+    try:
+        remote_accounts = _call_fetcher(panel_key, credentials, local_emails)
+    except Exception as exc:  # noqa: BLE001 - 远端故障要变成可展示的原因
+        remote_error = str(exc) or exc.__class__.__name__
+        logger.warning("面板 %s 远端拉取失败: %s", panel_key, remote_error)
+    return local_rows, remote_accounts, remote_error
+
+
+def _rebuild_panel_comparison(key: str) -> dict[str, Any]:
+    """真正去拉一次数据并写缓存（调用方需已持有该面板的重建锁）。"""
+    local_rows, remote_accounts, remote_error = fetch_panel_raw(key)
 
     rows = build_comparison(local_rows, remote_accounts)
     payload = {
@@ -292,5 +304,6 @@ def _rebuild_panel_comparison(key: str) -> dict[str, Any]:
 __all__ = [
     "CACHE_TTL_SECONDS",
     "clear_cache",
+    "fetch_panel_raw",
     "get_panel_comparison",
 ]
