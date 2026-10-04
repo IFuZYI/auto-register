@@ -337,7 +337,7 @@ def _result_message(result: dict[str, Any]) -> str:
 
 
 def _execute_batch_cliproxy_sync(accounts: list[AccountModel], session: Session) -> dict[str, Any]:
-    from services.cliproxyapi_sync import sync_chatgpt_cliproxyapi_status_batch
+    from services.cliproxyapi_sync import is_sync_ok, sync_chatgpt_cliproxyapi_status_batch
 
     class SyncAccount:
         def __init__(self, model: AccountModel):
@@ -363,8 +363,7 @@ def _execute_batch_cliproxy_sync(accounts: list[AccountModel], session: Session)
     for acc_model in accounts:
         sync_result = sync_results.get(int(acc_model.id or 0), {})
         update_account_model_cliproxy_sync(acc_model, sync_result, session=session, commit=False)
-        remote_state = str(sync_result.get("remote_state") or "").strip().lower()
-        ok = bool(sync_result.get("uploaded")) and remote_state not in {"unreachable", "not_found"}
+        ok = is_sync_ok(sync_result)
         if ok:
             success_count += 1
         else:

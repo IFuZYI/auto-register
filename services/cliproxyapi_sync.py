@@ -9,6 +9,8 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+import requests
+
 from platforms.chatgpt.status_probe import CODEX_USER_AGENT, extract_chatgpt_account_id
 from services.chatgpt_account_state import is_account_deactivated_message
 
@@ -271,6 +273,68 @@ def _match_auth_file(
     return candidates[0]
 
 
+def _credential_rejection_result(exc: Exception, checked_at: str) -> Optional[dict[str, Any]]:
+    """CPA 管理接口 4xx（如 `auth token refresh failed`）→ 探活结果。
+
+    这是「账号凭证被 CPA 拒绝」而不是「CPA 连不上」：HTTP 层是通的，CPA
+    明确回了错误体。实测（线上 32 个 xai 账号里 21 个）之前统一标成
+    `unreachable`，批量结果全部显示「无法连接」，排查方向被带偏 ——
+    真实原因是这些账号的 RT 已死（CPA 侧 `status: error / invalid grant`）。
+
+    返回 None 表示不是凭证类拒绝（非 HTTP 错误 / 非 4xx / 错误体不含凭证
+    措辞），调用方按原逻辑抛给上层。识别的是 CPA 的三种文案：
+    `auth token refresh failed` / `auth token not found` /
+    `auth credential not found for auth_index`（见 CLIProxyAPI
+    `internal/api/handlers/management/api_tools.go`）。
+    """
+    response = getattr(exc, "response", None)
+    if response is None:
+        return None
+    status_code = int(getattr(response, "status_code", 0) or 0)
+    if not (400 <= status_code < 500):
+        return None
+
+    message = ""
+    try:
+        body = response.json()
+        if isinstance(body, dict):
+            message = str(body.get("error") or "").strip()
+    except Exception:
+        pass
+    if not message:
+        message = str(getattr(response, "text", "") or "").strip()
+    if "auth token" not in message and "auth credential" not in message:
+        return None
+
+    return {
+        "last_probe_at": checked_at,
+        "last_probe_status_code": status_code,
+        "last_probe_error_code": "",
+        "last_probe_message": message,
+        "remote_state": "credential_error",
+    }
+
+
+#: 同步结果里视为「需要人工处理」的远端状态 —— 这些状态下账号不计同步成功。
+#: 三个调用点（chatgpt 插件 / grok 插件 / 批量动作）共用 `is_sync_ok`，
+#: 口径只在这里维护一次。
+SYNC_FAILED_STATES = frozenset({"unreachable", "not_found", "credential_error"})
+
+
+def is_sync_ok(sync_result: dict[str, Any]) -> bool:
+    """同步的一行是否算成功（批量结果的成功/失败计数用）。
+
+    失败口径：远端没有该账号（`not_found`）、CPA 连不上（`unreachable`）、
+    账号凭证被拒（`credential_error`）—— 三者都要用户去处理。
+    """
+    if not isinstance(sync_result, dict):
+        return False
+    if not bool(sync_result.get("uploaded")):
+        return False
+    state = str(sync_result.get("remote_state") or "").strip().lower()
+    return state not in SYNC_FAILED_STATES
+
+
 def _probe_remote_auth(auth_index: str, account_id: str, *, api_url: str | None = None, api_key: str | None = None) -> dict[str, Any]:
     checked_at = _utcnow_iso()
     if not auth_index:
@@ -379,16 +443,24 @@ def _build_remote_sync_result(
             )
         )
     except Exception as exc:
-        remote.update(
-            {
-                "last_probe_at": synced_at,
-                "last_probe_status_code": 0,
-                "last_probe_error_code": "",
-                "last_probe_message": str(exc),
-                "remote_state": "unreachable",
-                "message": str(exc),
-            }
-        )
+        # CPA 可达但拒绝账号凭证（如 RT 已死）→ 标 credential_error，
+        # 不跟「连不上 CPA」混为一谈（见 `_credential_rejection_result`）。
+        rejection = _credential_rejection_result(exc, synced_at)
+        if rejection is not None:
+            remote.update(rejection)
+        else:
+            remote.update(
+                {
+                    "last_probe_at": synced_at,
+                    "last_probe_status_code": 0,
+                    "last_probe_error_code": "",
+                    "last_probe_message": str(exc),
+                    "remote_state": "unreachable",
+                    "message": str(exc),
+                }
+            )
+        if remote.get("status") == "error" and remote.get("status_message"):
+            remote["message"] = remote["status_message"]
         return remote
     if remote["status"] == "error" and remote["status_message"]:
         remote["message"] = remote["status_message"]
@@ -440,23 +512,30 @@ def _probe_grok_remote_auth(auth_index: str, *, api_url: str | None = None, api_
             "last_probe_message": "缺少 auth_index，无法探测远端状态",
             "remote_state": "probe_skipped",
         }
-    data = _request_json(
-        "POST",
-        "/v0/management/api-call",
-        api_url=api_url,
-        api_key=api_key,
-        json_body={
-            "authIndex": auth_index,
-            "method": "GET",
-            "url": _GROK_PROBE_URL,
-            "header": {
-                "Authorization": "Bearer $TOKEN$",
-                "User-Agent": _GROK_PROBE_UA,
-                "x-grok-client-version": "1.0.40",
-                "x-grok-client-identifier": "grok-shell",
+    data = None
+    try:
+        data = _request_json(
+            "POST",
+            "/v0/management/api-call",
+            api_url=api_url,
+            api_key=api_key,
+            json_body={
+                "authIndex": auth_index,
+                "method": "GET",
+                "url": _GROK_PROBE_URL,
+                "header": {
+                    "Authorization": "Bearer $TOKEN$",
+                    "User-Agent": _GROK_PROBE_UA,
+                    "x-grok-client-version": "1.0.40",
+                    "x-grok-client-identifier": "grok-shell",
+                },
             },
-        },
-    )
+        )
+    except Exception as exc:  # noqa: BLE001 - 转成探活结果，由调用方决定标签
+        rejection = _credential_rejection_result(exc, checked_at)
+        if rejection is not None:
+            return rejection
+        raise
     upstream_status = int((data or {}).get("status_code") or 0)
     body_text = str((data or {}).get("body") or "")
     body_json = _parse_json_text(body_text)

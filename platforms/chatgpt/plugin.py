@@ -323,10 +323,10 @@ class ChatGPTPlatform(BasePlatform):
             }
 
         if action_id == "sync_cliproxyapi_status":
-            from services.cliproxyapi_sync import sync_chatgpt_cliproxyapi_status
+            from services.cliproxyapi_sync import is_sync_ok, sync_chatgpt_cliproxyapi_status
 
             sync_result = sync_chatgpt_cliproxyapi_status(a)
-            ok = bool(sync_result.get("uploaded")) and sync_result.get("remote_state") not in {"unreachable", "not_found"}
+            ok = is_sync_ok(sync_result)
             summary = (
                 f"远端状态={sync_result.get('status') or 'not_found'}, "
                 f"探测={sync_result.get('remote_state') or 'not_checked'}"

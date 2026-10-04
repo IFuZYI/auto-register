@@ -528,7 +528,7 @@ class GrokPlatform(BasePlatform):
         if action_id == "sync_cliproxyapi_status":
             from types import SimpleNamespace
 
-            from services.cliproxyapi_sync import sync_grok_cliproxyapi_status_batch
+            from services.cliproxyapi_sync import is_sync_ok, sync_grok_cliproxyapi_status_batch
 
             # 同步函数只用到 id / email（按邮箱匹配远端记录），构造一个轻量对象。
             # `Account` 上没有 id（那是仓储行才有的），用 extra 里的账号 id 兜底。
@@ -538,8 +538,7 @@ class GrokPlatform(BasePlatform):
             )
             results = sync_grok_cliproxyapi_status_batch([sync_account])
             sync_result = results.get(int(sync_account.id or 0), {})
-            remote_state = str(sync_result.get("remote_state") or "").strip().lower()
-            ok = bool(sync_result.get("uploaded")) and remote_state not in {"unreachable", "not_found"}
+            ok = is_sync_ok(sync_result)
             summary = (
                 f"远端状态={sync_result.get('status') or 'not_found'}, "
                 f"探测={sync_result.get('remote_state') or 'not_checked'}"

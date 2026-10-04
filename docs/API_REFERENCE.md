@@ -393,8 +393,18 @@ iCloud 业务错误不使用 `401`，以免被前端误判为面板登录过期�
 > **面板管理页的动作**（用户要求把账号页那批操作集成进来）：上传 / 同步远端状态
 > 不新增端点，复用 `POST /api/actions/{platform}/{action_id}/batch` ——
 > 面板注册表声明每个面板对应哪个平台与哪个动作 id，界面按对比结果里的
-> `local_id` 组 `account_ids` 发出去。`upload_action` / `sync_action` 为空表示
-> 该面板没有这类动作（如 Sub2API 只接收上传，没有"拉远端状态"）。
+> `local_id` 组 `account_ids` 发出去。四个面板都有 `sync_action`（CPA /
+> Sub2API / grok2api / chatgpt2api）。
+>
+> **CPA 探活的状态词**（`services/cliproxyapi_sync.py`）：`usable`（探活
+> 200）/ `payment_required`（402/403，没额度但号有效）/ `quota_exhausted`
+> （429）/ `access_token_invalidated`（401）/ `account_deactivated`（封号）/
+> `not_found`（CPA 里没有这个账号）/ `unreachable`（**CPA 连不上**：连接错误、
+> 超时）/ `credential_error`（**CPA 可达但拒绝账号凭证**，如 400
+> `auth token refresh failed` —— 那是账号 RT 已死，要重新登录，不是 CPA 故障）。
+> `unreachable` 与 `credential_error` 分开报：混在一起排查方向会被带偏
+> （实测 32 个 xai 账号里 21 个被误报成「无法连接」）。两者都算同步失败
+> （`is_sync_ok`，三个调用点共用一份口径）。
 
 > 历史：本节曾列出 7 个 `/api/integrations/services*` 端点（安装/启停/卸载本机
 > 插件进程），随「本地插件管理」整块删除 —— 面板全部是远程服务，本应用不再
