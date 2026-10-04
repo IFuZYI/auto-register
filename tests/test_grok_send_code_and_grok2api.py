@@ -170,18 +170,6 @@ class Grok2ApiClientTests(unittest.TestCase):
         )
         self.assertEqual(done, ["accept-terms", "birth-date", "nsfw"])
 
-    def test_derive_posts_ids_and_strategy(self):
-        c = self._client()
-        resp = MagicMock()
-        resp.status_code = 200
-        resp.text = 'data: {"created":1}\n'
-        with patch.object(c, "_request", return_value=resp) as req:
-            ok, _ = c.sync_to_console([7])
-        self.assertTrue(ok)
-        body = req.call_args.kwargs["json_body"]
-        self.assertEqual(body["ids"], ["7"], "id 要转成字符串（grok2api 按字符串比）")
-        self.assertEqual(body["strategy"], "all")
-
     def test_unconfigured_client_reports_clearly(self):
         from platforms.grok.grok2api import Grok2ApiClient, Grok2ApiError
 
@@ -190,23 +178,21 @@ class Grok2ApiClientTests(unittest.TestCase):
         with self.assertRaises(Grok2ApiError):
             c.login()
 
-    def test_ingest_flow_reports_derived_formats(self):
-        """完整接入：上传 → 派生 → NSFW，摘要里带出每一步。
+    def test_ingest_flow_uploads_web_and_sets_nsfw(self):
+        """完整接入：上传（Web）→ NSFW，摘要里带出每一步。
 
-        派生用 Web 号池的 id（`sync-to-console` / `convert-to-build` 只认
-        provider=grok_web 的账号，见 `ingest_sso` 里的说明）。
+        Console / Build 派生已按用户要求移除 —— 摘要里不该再有这两个字样，
+        见 `tests/test_grok2api_web_only.py`。
         """
         c = self._client()
         with patch.object(c, "import_sso", return_value=(True, "created/updated")), patch.object(
             c, "find_web_account_by_email", return_value={"id": 5, "email": "a@b.com", "provider": "grok_web"}
-        ), patch.object(c, "sync_to_console", return_value=(True, "ok")), patch.object(
-            c, "convert_to_build", return_value=(True, "ok")
         ), patch.object(
             c, "account_setup", return_value=(True, ["accept-terms", "birth-date", "nsfw"], [])
         ):
             ok, summary = c.ingest_sso("sso", "a@b.com")
         self.assertTrue(ok)
-        for part in ("web", "console", "build", "NSFW"):
+        for part in ("web", "NSFW"):
             self.assertIn(part, summary)
 
     def test_ingest_upload_failure_is_fatal(self):

@@ -162,11 +162,11 @@ Grok 注册**只有浏览器一条路径**：x.ai 的 Cloudflare 只有 camoufox
 **账号操作**：测活（CLI Proxy）、重换 OAuth、导出 CPA JSON；面板动作同 ChatGPT
 （上传 CPA / 同步 CPA 状态 / 上传 Sub2API / 上传 grok2api）。
 
-**grok2api 接入**（`platforms/grok/grok2api.py`）：上传 SSO → 派生 Console / Build 两种凭据 →
-开启 NSFW。只调 grok2api 现成的管理 API。几个关键点：
+**grok2api 接入**（`platforms/grok/grok2api.py`）：上传 SSO（Web）→ 开启 NSFW。
+只调 grok2api 现成的管理 API。Console / Build 两类凭据**不在这里派生** ——
+用户自己在 grok2api 里手动转换。几个关键点：
 
 - 上传文件名**必须是** `grok-web-sso-tokens.txt`（grok2api 靠文件名识别 token 类型）
-- 派生格式 grok2api **不会自动做**，要显式调 `sync-to-console` 与 `convert-to-build`
 - 账号级动作（条款/生日/NSFW）只对 Web 账号有效，必须先按邮箱找到 `provider=grok_web` 那条
 - NSFW 顺序不能换：`accept-terms` → `birth-date` → `nsfw`
 - 管理面要**用户名+密码换 token**（不是固定 API Key），有效期约 10 分钟

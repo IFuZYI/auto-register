@@ -97,7 +97,7 @@ const PANEL_SECTIONS: PanelSection[] = [
     anchor: 'grok2api',
     section: {
       title: 'grok2api',
-      desc: 'Grok 账号池与 API 网关。注册出 SSO 后自动上传并派生 Console / Build 凭据。',
+      desc: 'Grok 账号池与 API 网关。注册出 SSO 后自动上传 Web 账号并开启 NSFW；Console / Build 凭据由你在 grok2api 中手动转换。',
       fields: [
         { key: 'grok2api_enabled', label: '启用自动上传', type: 'boolean' },
         { key: 'grok2api_base_url', label: 'API URL', placeholder: 'http://127.0.0.1:8000' },

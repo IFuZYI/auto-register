@@ -305,7 +305,6 @@ class GrokPlatform(BasePlatform):
                     {"key": "api_url", "label": "grok2api URL（留空用全局配置）", "type": "text"},
                     {"key": "username", "label": "管理员用户名（留空用全局配置）", "type": "text"},
                     {"key": "password", "label": "管理员密码（留空用全局配置）", "type": "text"},
-                    {"key": "derive", "label": "派生 Console/Build（默认开）", "type": "text"},
                     {"key": "nsfw", "label": "开启 NSFW（默认开）", "type": "text"},
                 ],
             },
@@ -726,11 +725,7 @@ class GrokPlatform(BasePlatform):
                 if g2a.configured:
                     ok_ing, msg_ing = g2a.ingest_sso(
                         sso, email,
-                        derive=_truthy(extra.get("grok2api_auto_derive"), default=True),
                         nsfw=_truthy(extra.get("grok2api_auto_nsfw"), default=True),
-                        # 带上刚换到的 token：Build 凭据直接导入，不再依赖
-                        # grok2api 那条被上游挡住的 Device Flow 转换
-                        tokens=account_extra if account_extra.get("access_token") else None,
                         log=log,
                     )
                     account_extra["grok2api_ingested"] = bool(ok_ing)
@@ -874,19 +869,10 @@ class GrokPlatform(BasePlatform):
                 "error": "grok2api 未配置（「全局配置 → 面板配置 → grok2api」填地址 / 用户名 / 密码）",
             }
 
-        derive = _truthy(params.get("derive"), default=True)
         nsfw = _truthy(params.get("nsfw"), default=True)
-        # 账号已存的 token 直接当 Build 凭据导入（见 import_build_tokens）；
-        # 没有 token 的老账号才回退到 grok2api 自己的转换。
-        tokens = {
-            "access_token": str(extra.get("access_token") or ""),
-            "refresh_token": str(extra.get("refresh_token") or ""),
-            "id_token": str(extra.get("id_token") or ""),
-        }
         try:
             ok, msg = client.ingest_sso(
-                sso, account.email, derive=derive, nsfw=nsfw,
-                tokens=tokens if tokens["access_token"] else None,
+                sso, account.email, nsfw=nsfw,
             )
         except Exception as exc:  # noqa: BLE001 - 动作失败要带原因回前端
             return {

@@ -1,4 +1,4 @@
-"""grok2api 管理面客户端：上传 SSO → 派生三格式 → 开 NSFW。
+"""grok2api 管理面客户端：上传 SSO（Web）→ 开 NSFW。
 
 只调用 grok2api **现成的**管理 API，不改它本身。
 
@@ -8,11 +8,13 @@
 1. 上传文件名**必须**是 `grok-web-sso-tokens.txt` —— grok2api 靠文件名识别
    token 类型，换名字会报 `Cannot read properties of undefined (reading 'trim')`。
 2. 重复上传返回 `created:0, updated:1` —— 也算成功（幂等）。
-3. 派生三格式（console / build）grok2api **不会自动做**，要显式调
-   `sync-to-console` 与 `convert-to-build`。
-4. 账号级动作（条款/生日/NSFW）只对 **Web** 账号有效，必须先按邮箱找到
+3. 账号级动作（条款/生日/NSFW）只对 **Web** 账号有效，必须先按邮箱找到
    `provider=grok_web` 的那条，拿它的数字 id。
-5. NSFW 顺序不能换：`accept-terms` → `birth-date` → `nsfw`。
+4. NSFW 顺序不能换：`accept-terms` → `birth-date` → `nsfw`。
+
+**不做派生**：Console / Build 两类凭据由用户自己在 grok2api 里手动转换
+（用户要求：「grok2api 导入只需要 grokweb，build 和 console 不需要」）。
+我们只负责把 Web 号（SSO）传上去。
 
 与 ChatGPT 侧的差别：grok2api 的管理面要**用户名+密码换 token**（不是固定
 API Key），token 有效期约 10 分钟，这里做进程内缓存并在 401 时重建。
@@ -25,11 +27,6 @@ import time
 from typing import Any, Optional
 
 _TOKEN_TTL_SECONDS = 9 * 60  # 实测 10 分钟有效期，留 1 分钟缓冲
-
-#: Build 凭据的 OAuth client_id —— 与 `platforms/grok/constants.py` 的
-#: `CLIENT_ID`、以及 grok2api `sso_build.go` 的 `ssoBuildClientID` 是同一个。
-#: 注册时换到的 token 直接就是这个 client 签发的，所以能当 Build 凭据导入。
-_BUILD_CLIENT_ID = "b1a00492-073a-47ea-816f-4c329264a828"
 
 
 class Grok2ApiError(RuntimeError):
@@ -301,10 +298,12 @@ class Grok2ApiClient:
             return item
         return None
 
-    def find_account_by_email(self, email: str) -> Optional[dict]:
-        return self._find_account(email)
-
     def find_web_account_by_email(self, email: str) -> Optional[dict]:
+        """按邮箱找 **Web 号池** 的账号（账号级动作只对它有效）。
+
+        必须筛 `provider=grok_web`：同邮箱下常同时存在 build / console 记录
+        （grok2api 自己转换出来的），不筛就会拿到别的那条。
+        """
         return self._find_account(email, provider="grok_web")
 
     @staticmethod
@@ -323,104 +322,6 @@ class Grok2ApiClient:
             if isinstance(parsed, dict):
                 out = parsed
         return out
-
-    def _derive(self, path: str, ids: list, strategy: str, *, timeout: int = 120) -> tuple[bool, str, dict]:
-        resp = self._request(
-            "POST",
-            f"/api/admin/v1/accounts/web/{path}",
-            headers=self._auth_headers(content_type="application/json"),
-            json_body={"ids": [str(i) for i in ids], "strategy": strategy},
-            timeout=timeout,
-        )
-        status = int(getattr(resp, "status_code", 0) or 0)
-        text = str(getattr(resp, "text", "") or "")
-        done = self._last_sse_data(text)
-        ok = status == 200 and not done.get("failed")
-        brief = " ".join(text.split())[:180]
-        return ok, brief, done
-
-    def sync_to_console(self, ids: list, strategy: str = "all") -> tuple[bool, str]:
-        """Web → Console 派生。"""
-        ok, brief, _ = self._derive("sync-to-console", ids, strategy)
-        return ok, brief
-
-    def convert_to_build(self, ids: list, strategy: str = "missing") -> tuple[bool, str]:
-        """Web → Build 派生（缺省 missing：已有的不重转，幂等）。
-
-        **当前上游不可用**：grok2api 的转换走 xAI Device Flow 的
-        `device/approve`，而该端点现在要求同意页里的 `consent_token` +
-        完整浏览器头，否则一律 403 `Request could not be verified`
-        （实测：纯 HTTP 用任意头组合都过不去，唯一可行的是真浏览器点按钮）。
-        所以这条路径留给「grok2api 自己修好」的情况；正常接入走
-        `import_build_tokens`（我们注册时拿到的 token 本身就是 Build 凭据）。
-        """
-        ok, brief, _ = self._derive("convert-to-build", ids, strategy)
-        return ok, brief
-
-    def import_build_tokens(
-        self,
-        *,
-        email: str,
-        access_token: str,
-        refresh_token: str = "",
-        id_token: str = "",
-        client_id: str = "",
-        name: str = "",
-    ) -> tuple[bool, str]:
-        """把已有的 OAuth token 作为 Build 凭据直接导入 grok2api。
-
-        为什么不需要 `convert-to-build`
-        ------------------------------
-        我们注册时换的 OAuth token 用的就是 Build 的 client_id 与 scope
-        （`platforms/grok/constants.py` 的 `CLIENT_ID` / `SCOPES`，与
-        grok2api `sso_build.go` 里 `ssoBuildClientID` / `ssoBuildScope` 一致），
-        本身就是可用的 Build 凭据。实测：直接 POST 到
-        `/accounts/import`（provider=grok_build）返回 `created:1, failed:0`，
-        且 grok2api 会自动把新的 Build 账号与同邮箱的 Web 账号互相关联
-        （`linkedAccountId` 双向写入），随后 `refresh-token` / `refresh-billing`
-        都能正常调通。
-
-        而 grok2api 自己的 `convert-to-build` 走 Device Flow，其 `approve`
-        步骤已被上游加严（要求同意页的 `consent_token` + 浏览器头），
-        服务端代码还没跟上 → 永远 `failed:1`。
-
-        返回 `(ok, 摘要)`。
-        """
-        if not access_token:
-            return False, "缺少 access_token"
-        doc = {
-            "accounts": [
-                {
-                    "provider": "grok_build",
-                    "name": name or f"Grok Build {email}",
-                    "client_id": client_id or _BUILD_CLIENT_ID,
-                    "access_token": access_token,
-                    "refresh_token": refresh_token,
-                    "id_token": id_token,
-                    "token_type": "Bearer",
-                    "email": email,
-                }
-            ]
-        }
-        content = json.dumps(doc, ensure_ascii=False).encode("utf-8")
-        resp = self._request(
-            "POST",
-            "/api/admin/v1/accounts/import",
-            headers=self._auth_headers(),
-            files={"file": ("grok-build-credentials.json", content, "application/json")},
-            timeout=120,
-        )
-        status = int(getattr(resp, "status_code", 0) or 0)
-        text = str(getattr(resp, "text", "") or "")
-        done = self._last_sse_data(text)
-        created = self._as_int(done.get("created"))
-        updated = self._as_int(done.get("updated"))
-        skipped = self._as_int(done.get("skipped"))
-        failed = self._as_int(done.get("failed"))
-        if status == 200 and done and failed == 0 and (created + updated + skipped) > 0:
-            return True, f"created={created} updated={updated} skipped={skipped}"
-        brief = " ".join(text.split())[:180]
-        return False, brief or f"HTTP {status}"
 
     def account_setup(self, web_id: Any, *, nsfw: bool = True) -> tuple[bool, list, list]:
         """Web 账号一键设置：接受条款 → 设成人生日 → 开 NSFW（顺序不能换）。
@@ -462,18 +363,16 @@ class Grok2ApiClient:
         sso: str,
         email: str,
         *,
-        derive: bool = True,
         nsfw: bool = True,
-        tokens: Optional[dict] = None,
         log=None,
     ) -> tuple[bool, str]:
-        """一个账号的完整接入：上传 → 派生三格式 → 开 NSFW。
+        """一个账号的完整接入：上传 SSO（Web）→ 开 NSFW。
 
-        `tokens` 是注册时换到的 OAuth token（access/refresh/id）。给了它就走
-        `import_build_tokens` 直接导入 Build 凭据；没给则退回 grok2api 自己的
-        `convert-to-build`（那条路目前被上游加严挡住，见 `convert_to_build`）。
+        只做 Web 导入。Console / Build 两类凭据**不在这里派生** ——
+        用户要求：「grok2api 导入只需要 grokweb，build 和 console 不需要，
+        这两个用户可以自己在 grok2api 中手动转换。」
 
-        返回 `(ok, 摘要)`。派生/NSFW 失败不影响 ok（账号已在池里，
+        返回 `(ok, 摘要)`。NSFW 失败不影响 ok（账号已在池里，
         只把失败原因带回去让界面显示）。
         """
         def _say(msg: str) -> None:
@@ -489,41 +388,11 @@ class Grok2ApiClient:
         done = ["web"]
 
         warnings: list[str] = []
-        if derive:
-            # 必须按 provider=grok_web 找：`sync-to-console` 与
-            # `convert-to-build` 都只接受 Web 号池的 id（用同邮箱的
-            # build/console 账号 id 会被拒 `accountPoolMismatch`，实测）。
-            # 而 `find_account_by_email` 不筛 provider，同邮箱下常常返回
-            # build 那条（它比 web 后建、排序靠前）。
-            web_account = self.find_web_account_by_email(email)
-            if not web_account:
-                warnings.append("派生跳过（grok2api 查不到该 Web 账号）")
-            else:
-                acc_id = web_account.get("id")
-                ok_c, msg_c = self.sync_to_console([acc_id])
-                if ok_c:
-                    done.append("console")
-                else:
-                    warnings.append(f"console 派生失败: {msg_c[:80]}")
-
-                access = str((tokens or {}).get("access_token") or "")
-                if access:
-                    # 我们自己的 token 就是 Build 凭据：直接导入，绕开
-                    # grok2api 那条被上游挡住的 Device Flow 转换。
-                    ok_b, msg_b = self.import_build_tokens(
-                        email=email,
-                        access_token=access,
-                        refresh_token=str((tokens or {}).get("refresh_token") or ""),
-                        id_token=str((tokens or {}).get("id_token") or ""),
-                    )
-                else:
-                    ok_b, msg_b = self.convert_to_build([acc_id])
-                if ok_b:
-                    done.append("build")
-                else:
-                    warnings.append(f"build 派生失败: {msg_b[:80]}")
 
         if nsfw:
+            # 账号级动作（条款/生日/NSFW）只对 Web 账号有效，必须按
+            # provider=grok_web 找 —— 同邮箱下常同时存在 build/console 记录
+            # （grok2api 自己转换出来的），不筛就会拿到别的那条。
             web = self.find_web_account_by_email(email)
             if not web:
                 warnings.append("NSFW 跳过（查不到 Web 账号）")

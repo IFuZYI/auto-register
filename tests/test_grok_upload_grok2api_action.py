@@ -140,90 +140,52 @@ class UploadGrok2ApiActionTests(unittest.TestCase):
         self.assertEqual(captured["api_url"], "http://other.test")
         self.assertEqual(captured["username"], "u2")
 
-    def test_derive_and_nsfw_flags_pass_through(self):
-        """derive/nsfw 参数要真的传给 ingest_sso（前端传的是字符串）。"""
+    def test_nsfw_flag_passes_through(self):
+        """nsfw 参数要真的传给 ingest_sso（前端传的是字符串）。"""
         p = _platform()
         seen = {}
 
-        def _fake_ingest(self, sso, email, *, derive=True, nsfw=True, tokens=None, log=None):
-            seen["derive"] = derive
+        def _fake_ingest(self, sso, email, *, nsfw=True, log=None):
             seen["nsfw"] = nsfw
             return True, "ok"
 
         with _config_store(_CFG), patch(
             "platforms.grok.grok2api.Grok2ApiClient.ingest_sso", _fake_ingest
         ):
-            p.execute_action("upload_grok2api", _account(), {"derive": "false", "nsfw": "0"})
+            p.execute_action("upload_grok2api", _account(), {"nsfw": "0"})
 
-        self.assertFalse(seen["derive"], "derive=false 没生效")
         self.assertFalse(seen["nsfw"], "nsfw=0 没生效")
 
-    def test_derive_nsfw_default_on_when_absent(self):
-        p = _platform()
-        seen = {}
+    def test_nsfw_defaults_on_when_absent(self):
+        """不传参数时 nsfw 默认开（默认值由**动作**给出，不是 mock 的默认值）。
 
-        def _fake_ingest(self, sso, email, *, derive=True, nsfw=True, tokens=None, log=None):
-            seen["derive"] = derive
-            seen["nsfw"] = nsfw
-            return True, "ok"
-
-        with _config_store(_CFG), patch(
-            "platforms.grok.grok2api.Grok2ApiClient.ingest_sso", _fake_ingest
-        ):
-            p.execute_action("upload_grok2api", _account(), {})
-
-        self.assertTrue(seen["derive"])
-        self.assertTrue(seen["nsfw"])
-
-    def test_account_tokens_are_forwarded_for_build_import(self):
-        """账号已存的 token 要传给 ingest_sso —— Build 凭据直接导入用它。
-
-        背景：grok2api 的 `convert-to-build`（Device Flow）已被上游加严挡住
-        （`device/approve` 要求同意页的 consent_token + 浏览器头，服务端没跟上，
-        永远 `failed:1`）。而我们注册时换的 token 用的就是 Build 的 client_id
-        与 scope，本身就是 Build 凭据，直接 import 即可（实测 `created:1`）。
+        钉住传参本身：`seen` 记录的是动作实际传下来的值，mock 签名里的
+        `nsfw=True` 只是接收端 —— 动作若不传，这里会看到 mock 的默认值，
+        断言仍是 True（假绿）。所以额外断言动作确实**显式**传了这个关键字。
         """
         p = _platform()
         seen = {}
+        explicit = {}
 
-        def _fake_ingest(self, sso, email, *, derive=True, nsfw=True, tokens=None, log=None):
-            seen["tokens"] = tokens
+        def _fake_ingest(self, sso, email, *, nsfw=True, log=None):
+            seen["nsfw"] = nsfw
+            # 用哨兵值区分「动作传了 True」与「动作没传、吃了默认值」
             return True, "ok"
 
-        acc = _account()
-        acc.extra = {
-            "sso": "sso-token",
-            "access_token": "at-1",
-            "refresh_token": "rt-1",
-            "id_token": "idt-1",
-        }
+        def _sentinel(self, sso, email, **kwargs):
+            explicit["kw"] = set(kwargs.keys())
+            return _fake_ingest(self, sso, email, **kwargs)
+
         with _config_store(_CFG), patch(
-            "platforms.grok.grok2api.Grok2ApiClient.ingest_sso", _fake_ingest
+            "platforms.grok.grok2api.Grok2ApiClient.ingest_sso", _sentinel
         ):
-            p.execute_action("upload_grok2api", acc, {})
+            p.execute_action("upload_grok2api", _account(), {})
 
-        self.assertIsNotNone(seen["tokens"], "有 token 时必须传下去，否则会退回被挡住的转换路径")
-        self.assertEqual(seen["tokens"]["access_token"], "at-1")
-        self.assertEqual(seen["tokens"]["refresh_token"], "rt-1")
-        self.assertEqual(seen["tokens"]["id_token"], "idt-1")
-
-    def test_no_tokens_passes_none(self):
-        """没有 token 的老账号传 None → ingest_sso 回退到 grok2api 自己的转换。"""
-        p = _platform()
-        seen = {}
-
-        def _fake_ingest(self, sso, email, *, derive=True, nsfw=True, tokens=None, log=None):
-            seen["tokens"] = tokens
-            return True, "ok"
-
-        acc = _account()
-        acc.extra = {"sso": "sso-token"}
-        with _config_store(_CFG), patch(
-            "platforms.grok.grok2api.Grok2ApiClient.ingest_sso", _fake_ingest
-        ):
-            p.execute_action("upload_grok2api", acc, {})
-
-        self.assertIsNone(seen["tokens"])
+        self.assertTrue(seen["nsfw"])
+        self.assertIn("nsfw", explicit["kw"], "动作没有显式传 nsfw（吃了接收端默认值）")
+        self.assertNotIn(
+            "derive", explicit["kw"], "derive 参数已删除，不该再传"
+        )
 
 
 class FromConfigPriorityTests(unittest.TestCase):
@@ -372,164 +334,6 @@ class ImportSsoSseParsingTests(unittest.TestCase):
         with patch.object(c, "_request", return_value=self._resp(text, status=500)):
             ok, _ = c.import_sso("sso")
         self.assertFalse(ok)
-
-
-class ImportBuildTokensTests(unittest.TestCase):
-    """`import_build_tokens`：把已有的 OAuth token 当 Build 凭据导入。
-
-    为什么需要这条路（实测）：
-    grok2api 的 `convert-to-build` 走 xAI Device Flow，其 `device/approve`
-    已被上游加严 —— 要求同意页里的 `consent_token` + 完整浏览器头，
-    否则一律 403 `Request could not be verified`（试过纯 HTTP 的各种头组合，
-    只有真浏览器点按钮才过）。而**我们注册时换的 token 用的就是 Build 的
-    client_id 与 scope**，本身就是 Build 凭据：直接 POST `/accounts/import`
-    返回 `created:1, failed:0`，grok2api 还会自动把新 Build 账号与同邮箱的
-    Web 账号互相关联。
-    """
-
-    def _client(self):
-        from platforms.grok.grok2api import Grok2ApiClient
-
-        c = Grok2ApiClient("http://g2a.test", "admin", "pw")
-        c._token = "tok"
-        return c
-
-    def _resp(self, text, status=200):
-        from unittest.mock import MagicMock
-
-        return MagicMock(status_code=status, text=text)
-
-    def test_created_one_is_success(self):
-        c = self._client()
-        text = ('event: complete\ndata: {"created":1,"updated":0,"skipped":0,'
-                '"failed":0,"synced":1,"syncFailed":0}\n\n')
-        captured = {}
-
-        def _fake(method, url, **kwargs):
-            captured["url"] = url
-            captured["files"] = kwargs.get("files")
-            return self._resp(text)
-
-        with patch.object(c, "_request", _fake):
-            ok, msg = c.import_build_tokens(
-                email="a@b.c", access_token="at", refresh_token="rt", id_token="idt"
-            )
-
-        self.assertTrue(ok, msg)
-        self.assertIn("created=1", msg)
-        # 必须打到 build 的导入端点，且文件名/结构正确
-        self.assertIn("/accounts/import", captured["url"])
-        fname, content, ctype = captured["files"]["file"]
-        self.assertTrue(fname.endswith(".json"), fname)
-        self.assertEqual(ctype, "application/json")
-        import json as _json
-        doc = _json.loads(content.decode("utf-8"))
-        entry = doc["accounts"][0]
-        self.assertEqual(entry["provider"], "grok_build")
-        self.assertEqual(entry["access_token"], "at")
-        self.assertEqual(entry["refresh_token"], "rt")
-        self.assertEqual(entry["email"], "a@b.c")
-        # client_id 必须是 Build 那个（与 constants.CLIENT_ID 一致）
-        self.assertEqual(entry["client_id"], "b1a00492-073a-47ea-816f-4c329264a828")
-
-    def test_failed_count_is_failure(self):
-        c = self._client()
-        text = 'event: complete\ndata: {"created":0,"failed":1}\n\n'
-        with patch.object(c, "_request", return_value=self._resp(text)):
-            ok, _ = c.import_build_tokens(email="a@b.c", access_token="at")
-        self.assertFalse(ok)
-
-    def test_missing_access_token_short_circuits(self):
-        """没有 access_token 直接报错，不发请求（避免打空请求）。"""
-        c = self._client()
-        with patch.object(c, "_request") as m:
-            ok, msg = c.import_build_tokens(email="a@b.c", access_token="")
-        self.assertFalse(ok)
-        self.assertIn("access_token", msg)
-        m.assert_not_called()
-
-    def test_ingest_prefers_import_over_convert_when_tokens_given(self):
-        """给了 token 就必须走 import，不能再去调被挡住的 convert-to-build。"""
-        c = self._client()
-        calls = []
-
-        def _fake_import_sso(sso):
-            return True, "created=1"
-
-        def _fake_find_web(email):
-            return {"id": "41", "provider": "grok_web"}
-
-        def _fake_sync_console(ids):
-            return True, "ok"
-
-        def _fake_import_build(**kwargs):
-            calls.append(("import", kwargs.get("access_token")))
-            return True, "created=1"
-
-        def _fake_convert(ids, strategy="missing"):
-            calls.append(("convert", None))
-            return True, "should not be called"
-
-        def _fake_find_any(email):
-            return {"id": "41"}
-
-        def _fake_setup(web_id, nsfw=True):
-            return True, ["accept-terms"], []
-
-        with patch.object(c, "import_sso", _fake_import_sso), \
-             patch.object(c, "find_web_account_by_email", _fake_find_web), \
-             patch.object(c, "sync_to_console", _fake_sync_console), \
-             patch.object(c, "import_build_tokens", _fake_import_build), \
-             patch.object(c, "convert_to_build", _fake_convert), \
-             patch.object(c, "find_web_account_by_email", _fake_find_web), \
-             patch.object(c, "account_setup", _fake_setup):
-            ok, msg = c.ingest_sso(
-                "sso", "a@b.c",
-                tokens={"access_token": "at-1", "refresh_token": "rt-1"},
-            )
-
-        self.assertTrue(ok, msg)
-        self.assertIn(("import", "at-1"), calls)
-        self.assertNotIn(("convert", None), calls, "有 token 时不该再调 convert-to-build")
-        self.assertIn("build", msg)
-
-    def test_ingest_uses_web_account_id_for_derive(self):
-        """派生必须用 Web 号池的 id。
-
-        `sync-to-console` / `convert-to-build` 只接受 provider=grok_web 的 id，
-        拿同邮箱的 build/console id 会被拒 `accountPoolMismatch`（实测）。
-        而 `find_account_by_email` 不筛 provider，同邮箱下常返回 build 那条。
-        """
-        c = self._client()
-        seen_ids = []
-
-        def _fake_import_sso(sso):
-            return True, "created=1"
-
-        def _fake_find_web(email):
-            return {"id": "WEB-41", "provider": "grok_web"}
-
-        def _fake_sync_console(ids):
-            seen_ids.append(list(ids))
-            return True, "ok"
-
-        def _fake_convert(ids, strategy="missing"):
-            seen_ids.append(list(ids))
-            return True, "ok"
-
-        def _fake_setup(web_id, nsfw=True):
-            return True, [], []
-
-        with patch.object(c, "import_sso", _fake_import_sso), \
-             patch.object(c, "find_web_account_by_email", _fake_find_web), \
-             patch.object(c, "sync_to_console", _fake_sync_console), \
-             patch.object(c, "convert_to_build", _fake_convert), \
-             patch.object(c, "account_setup", _fake_setup):
-            c.ingest_sso("sso", "a@b.c")  # 不给 token → 走 convert 回退
-
-        self.assertTrue(seen_ids, "两个派生都没被调用")
-        for ids in seen_ids:
-            self.assertEqual(ids, ["WEB-41"], "必须用 Web 号池的 id")
 
 
 class MultipartEncodingTests(unittest.TestCase):
