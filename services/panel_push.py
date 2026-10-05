@@ -31,10 +31,8 @@ from core.credential_fields import (
 )
 from services.panel_comparison import (
     RemoteAccount,
-    compare_by_hour,
     compare_credential_time,
     compare_credentials,
-    parse_timestamp,
 )
 
 logger = logging.getLogger(__name__)
@@ -124,15 +122,17 @@ def plan_push(
         outcome.reason = "unknown_credential"
         return outcome
 
-    # 凭证不同：按时间决定方向。优先凭证签发时间，解不出回落记录时间。
-    relation = compare_credential_time(local_extra or {}, remote_creds)
+    # 凭证不同：按时间决定方向。每侧独立「iat 优先、无则回落该侧记录时间」
+    # —— 与对比页两列的显示口径一致。整体回落记录时间会被状态回写的噪声
+    # 带反（用户实测报过的 bug）。
+    relation = compare_credential_time(
+        local_extra or {}, remote_creds,
+        local_record=local_updated, remote_record=remote.updated_at,
+    )
     if not relation:
-        local_time = parse_timestamp(local_updated) if local_updated else None
-        remote_time = remote.updated_at
-        if local_time is None or remote_time is None:
-            outcome.reason = "unknown_time"
-            return outcome
-        relation = compare_by_hour(local_time, remote_time)
+        # 至少一侧连记录时间都没有 → 无法判定方向，保守不动
+        outcome.reason = "unknown_time"
+        return outcome
     if relation == "time_synced":
         outcome.reason = "time_synced"
         return outcome

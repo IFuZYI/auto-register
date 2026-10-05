@@ -198,24 +198,58 @@ def _latest_issuance(extra: dict[str, Any]) -> Optional[datetime]:
     return newest
 
 
-def compare_credential_time(local: dict[str, Any], remote: dict[str, Any]) -> str:
-    """按凭证**签发时间**（JWT `iat`）比先后 —— 比记录时间更可信。
+def compare_credential_time(
+    local: dict[str, Any],
+    remote: dict[str, Any],
+    *,
+    local_record: Optional[Any] = None,
+    remote_record: Optional[Any] = None,
+) -> str:
+    """按「每侧最有信息量的时间」比先后 —— iat 优先，无则回落该侧记录时间。
 
     返回 `local_newer` / `remote_newer` / `time_synced` / `""`（无结论）。
-    一边解不出 iat 就返回空串：调用方回落到记录时间（`compare_by_hour`）。
+    至少一侧连记录时间都取不到时返回空串：调用方按「无法判定 → 不动」处理。
 
     为什么需要它（实测 2026-10-05）：grok2api 面板 10 个账号的**行更新时间**
     被「同步远端状态」顶到了本地较新（状态回写会 touch `updated_at`），而
     凭证实际是远端新（本地 AT 已过期、远端是刚签发的）—— 只看记录时间会把
     方向判反：「更新本地」不动、「更新远程」反而拿本地旧凭证去覆盖远端新的。
+
+    **单侧回落**（用户实测报的 bug，2026-10-05）：grok2api 的 web 线账号远端
+    只有 SSO（解不出 iat）而本地有 AT。旧实现要求两侧都能解出 iat 才出结论、
+    否则**整体**回落记录时间 —— 本地记录时间恰被状态同步顶成噪声，于是
+    「本地 10-02（iat）vs 远端 10-04（记录）」的行被判成「本地较新」（拿
+    10-05 的噪声记录时间判的），与两列显示自相矛盾。现在**每侧独立**
+    「iat 优先、无则回落该侧记录时间」，与「本地/远端更新时间」两列的显示
+    口径完全一致 —— 显示什么就比什么。
     """
     local_extra = local if isinstance(local, dict) else {}
     remote_extra = remote if isinstance(remote, dict) else {}
-    local_issued = _latest_issuance(local_extra)
-    remote_issued = _latest_issuance(remote_extra)
-    if local_issued is None or remote_issued is None:
+    local_time = _latest_issuance(local_extra) or parse_timestamp(local_record)
+    remote_time = _latest_issuance(remote_extra) or parse_timestamp(remote_record)
+    if local_time is None or remote_time is None:
         return ""
-    return compare_by_hour(local_issued, remote_issued)
+    return compare_by_hour(local_time, remote_time)
+
+
+def credential_time_basis(local: dict[str, Any], remote: dict[str, Any]) -> str:
+    """`compare_credential_time` 出了结论时，两侧各用了哪种时间。
+
+    - `credential`：两侧都按 AT 签发时间（JWT `iat`）比较；
+    - `mixed`：一侧有 iat、另一侧回落记录时间（该侧解不出 iat，如 grok2api
+      的 web 线账号只有 SSO）；
+    - `record`：两侧都回落记录时间。
+
+    只在 `compare_credential_time` 出了结论时使用 —— 无结论（空串）时该值
+    没有意义，调用方不应展示。
+    """
+    local_iat = _latest_issuance(local if isinstance(local, dict) else {})
+    remote_iat = _latest_issuance(remote if isinstance(remote, dict) else {})
+    if local_iat is not None and remote_iat is not None:
+        return "credential"
+    if local_iat is None and remote_iat is None:
+        return "record"
+    return "mixed"
 
 
 def hour_bucket(value: Optional[datetime]) -> str:
@@ -450,12 +484,16 @@ def build_comparison(
         row.credential_compared = _count_compared(extra, remote.credentials)
         row.state = credential_state
         # 辅助信息：凭证不同时，时间说明是哪边动的（按小时）。
-        # 优先按凭证签发时间（iat）判定 —— 记录时间会被「同步远端状态」等
-        # 操作 touch 成噪声（实测 10 个账号被顶成本地较新，而凭证是远端新）。
-        cred_relation = compare_credential_time(extra, remote.credentials)
+        # 每侧独立取「iat 优先、无则回落该侧记录时间」—— 与「本地/远端
+        # 更新时间」两列的显示口径一致（显示什么就比什么）。整体回落记录
+        # 时间会被状态回写的噪声带反（用户实测报过的 bug）。
+        cred_relation = compare_credential_time(
+            extra, remote.credentials,
+            local_record=local_updated, remote_record=remote.updated_at,
+        )
         if cred_relation:
             row.time_relation = cred_relation
-            row.time_basis = "credential"
+            row.time_basis = credential_time_basis(extra, remote.credentials)
         else:
             row.time_relation = compare_by_hour(local_updated, remote.updated_at)
             row.time_basis = "record"
@@ -1161,7 +1199,9 @@ __all__ = [
     "STATE_UNKNOWN_TIME",
     "build_comparison",
     "compare_by_hour",
+    "compare_credential_time",
     "compare_credentials",
+    "credential_time_basis",
     "hour_bucket",
     "parse_timestamp",
     "summarize",

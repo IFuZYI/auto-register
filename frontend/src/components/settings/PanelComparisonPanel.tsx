@@ -343,7 +343,9 @@ const COLUMNS: ColumnsType<ComparisonRow> = [
       const basisTip =
         row.time_basis === 'credential'
           ? '按凭证签发时间（JWT iat）比较 —— 记录时间会被状态回写等操作顶成噪声'
-          : '按记录更新时间比较（凭证解不出签发时间时的兜底）'
+          : row.time_basis === 'mixed'
+            ? '一侧按凭证签发时间（JWT iat）、另一侧解不出 iat 回落记录时间（如 grok2api web 线只有 SSO）—— 与两列显示同一口径'
+            : '按记录更新时间比较（两侧都解不出签发时间时的兜底）'
       return (
         <Tooltip title={basisTip}>
           <span style={{ fontSize: 12 }}>{text}</span>

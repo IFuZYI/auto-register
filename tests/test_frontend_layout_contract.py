@@ -527,6 +527,22 @@ class PanelTimeColumnsUseCredentialIssuedAtTests(unittest.TestCase):
         self.assertIn("本地没有可解析的 AT 生成时间", local_block, "本地列回落分支没说明显示的是记录时间")
         self.assertIn("远端没有可解析的 AT 生成时间", remote_block, "远端列回落分支没说明显示的是记录时间")
 
+    def test_time_tooltip_explains_mixed_basis(self):
+        """「时间」列 tooltip 要说明单侧回落（mixed）—— 一侧有 iat、一侧没有。
+
+        用户实测报的 bug（2026-10-05）：grok2api web 线账号远端只有 SSO，
+        判定曾整体回落记录时间、拿状态回写的噪声把方向判反。修复后每侧独立
+        「iat 优先、无则回落该侧记录时间」，basis=mixed 表示这种单侧情况 ——
+        tooltip 必须能向用户解释清楚，不能只留 credential/record 两档。
+        """
+        src = self._src()
+        block = src.split("title: '时间'", 1)[1].split("title: '差异'", 1)[0]
+        self.assertIn(
+            "time_basis === 'mixed'",
+            block,
+            "「时间」列没有处理 mixed 档 —— 单侧回落的行 tooltip 会误导",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
