@@ -53,6 +53,80 @@ class FrontendBuildContractTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
+class AtLifecycleDisplayContractTests(unittest.TestCase):
+    """ChatGPT 的 AT 生成/到期时间必须在**列表**与详情两处都可见。
+
+    用户反馈（2026-10-05）：「AT有效判断和AT日期呢？我怎么在GPT界面没见到，
+    这个在chatgpt2api应该有啊。」——参考实现（chatgpt2api 的
+    AccountCredentialStatus.vue）在列表行内直接显示凭据状态 chip + hover
+    详情卡；我们此前只在详情弹窗里有 AT 生成/到期，列表行看不到。
+
+    另：取 AT 必须**列（token）与 extra.access_token 都看** —— 实测存在
+    token 列为空而 extra.access_token 有值的账号（较新的落库路径写 extra），
+    只读 token 会让这类账号误显示「无 AT」。
+    """
+
+    def _src(self) -> str:
+        return (FRONTEND / "src" / "pages" / "Accounts.tsx").read_text(encoding="utf-8")
+
+    def test_list_has_at_expiry_column(self):
+        """列表要有「AT 有效期」列（用 atListSummary 渲染，两平台通用）。"""
+        src = self._src()
+        self.assertIn("atListSummary", src, "列表没有用 atListSummary —— AT 日期在列表不可见")
+        self.assertIn("title: 'AT 有效期'", src, "列表没有「AT 有效期」列标题")
+        # 列必须在**公共区**（两平台都显示）——ChatGPT 与 Grok 的 AT 都是
+        # JWT，详情弹窗本来就是共享的，列表不该只给一个平台。
+        # 锚点：列定义出现在 `if (isChatgptPlatform)` 之前。
+        at_idx = src.find("title: 'AT 有效期'")
+        branch_idx = src.find("if (isChatgptPlatform) {")
+        self.assertLess(
+            at_idx,
+            branch_idx,
+            "「AT 有效期」列只在 ChatGPT 分支里 —— Grok 列表看不到（同类 UI 不一致）",
+        )
+
+    def test_scroll_x_covers_the_new_column(self):
+        """scroll.x 要盖住加了 AT 列之后的列宽和（否则 antd 等比压缩）。"""
+        import re
+
+        src = self._src()
+        m = re.search(r"scroll=\{\{ x: isChatgptPlatform \? (\d+) : (\d+) \}\}", src)
+        if m is None:
+            self.fail("找不到 scroll.x 配置")
+        chatgpt_x, grok_x = int(m.group(1)), int(m.group(2))
+        # ChatGPT: 260+120+120+110+130+260+140+132+150 = 1422
+        # Grok:    260+120+120+110+130+100+120+132+150 = 1242
+        self.assertGreaterEqual(chatgpt_x, 1422, f"ChatGPT scroll.x={chatgpt_x} 小于列宽和 1422")
+        self.assertGreaterEqual(grok_x, 1242, f"Grok scroll.x={grok_x} 小于列宽和 1242")
+
+    def test_detail_and_list_read_at_from_both_sources(self):
+        """取 AT 要兼容 token 列与 extra.access_token 两个来源。"""
+        src = self._src()
+        self.assertIn(
+            "access_token",
+            src,
+            "取 AT 没有读 extra.access_token —— token 列为空的账号会误显示「无 AT」",
+        )
+        # 至少一处 helper 把两者合并（锚点：访问 record.token 且提到 extra）
+        helper_idx = src.find("const getAccessToken")
+        self.assertGreater(helper_idx, -1, "缺少统一的 getAccessToken helper（两处取值口径会漂）")
+        block = src[helper_idx : helper_idx + 500]
+        self.assertIn("token", block)
+        self.assertIn("access_token", block)
+
+    def test_detail_modal_uses_the_shared_helper(self):
+        """详情弹窗也要走同一个 helper（不能只读 token 列）。"""
+        src = self._src()
+        idx = src.find("AT 有效期")
+        self.assertGreater(idx, -1)
+        # 弹窗里 atLifecycleMeta 的参数必须是 helper 调用，不是裸 currentAccount.token
+        self.assertNotIn(
+            "atLifecycleMeta(currentAccount.token)",
+            src,
+            "详情弹窗还在只读 token 列 —— 应走 getAccessToken(currentAccount)",
+        )
+
+
 class ICloudTableLayoutTests(unittest.TestCase):
     """iCloud 页两个表格的列宽契约（实测踩过的 bug 的回归网）。
 

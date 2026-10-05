@@ -99,5 +99,25 @@ eq(metaInvalid.color, 'error', 'atLifecycleMeta(invalid).color')
 // 没有 exp → unknown（不误判成失效）
 eq(mod.atLifecycleMeta(fakeJwt({ iat: 1000 })).status, 'unknown', 'atLifecycleMeta(no exp)')
 
+// ── 列表行 AT 摘要（atListSummary）：列表「AT 有效期」列用 ──
+// 参考实现（chatgpt2api）在列表行内直接显示凭据状态；我们的列表此前
+// 只在详情弹窗里有 AT 生成/到期，用户看不到。这个函数产出列表行的
+// 一行摘要：状态标签 + 到期日 + 剩余时间。
+const listValid = mod.atListSummary(fakeJwt({ iat: 1000, exp: future }))
+eq(listValid.label, '有效', 'atListSummary(valid).label')
+eq(listValid.color, 'success', 'atListSummary(valid).color')
+eq(listValid.expiresShort.includes('-'), true, 'atListSummary(valid).expiresShort 是短日期')
+eq(listValid.remainingText !== '', true, 'atListSummary(valid).remainingText non-empty')
+// tooltip 全量信息：生成 + 到期 + 剩余
+eq(listValid.tooltip.includes('生成于'), true, 'atListSummary.tooltip 含生成时间')
+eq(listValid.tooltip.includes('到期'), true, 'atListSummary.tooltip 含到期时间')
+// 即将过期（剩 1 小时）→ warning
+eq(mod.atListSummary(fakeJwt({ iat: 1000, exp: Math.floor(Date.now() / 1000) + 3600 })).label, '即将过期', 'atListSummary(expiring).label')
+// 已过期 → error
+eq(mod.atListSummary(fakeJwt({ iat: 1000, exp: past })).label, '已过期', 'atListSummary(invalid).label')
+// 空 token → 无 AT，expiresShort 为空串（列表不显示日期行）
+eq(mod.atListSummary('').label, '无 AT', 'atListSummary(empty).label')
+eq(mod.atListSummary('').expiresShort, '', 'atListSummary(empty).expiresShort 空')
+
 console.log(JSON.stringify({ passed: failures.length === 0, checked, failures }, null, 2))
 process.exit(failures.length === 0 ? 0 : 1)

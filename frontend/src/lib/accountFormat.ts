@@ -245,3 +245,46 @@ export function atLifecycleMeta(accessToken?: string): AtLifecycleMeta {
     remainingText: remaining !== null ? formatRemaining(remaining) : '',
   }
 }
+
+/** 列表行 AT 摘要（「AT 有效期」列用）。 */
+export interface AtListSummary {
+  /** 状态标签（有效 / 即将过期 / 已过期 / 无法解析 / 无 AT） */
+  label: string
+  color: string
+  /** 短到期日（`2026-10-12`），无到期信息时为空串 */
+  expiresShort: string
+  /** 剩余时间人话（「7 天 8 小时」），无到期信息时为空串 */
+  remainingText: string
+  /** hover 全量信息（生成于 / 到期 / 剩余），供 Tooltip 展示 */
+  tooltip: string
+}
+
+/**
+ * 列表行 AT 摘要 —— 参考实现（chatgpt2api）在列表行内直接显示凭据状态，
+ * 我们的列表此前只在详情弹窗里有 AT 生成/到期（用户反馈「没见到」）。
+ * 与 `atLifecycleMeta` 同口径，输出列表用的紧凑形状。
+ */
+export function atListSummary(accessToken?: string): AtListSummary {
+  const meta = atLifecycleMeta(accessToken)
+  // 短日期用 epoch 确定性构造（不解析 locale 字符串 —— 不同 locale 下
+  // toLocaleString 的格式不一样，解析会得出不稳定结果）。
+  const claims = decodeJwtPayload(String(accessToken || '').trim())
+  const expiresAt = Number(claims.exp) > 0 ? Number(claims.exp) : null
+  let expiresShort = ''
+  if (expiresAt !== null) {
+    const d = new Date(expiresAt * 1000)
+    const pad = (n: number) => String(n).padStart(2, '0')
+    expiresShort = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+  }
+  const parts: string[] = []
+  if (meta.issuedText) parts.push(`生成于 ${meta.issuedText}`)
+  if (meta.expiresText) parts.push(`到期 ${meta.expiresText}`)
+  if (meta.remainingText) parts.push(meta.remainingText)
+  return {
+    label: meta.label,
+    color: meta.color,
+    expiresShort,
+    remainingText: meta.remainingText,
+    tooltip: parts.join(' · '),
+  }
+}

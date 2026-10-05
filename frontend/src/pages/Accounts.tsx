@@ -14,6 +14,7 @@ import {
   plusTrialMeta,
   planMeta,
   atLifecycleMeta,
+  atListSummary,
 } from '@/lib/accountFormat'
 import {
   Table,
@@ -33,6 +34,7 @@ import {
   DatePicker,
   Segmented,
   Switch,
+  Tooltip,
   theme,
 } from 'antd'
 import type { MenuProps } from 'antd'
@@ -475,6 +477,24 @@ export default function Accounts() {
     }
   }
 
+  /**
+   * 取账号的 Access Token —— 两个来源都要看：
+   * - `token` 列：历史遗留的凭证位（详情弹窗编辑、`POST /api/accounts` 写它）；
+   * - `extra.access_token`：较新的落库路径写这里（实测存在 token 列为空、
+   *   extra 有值的账号，只读列会误显示「无 AT」）。
+   * 优先 extra（更新的来源），为空再退回列。
+   */
+  const getAccessToken = (record: { token?: string; extra_json?: string } | null | undefined): string => {
+    try {
+      const extra = JSON.parse(record?.extra_json || '{}')
+      const fromExtra = String(extra.access_token || '').trim()
+      if (fromExtra) return fromExtra
+    } catch {
+      // ignore，退回列
+    }
+    return String(record?.token || '').trim()
+  }
+
   const handleDelete = async (id: number) => {
     // 带 platform：账号 id 是每库自增的，不带平台可能删到别的平台的同 id 账号
     await apiFetch(`/accounts/${id}?platform=${encodeURIComponent(currentPlatform)}`, {
@@ -833,6 +853,42 @@ export default function Accounts() {
       width: 110,
       render: (status: string) => <Tag color={STATUS_COLORS[status] || 'default'}>{status}</Tag>,
     },
+    {
+      // AT 有效期：ChatGPT 与 Grok 的 AT 都是 JWT（都带 iat/exp），
+      // 两个平台的列表都要显示 —— 详情弹窗本来就是共享的，列表不该分家。
+      title: 'AT 有效期',
+      key: 'at_lifecycle',
+      width: 130,
+      render: (_: unknown, record: { token?: string; extra_json?: string }) => {
+        // 与详情弹窗同口径（atListSummary 内部复用 atLifecycleMeta）。
+        // 参考实现（chatgpt2api）在列表行内直接显示凭据状态，用户反馈
+        // 「GPT 界面没见到 AT 日期」——此前只在详情弹窗里。
+        const at = atListSummary(getAccessToken(record))
+        const hasDate = Boolean(at.expiresShort || at.remainingText)
+        if (at.label === '无 AT' && !hasDate) {
+          return (
+            <Text type="secondary" style={secondaryTextStyle}>
+              无 AT
+            </Text>
+          )
+        }
+        return (
+          <div style={{ ...cellStackStyle, ...compactPanelStyle }}>
+            <Tooltip title={at.tooltip || at.label}>
+              <Tag color={at.color} style={{ marginInlineEnd: 0 }}>
+                {at.label}
+              </Tag>
+            </Tooltip>
+            {hasDate ? (
+              <Text type="secondary" style={secondaryTextStyle} ellipsis={{ tooltip: at.tooltip }}>
+                {at.expiresShort ? `到期 ${at.expiresShort}` : ''}
+                {at.remainingText ? `${at.expiresShort ? ' · ' : ''}${at.remainingText}` : ''}
+              </Text>
+            ) : null}
+          </div>
+        )
+      },
+    },
   ]
 
   if (isChatgptPlatform) {
@@ -1134,7 +1190,7 @@ export default function Accounts() {
           onChange: setSelectedRowKeys,
         }}
         pagination={{ total, current: page, pageSize, showSizeChanger: true, pageSizeOptions: ['20', '50', '100'], onChange: (p, ps) => { setPage(p); setPageSize(ps) } }}
-        scroll={{ x: isChatgptPlatform ? 1300 : 980 }}
+        scroll={{ x: isChatgptPlatform ? 1430 : 1250 }}
         onRow={(record) => ({
           onDoubleClick: () => {
             setCurrentAccount(record)
@@ -1389,7 +1445,8 @@ export default function Accounts() {
             </Form>
             {(() => {
               // AT 生成时间 / 到期时间（从 JWT 的 iat / exp 解出，纯前端计算）。
-              const at = atLifecycleMeta(currentAccount.token)
+              // 取 AT 走 getAccessToken：token 列与 extra.access_token 都看。
+              const at = atLifecycleMeta(getAccessToken(currentAccount))
               if (at.status === 'invalid' && !at.issuedText && !at.expiresText) return null
               return (
                 <div style={{ marginTop: 8 }}>
