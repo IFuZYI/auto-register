@@ -297,6 +297,8 @@ grok2api），操作面在界面「面板管理」页（那里有本地 ↔ 远�
 | 方法 | 路径 | 请求体 | 说明 |
 | --- | --- | --- | --- |
 | POST | `/api/outlook/batch-import` | `{data,enabled:true}` | 批量导入 Outlook/Hotmail 邮箱 |
+| GET | `/api/outlook/pool-summary` | — | 号池状态计数（未入池 / 可用 / 使用中 / 已使用 / 失败 / 总数） |
+| POST | `/api/outlook/pool-status/import` | `{ids}` | 把勾选的账号从「未入池」转为可领取。只动 `unpooled` 的行 |
 
 `data` 每行一条，使用 `----` 分隔，支持：
 
@@ -366,6 +368,11 @@ grok2api），操作面在界面「面板管理」页（那里有本地 ↔ 远�
 | --- | --- | --- | --- |
 | GET | `/api/icloud/aliases` | `account_id?` | 列出隐私邮箱别名。每行带 `used_platforms`（池记账）与 `registered_platforms`（`accounts` 表里的权威注册证据，跨库查出来）；界面按后者显示「已注册平台」并做平台筛选 |
 | POST | `/api/icloud/aliases` | `{account_id?,account_email?,label?,note?,count:1}` | 生成别名；`count` 范围 1–5 |
+| POST | `/api/icloud/aliases/{alias_id}/pool-status` | `{pool_status}` | 手动改号池状态（`unpooled` / `available` / `in_use` / `used`）。自动记账已接通（取号标 `in_use`、注册收尾记回），此端点留给人工干预 |
+| POST | `/api/icloud/aliases/import-to-pool` | `{ids}` | 把选中的别名从「未入池」导入号池（→ 未使用）。生成/同步进来的默认未入池，取号会跳过 |
+| POST | `/api/icloud/aliases/unpool` | `{ids}` | 把选中的别名移出号池（未使用 → 未入池）。导入的反向操作 |
+| POST | `/api/icloud/aliases/{alias_id}/deactivate` | — | 停用隐私邮箱（不删除，可逆） |
+| POST | `/api/icloud/aliases/{alias_id}/reactivate` | — | 重新激活已停用的隐私邮箱 |
 | POST | `/api/icloud/aliases/batch-delete` | `{ids,remote:true}` | 批量删除别名；`remote` 决定是否同步删除 Apple 侧资源 |
 | DELETE | `/api/icloud/aliases/{alias_id}` | `remote=true` | 删除一个别名 |
 | GET | `/api/icloud/aliases/{alias_id}/messages` | `limit=50` | 拉取一个别名的邮件 |
@@ -560,3 +567,9 @@ remote_id,pushed,deleted,message,fields}],remote_error}`；`reason` ∈
 - FastAPI 会在服务运行后自动提供交互式文档：`/docs`，原始 Schema：`/openapi.json`。`/m/{share_token}` 因设置 `include_in_schema=False` 不在其中。
 - 前端统一处理 `401` 时应检查 `X-Panel-Auth-Required: 1`，不要将 iCloud 上游的业务失败误跳转到登录页。
 - 所有账号、导出、支付、Cookie、TOTP、Token、邮箱导入接口都可能承载敏感信息：建议禁用代理/访问日志中的请求体记录，并限制 API 的网络暴露范围。
+
+### 14.1 运行态版本戳 `GET /api/runtime`
+
+返回 `{code_version, disk_version, stale, booted_at, pid, python}`。
+
+`code_version` 是**进程启动时加载的那版代码**，`disk_version` 是磁盘上此刻的 HEAD；两者不一致（`stale: true`）= 改完代码还没重启 —— 这个服务手工拉起、不重启就还跑旧代码。排查「修复没生效」时先看这里，不要假设代码已加载。

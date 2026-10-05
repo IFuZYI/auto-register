@@ -549,10 +549,11 @@ def update_account(account_id: int, body: AccountUpdate, platform: str = ""):
     if body.cashier_url is not None:
         acc.cashier_url = body.cashier_url
     acc.updated_at = datetime.now(timezone.utc)
-    session.add(acc)
-    session.commit()
-    session.refresh(acc)
-    return acc
+    # 走仓储 upsert 落库（此前直接引用了一个不存在的 `session` 变量 ——
+    # 函数签名里没有、模块级也没绑定，实测 PATCH 必 500 NameError，
+    # 详情弹窗保存 100% 失败。`upsert` 按 (平台, 邮箱) 定位现有行并保留
+    # 未提交字段，与导入路径同款）。
+    return account_repository.upsert(acc)
 
 
 @router.delete("/{account_id}")

@@ -10,18 +10,22 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
+from sqlmodel import select
 
 from core.config_store import config_store
-from core.db import account_repository, platform_database_registry
+from core.db import AccountModel, account_repository, platform_database_registry
 from services.chatgpt_account_state import filter_accounts_by_plus_status
 from services.chatgpt_sync import backfill_chatgpt_account_to_cpa, get_cliproxy_sync_state
 from services.panel_comparison import FETCHERS
 from services.panel_comparison_cache import get_panel_comparison
 from services.panel_registry import list_panels
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/integrations", tags=["integrations"])
 
@@ -235,6 +239,68 @@ def _panel_remote_deleter(panel_key: str):
     return None
 
 
+def _persist_push_results(panel_key: str, items: list[dict]) -> None:
+    """把 push 结果写回账号行（`sync_statuses.<面板>`）。
+
+    与手动动作（`api/actions.py` 的 `_UPLOAD_SYNC_WRITERS`）和自动上传
+    （`services/external_sync.py`）保持同一语义：推了（成功或失败）都留痕；
+    跳过（无需更新）的动都没动，不写。
+
+    `items` 是 `push_local_to_remote` 的产出 —— 只有 `push=True` 的条目
+    代表真正发起过上传。写回按 `email` 定位账号（跨平台库：grok2api 的行
+    在 grok 库，CPA 的行可能是 chatgpt 或 grok）。
+    """
+    from services.chatgpt_sync import (
+        update_account_model_chatgpt2api_sync,
+        update_account_model_cpa_sync,
+        update_account_model_sub2api_sync,
+    )
+
+    writers = {
+        "cpa": update_account_model_cpa_sync,
+        "sub2api": update_account_model_sub2api_sync,
+        "chatgpt2api": update_account_model_chatgpt2api_sync,
+    }
+
+    for item in items:
+        if not item.get("push"):
+            continue  # 跳过的没发生任何事，不留痕
+        email = str(item.get("email") or "").strip()
+        platform = str(item.get("platform") or "").strip().lower()
+        if not email or not platform:
+            continue
+        ok = bool(item.get("pushed"))
+        message = str(item.get("message") or "")
+
+        try:
+            with platform_database_registry.session_for(platform) as session:
+                row = session.exec(
+                    select(AccountModel)
+                    .where(AccountModel.platform == platform)
+                    .where(AccountModel.email == email)
+                ).first()
+                if row is None:
+                    continue
+                if panel_key == "grok2api":
+                    # grok2api 的落库没有 update_account_model_* 版本
+                    # （它走 record_grok2api_sync_result 的 extra 形状）——
+                    # 就地写 extra 并提交。
+                    from services.chatgpt_sync import record_grok2api_sync_result
+
+                    extra = row.get_extra()
+                    record_grok2api_sync_result(extra, ok, message)
+                    row.set_extra(extra)
+                else:
+                    writer = writers.get(panel_key)
+                    if writer is None:
+                        continue
+                    writer(row, ok, message, session=session, commit=False)
+                session.add(row)
+                session.commit()
+        except Exception as exc:  # noqa: BLE001 - 落库失败不该毁整批结果
+            logger.warning("push 结果落库失败 %s/%s: %s", panel_key, email, exc)
+
+
 @router.post("/panels/{panel_key}/push")
 def push_panel_endpoint(
     panel_key: str,
@@ -293,6 +359,9 @@ def push_panel_endpoint(
     )
     summary["panel"] = key
     summary["remote_error"] = ""
+    # 推送结果落库（与手动动作/自动上传同语义）——此前只写内存副本，
+    # 经 push 路径上传的账号 sync_statuses 永远空白。
+    _persist_push_results(key, summary.get("items") or [])
     return summary
 
 
