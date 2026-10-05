@@ -40,8 +40,17 @@ api/             HTTP 接口
 services/        业务服务
 ```
 
-**依赖方向**：`platforms → modules → core`。反向依赖（core 里 import platforms/modules/services）
-是不允许的 —— 分库注册表因此由调用方传入表对象，而不是自己去 import 平台模型。
+**依赖方向**：`platforms → modules → core` 是主骨架，**core 一律不得反向 import**
+（core 里 import platforms/modules/services 不允许）—— 分库注册表因此由调用方传入
+表对象，而不是自己去 import 平台模型。
+
+注意 `platforms/` 与 `services/` 之间**存在既定的双向引用**（不算违规，是现状）：
+platforms 顶层 import services 的例子有 `platforms/chatgpt/registration_engine.py`
+（`services.sms_service`）、`platforms/chatgpt/status_probe.py`
+（`services.chatgpt_account_state`）；反方向有 `services/chatgpt_otp_mailbox.py`
+（`platforms.chatgpt.protocol`）、`services/cliproxyapi_sync.py`
+（`platforms.chatgpt.status_probe`）等。新增代码照既有习惯写即可：平台协议细节留
+`platforms/`、业务编排与跨平台能力放 `services/`。
 
 例外只有两个**加载器**：
 
@@ -114,7 +123,7 @@ class FooPlatform(BasePlatform):
 
 ```python
 # core/registry.py
-SUPPORTED_PLATFORMS = ("chatgpt", "icloud", "grok", "foo")
+SUPPORTED_PLATFORMS = ("chatgpt", "grok", "foo")
 ```
 
 > 白名单是**安全闸**：不在名单里的插件即使有 `@register` 装饰器也不会加载。
@@ -179,7 +188,7 @@ print(result.email, result.value)
 
 ## 3. 新增一种邮箱渠道
 
-**只需两步：加一个文件 + 在 `channels/__init__.py` 里 import 一次。**
+**只需两步：加一个文件 + 在 `core/mailboxes/__init__.py` 里 import 一次。**
 
 ```python
 # core/mailboxes/channels/foo.py
@@ -219,9 +228,12 @@ def build(*, extra: dict, proxy: str = None) -> BaseMailbox:
 ```
 
 ```python
-# core/mailboxes/channels/__init__.py —— 加一行
-from . import foo  # noqa: F401
+# core/mailboxes/__init__.py —— 加一行
+from .channels import foo  # noqa: F401  (导入副作用：注册)
 ```
+
+> 注意注册 import 在 `core/mailboxes/__init__.py`（`from .channels import ...`），
+> 不是渠道包的 `channels/__init__.py` —— 后者只维护 `__all__` 清单。
 
 不用改工厂：`create_mailbox` 由注册表驱动，`register_mailbox_provider`
 装饰器就是唯一的接入点。
@@ -443,7 +455,7 @@ python -m scripts.<your_e2e_script>
 | 坑 | 说明 |
 |----|------|
 | 忘了加 `SUPPORTED_PLATFORMS` | 插件被静默忽略，`load_all()` 里什么都看不到 |
-| 新增邮箱渠道后忘了在 `channels/__init__.py` import | 渠道「文件存在但查不到」，`create_mailbox` 报未知 provider |
+| 新增邮箱渠道后忘了在 `core/mailboxes/__init__.py` import | 渠道「文件存在但查不到」，`create_mailbox` 报未知 provider |
 | `create_all(tables=...)` 传了模型类 | 必须传 `Model.__table__`，否则报 `AttributeError: name` |
 | 分库后写裸 `select(AccountModel)` | 会漏掉分库平台的数据；改用 `account_repository` |
 | 自写轮询循环等验证码 | 无法响应任务控制（停止/跳过）；用 `_run_polling_wait` |

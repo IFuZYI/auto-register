@@ -250,15 +250,20 @@ grok2api），操作面在界面「面板管理」页（那里有本地 ↔ 远�
 | `chatgpt` | `backfill_refresh_token` | 补 Refresh Token | — |
 | `chatgpt` | `bind_2fa` | 绑定 TOTP 2FA | — |
 | `chatgpt` | `sync_cliproxyapi_status` | 同步 CLIProxyAPI 状态 | `panel` |
-| `chatgpt` | `upload_cpa` / `upload_sub2api` | 上传到外部系统；通常传 `api_url,api_key` | `panel` |
+| `chatgpt` | `sync_sub2api_status` | 同步 Sub2API 状态 | `panel` |
+| `chatgpt` | `sync_chatgpt2api_status` | 同步 chatgpt2api 状态 | `panel` |
+| `chatgpt` | `upload_cpa` / `upload_sub2api` / `upload_chatgpt2api` | 上传到外部系统；通常传 `api_url,api_key` | `panel` |
 | `grok` | `probe` | 测活（CLI Proxy 发一次最小请求） | — |
 | `grok` | `probe_refresh` | 检测有效性（refresh grant 换新凭证；`invalid_grant` 等永久错误判失效） | — |
 | `grok` | `refresh_token` | 刷新 Token（**登录协议**：浏览器完成 Device Flow 授权） | — |
 | `grok` | `refresh_oauth` | 已弃用（协议 device flow 被 CF 挡死）—— 转发到 `refresh_token` | — |
 | `grok` | `export_cpa_json` | 导出 CPA JSON | — |
+| `grok` | `sync_cliproxyapi_status` | 同步 CPA 状态 | `panel` |
+| `grok` | `sync_grok2api_status` | 同步 grok2api 状态 | `panel` |
 | `grok` | `upload_cpa` / `upload_sub2api` / `upload_grok2api` | 上传到外部系统 | `panel` |
-| `icloud` | `fetch_inbox` | 收取隐私邮箱邮件，可传 `limit` | — |
-| `icloud` | `delete_alias` | 删除隐私邮箱 | — |
+
+> iCloud 不是注册平台（不在 `SUPPORTED_PLATFORMS`），没有平台动作 ——
+> `POST /api/actions/icloud/...` 会 404；iCloud 邮箱功能走 §9 的 `/api/icloud/*` 接口。
 
 ---
 
@@ -280,7 +285,7 @@ grok2api），操作面在界面「面板管理」页（那里有本地 ↔ 远�
 
 ## 7. 全局配置与邮箱导入
 
-### 8.1 配置 `/api/config`
+### 7.1 配置 `/api/config`
 
 | 方法 | 路径 | 请求体 / 参数 | 说明 |
 | --- | --- | --- | --- |
@@ -294,7 +299,7 @@ grok2api），操作面在界面「面板管理」页（那里有本地 ↔ 远�
 
 > 前端导航：平台级集成（CPA / Sub2API / grok2api）的连接配置在「全局配置 → 面板配置」；「面板管理」只提供跳转与补传。两者读写本接口的同一份白名单配置。CLIProxyAPI 与「CPA 面板」是同一个服务，注册表里只有 `cpa` 一项（旧 key `cliproxyapi` 由 `resolve_panel_key` 归一）。
 
-### 8.2 通用邮件导入 `/api/mail-imports`
+### 7.2 通用邮件导入 `/api/mail-imports`
 
 | 方法 | 路径 | 请求体 / 参数 | 说明 |
 | --- | --- | --- | --- |
@@ -306,7 +311,7 @@ grok2api），操作面在界面「面板管理」页（那里有本地 ↔ 远�
 
 邮件导入具体字段由 `GET /api/mail-imports/providers` 返回的描述决定；至少应提供 `type`，导入操作一般还需 `content`。
 
-### 8.3 Microsoft/Outlook 导入 `/api/outlook`
+### 7.3 Microsoft/Outlook 导入 `/api/outlook`
 
 | 方法 | 路径 | 请求体 | 说明 |
 | --- | --- | --- | --- |
@@ -354,7 +359,7 @@ grok2api），操作面在界面「面板管理」页（那里有本地 ↔ 远�
 > 注册页只配 `icloud_local_account_id` / `icloud_local_label` / `icloud_local_note`。
 > （历史上另有远程 `icloud_hme` 链路，已随服务删除。）
 
-### 10.1 登录会话
+### 9.1 登录会话
 
 | 方法 | 路径 | 请求体 | 说明 |
 | --- | --- | --- | --- |
@@ -365,7 +370,7 @@ grok2api），操作面在界面「面板管理」页（那里有本地 ↔ 远�
 | POST | `/api/icloud/login-sessions/{login_id}/sms` | `{phone_id,mode?}` | 请求向可信手机号发送短信验证码 |
 | DELETE | `/api/icloud/login-sessions/{login_id}` | — | 取消登录会话 |
 
-### 10.2 iCloud 主号
+### 9.2 iCloud 主号
 
 | 方法 | 路径 | 请求体 / 参数 | 说明 |
 | --- | --- | --- | --- |
@@ -376,7 +381,7 @@ grok2api），操作面在界面「面板管理」页（那里有本地 ↔ 远�
 | POST | `/api/icloud/accounts/{account_id}/sync` | — | 从 Apple 同步隐私邮箱别名 |
 | GET | `/api/icloud/accounts/{account_id}/messages` | `limit=50,recipient?` | 拉取主号收件邮件；可按收件别名过滤 |
 
-### 10.3 Hide My Email 别名
+### 9.3 Hide My Email 别名
 
 | 方法 | 路径 | 请求体 / 参数 | 说明 |
 | --- | --- | --- | --- |
@@ -393,7 +398,7 @@ grok2api），操作面在界面「面板管理」页（那里有本地 ↔ 远�
 
 iCloud 业务错误不使用 `401`，以免被前端误判为面板登录过期；凭据无效等错误通常为 `400`、`409` 或上游 `5xx`。
 
-### 10.4 公开共享邮件页
+### 9.4 公开共享邮件页
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
@@ -435,7 +440,7 @@ iCloud 业务错误不使用 `401`，以免被前端误判为面板登录过期�
 
 ### 面板对比 `/api/integrations/panels/{key}/comparison`
 
-`key` ∈ `cpa` / `sub2api` / `grok2api`（`cliproxyapi` 由 `resolve_panel_key` 归一到 `cpa`）。
+`key` ∈ `cpa` / `sub2api` / `grok2api` / `chatgpt2api`（`cliproxyapi` 由 `resolve_panel_key` 归一到 `cpa`）。
 
 返回：
 
@@ -444,8 +449,8 @@ iCloud 业务错误不使用 `401`，以免被前端误判为面板登录过期�
   "panel": "cpa",
   "fetched_at": "2026-10-01T22:36:00+00:00",
   "cached": false,
-  "summary": {"local_only": 1, "remote_only": 2, "synced": 1, "local_newer": 1,
-              "remote_newer": 0, "unknown_time": 0, "total": 5},
+  "summary": {"local_only": 1, "remote_only": 2, "synced": 1, "credential_diff": 1,
+              "unknown_credential": 0, "unknown_time": 0, "total": 5},
   "rows": [{"email": "a@b.c", "state": "credential_diff", "label": "凭证不同",
             "local_updated_at": "2026-10-01T21:00:00+00:00", "local_updated_hour": "2026-10-01T21:00Z",
             "remote_updated_at": "2026-10-01T19:00:00+00:00", "remote_updated_at_raw": "2026-10-02T03:00:00+08:00",
@@ -502,8 +507,8 @@ iCloud 业务错误不使用 `401`，以免被前端误判为面板登录过期�
 
 - 远端较新且远端有凭证 → 拉回（覆盖 `access_token` / `refresh_token` /
   `session_token` / `id_token` / `sso`，本地其它字段保留）；
-- 本地较新 / 同小时 / 无法判定时间 / 远端没有凭证 → 不动（保守，不拿不确定
-  的数据覆盖本地）。
+- 本地较新 / 两侧时间相同（`time_synced`）/ 无法判定时间 / 远端没有凭证 → 不动
+  （保守，不拿不确定的数据覆盖本地）。
 
 方向判定按「每侧 iat 优先、无则回落该侧记录时间」（单侧回落，`mixed`）——
 与对比页两列的显示口径一致；两侧都有 iat 时**秒级**比（同小时内的真实轮换
@@ -537,7 +542,7 @@ remote_error}`；`reason` ∈ `synced` / `local_newer` / `remote_newer` /
 
 - 远端没有（未上传）→ 推送（补传）；
 - 凭证不同且**本地较新** → 推送；
-- 远端较新 / 同小时 / 无法判定时间 / 凭证相同 / 无法比对 → 不动
+- 远端较新 / 两侧时间相同（`time_synced`）/ 无法判定时间 / 凭证相同 / 无法比对 → 不动
   （推上去会用本地旧凭证覆盖远端新的）。
 
 方向判定同样按「每侧 iat 优先、无则回落该侧记录时间」（单侧回落；两侧都

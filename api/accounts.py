@@ -10,6 +10,7 @@ from services.account_export import (
     render_accounts,
 )
 from services.chatgpt_account_state import filter_accounts_by_plus_status
+from core.credential_fields import export_names as _export_names
 from typing import Optional
 from datetime import datetime, timezone
 import io, csv, json, logging
@@ -377,14 +378,11 @@ def import_accounts(
 #: JSON 导入时进 `extra` 的凭证字段（导出侧 `_render_json` 写的那几个）。
 #: `platform` / `email` / `password` / `status` / `created_at` 是账号表自己的列，
 #: 不进 extra；其余都是 extra 键 —— 与导出字段一一对应，保证往返不丢。
-#: **含 sso**（grok 主凭证）—— 整理前缺失导致 grok 账号往返丢 SSO。
+#: 凭证部分从注册表展开（`export_names()`，含 sso）—— 手写清单会漂移
+#: （整理前缺失 sso 导致 grok 账号往返丢 SSO）；`totp_secret` 非凭证字段，显式列出。
 _IMPORT_EXTRA_KEYS = (
     "totp_secret",
-    "access_token",
-    "refresh_token",
-    "id_token",
-    "session_token",
-    "sso",
+    *_export_names(),
 )
 
 

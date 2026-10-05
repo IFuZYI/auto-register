@@ -295,6 +295,31 @@ class BatchLimitContractTests(unittest.TestCase):
             "unknown_time 不是行状态，摆成筛选项会恒为 0",
         )
 
+    def test_row_tooltip_has_no_dead_unknown_time_branch(self):
+        """「对比」列 tooltip 不留 unknown_time 死分支，文案与秒级口径一致。
+
+        `unknown_time` 永远不是行状态（tests 里的 filter-bar 用例已证不可达），
+        所以 `row.state === 'unknown_time'` 的判定分支与 STATE_COLORS 里的
+        `unknown_time` 键都是死代码。文案也要跟上 c819752 的口径：两侧都能
+        解出签发时间（iat）时按秒级比较，单侧/无 iat 才回落记录时间的小时档。
+        """
+        from pathlib import Path
+
+        src = (
+            Path(__file__).resolve().parents[1]
+            / "frontend/src/components/settings/PanelComparisonPanel.tsx"
+        ).read_text(encoding="utf-8")
+        self.assertNotIn(
+            "row.state === 'unknown_time'", src,
+            "unknown_time 不是行状态，这个三元分支不可达",
+        )
+        self.assertNotIn(
+            "按小时比较（不管分秒）", src,
+            "口径已改为「两侧可解出 iat 时秒级比较」，旧文案过时",
+        )
+        # 兜底文案仍要展示两侧的小时档位（单侧/无 iat 时的依据）
+        self.assertIn("local_updated_hour", src)
+
 
 class MultiPlatformPanelTests(unittest.TestCase):
     """CPA 面板同时服务 ChatGPT 与 Grok。

@@ -51,6 +51,21 @@ def _account(**account_extra):
     )
 
 
+def _oauth_shaped_token() -> str:
+    """一段 OAuth 形态的假 JWT（三段式、payload 带 exp）—— 模拟 token 列被 AT 盖过。
+
+    与 `core.credential_fields.is_oauth_access_token` 的判据一致（带 exp/iat/iss），
+    但不依赖生产代码构造 —— 测试要能在实现坏掉时仍然造出这个输入。
+    """
+    import base64
+    import json as _json
+
+    payload = base64.urlsafe_b64encode(
+        _json.dumps({"exp": 9999999999, "sub": "x"}).encode()
+    ).rstrip(b"=").decode()
+    return f"eyJhbGciOiJSUzI1NiJ9.{payload}.signature-part"
+
+
 class UploadGrok2ApiActionTests(unittest.TestCase):
     def test_action_is_registered(self):
         ids = [a["id"] for a in _platform().get_platform_actions()]
@@ -186,6 +201,49 @@ class UploadGrok2ApiActionTests(unittest.TestCase):
         self.assertNotIn(
             "derive", explicit["kw"], "derive 参数已删除，不该再传"
         )
+
+
+class SsoTokenColumnFallbackTests(unittest.TestCase):
+    """SSO 只在 token 列时也要认 —— token 列是 grok 的 SSO 镜像。
+
+    背景：grok 注册把 SSO 写进 `token` 列（镜像规则见 `core/credential_fields`），
+    extra 里不一定有 `sso`。只读 extra 的实现在这类账号上误报「账号没有 SSO」，
+    而同一文件的 `refresh_token` 分支早就用 `token_column_credential` 兜底 ——
+    两个动作的取 SSO 口径必须一致。
+    """
+
+    def test_sso_from_token_column_is_used(self):
+        """extra 无 sso、token 列有值时：把列值当 SSO 上传，而不是误报缺 SSO。"""
+        p = _platform()
+        seen = {}
+
+        def _fake_ingest(self, sso, email, *, nsfw=True, log=None):
+            seen["sso"] = sso
+            return True, "ok"
+
+        account = _account(sso="")
+        account.token = "sso-col-value"
+        with _config_store(_CFG), patch(
+            "platforms.grok.grok2api.Grok2ApiClient.ingest_sso", _fake_ingest
+        ):
+            result = p.execute_action("upload_grok2api", account, {})
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(seen.get("sso"), "sso-col-value", "token 列的 SSO 没被用上")
+
+    def test_oauth_shaped_token_column_is_rejected(self):
+        """token 列是 OAuth 形态假 JWT（被 AT 盖过的脏值）→ 不误用，仍报缺 SSO。"""
+        p = _platform()
+        account = _account(sso="")
+        account.token = _oauth_shaped_token()
+        with _config_store(_CFG), patch(
+            "platforms.grok.grok2api.Grok2ApiClient.ingest_sso"
+        ) as ingest:
+            result = p.execute_action("upload_grok2api", account, {})
+
+        self.assertFalse(result["ok"])
+        self.assertIn("SSO", result["error"])
+        ingest.assert_not_called()
 
 
 class FromConfigPriorityTests(unittest.TestCase):

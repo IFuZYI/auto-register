@@ -888,7 +888,13 @@ class GrokPlatform(BasePlatform):
         SSO / 凭据 JSON），所以缺 SSO 直接明确报错，别让它变成一个
         语焉不详的 500。
         """
-        sso = str(extra.get("sso") or "").strip()
+        # 与 `refresh_token` 分支同款兜底：extra 无 sso 时读 token 列镜像
+        # （grok 的 token 列 = SSO 镜像；OAuth 形态脏值会被拒掉）。
+        from core.credential_fields import token_column_credential
+
+        sso = str(extra.get("sso") or "").strip() or token_column_credential(
+            account, "grok", "sso"
+        )
         if not sso:
             return {"ok": False, "error": "账号没有 SSO（grok2api 的 Web 导入需要 SSO）"}
 

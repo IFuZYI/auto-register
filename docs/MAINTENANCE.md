@@ -137,7 +137,7 @@ chatgpt2api 时漏了三处、面板页直接 404）：
 | 动作 | 实现位置 | 说明 |
 | --- | --- | --- |
 | 同步远端状态 | `services/panel_status_sync.py`（CPA 走 `services/cliproxyapi_sync.py`） | 读远端状态回写本地；CPA 必须探活（列表无状态），其余读列表自带状态 |
-| 更新远程凭证 | `POST /api/integrations/panels/{key}/push`（`services/panel_push.py`） | 推「未上传 + 本地较新」；新建式面板（sub2api/chatgpt2api）配 `_PANEL_PUSH_KIND` 与删除器 |
+| 更新远程凭证 | `POST /api/integrations/panels/{key}/push`（`services/panel_push.py`） | 推「未上传 + 本地较新」；新建式面板（sub2api/chatgpt2api）配 `_PANEL_PUSH_KIND`（`api/integrations.py`）与删除器 |
 | 更新本地凭证 | `POST /api/integrations/panels/{key}/sync`（`services/panel_sync.py`） | 拉「远端较新」 |
 
 新增面板时三处都要有对应实现（对比页按钮按 `sync_action` + 端点存在与否渲染）。
@@ -198,7 +198,8 @@ chatgpt2api 时漏了三处、面板页直接 404）：
 
 代码骨架见 [EXTENDING.md §3](EXTENDING.md)。两个必须做的动作：
 
-1. 在 `core/mailboxes/channels/__init__.py` 里 `import` 一次（触发自注册）；
+1. 在 `core/mailboxes/__init__.py` 里 `import` 一次（触发自注册；渠道包
+   `core/mailboxes/channels/__init__.py` 只维护 `__all__` 清单）；
 2. 若是依赖 `services/` 的渠道（要读库里的主号凭据），放 `modules/mail/`，
    并把模块名加进 `core/mailboxes/registry.py` 的 `_OPTIONAL_PROVIDER_MODULES`。
 
@@ -298,7 +299,9 @@ register_job("my_job", interval_seconds=lambda: ..., runner=lambda: ...)
 | `test_config_dedup_and_registration_modes.py` | 注册方式声明与运行时兜底一致 | 插件改了默认值没同步声明 |
 | `test_contrast_gate_contract.py` | 主题色板两套齐、preset 标签钉住 | 加新颜色没做对比度处理 |
 | `test_data_paths.py` | 数据路径默认落在 `data/` 下 | 新增路径常量写错基准 |
-| `test_credential_fields.py` | 凭证字段注册表（字段/别名/标签、token 列镜像、导出往返含 SSO） | 改 `core/credential_fields.py` 的字段表；消费方不再同源 |
+| `test_credential_fields.py` | 凭证字段注册表（字段/别名/标签、token 列镜像、导出往返含 SSO、启动迁移把被 AT 盖过的 grok token 列修回 SSO 镜像） | 改 `core/credential_fields.py` 的字段表；消费方不再同源 |
+| `test_panel_time_single_side.py` | 时间判定的单侧回落：一侧有 iat、另一侧回落记录时间（`mixed` 档）仍能判方向；iat 两侧可比时优先于记录时间 | 改 `compare_credential_time` 的回落口径 |
+| `test_account_status_removal.py` | 账号状态四值（registered/expired/invalid/banned）、`AccountStatus.normalize` 读侧兜底、启动迁移归一历史行并删除 `trial_end_time` 列 | 改状态枚举或删除迁移 |
 | `test_runtime_version_stamp.py` | 版本戳语义（未跟踪文件不算脏） | 改 `_read_git_version` |
 | `test_frontend_layout_contract.py::test_typescript_still_compiles` | `npx tsc -b` 0 错误 | 前端类型错误（无 node 时跳过） |
 
@@ -306,8 +309,8 @@ register_job("my_job", interval_seconds=lambda: ..., runner=lambda: ...)
 
 | 脚本 | 跑什么 |
 | --- | --- |
-| `frontend/scripts/run_account_format_checks.mjs` | `lib/accountFormat.ts` 的纯函数（24 条断言） |
-| `frontend/scripts/run_panel_filter_checks.mjs` | `lib/panelComparison.ts` 的筛选/计数（24 条断言） |
+| `frontend/scripts/run_account_format_checks.mjs` | `lib/accountFormat.ts` 的纯函数（46 条断言） |
+| `frontend/scripts/run_panel_filter_checks.mjs` | `lib/panelComparison.ts` 的筛选/计数（32 条断言） |
 | `tests/test_timezone_display.py` | 三个时区下编译并执行 `lib/time.ts` |
 
 新写前端纯逻辑时照这个模式：**逻辑放 `frontend/src/lib/`，配一个
@@ -367,7 +370,7 @@ git diff --stat
 | 面板保存成功但不生效 | 键不在 `CONFIG_KEYS` | 看 `PUT /api/config` 响应里的 `ignored` |
 | 界面永远不显示上传状态 | 动作没进 `_UPLOAD_SYNC_WRITERS` | 加一行（§2.7） |
 | 插件加了但不加载 | 不在 `SUPPORTED_PLATFORMS` | 加白名单（§2.2） |
-| 邮箱渠道「文件存在但查不到」 | 忘了 `channels/__init__.py` 里 import | 加 import（§2.4） |
+| 邮箱渠道「文件存在但查不到」 | 忘了 `core/mailboxes/__init__.py` 里 import | 加 import（§2.4） |
 | 面板对比全是「未上传 + 仅远端」 | 远端行没带 `platform` | fetcher 里打上平台（§2.1） |
 | 面板页 404「未知面板」 | `FETCHERS` 没加 | 加 fetcher（§2.1） |
 | 口令保存一次就没了 | 前端提交了空口令 | 留空 = 不修改（§2.3） |

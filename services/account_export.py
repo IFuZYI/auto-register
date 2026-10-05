@@ -148,6 +148,10 @@ def _render_csv(accounts: Sequence[Any]) -> str:
 
 
 def _render_json(accounts: Sequence[Any]) -> str:
+    # 凭证字段从注册表展开（`export_names()`）—— 手写清单会与注册表漂移
+    # （整理前正是手写清单，sso 缺失导致 grok 账号往返丢字段）。
+    from core.credential_fields import export_names
+
     rows = []
     for account in accounts:
         extra = _extra_of(account)
@@ -159,11 +163,7 @@ def _render_json(accounts: Sequence[Any]) -> str:
                     "email",
                     "password",
                     "totp_secret",
-                    "access_token",
-                    "refresh_token",
-                    "id_token",
-                    "session_token",
-                    "sso",
+                    *export_names(),
                     "status",
                     "created_at",
                 )

@@ -247,11 +247,12 @@ class ImportExportWiringTests(unittest.TestCase):
         from services.account_export import EXPORT_FIELDS, _render_json
 
         self.assertIn("sso", EXPORT_FIELDS, "导出字段表缺 sso")
-        # _render_json 的字段清单也要带上（渲染时才真正写出）
+        # `_render_json` 的字段清单从注册表展开（渲染时才真正写出）；
+        # 「输出里确实有 sso」由 ExportWiringTests 用真实渲染钉住。
         import inspect
 
         src = inspect.getsource(_render_json)
-        self.assertIn('"sso"', src, "_render_json 没有输出 sso")
+        self.assertIn("export_names", src, "_render_json 没有从注册表取凭证字段")
 
     def test_tracked_keys_are_registry_driven(self):
         """动作结果落库（api/actions）不再用手写集合 —— 走注册表归一。"""
@@ -294,6 +295,74 @@ class SsoRoundTripTests(unittest.TestCase):
         self.assertEqual(
             exported[0].get("sso"), "sso-value-1",
             "导出的 JSON 里没有 sso —— grok 账号换机器导入就丢 SSO",
+        )
+
+
+class ExportWiringTests(unittest.TestCase):
+    """导出/导入的凭证字段表**直接消费注册表**（`export_names()`）。
+
+    背景：`_render_json` 与 `_IMPORT_EXTRA_KEYS` 整理时接进了注册表，但之后
+    一直是手写 tuple —— `export_names()` 零生产消费，字段增删只在注册表改了
+    不会影响导出/导入输出（漂移会静默回归：sso 那种「往返丢字段」的 bug 就是
+    这么来的）。这两条钉住「同源」：注册表改字段，两侧自动跟上。
+    """
+
+    def test_render_json_credential_keys_come_from_registry(self):
+        """`_render_json` 输出的凭证键集合 == `export_names()`（全字段账号）。"""
+        import inspect
+        import json
+
+        from core.db.models_account import AccountModel
+        from core.credential_fields import export_names
+        from services.account_export import _render_json
+
+        model = AccountModel(
+            platform="grok", email="wiring@example.com", password="p",
+        )
+        model.set_extra({
+            "totp_secret": "TOTP-W",
+            "access_token": "at-w",
+            "refresh_token": "rt-w",
+            "id_token": "id-w",
+            "session_token": "st-w",
+            "sso": "sso-w",
+        })
+        exported = json.loads(_render_json([model]))[0]
+
+        credential_names = set(export_names())
+        present = {name for name in credential_names if name in exported}
+        self.assertEqual(
+            present, credential_names,
+            "导出的凭证键集合与注册表不一致 —— 导出没有从 export_names() 取字段",
+        )
+        # 逐个值也验一遍（键在但取值错同样算漂移）
+        self.assertEqual(exported["sso"], "sso-w")
+        self.assertEqual(exported["session_token"], "st-w")
+        # 接线检查：字段表由 export_names() 展开，而不是手写 tuple
+        # （手写清单改注册表不影响输出 = 漂移会静默回归）
+        self.assertIn(
+            "export_names", inspect.getsource(_render_json),
+            "_render_json 的凭证字段是手写清单 —— 注册表增删字段不会反映到导出",
+        )
+
+    def test_import_extra_keys_include_all_credential_names(self):
+        """`_IMPORT_EXTRA_KEYS` ⊇ `export_names()`，且 totp_secret 仍在。"""
+        import inspect
+
+        from api import accounts
+        from api.accounts import _IMPORT_EXTRA_KEYS
+        from core.credential_fields import export_names
+
+        self.assertGreaterEqual(
+            set(_IMPORT_EXTRA_KEYS), set(export_names()),
+            "导入白名单缺注册表里的凭证字段 —— 导出能写、导入会丢",
+        )
+        self.assertIn("totp_secret", _IMPORT_EXTRA_KEYS)
+        # 接线检查：白名单从注册表展开
+        block = inspect.getsource(accounts).split("_IMPORT_EXTRA_KEYS = ", 1)[1].split("\n\n\n", 1)[0]
+        self.assertIn(
+            "export_names", block,
+            "_IMPORT_EXTRA_KEYS 是手写清单 —— 注册表增删字段不会反映到导入白名单",
         )
 
 

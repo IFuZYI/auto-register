@@ -79,7 +79,6 @@ const STATE_COLORS: Record<string, string> = {
   credential_diff: 'error',
   unknown_credential: 'default',
   synced: 'success',
-  unknown_time: 'default',
 }
 
 /** 平台名 → 展示文案（CPA 这类多平台面板的对比行要标出平台）。 */
@@ -220,9 +219,7 @@ const COLUMNS: ColumnsType<ComparisonRow> = [
               ? `不同的凭证字段：${(row.credential_differences || []).join('、') || '—'}`
               : row.state === 'unknown_credential'
                 ? '远端接口不返回凭证（AT/RT），无法比对'
-                : row.state === 'unknown_time'
-                  ? '至少一边没有可用的更新时间'
-                  : `按小时比较（不管分秒）：本地 ${row.local_updated_hour || '—'} / 远端 ${row.remote_updated_hour || '—'}`
+                : `本地 ${row.local_updated_hour || '—'} / 远端 ${row.remote_updated_hour || '—'}（小时档位；两侧都能解出签发时间时按秒级比较）`
         }
       >
         <Tag color={STATE_COLORS[value] || 'default'}>{row.label}</Tag>

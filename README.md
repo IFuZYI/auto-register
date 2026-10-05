@@ -236,9 +236,9 @@ Grok 注册**只有浏览器一条路径**：x.ai 的 Cloudflare 只有 camoufox
   **同步远端状态**读远端状态回写本地（含封禁/失效判定）；**更新远程凭证**把
   「未上传 + 本地较新」的凭证推到远端（新建式面板会清理被替换的旧记录）；
   **更新本地凭证**把远端较新的凭证拉回本地。凭证不同的行只按 `time_relation`
-  走对应方向（本地较新 → 推；远端较新 → 拉；同小时/无法判定 → 都不动），
-  绝不拿旧凭证覆盖新的；谁更新**优先按凭证签发时间（JWT `iat`）**判定 ——
-  记录时间会被状态回写操作顶成噪声
+  走对应方向（本地较新 → 推；远端较新 → 拉；两侧时间相同（`time_synced`）或
+  无法判定 → 都不动），绝不拿旧凭证覆盖新的；谁更新**优先按凭证签发时间
+  （JWT `iat`）**判定 —— 记录时间会被状态回写操作顶成噪声
 - 把注册好的账号推过去（`services/external_sync.py`）
 
 | 面板 | 用途 | 项目主页 |
@@ -250,7 +250,7 @@ Grok 注册**只有浏览器一条路径**：x.ai 的 Cloudflare 只有 camoufox
 
 **对比的匹配与判定**：匹配键是 **(平台, 邮箱)**（CPA 同时托管 ChatGPT 的 `codex` 与
 Grok 的 `xai` 两类凭据）；主判据是**凭证本体是否相同**（AT/RT/session/id_token/sso），
-时间（按小时比较）降为辅助信息。
+时间（优先凭证签发时间 JWT `iat`，两侧可比时秒级；回落记录时间时小时档）降为辅助信息。
 
 **上传开关按平台分开**：CPA 的 ChatGPT 与 Grok 各自控制（`cpa_upload_chatgpt_enabled` /
 `cpa_upload_grok_enabled`）；其余面板各有自己的 `*_enabled` 开关。
@@ -417,7 +417,8 @@ data/
 ├── platforms/                平台分库（账号随平台分库）              ← 必须备份
 │   └── <platform>.db
 ├── secrets/
-│   └── credential_key        凭据加密密钥（AES-256-GCM）             ← 必须备份
+│   ├── credential_key        凭据加密密钥（AES-256-GCM）             ← 必须备份
+│   └── totp_journal/         2FA 绑定的写前密钥日志（可丢弃）
 ├── import_backups/           导入前自动留存的数据快照（可丢弃）
 └── logs/                     应用自身日志（可丢弃）
 ```

@@ -205,8 +205,9 @@ class AccountRepository:
             status = getattr(account, "status", None)
             status_value = getattr(status, "value", None) or str(status or "registered")
             # 状态精简的写侧兜底：旧客户端/旧导入文件可能提交已删除的
-            # trial / subscribed —— 落库前统一归一（读侧 AccountStatus.normalize
-            # 是第二道防线；这里保证数据本身收敛）。
+            # trial / subscribed —— 落库前统一归一。历史行由启动迁移
+            # （`_normalize_removed_account_statuses`）收敛；写侧（创建/导入/
+            # 更新）在这里归一，防止旧客户端/旧导入文件把已删值写回库。
             from core.base_platform import AccountStatus
 
             status_value = AccountStatus.normalize(status_value)

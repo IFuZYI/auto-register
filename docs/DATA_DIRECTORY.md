@@ -12,7 +12,8 @@ data/
 ├── platforms/                平台分库（DATABASE_URL_<PLATFORM> 指到这里）
 │   └── <platform>.db
 ├── secrets/
-│   └── credential_key        凭据加密密钥（AES-256-GCM）
+│   ├── credential_key        凭据加密密钥（AES-256-GCM）
+│   └── totp_journal/         2FA 绑定过程的明文密钥 journal（目录 0700 / 文件 0600；可丢弃）
 ├── import_backups/           导入备份包前自动留存的数据快照（可丢弃）
 │   └── <时间戳>-<随机后缀>-import/
 └── logs/                     应用自身日志（Turnstile solver 等）
@@ -23,6 +24,7 @@ data/
 | `account_manager.db` | 跨平台基础设施：`task_runs` / `task_logs` / `proxies` / `configs` | **必须备份** |
 | `platforms/*.db` | 各平台账号库，按需创建 | **必须备份** |
 | `secrets/credential_key` | 加密账号凭据的密钥 | **必须备份**，丢了凭据全废 |
+| `secrets/totp_journal/` | 2FA 绑定过程的写前密钥日志（明文；目录 0700 / 文件 0600）。密钥入库后自动清理，未入库条目在启动时补写 | 可丢弃（不进备份包） |
 | `import_backups/` | 每次导入前自动留存的一份快照（用于回退） | 可丢弃（占用随时间累积，可手动清） |
 | `logs/` | 应用自身运行日志（Turnstile solver 等） | 可丢弃 |
 
