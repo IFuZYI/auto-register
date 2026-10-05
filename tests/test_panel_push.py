@@ -235,5 +235,49 @@ class GrokUploadConfigFallbackTests(unittest.TestCase):
         )
 
 
+def _jwt_with_iat(iat: int) -> str:
+    import base64
+    import json
+
+    payload = (
+        base64.urlsafe_b64encode(json.dumps({"iat": iat}).encode("utf-8"))
+        .decode("ascii")
+        .rstrip("=")
+    )
+    return f"h.{payload}.s"
+
+
+def _epoch(*args) -> int:
+    return int(datetime(*args, tzinfo=timezone.utc).timestamp())
+
+
+class PlanPushCredentialTimeTests(unittest.TestCase):
+    """方向判定优先按凭证签发时间（iat）—— 记录时间会被状态同步顶掉。"""
+
+    def test_credential_time_beats_record_time(self):
+        """记录时间说远端新（噪声），凭证说本地新 → 仍应推。"""
+        local = {"access_token": _jwt_with_iat(_epoch(2026, 10, 5, 1, 18))}
+        remote = RemoteAccount(
+            email="a@x.com", platform="grok", remote_id="r-1",
+            updated_at=datetime(2026, 10, 5, 3, 0, tzinfo=timezone.utc),
+            credentials={"access_token": _jwt_with_iat(_epoch(2026, 10, 4, 21, 26))},
+        )
+        outcome = plan_push(local, remote, local_updated=_utc(2026, 10, 5, 0, 30))
+        self.assertTrue(outcome.push)
+        self.assertEqual(outcome.reason, "local_newer")
+
+    def test_same_hour_issuance_is_not_pushed(self):
+        """凭证同小时签发 → 分秒是噪声，不动（即使记录时间说本地新）。"""
+        local = {"access_token": _jwt_with_iat(_epoch(2026, 10, 5, 1, 50))}
+        remote = RemoteAccount(
+            email="a@x.com", platform="grok", remote_id="r-1",
+            updated_at=datetime(2026, 10, 5, 1, 0, tzinfo=timezone.utc),
+            credentials={"access_token": _jwt_with_iat(_epoch(2026, 10, 5, 1, 5))},
+        )
+        outcome = plan_push(local, remote, local_updated=_utc(2026, 10, 5, 3, 37))
+        self.assertFalse(outcome.push)
+        self.assertEqual(outcome.reason, "time_synced")
+
+
 if __name__ == "__main__":
     unittest.main()

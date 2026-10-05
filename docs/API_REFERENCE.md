@@ -432,10 +432,12 @@ iCloud 业务错误不使用 `401`，以免被前端误判为面板登录过期�
   "cached": false,
   "summary": {"local_only": 1, "remote_only": 2, "synced": 1, "local_newer": 1,
               "remote_newer": 0, "unknown_time": 0, "total": 5},
-  "rows": [{"email": "a@b.c", "state": "local_newer", "label": "本地较新",
+  "rows": [{"email": "a@b.c", "state": "credential_diff", "label": "凭证不同",
             "local_updated_at": "2026-10-01T21:00:00+00:00", "local_updated_hour": "2026-10-01T21:00Z",
             "remote_updated_at": "2026-10-01T19:00:00+00:00", "remote_updated_at_raw": "2026-10-02T03:00:00+08:00",
             "remote_updated_hour": "2026-10-01T19:00Z", "remote_status": "active",
+            "credential_differences": ["access_token"], "credential_compared": 2,
+            "time_relation": "local_newer", "time_basis": "credential",
             "differences": [], "remote_extra": {}}],
   "remote_error": "",
   "local_count": 3,
@@ -445,8 +447,12 @@ iCloud 业务错误不使用 `401`，以免被前端误判为面板登录过期�
 
 口径要点：
 
-- **时间按小时比**（`local_newer` / `remote_newer` / `synced`）：同一小时内两边各
-  动过一次不算谁新 —— 分秒差异是噪声。
+- **时间判定分两层**（`time_relation`：local_newer / remote_newer / time_synced）：
+  优先按**凭证签发时间**（JWT `iat`，取每侧最新签发的一个字段）比较 ——
+  记录更新时间会被「同步远端状态」等回写操作 touch 成噪声（实测把 10 个远端
+  较新的账号顶成本地较新，方向判反）；凭证解不出 iat 时回落记录更新时间，
+  都按小时粒度比（同一小时内不算谁新）。行上的 `time_basis` 标明用了哪种
+  （`credential` / `record`）。
 - 两边时间都**归一成 UTC** 再给前端（远端原始串可能带 `+08:00`）；原始串留在
   `remote_updated_at_raw` 供 tooltip 显示。
 - `state=local_only` = 本地有、远端没有 = **未上传**；`remote_only` = 远端多出来的。
@@ -454,8 +460,9 @@ iCloud 业务错误不使用 `401`，以免被前端误判为面板登录过期�
   两边都有值的 `access_token` / `refresh_token` / `session_token` / `id_token` /
   `sso` 全部相同 → `synced`；有任一不同 → `credential_diff`（列出字段）；
   远端接口不返回凭证 → `unknown_credential`（**不能当已同步**，那会给出错误的安全感）。
-- 时间只作**辅助信息**（`time_relation`：local_newer / remote_newer / time_synced），
-  凭证不同时用来说明是哪边动的。
+- 时间只作**辅助信息**（`time_relation`：local_newer / remote_newer / time_synced，
+  依据见上行；`time_basis` 标明比较基准），凭证不同时用来说明是哪边动的，
+  并给「更新本地 / 更新远程」的动作面做方向判定。
 - **远端拉不到不是错误**：本地账号照常返回，`remote_error` 说明原因。
 - 结果缓存 60 秒（`services/panel_comparison_cache.py`）；失败结果按 5 秒短 TTL
   （一次抖动不该被钉在界面上整整一分钟）；`?refresh=1` 绕过。
@@ -469,6 +476,10 @@ iCloud 业务错误不使用 `401`，以免被前端误判为面板登录过期�
   `id_token` / `sso`，本地其它字段保留）；
 - 本地较新 / 同小时 / 无法判定时间 / 远端没有凭证 → 不动（保守，不拿不确定
   的数据覆盖本地）。
+
+方向判定优先按**凭证签发时间**（JWT `iat`）；凭证解不出 iat 时回落记录更新
+时间。原因：记录时间会被「同步远端状态」等回写操作 touch 成噪声（实测把
+10 个远端较新的账号顶成本地较新，导致拉不回新鲜的 AT/RT）。
 
 可选查询参数 `platform`（`chatgpt` / `grok`）：多平台面板（CPA）用 —— 界面上的
 平台筛选只作用在前端，用户筛了 Grok 再点同步时后端必须按同一口径过滤，否则
@@ -496,6 +507,9 @@ remote_error}`；`reason` ∈ `synced` / `local_newer` / `remote_newer` /
 - 凭证不同且**本地较新** → 推送；
 - 远端较新 / 同小时 / 无法判定时间 / 凭证相同 / 无法比对 → 不动
   （推上去会用本地旧凭证覆盖远端新的）。
+
+方向判定同样优先按**凭证签发时间**（JWT `iat`）—— 记录时间被状态回写 touch
+后会判反（实测把本地旧凭证的行顶成「本地较新」，会把死凭证推上去）。
 
 查询参数：
 

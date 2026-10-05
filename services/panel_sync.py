@@ -32,6 +32,8 @@ from typing import Any, Optional
 from services.panel_comparison import (
     CREDENTIAL_FIELDS,
     RemoteAccount,
+    compare_by_hour,
+    compare_credential_time,
     compare_credentials,
     parse_timestamp,
 )
@@ -93,8 +95,10 @@ def plan_sync(
 ) -> SyncOutcome:
     """决定这个账号该不该从远端拉凭证（纯函数，不落库）。
 
-    规则见模块 docstring。时间用 `parse_timestamp` 归一后比 epoch ——
-    远端时区与本地不同（`+08:00` vs UTC），比字符串会得出错误结论。
+    规则见模块 docstring。方向判定优先按**凭证签发时间**（JWT `iat`）——
+    记录时间会被「同步远端状态」等操作 touch 成噪声（实测把 10 个远端较新的
+    账号顶成本地较新，导致拉不回）。凭证解不出 iat 时回落记录时间，比较前
+    先归一（远端时区与本地不同，`+08:00` vs UTC）。
     """
     email = str(remote.email or "")
     platform = str(remote.platform or "")
@@ -110,13 +114,22 @@ def plan_sync(
         outcome.reason = "synced"
         return outcome
 
-    # 凭证不同：按时间决定方向。远端时间缺失 → 不动（保守）。
-    local_time = parse_timestamp(local_updated) if local_updated else None
-    remote_time = remote.updated_at
-    if remote_time is None:
-        outcome.reason = "unknown_time"
+    # 凭证不同：按时间决定方向。优先凭证签发时间，解不出回落记录时间。
+    relation = compare_credential_time(local_extra, remote_creds)
+    if not relation:
+        local_time = parse_timestamp(local_updated) if local_updated else None
+        remote_time = remote.updated_at
+        if remote_time is None:
+            outcome.reason = "unknown_time"
+            return outcome
+        if local_time is None:
+            outcome.reason = "unknown_time"
+            return outcome
+        relation = compare_by_hour(local_time, remote_time)
+    if relation == "time_synced":
+        outcome.reason = "time_synced"
         return outcome
-    if local_time is not None and local_time >= remote_time:
+    if relation == "local_newer":
         outcome.reason = "local_newer"
         return outcome
 

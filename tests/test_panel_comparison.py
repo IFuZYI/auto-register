@@ -16,6 +16,7 @@ from services.panel_comparison import (
     STATE_UNKNOWN_TIME,
     build_comparison,
     compare_by_hour,
+    compare_credential_time,
     compare_credentials,
     diff_fields,
     hour_bucket,
@@ -27,6 +28,24 @@ from services.panel_comparison_cache import clear_cache, get_panel_comparison
 
 def _dt(text: str) -> datetime:
     return parse_timestamp(text)
+
+
+def _jwt_with_iat(iat: int) -> str:
+    """造一个带 `iat` 的 JWT 形状 token（对比只解 payload，不验签）。"""
+    import base64
+    import json
+
+    payload = (
+        base64.urlsafe_b64encode(json.dumps({"iat": iat, "sub": "u-1"}).encode("utf-8"))
+        .decode("ascii")
+        .rstrip("=")
+    )
+    return f"h.{payload}.s"
+
+
+def _epoch(*args) -> int:
+    """构造 epoch 秒（测试里写「几点几分」比裸数字可读）。"""
+    return int(datetime(*args, tzinfo=timezone.utc).timestamp())
 
 
 class ParseTimestampTests(unittest.TestCase):
@@ -699,6 +718,98 @@ class LegacyTokenColumnTests(unittest.TestCase):
         )
         self.assertEqual(state2, "credential_diff")
         self.assertIn("access_token", changed)
+
+
+class CredentialTimeRelationTests(unittest.TestCase):
+    """谁更新：优先按凭证**签发时间**（JWT `iat`）判定。
+
+    背景（实测）：grok2api 面板 10 个账号的行更新时间被「同步远端状态」顶到
+    本地较新，而凭证实际是远端新（本地 AT 已过期、远端是新签发的）—— 按记录
+    时间判方向会把「更新本地」判成不该拉。凭证签发时间是更可信的信号。
+    """
+
+    def test_newer_remote_issuance_wins(self):
+        local = {"access_token": _jwt_with_iat(_epoch(2026, 10, 4, 21, 26))}
+        remote = {"access_token": _jwt_with_iat(_epoch(2026, 10, 5, 1, 18))}
+        self.assertEqual(compare_credential_time(local, remote), "remote_newer")
+
+    def test_newer_local_issuance_wins(self):
+        local = {"access_token": _jwt_with_iat(_epoch(2026, 10, 5, 1, 18))}
+        remote = {"access_token": _jwt_with_iat(_epoch(2026, 10, 4, 21, 26))}
+        self.assertEqual(compare_credential_time(local, remote), "local_newer")
+
+    def test_same_hour_issuance_is_time_synced(self):
+        """同一小时内两边各签发过一次 → 分秒是噪声，不算谁新。"""
+        local = {"access_token": _jwt_with_iat(_epoch(2026, 10, 5, 1, 5))}
+        remote = {"access_token": _jwt_with_iat(_epoch(2026, 10, 5, 1, 50))}
+        self.assertEqual(compare_credential_time(local, remote), "time_synced")
+
+    def test_missing_iat_on_either_side_has_no_verdict(self):
+        """一边解不出 iat → 没有结论（回落记录时间由调用方做）。"""
+        jwt = _jwt_with_iat(_epoch(2026, 10, 5, 1, 0))
+        self.assertEqual(compare_credential_time({"access_token": "opaque"}, {"access_token": jwt}), "")
+        self.assertEqual(compare_credential_time({"access_token": jwt}, {"access_token": "opaque"}), "")
+        self.assertEqual(compare_credential_time({}, {}), "")
+
+    def test_newest_field_wins_on_each_side(self):
+        """每侧取最新签发的一个 —— id_token 是登录时签的（旧），AT 是刷新后的（新）。"""
+        local = {
+            "access_token": _jwt_with_iat(_epoch(2026, 10, 5, 3, 0)),
+            "id_token": _jwt_with_iat(_epoch(2026, 10, 4, 13, 0)),
+        }
+        remote = {"access_token": _jwt_with_iat(_epoch(2026, 10, 5, 1, 0))}
+        self.assertEqual(compare_credential_time(local, remote), "local_newer")
+
+
+class BuildComparisonCredentialTimeTests(unittest.TestCase):
+    """行上的 `time_relation` / `time_basis`：凭证签发时间优先、记录时间兜底。"""
+
+    def test_credential_time_beats_record_time(self):
+        """记录时间说本地新（状态同步噪声），凭证说远端新 → 用凭证的。"""
+        local = [{
+            "id": 1, "email": "a@example.com", "status": "registered",
+            "updated_at": "2026-10-05T03:37:00+00:00",
+            "extra": {"access_token": _jwt_with_iat(_epoch(2026, 10, 4, 21, 26))},
+        }]
+        remote = [RemoteAccount(
+            email="a@example.com",
+            updated_at=parse_timestamp("2026-10-04T15:30:00+00:00"),
+            credentials={"access_token": _jwt_with_iat(_epoch(2026, 10, 5, 1, 18))},
+        )]
+        row = build_comparison(local, remote)[0]
+        self.assertEqual(row.state, STATE_CREDENTIAL_DIFF)
+        self.assertEqual(row.time_relation, "remote_newer")
+        self.assertEqual(row.time_basis, "credential")
+
+    def test_record_time_is_the_fallback(self):
+        local = [{
+            "id": 1, "email": "a@example.com", "status": "registered",
+            "updated_at": "2026-10-04T04:10:00+00:00",
+            "extra": {"access_token": "opaque-local"},
+        }]
+        remote = [RemoteAccount(
+            email="a@example.com",
+            updated_at=parse_timestamp("2026-10-04T09:50:00+00:00"),
+            credentials={"access_token": "opaque-remote"},
+        )]
+        row = build_comparison(local, remote)[0]
+        self.assertEqual(row.time_relation, "remote_newer")
+        self.assertEqual(row.time_basis, "record")
+
+    def test_payload_carries_the_basis(self):
+        local = [{
+            "id": 1, "email": "a@example.com", "status": "registered",
+            "updated_at": "2026-10-05T03:37:00+00:00",
+            "extra": {"access_token": _jwt_with_iat(_epoch(2026, 10, 4, 21, 26))},
+        }]
+        remote = [RemoteAccount(
+            email="a@example.com",
+            updated_at=parse_timestamp("2026-10-04T15:30:00+00:00"),
+            credentials={"access_token": _jwt_with_iat(_epoch(2026, 10, 5, 1, 18))},
+        )]
+        payload = build_comparison(local, remote)[0].to_dict()
+        self.assertEqual(payload["time_basis"], "credential")
+        self.assertEqual(payload["time_relation"], "remote_newer")
 
 
 if __name__ == "__main__":

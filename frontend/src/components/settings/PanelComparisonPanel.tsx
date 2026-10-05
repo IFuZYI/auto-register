@@ -51,6 +51,8 @@ interface ComparisonRow {
   credential_compared: number
   /** 谁更新（按小时）：local_newer / remote_newer / time_synced / '' */
   time_relation: string
+  /** time_relation 的依据：credential（凭证签发时间）/ record（记录时间）/ '' */
+  time_basis: string
 }
 
 interface ComparisonPayload {
@@ -306,7 +308,7 @@ const COLUMNS: ColumnsType<ComparisonRow> = [
     title: '时间',
     dataIndex: 'time_relation',
     width: 110,
-    render: (value: string) => {
+    render: (value: string, row) => {
       const labels: Record<string, string> = {
         local_newer: '本地较新',
         remote_newer: '远端较新',
@@ -314,8 +316,12 @@ const COLUMNS: ColumnsType<ComparisonRow> = [
       }
       const text = labels[value] || ''
       if (!text) return <span style={{ color: 'var(--text-muted)', fontSize: 12 }}>—</span>
+      const basisTip =
+        row.time_basis === 'credential'
+          ? '按凭证签发时间（JWT iat）比较 —— 记录时间会被状态回写等操作顶成噪声'
+          : '按记录更新时间比较（凭证解不出签发时间时的兜底）'
       return (
-        <Tooltip title="按小时比较（不管分秒），辅助判断是哪边动的">
+        <Tooltip title={basisTip}>
           <span style={{ fontSize: 12 }}>{text}</span>
         </Tooltip>
       )

@@ -243,5 +243,65 @@ class SyncBatchTests(unittest.TestCase):
         self.assertEqual(summary["items"][0]["reason"], "synced")
 
 
+def _jwt_with_iat(iat: int) -> str:
+    import base64
+    import json
+
+    payload = (
+        base64.urlsafe_b64encode(json.dumps({"iat": iat}).encode("utf-8"))
+        .decode("ascii")
+        .rstrip("=")
+    )
+    return f"h.{payload}.s"
+
+
+def _epoch(*args) -> int:
+    return int(datetime(*args, tzinfo=timezone.utc).timestamp())
+
+
+class PlanSyncCredentialTimeTests(unittest.TestCase):
+    """方向判定优先按凭证签发时间（iat）—— 记录时间会被状态同步顶掉。"""
+
+    def test_credential_time_beats_record_time(self):
+        """记录时间说本地新（状态同步噪声），凭证说远端新 → 仍应拉回。"""
+        local = {"access_token": _jwt_with_iat(_epoch(2026, 10, 4, 21, 26))}
+        remote = RemoteAccount(
+            email="a@x.com", platform="grok",
+            updated_at=datetime(2026, 10, 4, 15, 30, tzinfo=timezone.utc),
+            credentials={"access_token": _jwt_with_iat(_epoch(2026, 10, 5, 1, 18))},
+        )
+        outcome = plan_sync(local, remote, local_updated=_utc(2026, 10, 5, 3, 37))
+        self.assertTrue(outcome.pulled)
+        self.assertEqual(outcome.reason, "remote_newer")
+
+    def test_same_hour_issuance_is_not_pulled(self):
+        """凭证同小时签发 → 分秒是噪声，不动（即使记录时间说远端新）。"""
+        local = {"access_token": _jwt_with_iat(_epoch(2026, 10, 5, 1, 5))}
+        remote = RemoteAccount(
+            email="a@x.com", platform="grok",
+            updated_at=datetime(2026, 10, 5, 6, 0, tzinfo=timezone.utc),
+            credentials={"access_token": _jwt_with_iat(_epoch(2026, 10, 5, 1, 50))},
+        )
+        outcome = plan_sync(local, remote, local_updated=_utc(2026, 10, 4, 23, 0))
+        self.assertFalse(outcome.pulled)
+        self.assertEqual(outcome.reason, "time_synced")
+
+    def test_missing_local_record_time_is_conservative(self):
+        """本地记录时间缺失（凭证也解不出 iat）→ 不动（无法判定方向）。
+
+        模块 docstring 的口径是「无法判定 → 不动（不拿不确定的数据覆盖本地）」
+        —— 旧实现对 `local_time is None` 放行（当成远端较新直接拉），与文档不符。
+        """
+        local = {"access_token": "opaque-local"}
+        remote = RemoteAccount(
+            email="a@x.com", platform="grok",
+            updated_at=datetime(2026, 10, 4, 15, 30, tzinfo=timezone.utc),
+            credentials={"access_token": "opaque-remote"},
+        )
+        outcome = plan_sync(local, remote, local_updated=None)
+        self.assertFalse(outcome.pulled)
+        self.assertEqual(outcome.reason, "unknown_time")
+
+
 if __name__ == "__main__":
     unittest.main()

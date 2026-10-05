@@ -9,6 +9,10 @@
    全相同 → `synced`（已同步）；有任一不同 → `credential_diff`（凭证不同）。
 2. **谁更新（辅助信息）** —— 凭证不同时，再用时间戳说清是哪边动的（按小时比，
    分秒是噪声）。时间只作展示与排序，不再单独决定「同步」与否。
+   **优先按凭证签发时间**（JWT `iat`，`compare_credential_time`）—— 记录
+   更新时间会被「同步远端状态」等回写操作 touch 成噪声（实测把 10 个远端较新
+   的账号顶成本地较新，方向判反）；凭证解不出 iat 时回落记录时间
+   （`compare_by_hour`），行上的 `time_basis` 标明用了哪种。
 
 - 两边的时间戳格式不统一（远端 `last_refresh` 是 `+08:00` 带偏移的字符串，
   本地 `updated_at` 是 UTC datetime），必须先归一成 epoch 再比。
@@ -182,6 +186,50 @@ def compare_by_hour(local_time: Optional[datetime], remote_time: Optional[dateti
     return "local_newer" if local_hour > remote_hour else "remote_newer"
 
 
+def _latest_issuance(extra: dict[str, Any]) -> Optional[datetime]:
+    """一组凭证里**最新**的签发时间（JWT `iat`），取不出返回 None。
+
+    每侧取最新的一个字段：`id_token` 是登录时签的（旧），`access_token`
+    是每次刷新后重签的（新）—— 谁最后刷新，谁的那侧就更新。
+    """
+    from services.chatgpt_token_lifecycle import decode_jwt_claims
+
+    newest: Optional[datetime] = None
+    for aliases in CREDENTIAL_FIELDS:
+        value = _first_present(extra, aliases)
+        if not value:
+            continue
+        claims = decode_jwt_claims(value)
+        iat = claims.get("iat")
+        try:
+            issued = _from_epoch(int(iat)) if iat is not None else None
+        except (TypeError, ValueError):
+            issued = None
+        if issued is not None and (newest is None or issued > newest):
+            newest = issued
+    return newest
+
+
+def compare_credential_time(local: dict[str, Any], remote: dict[str, Any]) -> str:
+    """按凭证**签发时间**（JWT `iat`）比先后 —— 比记录时间更可信。
+
+    返回 `local_newer` / `remote_newer` / `time_synced` / `""`（无结论）。
+    一边解不出 iat 就返回空串：调用方回落到记录时间（`compare_by_hour`）。
+
+    为什么需要它（实测 2026-10-05）：grok2api 面板 10 个账号的**行更新时间**
+    被「同步远端状态」顶到了本地较新（状态回写会 touch `updated_at`），而
+    凭证实际是远端新（本地 AT 已过期、远端是刚签发的）—— 只看记录时间会把
+    方向判反：「更新本地」不动、「更新远程」反而拿本地旧凭证去覆盖远端新的。
+    """
+    local_extra = local if isinstance(local, dict) else {}
+    remote_extra = remote if isinstance(remote, dict) else {}
+    local_issued = _latest_issuance(local_extra)
+    remote_issued = _latest_issuance(remote_extra)
+    if local_issued is None or remote_issued is None:
+        return ""
+    return compare_by_hour(local_issued, remote_issued)
+
+
 def hour_bucket(value: Optional[datetime]) -> str:
     """时间的小时档位（`2026-03-31T04:00Z`），给前端展示"以小时为单位"的对比。"""
     if value is None:
@@ -256,7 +304,10 @@ class ComparisonRow:
     #: 凭证实际比了几个字段（0 = 比不了，见 STATE_UNKNOWN_CREDENTIAL）
     credential_compared: int = 0
     #: 谁更新（按小时，辅助信息）：local_newer / remote_newer / time_synced / ""
+    #: 优先按凭证签发时间（iat）判定，解不出时回落到记录时间。
     time_relation: str = ""
+    #: time_relation 的依据：`credential`（凭证签发时间）/ `record`（记录时间）/ ""
+    time_basis: str = ""
 
     @property
     def label(self) -> str:
@@ -286,6 +337,7 @@ class ComparisonRow:
             "credential_differences": self.credential_differences,
             "credential_compared": self.credential_compared,
             "time_relation": self.time_relation,
+            "time_basis": self.time_basis,
         }
 
 
@@ -397,8 +449,16 @@ def build_comparison(
         row.credential_differences = credential_diff
         row.credential_compared = _count_compared(extra, remote.credentials)
         row.state = credential_state
-        # 辅助信息：凭证不同时，时间说明是哪边动的（按小时）
-        row.time_relation = compare_by_hour(local_updated, remote.updated_at)
+        # 辅助信息：凭证不同时，时间说明是哪边动的（按小时）。
+        # 优先按凭证签发时间（iat）判定 —— 记录时间会被「同步远端状态」等
+        # 操作 touch 成噪声（实测 10 个账号被顶成本地较新，而凭证是远端新）。
+        cred_relation = compare_credential_time(extra, remote.credentials)
+        if cred_relation:
+            row.time_relation = cred_relation
+            row.time_basis = "credential"
+        else:
+            row.time_relation = compare_by_hour(local_updated, remote.updated_at)
+            row.time_basis = "record"
         rows.append(row)
 
     # 远端多出来的（本地没有）
