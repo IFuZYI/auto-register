@@ -265,7 +265,12 @@ def _persist_push_results(panel_key: str, items: list[dict]) -> None:
     for item in items:
         if not item.get("push"):
             continue  # 跳过的没发生任何事，不留痕
-        email = str(item.get("email") or "").strip()
+        # 归一邮箱：远端返回的大小写可能与本地行不同（本地行经仓储统一为
+        # 小写），不归一会精确匹配失败、静默不落库（实测 'User@X.com' 查
+        # 'user@x.com' 落空）。
+        from core.db import normalize_email
+
+        email = normalize_email(str(item.get("email") or ""))
         platform = str(item.get("platform") or "").strip().lower()
         if not email or not platform:
             continue

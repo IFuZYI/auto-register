@@ -156,5 +156,147 @@ class PushPersistsSyncStatusTests(unittest.TestCase):
         self.assertIsNone(state, f"跳过行不该写状态（实际：{state}）")
 
 
+class PushPersistsWritersBranchTests(unittest.TestCase):
+    """writers 分支（cpa / sub2api / chatgpt2api 走 update_account_model_*_sync）。
+
+    覆盖缺口（最终审查实测）：把 writers 分支整段禁用后全量测试无一变红 ——
+    cpa 路径的落库正确性只能靠人工验证。这里补一条 cpa 用例钉住。
+    """
+
+    def _client(self):
+        import main as main_mod
+        from fastapi.testclient import TestClient
+
+        return TestClient(main_mod.app)
+
+    def _make_chatgpt_account(self, email: str) -> int:
+        from core.db import AccountModel, platform_session
+
+        with platform_session("chatgpt") as session:
+            row = AccountModel(platform="chatgpt", email=email, password="pw", status="registered")
+            row.set_extra({"access_token": "at-value"})
+            session.add(row)
+            session.commit()
+            session.refresh(row)
+            if row.id is None:
+                raise RuntimeError("账号未落库")
+            return row.id
+
+    def _extra_of(self, email: str) -> dict:
+        from core.db import AccountModel, platform_session
+        from sqlmodel import select
+
+        with platform_session("chatgpt") as session:
+            row = session.exec(
+                select(AccountModel).where(AccountModel.email == email)
+            ).first()
+            return row.get_extra() if row else {}
+
+    def test_cpa_failed_push_persists_sync_status(self):
+        """CPA 推送失败 → sync_statuses.cpa 落库（last_attempt_ok=False）。
+
+        用「未配置 CPA」触发失败（上传器直接返回 False），不需要 mock 网络。
+        """
+        email = "push-cpa-fail@example.com"
+        account_id = self._make_chatgpt_account(email)
+        local_rows = [_row(
+            account_id, email, "chatgpt",
+            datetime(2026, 10, 4, 12, tzinfo=timezone.utc),
+            {"access_token": "at-value"},
+        )]
+
+        with mock.patch(
+            "services.panel_comparison_cache.fetch_panel_raw",
+            return_value=(local_rows, [], ""),
+        ), mock.patch(
+            "services.chatgpt_sync.upload_proxy_for",
+            return_value="",
+        ), mock.patch(
+            "platforms.chatgpt.cpa_upload.upload_to_cpa",
+            return_value=(False, "CPA 未配置"),
+        ):
+            with self._client() as client:
+                r = client.post("/api/integrations/panels/cpa/push")
+
+        self.assertEqual(r.status_code, 200, r.text[:300])
+        self.assertEqual(r.json()["failed"], 1)
+
+        state = (self._extra_of(email).get("sync_statuses") or {}).get("cpa") or {}
+        self.assertIn("last_attempt_ok", state, f"cpa 失败推送没落库（实际：{state}）")
+        self.assertFalse(state.get("last_attempt_ok"))
+        self.assertIn("未配置", str(state.get("last_message") or ""))
+
+
+class PushPersistEmailNormalizationTests(unittest.TestCase):
+    """落库定位要过 `normalize_email`。
+
+    远端返回的邮箱大小写可能与本地行不同（本地行经仓储统一为小写）；
+    不过归一就精确匹配失败、静默不落库（实测：'User@X.com' 查 'user@x.com'
+    落空）。
+    """
+
+    def _client(self):
+        import main as main_mod
+        from fastapi.testclient import TestClient
+
+        return TestClient(main_mod.app)
+
+    def test_mixed_case_remote_email_still_persists(self):
+        from core.db import AccountModel, platform_session
+        from sqlmodel import select
+
+        email = "push-case@example.com"
+        with platform_session("grok") as session:
+            row = AccountModel(platform="grok", email=email, password="pw", status="registered")
+            row.set_extra({"sso": "sso-value"})
+            session.add(row)
+            session.commit()
+            session.refresh(row)
+            account_id = row.id
+
+        # 远端返回混合大小写邮箱（本地行是小写）
+        local_rows = [_row(
+            account_id, email, "grok",
+            datetime(2026, 10, 4, 12, tzinfo=timezone.utc),
+            {"sso": "sso-value"},
+        )]
+
+        from services.panel_comparison import RemoteAccount
+
+        remote = [RemoteAccount(
+            email="Push-Case@Example.COM", platform="grok", remote_id="r-1",
+            updated_at=datetime(2026, 10, 4, 10, tzinfo=timezone.utc),
+            credentials={"sso_token": "old"},
+        )]
+
+        fake_client = mock.Mock()
+        fake_client.configured = True
+        fake_client.ingest_sso.return_value = (True, "已接入")
+
+        with mock.patch(
+            "services.panel_comparison_cache.fetch_panel_raw",
+            return_value=(local_rows, remote, ""),
+        ), mock.patch(
+            "platforms.grok.grok2api.Grok2ApiClient.from_config",
+            return_value=fake_client,
+        ):
+            with self._client() as client:
+                r = client.post("/api/integrations/panels/grok2api/push")
+
+        self.assertEqual(r.status_code, 200, r.text[:300])
+
+        with platform_session("grok") as session:
+            row = session.exec(
+                select(AccountModel).where(AccountModel.email == email)
+            ).first()
+            if row is None:
+                raise RuntimeError("账号行丢失")
+            state = (row.get_extra().get("sync_statuses") or {}).get("grok2api") or {}
+        self.assertTrue(
+            state.get("last_attempt_ok"),
+            f"远端混合大小写邮箱导致落库失败（实际：{state}）",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
