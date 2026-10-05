@@ -53,6 +53,10 @@ interface ComparisonRow {
   time_relation: string
   /** time_relation 的依据：credential（凭证签发时间）/ record（记录时间）/ '' */
   time_basis: string
+  /** 本地 AT 生成时间（JWT iat）—— 「本地更新时间」列显示它，空则回落记录时间 */
+  local_credential_issued_at: string
+  /** 远端 AT 生成时间（JWT iat）—— 「远端更新时间」列显示它，空则回落记录时间 */
+  remote_credential_issued_at: string
 }
 
 interface ComparisonPayload {
@@ -226,32 +230,52 @@ const COLUMNS: ColumnsType<ComparisonRow> = [
     ),
   },
   {
+    // 显示 **AT 生成时间**（JWT iat）—— 记录更新时间会被「同步远端状态」等
+    // 回写操作 touch 成噪声，AT 生成时间才是「凭证什么时候生成的」真实口径
+    // （与方向判定的 time_relation 同一来源）。解不出 iat 时回落记录时间。
     title: '本地更新时间',
     dataIndex: 'local_updated_at',
     width: 150,
-    render: (value: string, row) => (
-      <Tooltip
-        title={`本地库写的是 UTC，这里按浏览器本地时区（${localTimezoneLabel()}）显示${
-          row.local_updated_hour ? `；小时档位 ${row.local_updated_hour}` : ''
-        }`}
-      >
-        <span style={{ fontSize: 12 }}>{shortTime(value)}</span>
-      </Tooltip>
-    ),
+    render: (value: string, row) => {
+      const issued = row.local_credential_issued_at || ''
+      const shown = issued || value
+      return (
+        <Tooltip
+          title={
+            issued
+              ? `本地 AT 生成时间（JWT iat）；按浏览器本地时区（${localTimezoneLabel()}）显示`
+              : `本地没有可解析的 AT 生成时间，显示记录更新时间；按浏览器本地时区（${localTimezoneLabel()}）显示${
+                  row.local_updated_hour ? `；小时档位 ${row.local_updated_hour}` : ''
+                }`
+          }
+        >
+          <span style={{ fontSize: 12 }}>{shortTime(shown)}</span>
+        </Tooltip>
+      )
+    },
   },
   {
+    // 同上：优先远端 AT 生成时间，解不出时回落远端记录更新时间。
     title: '远端更新时间',
     dataIndex: 'remote_updated_at',
     width: 150,
-    render: (value: string, row) => (
-      <Tooltip
-        title={`远端面板服务器时区可能不同，已归一；这里按浏览器本地时区（${localTimezoneLabel()}）显示${
-          row.remote_updated_at_raw ? `；远端原始值：${row.remote_updated_at_raw}` : ''
-        }`}
-      >
-        <span style={{ fontSize: 12 }}>{shortTime(value)}</span>
-      </Tooltip>
-    ),
+    render: (value: string, row) => {
+      const issued = row.remote_credential_issued_at || ''
+      const shown = issued || value
+      return (
+        <Tooltip
+          title={
+            issued
+              ? `远端 AT 生成时间（JWT iat）；按浏览器本地时区（${localTimezoneLabel()}）显示`
+              : `远端没有可解析的 AT 生成时间，显示记录更新时间（远端面板服务器时区已归一）；按浏览器本地时区（${localTimezoneLabel()}）显示${
+                  row.remote_updated_at_raw ? `；远端原始值：${row.remote_updated_at_raw}` : ''
+                }`
+          }
+        >
+          <span style={{ fontSize: 12 }}>{shortTime(shown)}</span>
+        </Tooltip>
+      )
+    },
   },
   {
     title: '远端信息',

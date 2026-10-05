@@ -438,6 +438,8 @@ iCloud 业务错误不使用 `401`，以免被前端误判为面板登录过期�
             "remote_updated_hour": "2026-10-01T19:00Z", "remote_status": "active",
             "credential_differences": ["access_token"], "credential_compared": 2,
             "time_relation": "local_newer", "time_basis": "credential",
+            "local_credential_issued_at": "2026-10-01T21:00:00+00:00",
+            "remote_credential_issued_at": "2026-10-01T19:00:00+00:00",
             "differences": [], "remote_extra": {}}],
   "remote_error": "",
   "local_count": 3,
@@ -455,6 +457,10 @@ iCloud 业务错误不使用 `401`，以免被前端误判为面板登录过期�
   （`credential` / `record`）。
 - 两边时间都**归一成 UTC** 再给前端（远端原始串可能带 `+08:00`）；原始串留在
   `remote_updated_at_raw` 供 tooltip 显示。
+- **界面上的「本地/远端更新时间」两列显示的是 AT 生成时间**（`local_credential_issued_at` /
+  `remote_credential_issued_at`，JWT `iat` 每侧最新签发的一个字段）——
+  记录更新时间会被回写操作 touch 成噪声，用户口径要的是「AT 生成的时间」；
+  解不出 iat 时前端回落显示记录更新时间（`local_updated_at` / `remote_updated_at`）。
 - `state=local_only` = 本地有、远端没有 = **未上传**；`remote_only` = 远端多出来的。
 - **「是否同步」按凭证本体判定**（用户口径「AT、RT 这种全相同就是同步」）：
   两边都有值的 `access_token` / `refresh_token` / `session_token` / `id_token` /

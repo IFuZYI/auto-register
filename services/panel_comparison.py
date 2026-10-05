@@ -308,6 +308,11 @@ class ComparisonRow:
     time_relation: str = ""
     #: time_relation 的依据：`credential`（凭证签发时间）/ `record`（记录时间）/ ""
     time_basis: str = ""
+    #: 两侧 AT 的**生成时间**（JWT `iat`，每侧取最新签发的一个字段）。
+    #: 「本地/远端更新时间」两列显示的就是它（用户口径：AT 生成的时间）；
+    #: 解不出 iat 时为空 —— 前端回落记录更新时间。
+    local_credential_issued_at: Optional[datetime] = None
+    remote_credential_issued_at: Optional[datetime] = None
 
     @property
     def label(self) -> str:
@@ -338,6 +343,9 @@ class ComparisonRow:
             "credential_compared": self.credential_compared,
             "time_relation": self.time_relation,
             "time_basis": self.time_basis,
+            # AT 生成时间（iat）—— 「本地/远端更新时间」两列显示的就是它
+            "local_credential_issued_at": _iso(self.local_credential_issued_at),
+            "remote_credential_issued_at": _iso(self.remote_credential_issued_at),
         }
 
 
@@ -428,6 +436,8 @@ def build_comparison(
             local_updated_at=local_updated,
             local_updated_hour=hour_bucket(local_updated),
             local_has_refresh_token=bool(_refresh_token_from_extra(extra)),
+            # AT 生成时间（每侧最新签发的一个字段）—— 两列「更新时间」显示它
+            local_credential_issued_at=_latest_issuance(extra),
         )
 
         remote = remote_by_key.pop(key, None)
@@ -441,6 +451,9 @@ def build_comparison(
         row.remote_updated_at_raw = remote.updated_at_raw
         row.remote_updated_hour = hour_bucket(remote.updated_at)
         row.remote_extra = dict(remote.extra or {})
+        row.remote_credential_issued_at = _latest_issuance(
+            remote.credentials if isinstance(remote.credentials, dict) else {}
+        )
         row.differences = diff_fields(extra, remote)
         # 主判据：凭证是否相同（用户口径「AT、RT 全相同就是同步」）
         credential_state, credential_diff = compare_credentials(
@@ -474,6 +487,9 @@ def build_comparison(
                 remote_updated_at_raw=remote.updated_at_raw,
                 remote_updated_hour=hour_bucket(remote.updated_at),
                 remote_extra=dict(remote.extra or {}),
+                remote_credential_issued_at=_latest_issuance(
+                    remote.credentials if isinstance(remote.credentials, dict) else {}
+                ),
             )
         )
 

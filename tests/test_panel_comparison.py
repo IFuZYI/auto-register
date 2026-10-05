@@ -812,5 +812,73 @@ class BuildComparisonCredentialTimeTests(unittest.TestCase):
         self.assertEqual(payload["time_relation"], "remote_newer")
 
 
+class CredentialIssuedAtPayloadTests(unittest.TestCase):
+    """对比行要暴露 AT 生成时间 —— 「本地/远端更新时间」两列显示的就是它。
+
+    用户要求：「本地更新时间 远端更新时间 用的是 AT 生成的时间」。
+    记录更新时间会被状态回写 touch 成噪声，AT 生成时间（JWT iat）才是
+    「凭证什么时候更新的」的真实口径（与方向判定同一来源）。
+    """
+
+    def test_credential_issued_times_are_exposed(self):
+        local = [{
+            "id": 1, "email": "a@example.com", "status": "registered",
+            "updated_at": "2026-10-05T03:37:00+00:00",
+            "extra": {"access_token": _jwt_with_iat(_epoch(2026, 10, 4, 21, 26))},
+        }]
+        remote = [RemoteAccount(
+            email="a@example.com",
+            updated_at=parse_timestamp("2026-10-04T15:30:00+00:00"),
+            credentials={"access_token": _jwt_with_iat(_epoch(2026, 10, 5, 1, 18))},
+        )]
+        payload = build_comparison(local, remote)[0].to_dict()
+        self.assertIn("2026-10-04T21:26", payload["local_credential_issued_at"])
+        self.assertIn("2026-10-05T01:18", payload["remote_credential_issued_at"])
+
+    def test_missing_iat_leaves_empty_strings(self):
+        """解不出 iat（非 JWT / 无凭证）→ 空串（前端回落记录时间）。"""
+        local = [{
+            "id": 1, "email": "a@example.com", "status": "registered",
+            "updated_at": "2026-10-05T03:37:00+00:00",
+            "extra": {"access_token": "opaque-local"},
+        }]
+        remote = [RemoteAccount(
+            email="a@example.com",
+            updated_at=parse_timestamp("2026-10-04T15:30:00+00:00"),
+            credentials={"access_token": "opaque-remote"},
+        )]
+        payload = build_comparison(local, remote)[0].to_dict()
+        self.assertEqual(payload["local_credential_issued_at"], "")
+        self.assertEqual(payload["remote_credential_issued_at"], "")
+
+    def test_newest_field_wins_per_side(self):
+        """每侧取最新签发的字段（AT 刷新后重签；id_token 是登录时的旧值）。"""
+        local = [{
+            "id": 1, "email": "a@example.com", "status": "registered",
+            "updated_at": "2026-10-05T03:37:00+00:00",
+            "extra": {
+                "access_token": _jwt_with_iat(_epoch(2026, 10, 5, 3, 0)),
+                "id_token": _jwt_with_iat(_epoch(2026, 10, 4, 13, 0)),
+            },
+        }]
+        remote = [RemoteAccount(
+            email="a@example.com",
+            updated_at=parse_timestamp("2026-10-04T15:30:00+00:00"),
+            credentials={"access_token": _jwt_with_iat(_epoch(2026, 10, 5, 1, 0))},
+        )]
+        payload = build_comparison(local, remote)[0].to_dict()
+        self.assertIn("2026-10-05T03:00", payload["local_credential_issued_at"])
+
+    def test_local_only_rows_have_no_remote_credential_time(self):
+        local = [{
+            "id": 1, "email": "a@example.com", "status": "registered",
+            "updated_at": "2026-10-05T03:37:00+00:00",
+            "extra": {"access_token": _jwt_with_iat(_epoch(2026, 10, 4, 21, 26))},
+        }]
+        payload = build_comparison(local, [])[0].to_dict()
+        self.assertIn("2026-10-04T21:26", payload["local_credential_issued_at"])
+        self.assertEqual(payload["remote_credential_issued_at"], "")
+
+
 if __name__ == "__main__":
     unittest.main()

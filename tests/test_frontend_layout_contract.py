@@ -444,5 +444,72 @@ class DataBackupPanelContractTests(unittest.TestCase):
         self.assertIn("自动备份", src)
 
 
+class PanelTimeColumnsUseCredentialIssuedAtTests(unittest.TestCase):
+    """对比表的「本地/远端更新时间」两列显示 **AT 生成时间**。
+
+    用户要求：「本地更新时间 远端更新时间 用的是 AT 生成的时间」。
+    记录更新时间会被状态回写 touch 成噪声（实测把 10 个远端较新的账号顶成
+    本地较新）—— AT 生成时间（JWT iat）才是「凭证什么时候生成的」真实口径，
+    与方向判定（time_relation / time_basis）同一来源。
+
+    行为：优先显示 `*_credential_issued_at`，为空（解不出 iat）回落记录时间。
+    """
+
+    def _src(self) -> str:
+        return (
+            FRONTEND / "src" / "components" / "settings" / "PanelComparisonPanel.tsx"
+        ).read_text(encoding="utf-8")
+
+    def test_row_interface_has_credential_issued_fields(self):
+        src = self._src()
+        self.assertIn("local_credential_issued_at", src, "行接口缺本地 AT 生成时间字段")
+        self.assertIn("remote_credential_issued_at", src, "行接口缺远端 AT 生成时间字段")
+
+    def test_local_column_prefers_credential_issued_at(self):
+        src = self._src()
+        block = src.split("title: '本地更新时间'", 1)[1].split("title: '远端更新时间'", 1)[0]
+        self.assertIn(
+            "local_credential_issued_at",
+            block,
+            "「本地更新时间」列没有用 AT 生成时间",
+        )
+        self.assertIn(
+            "local_updated_at",
+            block,
+            "「本地更新时间」列丢了记录时间回落 —— 解不出 iat 的账号会显示空白",
+        )
+
+    def test_remote_column_prefers_credential_issued_at(self):
+        src = self._src()
+        block = src.split("title: '远端更新时间'", 1)[1].split("title: '远端信息'", 1)[0]
+        self.assertIn(
+            "remote_credential_issued_at",
+            block,
+            "「远端更新时间」列没有用 AT 生成时间",
+        )
+        self.assertIn(
+            "remote_updated_at",
+            block,
+            "「远端更新时间」列丢了记录时间回落",
+        )
+
+    def test_column_titles_say_credential_generated(self):
+        """两列的 tooltip 都要说明口径是 AT 生成时间（含回落分支）。
+
+        用**精确串**（主分支 / 回落分支各一条）而不是「块里出现过」——
+        注释里也会出现同样的词，计数式断言会被注释蒙混过关（实测变异验证
+        抓到过：删掉主分支的说明后计数仍然 ≥2，因为注释与回落分支还在）。
+        """
+        src = self._src()
+        local_block = src.split("title: '本地更新时间'", 1)[1].split("title: '远端更新时间'", 1)[0]
+        remote_block = src.split("title: '远端更新时间'", 1)[1].split("title: '远端信息'", 1)[0]
+        # 主分支（解出 iat）
+        self.assertIn("本地 AT 生成时间（JWT iat）", local_block, "本地列 tooltip 没说口径是 AT 生成时间")
+        self.assertIn("远端 AT 生成时间（JWT iat）", remote_block, "远端列 tooltip 没说口径是 AT 生成时间")
+        # 回落分支（解不出 iat）
+        self.assertIn("本地没有可解析的 AT 生成时间", local_block, "本地列回落分支没说明显示的是记录时间")
+        self.assertIn("远端没有可解析的 AT 生成时间", remote_block, "远端列回落分支没说明显示的是记录时间")
+
+
 if __name__ == "__main__":
     unittest.main()
