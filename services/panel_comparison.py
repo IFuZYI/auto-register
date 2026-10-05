@@ -695,9 +695,10 @@ def fetch_grok2api_remote_accounts(
     相同 —— 按邮箱去重，只保留最近有活动的那条，否则同一个号会出现两行、
     把"仅远端"一栏灌满重复项。
 
-    **凭证**走 `/api/admin/v1/accounts/export?provider=grok_web`（实测返回
-    `sso_token`）—— 列表接口不含凭证。只为 `emails` 里的账号查（见
-    `_MAX_CREDENTIAL_FETCH` 的理由）。
+    **凭证**走 `/api/admin/v1/accounts/export` 的 **web + build 两条线**并合并
+    —— web 线给 `sso_token`，build 线给完整 AT/RT（只抓 web 线时 build 账号的
+    AT/RT 差异会漏报成「已同步」）。列表接口不含凭证。只为 `emails` 里的账号
+    查（见 `_MAX_CREDENTIAL_FETCH` 的理由）。
     """
     from platforms.grok.grok2api import Grok2ApiClient
 
@@ -764,22 +765,38 @@ def fetch_grok2api_remote_accounts(
 
 
 def _fetch_grok2api_credentials(client) -> dict[str, dict[str, Any]]:
-    """拉 grok2api 的凭证导出表（email → {sso_token, ...}）。
+    """拉 grok2api 的凭证导出表（email → 凭证字典）。
 
-    导出接口按 provider 给全量数据（不是按账号查），一次调用就够。
-    `grok_web` 是 SSO 那条线（实测 12 条含 `sso_token`）；`grok_build` 在这套
-    部署里是空的（返回 `{"accounts": []}`），所以只取 web。
+    抓**两条线**并合并（导出接口按 provider 给全量，各一次调用）：
+
+    - `grok_web`：SSO 那条线，返回 `sso_token`；
+    - `grok_build`：Build 凭据线，返回完整 `access_token` / `refresh_token`
+      （实测 2026-10-05：10 个账号 AT/RT 非空 10/10）。**之前只抓 web 线**，
+      结果这 10 个账号的 AT/RT 差异全部漏报成「已同步」——本地 AT 已过期、
+      build 线是新鲜的，对比却显示一致。
+
+    合并规则：同邮箱两条线的凭证取并集（web 给 sso，build 给 AT/RT）。
+    单条线失败只丢该线的数据，另一条线照常出（不能整表判 unknown）。
+
+    注意：web 线的 `token` 字段**不是** id_token —— 它是 grok2api 导入时
+    `sso_token` 的 fallback 位，导出时恒为空，不映射。
     """
     result: dict[str, dict[str, Any]] = {}
-    try:
-        resp = client._request(
-            "GET",
-            "/api/admin/v1/accounts/export?provider=grok_web&limit=1000",
-            headers=client._auth_headers(),
-            timeout=30,
-        )
+
+    def _merge(provider: str, fields: dict[str, str]) -> None:
+        try:
+            resp = client._request(
+                "GET",
+                f"/api/admin/v1/accounts/export?provider={provider}&limit=1000",
+                headers=client._auth_headers(),
+                timeout=30,
+            )
+        except Exception as exc:  # noqa: BLE001 - 单线失败不毁整表
+            logger.warning("grok2api 凭证导出失败（%s）: %s", provider, exc)
+            return
         if int(getattr(resp, "status_code", 0) or 0) != 200:
-            return result
+            logger.warning("grok2api 凭证导出 %s 返回 HTTP %s", provider, getattr(resp, "status_code", 0))
+            return
         payload = resp.json() or {}
         for entry in payload.get("accounts") or []:
             if not isinstance(entry, dict):
@@ -787,12 +804,15 @@ def _fetch_grok2api_credentials(client) -> dict[str, dict[str, Any]]:
             email = str(entry.get("email") or "").strip().lower()
             if not email:
                 continue
-            result[email] = {
-                "sso": str(entry.get("sso_token") or "").strip(),
-                "id_token": str(entry.get("token") or "").strip(),
-            }
-    except Exception as exc:  # noqa: BLE001 - 凭证拿不到时照常出列表（判 unknown）
-        logger.warning("grok2api 凭证导出失败: %s", exc)
+            bucket = result.setdefault(email, {})
+            for key, source in fields.items():
+                value = str(entry.get(source) or "").strip()
+                if value:
+                    bucket[key] = value
+
+    # web 线：SSO。build 线：AT/RT（id_token 实测恒空，有值才收）。
+    _merge("grok_web", {"sso": "sso_token"})
+    _merge("grok_build", {"access_token": "access_token", "refresh_token": "refresh_token", "id_token": "id_token"})
     return result
 
 
