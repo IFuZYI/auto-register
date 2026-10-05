@@ -143,6 +143,48 @@ class AtLifecycleDisplayContractTests(unittest.TestCase):
             "getAccessToken 没有按平台镜像规则短路 —— grok 的 SSO 会被当 AT 显示",
         )
 
+    def test_at_column_splits_date_and_remaining_into_separate_lines(self):
+        """AT 列的「到期日期」与「剩余时间」要分行渲染。
+
+        dogfood 实测（2026-10-05，90% 缩放 + 100% 均复现）：两者拼成一行
+        需要 146px，而该列可用内容宽只有 ~92px（130px 列宽 - cell padding -
+        panel padding）—— 日期被截断成「到期 2026-10-…」。拆行后
+        「到期 2026-10-12」78px、「6 天 20 小时」59px，都放得下。
+        """
+        src = self._src()
+        block = src.split("title: 'AT 有效期'", 1)[1].split("if (isChatgptPlatform)", 1)[0]
+        self.assertNotIn(
+            "at.expiresShort ? ' · ' : ''",
+            block,
+            "AT 列又把「到期日期 · 剩余」拼回一行 —— 列宽放不下会截断（实测 146px > 92px）",
+        )
+        self.assertIn(
+            "at.remainingText",
+            block,
+            "AT 列丢了剩余时间渲染",
+        )
+
+    def test_plus_trial_time_uses_two_line_date_format(self):
+        """Plus 试用列的探测时间要用两行日期格式（同「注册时间」列）。
+
+        dogfood 实测（2026-10-05）：单行 `toLocaleString()`（`10/1/2026,
+        6:43:48 PM`）需要 118px，该列可用内容宽只有 ~102px —— 时间戳被截断
+        成「10/1/2026, 6:43…」。同页「注册时间」列早已用 formatCreatedAt
+        的两行格式（日期一行、时间一行），两列显示的是同类信息，格式应当一致。
+        """
+        src = self._src()
+        block = src.split("title: 'Plus 试用'", 1)[1].split("} else {", 1)[0]
+        self.assertNotIn(
+            "formatSyncTime(check.checked_at)",
+            block,
+            "Plus 列又用单行 formatSyncTime —— 时间戳会被截断（实测 118px > 102px）",
+        )
+        self.assertIn(
+            "formatCreatedAt(check.checked_at)",
+            block,
+            "Plus 列没有用两行日期格式（与「注册时间」列不一致）",
+        )
+
 
 class ICloudTableLayoutTests(unittest.TestCase):
     """iCloud 页两个表格的列宽契约（实测踩过的 bug 的回归网）。
@@ -542,6 +584,107 @@ class PanelTimeColumnsUseCredentialIssuedAtTests(unittest.TestCase):
             block,
             "「时间」列没有处理 mixed 档 —— 单侧回落的行 tooltip 会误导",
         )
+
+
+class UIScaleContractTests(unittest.TestCase):
+    """全站 90% 缩放（用户要求「UI按90%进行缩小一点」）。
+
+    实现走 CSS `zoom`（html 级）：布局级缩放、文字不模糊（transform: scale
+    会光栅化重采样），弹层/真实点击/媒体查询不受影响（Chrome 145 实测）。
+
+    实测坑（Chrome 145）：
+    * zoom 下 `100vh` 先按**物理视口**解析再被缩放 → 整屏高度比视口矮 10%
+      （577px 视口下渲染 519px，底部露出背景）。所有整屏高度必须走
+      `--app-vh: calc(100vh / var(--ui-scale))`（实测恰好填满视口）。
+    * `getBoundingClientRect` 在 zoom 下返回缩放后坐标，但 rc-trigger 的
+      弹层定位（Select/Popconfirm/Tooltip）与 CDP 真实点击均正确（实测）。
+
+    form-grid 宽度类的修复：`flex: 0 0 auto` 下 max-width 不决定宽度，
+    控件按内容 intrinsic 排 —— 实测同档控件 98/82/286/187 各不相同。
+    """
+
+    def _css(self) -> str:
+        return (FRONTEND / "src" / "index.css").read_text(encoding="utf-8")
+
+    def test_ui_scale_token_defined_and_applied(self):
+        css = self._css()
+        self.assertIn("--ui-scale: 0.9", css, "index.css 缺 --ui-scale: 0.9")
+        self.assertIn("zoom: var(--ui-scale)", css, "没有把 zoom 应用到 html 上")
+
+    def test_app_vh_compensates_zoom(self):
+        """整屏高度要用 --app-vh 补偿，否则底部露出 10% 背景（实测）。"""
+        css = self._css()
+        self.assertIn(
+            "--app-vh: calc(100vh / var(--ui-scale))",
+            css,
+            "缺 --app-vh 补偿定义",
+        )
+        self.assertIn("min-height: var(--app-vh)", css, "#root 没有用 --app-vh")
+        self.assertIn("height: var(--app-vh)", css, "侧栏没有用 --app-vh")
+
+    def test_tsx_full_height_uses_app_vh(self):
+        """App.tsx / Login.tsx 的整屏高度不许再用裸 100vh。"""
+        app = (FRONTEND / "src" / "App.tsx").read_text(encoding="utf-8")
+        self.assertNotIn("'100vh'", app, "App.tsx 还有裸 100vh —— zoom 下会矮 10%")
+        self.assertIn("'var(--app-vh)'", app, "App.tsx 没接 --app-vh")
+        login = (FRONTEND / "src" / "pages" / "Login.tsx").read_text(encoding="utf-8")
+        self.assertNotIn("'100vh'", login, "Login.tsx 还有裸 100vh")
+        self.assertIn("'var(--app-vh)'", login, "Login.tsx 没接 --app-vh")
+
+    def test_index_css_100vh_only_in_app_vh_token(self):
+        """index.css 里 100vh 只允许出现在 --app-vh 定义行。
+
+        只查「声明行」（以 ; 结尾）—— 注释里提到 100vh 是解释性文字，
+        不是会被浏览器解析的规则。
+        """
+        for i, line in enumerate(self._css().splitlines(), 1):
+            if "100vh" not in line or not line.strip().endswith(";"):
+                continue
+            self.assertIn(
+                "--app-vh",
+                line,
+                f"index.css:{i} 有裸 100vh 声明：{line.strip()}",
+            )
+
+    def test_form_grid_tier_fields_share_width_evenly(self):
+        """form-grid 同档字段等宽平分（封顶=档位宽度）。
+
+        dogfood 实测（2026-10-05）：旧规则 `flex: 0 0 auto` 让子项按内容
+        intrinsic 排 —— 「平台 99 / 执行器 286 / 验证码 187」「批量数量 98 /
+        并发数 82」同档控件各不相同。修复：`flex: 1 1 0` 平分 + `max-width`
+        封顶到档位 token。窄屏（<992px）由媒体查询放开封顶并堆叠。
+        """
+        css = self._css()
+        for cls, token in (
+            ("form-field--sm", "--w-field"),
+            ("form-field--md", "--w-field-md"),
+            ("form-field--lg", "--w-field-lg"),
+        ):
+            marker = f".form-grid > .{cls}"
+            idx = css.find(marker)
+            self.assertGreater(idx, -1, f"缺 {marker} 规则")
+            block = css[idx : idx + 200]
+            self.assertIn(
+                f"max-width: var({token})",
+                block,
+                f"{marker} 没有档位封顶",
+            )
+            self.assertIn(
+                "flex: 1 1 0",
+                block,
+                f"{marker} 没有等分 —— 同档字段会按内容宽度散乱",
+            )
+        # 窄屏要放开档位封顶（否则媒体查询里的 max-width:100% 被更高
+        # 特异性的 `.form-grid > .form-field--*` 规则压掉，实测窄屏仍限宽）
+        media_idx = css.find("@media (max-width: 991px)")
+        self.assertGreater(media_idx, -1, "找不到 <992px 媒体查询")
+        media = css[media_idx:]
+        for cls in ("form-field--sm", "form-field--md", "form-field--lg"):
+            self.assertIn(
+                f".form-grid > .{cls}",
+                media,
+                f"窄屏没有放开 {cls} 的档位封顶",
+            )
 
 
 if __name__ == "__main__":

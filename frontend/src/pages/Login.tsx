@@ -56,7 +56,7 @@ function LoginContent() {
   }
 
   const shellStyle: React.CSSProperties = {
-    minHeight: '100vh',
+    minHeight: 'var(--app-vh)',
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'center',

@@ -39,7 +39,26 @@
   --gradient-to: #5e5ce6;
   --ease-standard: cubic-bezier(0.4, 0, 0.2, 1);
   --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+
+  /* 全站缩放（桌面 90%）。走 CSS zoom 而不是 transform: scale：
+     zoom 是布局级缩放 —— 文字不模糊、弹层定位与真实点击不受影响
+     （Chrome 实测），而 transform 会光栅化重采样并破坏 fixed 定位。
+     窄屏（<992px）在媒体查询里改回 1 —— 那里的 44px 触摸目标是给
+     手指算的，缩 10% 会把点击目标压到 40px 以下。
+     默认 1，真正启用 0.9 放在下方 @supports 里 —— Firefox <126 不认识
+     zoom，若在那里按 0.9 算 --app-vh 会得到 111vh，整页反而高出视口。 */
+  --ui-scale: 1;
+  /* 整屏高度补偿。zoom 下 100vh 先按物理视口解析再被缩放 —— 整屏
+     容器会矮 10%（577px 视口实测渲染 519px，底部露出背景）。
+     calc(100vh / var(--ui-scale)) 恰好填满视口（实测）。 */
+  --app-vh: calc(100vh / var(--ui-scale));
   color-scheme: dark;
+}
+
+@supports (zoom: 0.9) {
+  :root {
+    --ui-scale: 0.9;
+  }
 }
 
 * {
@@ -51,6 +70,7 @@
 html {
   scroll-behavior: smooth;
   -webkit-text-size-adjust: 100%;
+  zoom: var(--ui-scale);
 }
 
 body {
@@ -63,7 +83,7 @@ body {
 }
 
 #root {
-  min-height: 100vh;
+  min-height: var(--app-vh);
 }
 
 /* ── 侧栏：毛玻璃 + 极细分隔线 ─────────────────────────── */
@@ -72,10 +92,12 @@ body {
   -webkit-backdrop-filter: saturate(180%) blur(20px);
   backdrop-filter: saturate(180%) blur(20px);
   border-right: 1px solid var(--border) !important;
-  /* 侧栏固定在视口内：内容区自己滚，页脚不会被顶出屏幕 */
+  /* 侧栏固定在视口内：内容区自己滚，页脚不会被顶出屏幕。
+     高度用 --app-vh（而非 100vh）—— zoom 0.9 下 100vh 会矮 10%，
+     侧栏底部会悬空、露出折叠按钮下面的背景。 */
   position: sticky !important;
   top: 0;
-  height: 100vh;
+  height: var(--app-vh);
   overflow: hidden;
 }
 
@@ -359,6 +381,26 @@ body {
 .form-grid > .ant-form-item:not([class*='form-field--']) {
   flex: 1 1 var(--w-field);
   min-width: var(--w-field);
+}
+
+/* 同档字段等宽平分：flex: 1 1 0 让一行内的同档控件平分行宽、封顶在
+   档位宽度。旧规则 `flex: 0 0 auto` 让子项按内容 intrinsic 排 ——
+   dogfood 实测同档控件 98/82/286/187 各不相同（平台 99 / 执行器 286 /
+   验证码 187），同类型 UI 不一致。 */
+.form-grid > .form-field--sm {
+  flex: 1 1 0;
+  min-width: 0;
+  max-width: var(--w-field);
+}
+.form-grid > .form-field--md {
+  flex: 1 1 0;
+  min-width: 0;
+  max-width: var(--w-field-md);
+}
+.form-grid > .form-field--lg {
+  flex: 1 1 0;
+  min-width: 0;
+  max-width: var(--w-field-lg);
 }
 
 /* 注册任务页：字段多、语义杂，逐个标注宽度容易漏。
@@ -764,6 +806,9 @@ body {
     --page-pad-x: 16px;
     --page-pad-y: 12px;
     --section-gap: 12px;
+    /* 窄屏不缩放：44px 的触摸目标是给手指算的（见 :root 的 --ui-scale
+       注释）。改回 1 后 --app-vh 自动回到 100vh。 */
+    --ui-scale: 1;
   }
 
   /* 顶栏的负 margin 与内边距要跟着一起收，否则标题会被推出屏幕 */
@@ -833,6 +878,11 @@ body {
   .form-field--md,
   .form-field--lg,
   .form-field--prose,
+  /* form-grid 内的档位封顶是 (0,2,0) 特异性，必须显式写进来放开，
+     否则窄屏仍被限宽（实测过同形状的坑） */
+  .form-grid > .form-field--sm,
+  .form-grid > .form-field--md,
+  .form-grid > .form-field--lg,
   .register-form .ant-form-item,
   .register-form .ant-form-item:not([class*='form-field--']),
   .register-form .ant-form-item.form-field--prose {

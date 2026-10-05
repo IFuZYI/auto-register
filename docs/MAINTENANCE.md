@@ -290,7 +290,7 @@ register_job("my_job", interval_seconds=lambda: ..., runner=lambda: ...)
 
 | 测试文件 | 守什么 | 改了什么时候会红 |
 | --- | --- | --- |
-| `test_frontend_layout_contract.py` | 表格列宽和 `scroll.x` 的匹配、按钮组换行、tsc 编译 | 改列宽忘了同步 `scroll.x`；TS 类型错误 |
+| `test_frontend_layout_contract.py` | 表格列宽和 `scroll.x` 的匹配、按钮组换行、tsc 编译、全站 90% 缩放（`--ui-scale`/`--app-vh`/form-grid 等分）、AT/Plus 列日期不截断 | 改列宽忘了同步 `scroll.x`；TS 类型错误；整屏高度用了裸 `100vh`；form-grid 档位不再等分 |
 | `test_secret_config_contract.py` | 口令「输入后不可查看」的前后端约定 | 新口令字段没进打码清单 / 忘了摘 `_set` 标记 |
 | `test_panel_registry.py` | 面板注册表形状（key/url_key 唯一性、github 链接） | 面板字段改名、url_key 撞车 |
 | `test_panel_management_actions.py` | 面板动作存在性、`scope`、多平台接线 | 新面板没补 `_rows_for()`；动作漏标 scope |

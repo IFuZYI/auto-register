@@ -128,7 +128,7 @@ function ProtectedLayout() {
 
   if (!ready) {
     return (
-      <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+      <div style={{ minHeight: 'var(--app-vh)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
         <Spin size="large" />
       </div>
     )
@@ -419,9 +419,11 @@ function AppContent() {
   return (
     <ConfigProvider theme={currentTheme} locale={zhCN}>
       <AntdApp>
-        {/* 固定 100vh（而非 min-height）：让内容区成为唯一的滚动容器，
-            这样 PageHeader 的 sticky 吸附与滚动分隔线才能生效 */}
-        <Layout style={{ height: '100vh', overflow: 'hidden', background: 'var(--bg-layout)' }}>
+        {/* 固定整屏高度（而非 min-height）：让内容区成为唯一的滚动容器，
+            这样 PageHeader 的 sticky 吸附与滚动分隔线才能生效。
+            用 --app-vh 而非 100vh —— 全站 zoom 0.9 下 100vh 会矮 10%
+            （见 index.css 的 --app-vh 注释）。 */}
+        <Layout style={{ height: 'var(--app-vh)', overflow: 'hidden', background: 'var(--bg-layout)' }}>
           {/* 跳到主内容：键盘用户不必逐个 Tab 过整条菜单 */}
           <a href="#main-content" className="skip-link">跳到主内容</a>
 

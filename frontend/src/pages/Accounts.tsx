@@ -7,7 +7,6 @@ import {
 } from '@/components/account/AccountDetailParts'
 import {
   normalizeAccount,
-  formatSyncTime,
   formatCreatedAt,
   authStateMeta,
   codexStateMeta,
@@ -879,9 +878,18 @@ export default function Accounts() {
               </Tag>
             </Tooltip>
             {hasDate ? (
+              // 日期与剩余时间**分行**：两者拼一行需要 146px，而该列可用
+              // 内容宽只有 ~92px（130px 列宽 - 两重 padding）—— 实测日期
+              // 被截断成「到期 2026-10-…」（dogfood 2026-10-05，缩放前后
+              // 均复现）。拆行后「到期 2026-10-12」78px、「6 天 20 小时」
+              // 59px，都放得下。
               <Text type="secondary" style={secondaryTextStyle} ellipsis={{ tooltip: at.tooltip }}>
                 {at.expiresShort ? `到期 ${at.expiresShort}` : ''}
-                {at.remainingText ? `${at.expiresShort ? ' · ' : ''}${at.remainingText}` : ''}
+              </Text>
+            ) : null}
+            {at.remainingText ? (
+              <Text type="secondary" style={secondaryTextStyle} ellipsis={{ tooltip: at.tooltip }}>
+                {at.remainingText}
               </Text>
             ) : null}
           </div>
@@ -937,17 +945,25 @@ export default function Accounts() {
         render: (_: unknown, record: { plusCheck?: PlusCheck }) => {
           const check = record.plusCheck || {}
           const meta = plusTrialMeta(check.status)
-          const checkedAt = formatSyncTime(check.checked_at)
+          // 两行日期格式（与「注册时间」列同款）：单行 toLocaleString
+          // （`10/1/2026, 6:43:48 PM`）实测需要 118px，该列可用内容宽只有
+          // ~102px，时间戳会被截断成「10/1/2026, 6:43…」（dogfood 2026-10-05）。
+          const checkedAt = formatCreatedAt(check.checked_at)
           return (
             <div style={{ ...cellStackStyle, ...compactPanelStyle }}>
               <Tag color={meta.color} title={check.message || ''}>
                 {meta.label}
               </Tag>
-              {checkedAt && (
-                <Text type="secondary" style={secondaryTextStyle} ellipsis={{ tooltip: checkedAt }}>
-                  {checkedAt}
+              {checkedAt.date !== '-' && (
+                <Text type="secondary" style={secondaryTextStyle} ellipsis={{ tooltip: `${checkedAt.date} ${checkedAt.time}`.trim() }}>
+                  {checkedAt.date}
                 </Text>
               )}
+              {checkedAt.time ? (
+                <Text type="secondary" style={secondaryTextStyle}>
+                  {checkedAt.time}
+                </Text>
+              ) : null}
             </div>
           )
         },
