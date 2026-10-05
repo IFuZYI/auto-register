@@ -266,17 +266,24 @@ class PlanPushCredentialTimeTests(unittest.TestCase):
         self.assertTrue(outcome.push)
         self.assertEqual(outcome.reason, "local_newer")
 
-    def test_same_hour_issuance_is_not_pushed(self):
-        """凭证同小时签发 → 分秒是噪声，不动（即使记录时间说本地新）。"""
+    def test_same_hour_local_newer_is_pushed(self):
+        """凭证同小时签发、本地后签发 → 仍应推送（秒级判方向，不再死锁）。
+
+        回归（用户实测）：「同小时就跳过」让同小时内的真实轮换永远卡在
+        「凭证不同」—— 两个方向都跳过。iat 是签发事实，秒级可判。
+        """
         local = {"access_token": _jwt_with_iat(_epoch(2026, 10, 5, 1, 50))}
         remote = RemoteAccount(
             email="a@x.com", platform="grok", remote_id="r-1",
             updated_at=datetime(2026, 10, 5, 1, 0, tzinfo=timezone.utc),
             credentials={"access_token": _jwt_with_iat(_epoch(2026, 10, 5, 1, 5))},
         )
-        outcome = plan_push(local, remote, local_updated=_utc(2026, 10, 5, 3, 37))
-        self.assertFalse(outcome.push)
-        self.assertEqual(outcome.reason, "time_synced")
+        outcome = plan_push(local, remote, local_updated=_utc(2026, 10, 5, 1, 10))
+        self.assertTrue(
+            outcome.push,
+            "同小时内本地后签发 → 应推送（同小时死锁回归）",
+        )
+        self.assertEqual(outcome.reason, "local_newer")
 
 
 if __name__ == "__main__":

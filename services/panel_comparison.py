@@ -210,6 +210,16 @@ def compare_credential_time(
     返回 `local_newer` / `remote_newer` / `time_synced` / `""`（无结论）。
     至少一侧连记录时间都取不到时返回空串：调用方按「无法判定 → 不动」处理。
 
+    **粒度分两档**（用户实测的「同步了还是凭证不同」死锁的修复，2026-10-05）：
+
+    - 两侧都能解出 iat → **秒级**比：iat 是签发事实，后签发的持有活凭证
+      （x.ai 的 RT 每次刷新都轮换）。旧实现按小时比，「同小时 → time_synced
+      → 两个方向都跳过」—— 同一小时内的真实轮换会永远卡在「凭证不同」，
+      点多少次「更新本地」都不拉（实测：本地 05:10:31 vs 远端 05:14:24）。
+    - 任一侧回落记录时间 → **小时级**（`compare_by_hour`）：记录时间会被
+      「同步远端状态」等回写操作 touch 成噪声，分秒差异不可信（用户口径
+      「以小时为单位，即不管分秒」）。两侧时间完全相同才判 `time_synced`。
+
     为什么需要它（实测 2026-10-05）：grok2api 面板 10 个账号的**行更新时间**
     被「同步远端状态」顶到了本地较新（状态回写会 touch `updated_at`），而
     凭证实际是远端新（本地 AT 已过期、远端是刚签发的）—— 只看记录时间会把
@@ -225,8 +235,17 @@ def compare_credential_time(
     """
     local_extra = local if isinstance(local, dict) else {}
     remote_extra = remote if isinstance(remote, dict) else {}
-    local_time = _latest_issuance(local_extra) or parse_timestamp(local_record)
-    remote_time = _latest_issuance(remote_extra) or parse_timestamp(remote_record)
+    local_iat = _latest_issuance(local_extra)
+    remote_iat = _latest_issuance(remote_extra)
+    if local_iat is not None and remote_iat is not None:
+        # 两侧都是签发事实：秒级比（后签发的持有活凭证）。
+        # 完全相同（同一秒签发）才判 time_synced —— 分不出先后，保守不动。
+        if local_iat == remote_iat:
+            return "time_synced"
+        return "local_newer" if local_iat > remote_iat else "remote_newer"
+    # 至少一侧解不出 iat：回落记录时间，按小时粒度（记录时间分秒不可信）。
+    local_time = local_iat or parse_timestamp(local_record)
+    remote_time = remote_iat or parse_timestamp(remote_record)
     if local_time is None or remote_time is None:
         return ""
     return compare_by_hour(local_time, remote_time)

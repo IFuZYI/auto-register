@@ -277,17 +277,24 @@ class PlanSyncCredentialTimeTests(unittest.TestCase):
         self.assertTrue(outcome.pulled)
         self.assertEqual(outcome.reason, "remote_newer")
 
-    def test_same_hour_issuance_is_not_pulled(self):
-        """凭证同小时签发 → 分秒是噪声，不动（即使记录时间说远端新）。"""
+    def test_same_hour_remote_newer_is_pulled(self):
+        """凭证同小时签发、远端后签发 → 仍应拉回（秒级判方向，不再死锁）。
+
+        回归（用户实测）：「同小时就跳过」让同小时内的真实轮换永远卡在
+        「凭证不同」—— 点多少次「更新本地」都不拉（方向判成 time_synced）。
+        """
         local = {"access_token": _jwt_with_iat(_epoch(2026, 10, 5, 1, 5))}
         remote = RemoteAccount(
             email="a@x.com", platform="grok",
-            updated_at=datetime(2026, 10, 5, 6, 0, tzinfo=timezone.utc),
+            updated_at=datetime(2026, 10, 5, 1, 55, tzinfo=timezone.utc),
             credentials={"access_token": _jwt_with_iat(_epoch(2026, 10, 5, 1, 50))},
         )
-        outcome = plan_sync(local, remote, local_updated=_utc(2026, 10, 4, 23, 0))
-        self.assertFalse(outcome.pulled)
-        self.assertEqual(outcome.reason, "time_synced")
+        outcome = plan_sync(local, remote, local_updated=_utc(2026, 10, 5, 1, 10))
+        self.assertTrue(
+            outcome.pulled,
+            "同小时内远端后签发 → 应拉回（同小时死锁回归）",
+        )
+        self.assertEqual(outcome.reason, "remote_newer")
 
     def test_missing_local_record_time_is_conservative(self):
         """本地记录时间缺失（凭证也解不出 iat）→ 不动（无法判定方向）。

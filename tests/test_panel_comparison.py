@@ -738,11 +738,29 @@ class CredentialTimeRelationTests(unittest.TestCase):
         remote = {"access_token": _jwt_with_iat(_epoch(2026, 10, 4, 21, 26))}
         self.assertEqual(compare_credential_time(local, remote), "local_newer")
 
-    def test_same_hour_issuance_is_time_synced(self):
-        """同一小时内两边各签发过一次 → 分秒是噪声，不算谁新。"""
+    def test_same_hour_issuance_resolves_by_seconds(self):
+        """同一小时内两边各签发过一次 → 按秒级判方向（后签发的是活凭证）。
+
+        回归（用户实测 2026-10-05）：「同小时 → 跳过」会让同小时内的真实
+        轮换永远卡在「凭证不同」—— 点多少次「更新本地」都不拉（方向判成
+        time_synced，两个方向都跳过）。iat 是签发事实、不是噪声，秒级可判：
+        x.ai 的 RT 每次刷新都轮换，谁最后刷新谁持有有效 RT。
+        """
         local = {"access_token": _jwt_with_iat(_epoch(2026, 10, 5, 1, 5))}
         remote = {"access_token": _jwt_with_iat(_epoch(2026, 10, 5, 1, 50))}
-        self.assertEqual(compare_credential_time(local, remote), "time_synced")
+        self.assertEqual(compare_credential_time(local, remote), "remote_newer")
+        self.assertEqual(compare_credential_time(remote, local), "local_newer")
+
+    def test_identical_issuance_is_time_synced(self):
+        """两侧 iat 完全相同（同一秒签发）→ 分不出先后，保守判 time_synced。"""
+        iat = _epoch(2026, 10, 5, 1, 5)
+        self.assertEqual(
+            compare_credential_time(
+                {"access_token": _jwt_with_iat(iat)},
+                {"access_token": _jwt_with_iat(iat)},
+            ),
+            "time_synced",
+        )
 
     def test_missing_iat_on_either_side_has_no_verdict(self):
         """一边解不出 iat → 没有结论（回落记录时间由调用方做）。"""
