@@ -254,6 +254,32 @@ register_job("my_job", interval_seconds=lambda: ..., runner=lambda: ...)
 **落库**：动作结果要写回账号时，`api/actions.py::_apply_action_result()` 是
 落库的唯一入口。上传类动作走 `_UPLOAD_SYNC_WRITERS` 表（加一行即可）——
 漏加的症状是「界面永远不显示上传状态」，在 sub2api / chatgpt2api 上各踩过一次。
+动作返回的 `data` 里的凭证字段由 `core/credential_fields.py` 的
+`canonical_writes()` 归一后落 extra（只收凭证字段，message/status 等展示字段不落）。
+
+### 2.8 新增 / 修改一个**凭证字段**（AT / RT / SSO …）
+
+凭证字段**全系统一处定义**：`core/credential_fields.py` 的 `CREDENTIAL_FIELDS`
+（规范名 + camelCase 别名 + 短标签）。改这里等于改全系统凭证口径，消费方包括：
+
+| 消费方 | 用注册表的什么 |
+| --- | --- |
+| `services/panel_comparison.py` | `compare_aliases()`（比对哪些字段） |
+| `services/panel_sync.py` / `panel_push.py` | `sync_aliases()`（拉/推哪些字段） |
+| `services/account_export.py` / `api/accounts.py` | `export_names()`（导出/导入字段） |
+| `api/actions.py` | `canonical_writes()`（动作结果落库归一） |
+| `platforms/grok/plugin.py` 等读侧 | `get_credential()` / `token_column_credential()` |
+
+新增字段的步骤：① 注册表加一项；② 按需把规范名加进 `account_export` 的
+`EXPORT_FIELDS` 与 `api/accounts._IMPORT_EXTRA_KEYS`（往返不丢）；③ 跑
+`tests/test_credential_fields.py`（注册表契约 + 往返测试）。
+
+**`token` 列（历史遗留列）的镜像规则**：token 列 = **平台主凭证的镜像**
+（chatgpt → AT，grok → SSO），规则表在注册表的 `_TOKEN_COLUMN_FIELDS`。
+写侧一律走 `sync_token_column()`；读侧兜底走 `token_column_credential()`
+（grok 列上是 OAuth 形态 JWT 时拒绝——那是被 AT 盖过的脏值，启动迁移
+`_normalize_grok_token_column` 会修库）。加新平台时要在映射表里登记，
+漏登记的后果是凭证合并静默不生效（`test_credential_fields.py` 会点名）。
 
 ---
 
@@ -272,6 +298,7 @@ register_job("my_job", interval_seconds=lambda: ..., runner=lambda: ...)
 | `test_config_dedup_and_registration_modes.py` | 注册方式声明与运行时兜底一致 | 插件改了默认值没同步声明 |
 | `test_contrast_gate_contract.py` | 主题色板两套齐、preset 标签钉住 | 加新颜色没做对比度处理 |
 | `test_data_paths.py` | 数据路径默认落在 `data/` 下 | 新增路径常量写错基准 |
+| `test_credential_fields.py` | 凭证字段注册表（字段/别名/标签、token 列镜像、导出往返含 SSO） | 改 `core/credential_fields.py` 的字段表；消费方不再同源 |
 | `test_runtime_version_stamp.py` | 版本戳语义（未跟踪文件不算脏） | 改 `_read_git_version` |
 | `test_frontend_layout_contract.py::test_typescript_still_compiles` | `npx tsc -b` 0 错误 | 前端类型错误（无 node 时跳过） |
 

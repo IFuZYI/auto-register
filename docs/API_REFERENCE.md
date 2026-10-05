@@ -55,11 +55,25 @@ Authorization: Bearer <access_token>
 | `platform` | 平台标识，例如 `chatgpt`、`icloud` |
 | `email` / `password` | 账号邮箱（或手机号）与密码；均属敏感数据 |
 | `user_id` / `region` | 平台用户 ID、地区 |
-| `token` | Access Token，敏感数据 |
+| `token` | 平台主凭证的镜像（历史遗留列）：`chatgpt` → Access Token，`grok` → SSO；敏感数据 |
 | `status` | 账号状态：`registered` / `expired` / `invalid` / `banned`，默认 `registered` |
 | `cashier_url` | 支付/升级链接 |
-| `extra_json` | 平台扩展字段的 JSON 字符串，例如 RT、Cookie、TOTP |
+| `extra_json` | 平台扩展字段的 JSON 字符串，例如 RT、Cookie、TOTP、SSO |
 | `created_at` / `updated_at` | 创建、更新时间 |
+
+**凭证字段（`extra_json` 内，注册表见 `core/credential_fields.py`）**
+
+| 规范名 | 别名（读写都认） | 说明 |
+| --- | --- | --- |
+| `access_token` | `accessToken` | AT，OAuth 访问令牌（JWT，带 `iat`/`exp`） |
+| `refresh_token` | `refreshToken` | RT，刷新令牌（x.ai 每次刷新轮换） |
+| `session_token` | `sessionToken` | ChatGPT 会话令牌 |
+| `id_token` | `idToken` | OIDC ID Token |
+| `sso` | `sso_token` | Grok 的 SSO cookie（Web 登录态唯一凭据，AT/RT 由其派生） |
+
+凭证字段**全系统一处定义**（比对 / 同步 / 导出 / 动作落库共用同一张表）——
+改字段口径只改注册表。导出/导入（JSON 格式）覆盖以上全部字段，grok 账号
+往返不丢 SSO。**写侧一律写规范名**（蛇形）；读侧同时认 camelCase 别名。
 
 **任务快照**
 
@@ -393,7 +407,7 @@ iCloud 业务错误不使用 `401`，以免被前端误判为面板登录过期�
 | --- | --- | --- | --- |
 | GET | `/api/integrations/panels` | — | 面板清单 + 当前地址 + **可跑的动作**（`platform` / `upload_action` / `sync_action`）；口令只回 `secret_set` 布尔，不回明文 |
 | GET | `/api/integrations/panels/{key}/comparison` | — | 本地账号 ↔ 远端面板对比；`?refresh=1` 绕过缓存 |
-| POST | `/api/integrations/panels/{key}/sync` | — | **更新本地凭证**：把远端较新的凭证拉回本地（覆盖 AT/RT/id_token，其它字段保留）；`?platform=chatgpt\|grok` 只处理该平台（多平台面板用，缺省全量） |
+| POST | `/api/integrations/panels/{key}/sync` | — | **更新本地凭证**：把远端较新的凭证拉回本地（覆盖 AT/RT/ST/id_token/SSO，其它字段保留）；`?platform=chatgpt\|grok` 只处理该平台（多平台面板用，缺省全量） |
 | POST | `/api/integrations/panels/{key}/push` | — | **更新远程凭证**：把「未上传 + 本地较新」的凭证推到远端；`?platform=` 同 sync，`?delete_old=true` 对新建式面板清理被替换的旧记录 |
 | POST | `/api/integrations/backfill` | `{platforms?,account_ids?,pending_only?,status?,email?,plus_status?}` | 将筛选账号补传到已配置外部系统 |
 
@@ -479,7 +493,7 @@ iCloud 业务错误不使用 `401`，以免被前端误判为面板登录过期�
 这个会改本地账号）。方向判定在 `services/panel_sync.py`：
 
 - 远端较新且远端有凭证 → 拉回（覆盖 `access_token` / `refresh_token` /
-  `id_token` / `sso`，本地其它字段保留）；
+  `session_token` / `id_token` / `sso`，本地其它字段保留）；
 - 本地较新 / 同小时 / 无法判定时间 / 远端没有凭证 → 不动（保守，不拿不确定
   的数据覆盖本地）。
 

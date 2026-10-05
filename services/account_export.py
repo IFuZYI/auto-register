@@ -62,7 +62,15 @@ def _extra_key(*names: str) -> Callable[[Any, dict], str]:
 
 
 def _access_token(account: Any, extra: dict) -> str:
-    return _text(extra.get("access_token")) or _text(getattr(account, "token", ""))
+    # token 列的兜底按平台镜像规则取：chatgpt 的列镜像 AT（可兜底），
+    # grok 的列镜像 SSO（**不能**当 AT 导出 —— 否则 grok 账号的「AT」列
+    # 会导出成 SSO cookie）。
+    from core.credential_fields import get_credential, token_column_credential
+
+    platform = str(getattr(account, "platform", "") or "")
+    return get_credential(extra, "access_token") or token_column_credential(
+        account, platform, "access_token"
+    )
 
 
 @dataclass(frozen=True)
@@ -81,8 +89,11 @@ EXPORT_FIELDS: dict[str, ExportField] = {
         ExportField("totp_secret", "2FA 密钥", _extra_key("totp_secret")),
         ExportField("access_token", "AccessToken", _access_token),
         ExportField("refresh_token", "RefreshToken", _extra_key("refresh_token", "refreshToken")),
-        ExportField("id_token", "IdToken", _extra_key("id_token")),
-        ExportField("session_token", "SessionToken", _extra_key("session_token")),
+        ExportField("id_token", "IdToken", _extra_key("id_token", "idToken")),
+        ExportField("session_token", "SessionToken", _extra_key("session_token", "sessionToken")),
+        # grok 账号的主凭证是 SSO —— 导出/导入必须带上，否则换机器导入丢 SSO
+        # （整理前实测的真 bug：导出没有 sso 字段，grok 账号往返即丢）。
+        ExportField("sso", "SSO", _extra_key("sso", "sso_token")),
         ExportField("phone_number", "手机号", _extra_key("phone_number")),
         ExportField("bound_email", "绑定邮箱", _extra_key("bound_email")),
         ExportField("user_id", "UID", _attr("user_id")),
@@ -152,6 +163,7 @@ def _render_json(accounts: Sequence[Any]) -> str:
                     "refresh_token",
                     "id_token",
                     "session_token",
+                    "sso",
                     "status",
                     "created_at",
                 )

@@ -29,8 +29,12 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Optional
 
+from core.credential_fields import (
+    first_present as _first_present,
+    sync_aliases,
+    sync_token_column,
+)
 from services.panel_comparison import (
-    CREDENTIAL_FIELDS,
     RemoteAccount,
     compare_by_hour,
     compare_credential_time,
@@ -40,16 +44,12 @@ from services.panel_comparison import (
 
 logger = logging.getLogger(__name__)
 
-#: 可从远端拉回的凭证字段（规范名 → 本地 extra 的写入键）。
+#: 可从远端拉回的凭证字段 —— 注册表（`core/credential_fields.py`）一处定义，
+#: 与比对范围一致（`session_token` 也纳入，整理前它只参与对比不参与同步）。
 #:
 #: 只拉凭证类字段：本地还存着注册上下文（register_proxy、mail_provider、
 #: cpa_record 的派生字段等），远端没有这些，整包覆盖会把它们抹掉。
-_PULLABLE_FIELDS: tuple[tuple[str, ...], ...] = (
-    ("access_token", "accessToken"),
-    ("refresh_token", "refreshToken"),
-    ("id_token", "idToken"),
-    ("sso", "sso_token"),
-)
+_PULLABLE_FIELDS: tuple[tuple[str, ...], ...] = sync_aliases()
 
 
 @dataclass
@@ -77,14 +77,6 @@ class SyncOutcome:
             "reason": self.reason,
             "fields": list(self.fields),
         }
-
-
-def _first_present(extra: dict[str, Any], aliases: tuple[str, ...]) -> str:
-    for name in aliases:
-        value = str(extra.get(name) or "").strip()
-        if value:
-            return value
-    return ""
 
 
 def plan_sync(
@@ -231,10 +223,9 @@ def _persist_local(row: dict[str, Any], merged_extra: dict[str, Any], platform: 
         if model is None:
             raise ValueError(f"账号 {account_id} 不在 {platform} 库里")
         model.set_extra(merged_extra)
-        # access_token 也同步到 token 列（历史消费方读列）
-        at = str(merged_extra.get("access_token") or "").strip()
-        if at:
-            model.token = at
+        # token 列 = 平台主凭证的镜像（chatgpt → AT，grok → SSO）。
+        # 整理前这里无条件写 access_token —— grok 拉回时把 SSO 镜像盖成 AT。
+        sync_token_column(model, platform, merged_extra)
         from datetime import datetime, timezone
 
         model.updated_at = datetime.now(timezone.utc)

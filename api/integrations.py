@@ -169,29 +169,31 @@ def _push_account_uploader(panel_key: str, platform: str, row: dict):
         from services.chatgpt_sync import upload_proxy_for
 
         if plat == "grok":
+            from core.credential_fields import get_credential
             from platforms.grok.oauth_device import token_to_cpa_record
             from platforms.grok.upload import upload_to_cpa
 
             record = extra.get("cpa_record")
             if not isinstance(record, dict) or not record:
-                access = str(extra.get("access_token") or "").strip()
+                access = get_credential(extra, "access_token")
                 if not access:
                     return False, "账号没有 CPA 记录（也没有 access_token 可重建）"
                 record = token_to_cpa_record(
                     {"access_token": access,
-                     "refresh_token": str(extra.get("refresh_token") or ""),
-                     "id_token": str(extra.get("id_token") or "")},
+                     "refresh_token": get_credential(extra, "refresh_token"),
+                     "id_token": get_credential(extra, "id_token")},
                     email=email,
-                    sso=str(extra.get("sso") or ""),
+                    sso=get_credential(extra, "sso"),
                 )
             return upload_to_cpa(record, proxy=upload_proxy_for("cpa", extra))
 
         # ChatGPT：走 generate_token_json（与手动动作 / 自动上传同一条路径）
+        from core.credential_fields import get_credential
         from platforms.chatgpt.cpa_upload import generate_token_json, upload_to_cpa
 
         account = Account(
             platform=plat or "chatgpt", email=email, password="",
-            token=str(extra.get("access_token") or ""),
+            token=get_credential(extra, "access_token"),
             status=AccountStatus.REGISTERED, extra=extra,
         )
         return upload_to_cpa(
@@ -200,23 +202,25 @@ def _push_account_uploader(panel_key: str, platform: str, row: dict):
 
     if panel_key == "sub2api":
         from core.base_platform import Account, AccountStatus
+        from core.credential_fields import get_credential
         from platforms.chatgpt.sub2api_upload import upload_to_sub2api
 
         account = Account(
             platform=plat or "chatgpt", email=email, password="",
-            token=str(extra.get("access_token") or ""),
+            token=get_credential(extra, "access_token"),
             status=AccountStatus.REGISTERED, extra=extra,
         )
         return upload_to_sub2api(account)
 
     if panel_key == "chatgpt2api":
         from core.base_platform import Account, AccountStatus
+        from core.credential_fields import get_credential
         from platforms.chatgpt.chatgpt2api_upload import upload_to_chatgpt2api
         from services.chatgpt_sync import upload_proxy_for
 
         account = Account(
             platform=plat or "chatgpt", email=email, password="",
-            token=str(extra.get("access_token") or ""),
+            token=get_credential(extra, "access_token"),
             status=AccountStatus.REGISTERED, extra=extra,
         )
         return upload_to_chatgpt2api(

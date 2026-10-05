@@ -327,8 +327,8 @@ def import_accounts(
 
     邮箱是唯一业务键：同平台同邮箱已存在时更新而不是重复插入。
 
-    JSON 导入是 `_render_json` 导出的逆向：那份导出写 10 个字段，这里要能原样
-    收回来（含凭证），否则"导出备份 → 换台机器导入"会丢 token。
+    JSON 导入是 `_render_json` 导出的逆向：那份导出写的字段（含 sso 等凭证）
+    这里要能原样收回来，否则"导出备份 → 换台机器导入"会丢 token。
     """
     from core.db import account_repository, normalize_email
 
@@ -377,12 +377,14 @@ def import_accounts(
 #: JSON 导入时进 `extra` 的凭证字段（导出侧 `_render_json` 写的那几个）。
 #: `platform` / `email` / `password` / `status` / `created_at` 是账号表自己的列，
 #: 不进 extra；其余都是 extra 键 —— 与导出字段一一对应，保证往返不丢。
+#: **含 sso**（grok 主凭证）—— 整理前缺失导致 grok 账号往返丢 SSO。
 _IMPORT_EXTRA_KEYS = (
     "totp_secret",
     "access_token",
     "refresh_token",
     "id_token",
     "session_token",
+    "sso",
 )
 
 

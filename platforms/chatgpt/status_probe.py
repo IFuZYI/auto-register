@@ -84,12 +84,13 @@ def extract_chatgpt_account_id(account: Any) -> str:
         return user_id
 
     extra = getattr(account, "extra", {}) or {}
-    id_token = str(extra.get("id_token") or getattr(account, "id_token", "") or "").strip()
-    access_token = str(
-        extra.get("access_token")
-        or getattr(account, "access_token", "")
-        or getattr(account, "token", "")
-        or ""
+    from core.credential_fields import get_credential
+
+    id_token = get_credential(extra, "id_token") or str(
+        getattr(account, "id_token", "") or ""
+    ).strip()
+    access_token = get_credential(extra, "access_token") or str(
+        getattr(account, "access_token", "") or getattr(account, "token", "") or ""
     ).strip()
 
     id_payload = _decode_jwt_payload(id_token)
@@ -346,11 +347,10 @@ def probe_plus_trial_status(account: Any, proxy: Optional[str] = None) -> dict[s
     """查这个号还能不能领首月免费的 Plus 试用。"""
     checked_at = _utcnow_iso()
     extra = getattr(account, "extra", {}) or {}
-    access_token = str(
-        extra.get("access_token")
-        or getattr(account, "access_token", "")
-        or getattr(account, "token", "")
-        or ""
+    from core.credential_fields import get_credential
+
+    access_token = get_credential(extra, "access_token") or str(
+        getattr(account, "access_token", "") or getattr(account, "token", "") or ""
     ).strip()
 
     if not access_token:
@@ -388,14 +388,17 @@ def probe_plus_trial_status(account: Any, proxy: Optional[str] = None) -> dict[s
 def probe_local_chatgpt_status(account: Any, proxy: Optional[str] = None) -> dict[str, Any]:
     checked_at = _utcnow_iso()
     extra = getattr(account, "extra", {}) or {}
-    access_token = str(
-        extra.get("access_token")
-        or getattr(account, "access_token", "")
-        or getattr(account, "token", "")
-        or ""
+    from core.credential_fields import get_credential
+
+    access_token = get_credential(extra, "access_token") or str(
+        getattr(account, "access_token", "") or getattr(account, "token", "") or ""
     ).strip()
-    refresh_token = str(extra.get("refresh_token") or getattr(account, "refresh_token", "") or "").strip()
-    session_token = str(extra.get("session_token") or getattr(account, "session_token", "") or "").strip()
+    refresh_token = get_credential(extra, "refresh_token") or str(
+        getattr(account, "refresh_token", "") or ""
+    ).strip()
+    session_token = get_credential(extra, "session_token") or str(
+        getattr(account, "session_token", "") or ""
+    ).strip()
     account_id = extract_chatgpt_account_id(account)
 
     result: dict[str, Any] = {

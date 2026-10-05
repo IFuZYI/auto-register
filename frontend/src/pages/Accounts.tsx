@@ -476,11 +476,11 @@ export default function Accounts() {
   }
 
   /**
-   * 取账号的 Access Token —— 两个来源都要看：
-   * - `token` 列：历史遗留的凭证位（详情弹窗编辑、`POST /api/accounts` 写它）；
+   * 取账号的 Access Token —— 按平台主凭证的镜像规则取：
    * - `extra.access_token`：较新的落库路径写这里（实测存在 token 列为空、
-   *   extra 有值的账号，只读列会误显示「无 AT」）。
-   * 优先 extra（更新的来源），为空再退回列。
+   *   extra 有值的账号，只读列会误显示「无 AT」）—— 两平台都优先读它；
+   * - `token` 列：chatgpt 的列镜像 AT，可作为兜底；**grok 的列镜像是 SSO**
+   *   （不是 AT），不能拿来当 AT —— 否则列表会把 SSO 显示成「无法解析」。
    */
   const getAccessToken = (record: { token?: string; extra_json?: string } | null | undefined): string => {
     try {
@@ -490,6 +490,7 @@ export default function Accounts() {
     } catch {
       // ignore，退回列
     }
+    if (currentPlatform === 'grok') return ''
     return String(record?.token || '').trim()
   }
 
@@ -1334,7 +1335,7 @@ export default function Accounts() {
           <Form.Item name="password" label="密码" rules={[{ required: true }]}>
             <Input.Password />
           </Form.Item>
-          <Form.Item name="token" label="Token">
+          <Form.Item name="token" label={currentPlatform === 'grok' ? 'SSO' : 'Token'}>
             <Input />
           </Form.Item>
           <Form.Item name="cashier_url" label="试用链接">
@@ -1424,7 +1425,7 @@ export default function Accounts() {
                   ]}
                 />
               </Form.Item>
-              <Form.Item name="token" label="Access Token">
+              <Form.Item name="token" label={currentPlatform === 'grok' ? 'SSO（token 列）' : 'Access Token'}>
                 <Input.TextArea rows={2} style={{ fontFamily: 'monospace' }} />
               </Form.Item>
             </Form>

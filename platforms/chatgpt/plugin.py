@@ -85,7 +85,11 @@ class ChatGPTPlatform(BasePlatform):
 
             a = _A()
             extra = account.extra or {}
-            a.access_token = extra.get("access_token") or account.token
+            from core.credential_fields import get_credential, token_column_credential
+
+            a.access_token = get_credential(extra, "access_token") or token_column_credential(
+                account, "chatgpt", "access_token"
+            )
             a.cookies = extra.get("cookies", "")
             a.user_id = account.user_id
             probe = probe_local_chatgpt_status(a, proxy=self.config.proxy if self.config else None)
@@ -274,10 +278,14 @@ class ChatGPTPlatform(BasePlatform):
         a = _A()
         a.email = account.email
         a.password = account.password
-        a.access_token = extra.get("access_token") or account.token
-        a.refresh_token = extra.get("refresh_token", "")
-        a.id_token = extra.get("id_token", "")
-        a.session_token = extra.get("session_token", "")
+        from core.credential_fields import get_credential, token_column_credential
+
+        a.access_token = get_credential(extra, "access_token") or token_column_credential(
+            account, "chatgpt", "access_token"
+        )
+        a.refresh_token = get_credential(extra, "refresh_token")
+        a.id_token = get_credential(extra, "id_token")
+        a.session_token = get_credential(extra, "session_token")
         a.client_id = extra.get("client_id", "app_EMoamEEZ73f0CkXaXp7hrann")
         a.cookies = extra.get("cookies", "")
         a.user_id = account.user_id

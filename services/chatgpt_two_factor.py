@@ -104,8 +104,10 @@ def bind_account_two_factor(
             already_bound=True, secret=existing, error_message="库里已经有这个号的 TOTP 密钥"
         )
 
-    session_token = str(extra.get("session_token") or "")
-    access_token = str(extra.get("access_token") or token or "")
+    from core.credential_fields import get_credential
+
+    session_token = get_credential(extra, "session_token")
+    access_token = get_credential(extra, "access_token") or token or ""
     device_id = str(extra.get("device_id") or "")
 
     result = TwoFactorBindResult(error_message="没有可用的绑定路径")

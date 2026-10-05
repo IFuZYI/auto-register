@@ -22,8 +22,9 @@ logger = logging.getLogger(__name__)
 
 
 def account_refresh_token(model: AccountModel) -> str:
-    extra = model.get_extra()
-    return str(extra.get("refresh_token") or extra.get("refreshToken") or "").strip()
+    from core.credential_fields import get_credential
+
+    return get_credential(model.get_extra(), "refresh_token")
 
 
 def account_missing_rt(model: AccountModel) -> bool:
@@ -98,11 +99,13 @@ def backfill_account_data(
     else:
         log(f"[补RT] 收件通道: {getattr(mail_provider, 'display_name', '邮箱')} → {email}")
 
+    from core.credential_fields import get_credential
+
     return RefreshTokenBackfiller(
         email=email,
         password=password,
-        session_token=str(extra.get("session_token") or ""),
-        access_token=str(extra.get("access_token") or token or ""),
+        session_token=get_credential(extra, "session_token"),
+        access_token=get_credential(extra, "access_token") or token or "",
         device_id=str(extra.get("device_id") or ""),
         totp_secret=str(extra.get("totp_secret") or ""),
         proxy=proxy,

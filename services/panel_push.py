@@ -25,6 +25,10 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
+from core.credential_fields import (
+    first_present as _first_present,
+    sync_aliases,
+)
 from services.panel_comparison import (
     RemoteAccount,
     compare_by_hour,
@@ -35,22 +39,9 @@ from services.panel_comparison import (
 
 logger = logging.getLogger(__name__)
 
-#: 本地可推的凭证字段（规范名 → 别名）。与 `panel_sync._PULLABLE_FIELDS`
-#: 同一套字段、相反方向 —— 两边增删要同步。
-_PUSHABLE_FIELDS: tuple[tuple[str, ...], ...] = (
-    ("access_token", "accessToken"),
-    ("refresh_token", "refreshToken"),
-    ("id_token", "idToken"),
-    ("sso", "sso_token"),
-)
-
-
-def _first_present(extra: dict[str, Any], aliases: tuple[str, ...]) -> str:
-    for name in aliases:
-        value = str(extra.get(name) or "").strip()
-        if value:
-            return value
-    return ""
+#: 本地可推的凭证字段 —— 注册表一处定义（`core/credential_fields.py`），
+#: 与 `panel_sync._PULLABLE_FIELDS` 同一套字段、相反方向。
+_PUSHABLE_FIELDS: tuple[tuple[str, ...], ...] = sync_aliases()
 
 
 @dataclass

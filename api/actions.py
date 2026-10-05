@@ -143,25 +143,32 @@ def _apply_action_result(
         extra = acc_model.get_extra()
         _merge_extra_patch(extra, patch)
         acc_model.set_extra(extra)
-        # 补 RT 顺带刷新的 access_token 只在补丁里，不走下面的 data 通道
-        # （补丁字段直接落 extra，不能拿去当展示文案），这里单独同步一次
-        if str(patch.get("access_token") or "").strip():
-            acc_model.token = patch["access_token"]
+        # token 列 = 平台主凭证的镜像（chatgpt → AT，grok → SSO）。
+        # 整理前这里无条件写 access_token —— grok 的刷新补丁里带 AT，把 SSO
+        # 镜像盖成了 AT（线上 32 行里 12 行如此，读侧 `or account.token` 的
+        # 兜底会拿错值）。改为按平台取镜像字段；没有对应值时不碰列。
+        from core.credential_fields import sync_token_column
+
+        sync_token_column(acc_model, platform, extra)
         from datetime import datetime, timezone
         acc_model.updated_at = datetime.now(timezone.utc)
         session.add(acc_model)
     _record_upload_sync(platform, action_id, acc_model, result, session)
     if result.get("ok") and result.get("data", {}) and isinstance(result["data"], dict):
         data = result["data"]
-        tracked_keys = {"access_token", "accessToken", "refreshToken", "clientId", "clientSecret", "webAccessToken"}
-        if tracked_keys.intersection(data.keys()):
+        # 凭证字段统一走注册表（`core/credential_fields.py`）：只收凭证类字段、
+        # 归一到规范名（camelCase 落库的也认），其余展示字段（message/status/
+        # strategy 等）不落。整理前这里是手写集合，混着 camelCase 与
+        # `clientId`/`clientSecret`/`webAccessToken` 三个零生产方的死键。
+        from core.credential_fields import canonical_writes, sync_token_column
+
+        writes = canonical_writes(data)
+        if writes:
             extra = acc_model.get_extra()
-            extra.update(data)
+            extra.update(writes)
             acc_model.set_extra(extra)
-            if data.get("access_token"):
-                acc_model.token = data["access_token"]
-            elif data.get("accessToken"):
-                acc_model.token = data["accessToken"]
+            # token 列 = 平台主凭证的镜像（chatgpt → AT，grok → SSO）
+            sync_token_column(acc_model, platform, writes)
             from datetime import datetime, timezone
 
             acc_model.updated_at = datetime.now(timezone.utc)
@@ -341,16 +348,20 @@ def _execute_batch_cliproxy_sync(accounts: list[AccountModel], session: Session)
 
     class SyncAccount:
         def __init__(self, model: AccountModel):
+            from core.credential_fields import get_credential, token_column_credential
+
             extra = model.get_extra()
             self.id = model.id
             self.email = model.email
             self.user_id = model.user_id
             self.token = model.token
             self.extra = extra
-            self.access_token = extra.get("access_token") or model.token
-            self.refresh_token = extra.get("refresh_token", "")
-            self.id_token = extra.get("id_token", "")
-            self.session_token = extra.get("session_token", "")
+            self.access_token = get_credential(extra, "access_token") or token_column_credential(
+                model, "chatgpt", "access_token"
+            )
+            self.refresh_token = get_credential(extra, "refresh_token")
+            self.id_token = get_credential(extra, "id_token")
+            self.session_token = get_credential(extra, "session_token")
             self.client_id = extra.get("client_id", "app_EMoamEEZ73f0CkXaXp7hrann")
             self.cookies = extra.get("cookies", "")
 

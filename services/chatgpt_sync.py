@@ -129,6 +129,7 @@ def record_cliproxy_sync_result(extra: dict[str, Any], sync_result: dict[str, An
 
 def build_chatgpt_sync_account(account: Any):
     extra = _get_account_extra(account)
+    from core.credential_fields import get_credential, token_column_credential
 
     class _SyncAccount:
         pass
@@ -136,10 +137,14 @@ def build_chatgpt_sync_account(account: Any):
     obj = _SyncAccount()
     obj.email = getattr(account, "email", "")
     obj.user_id = getattr(account, "user_id", "")
-    obj.access_token = extra.get("access_token") or getattr(account, "token", "")
-    obj.refresh_token = extra.get("refresh_token", "")
-    obj.id_token = extra.get("id_token", "")
-    obj.session_token = extra.get("session_token", "")
+    # 凭证读取统一走注册表（认 camelCase 别名）—— 整理前只读蛇形，
+    # camelCase 落库的账号会被当成「缺 RT」。
+    obj.access_token = get_credential(extra, "access_token") or token_column_credential(
+        account, "chatgpt", "access_token"
+    )
+    obj.refresh_token = get_credential(extra, "refresh_token")
+    obj.id_token = get_credential(extra, "id_token")
+    obj.session_token = get_credential(extra, "session_token")
     obj.client_id = extra.get("client_id", "app_EMoamEEZ73f0CkXaXp7hrann")
     obj.cookies = extra.get("cookies", "")
     return obj

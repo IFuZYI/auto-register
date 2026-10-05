@@ -31,6 +31,12 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 
+from core.credential_fields import (
+    compare_aliases,
+    field_aliases,
+    first_present as _first_present,
+)
+
 logger = logging.getLogger(__name__)
 
 #: 对比结论
@@ -50,21 +56,12 @@ STATE_LABELS = {
     STATE_UNKNOWN_TIME: "无法比较",
 }
 
-#: 参与「是否同步」判定的凭证字段。
-#:
-#: 用户口径是「AT、RT 这种全相同就是同步」—— 列出的这些**全部**相同才算同步，
-#: 任何一个不同就是未同步。`session_token` 也列进来是因为 ChatGPT 侧本地存的是
-#: 它（CPA 侧上传的是 AT/RT），而 Grok 侧本地是 `sso`。
-#:
-#: 每个字段可以有多个键名（`access_token` / `accessToken`）—— 落库路径会写
-#: camelCase，只认蛇形会把有值的账号当成"没有凭证"。
-CREDENTIAL_FIELDS: tuple[tuple[str, ...], ...] = (
-    ("access_token", "accessToken"),
-    ("refresh_token", "refreshToken"),
-    ("session_token", "sessionToken"),
-    ("id_token", "idToken"),
-    ("sso", "sso_token"),
-)
+#: 参与「是否同步」判定的凭证字段 —— 注册表在 `core/credential_fields.py`，
+#: 全系统一处定义。用户口径是「AT、RT 这种全相同就是同步」—— 列出的这些
+#: **全部**相同才算同步，任何一个不同就是未同步。`session_token` 也列进来是
+#: 因为 ChatGPT 侧本地存的是它（CPA 侧上传的是 AT/RT），而 Grok 侧本地是
+#: `sso`。别名表见注册表（每个字段认蛇形与 camelCase 两种拼写）。
+CREDENTIAL_FIELDS = compare_aliases()
 
 
 def parse_timestamp(value: Any) -> Optional[datetime]:
@@ -130,15 +127,6 @@ def compare_credentials(local: dict[str, Any], remote: dict[str, Any]) -> tuple[
     if not comparable:
         return STATE_UNKNOWN_CREDENTIAL, []
     return STATE_SYNCED, []
-
-
-def _first_present(extra: dict[str, Any], aliases: tuple[str, ...]) -> str:
-    """按别名顺序取第一个非空值（蛇形优先，兼容 camelCase 落库）。"""
-    for name in aliases:
-        value = str(extra.get(name) or "").strip()
-        if value:
-            return value
-    return ""
 
 
 def _count_compared(local: dict[str, Any], remote: dict[str, Any]) -> int:
@@ -373,16 +361,15 @@ def diff_fields(local_extra: dict[str, Any], remote: RemoteAccount) -> list[str]
 
 
 def _refresh_token_from_extra(extra: dict[str, Any]) -> str:
-    """账号 extra 里的 refresh_token。
+    """账号 extra 里的 refresh_token（认 camelCase 别名）。
 
-    两个键都认（`refresh_token` / `refreshToken`）：通用结果落库路径
-    （`api/actions.py` 的 tracked_keys）会原样写 camelCase，只读蛇形的话这些
-    账号在对比面板里会被标成「无RT」—— 恰好是这一栏要审的那个凭证。
-    口径与 `services.chatgpt_rt_backfill.account_refresh_token` 一致。
+    口径与注册表一致（`core/credential_fields.py`）—— 落库路径会原样写
+    camelCase，只读蛇形的话这些账号在对比面板里会被标成「无RT」，恰好是
+    这一栏要审的那个凭证。
     """
     if not isinstance(extra, dict):
         return ""
-    return str(extra.get("refresh_token") or extra.get("refreshToken") or "").strip()
+    return _first_present(extra, field_aliases("refresh_token"))
 
 
 def _match_key(platform: str, email: str) -> str:

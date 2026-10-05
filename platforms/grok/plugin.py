@@ -210,10 +210,14 @@ class GrokPlatform(BasePlatform):
     def check_valid(self, account: Account) -> bool:
         """账号是否仍有效（判定语义见 `_probe_verdict`）。"""
         extra = account.extra or {}
-        access = str(extra.get("access_token") or account.token or "").strip()
+        # 凭证读取走注册表：grok 的 token 列镜像 SSO（不是 AT）——
+        # 整理前 `or account.token` 会把 SSO 当 AT 拿去 probe。
+        from core.credential_fields import get_credential, token_column_credential
+
+        access = get_credential(extra, "access_token")
         if not access:
             # 没有 OAuth token 时，用 SSO 探测账号是否存在
-            sso = str(extra.get("sso") or account.token or "").strip()
+            sso = get_credential(extra, "sso") or token_column_credential(account, "grok", "sso")
             if not sso:
                 return False
             return self._sso_alive(sso)
@@ -322,7 +326,10 @@ class GrokPlatform(BasePlatform):
         proxy = (self.config.proxy if self.config else None) or ""
 
         if action_id == "probe":
-            access = str(extra.get("access_token") or account.token or "")
+            # grok 的 token 列镜像 SSO，不是 AT —— 只从 extra 读 AT
+            from core.credential_fields import get_credential
+
+            access = get_credential(extra, "access_token")
             if not access:
                 return {"ok": False, "error": "账号没有 access_token"}
             code, summary = probe_token(
@@ -433,8 +440,11 @@ class GrokPlatform(BasePlatform):
             # 协议 device flow 被 CF 挡（verify/approve 403），必须用浏览器
             # 完成授权 —— `refresh_via_device_flow` 封装的就是浏览器 flow。
             from .token_refresh import refresh_via_device_flow
+            from core.credential_fields import token_column_credential
 
-            sso = str(extra.get("sso") or account.token or "").strip()
+            sso = str(extra.get("sso") or "").strip() or token_column_credential(
+                account, "grok", "sso"
+            )
             if not sso:
                 return {"ok": False, "error": "账号没有 SSO，无法走登录协议刷新"}
             result = refresh_via_device_flow(

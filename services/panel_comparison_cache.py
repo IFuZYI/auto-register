@@ -94,12 +94,17 @@ def _local_accounts_for_panel(panel_key: str) -> list[dict[str, Any]]:
 
     **`token` 列要并进 extra 再交出去**：账号表的 `token` 列是历史遗留的凭证位
     （前端编辑弹窗的「Token / Access Token」字段、`POST /api/accounts` 都写它），
-    而较新的落库路径把 AT 写进 `extra.access_token`。对比只看 extra 的话，
-    凭证在列上的账号会被当成「本地没有 AT」—— 与远端一比对得出「两边都没有」
-    → `unknown_credential`，或者更糟：本地有 RT 而远端 AT 不同时判成 `synced`
+    而较新的落库路径把主凭证写进 `extra`。对比只看 extra 的话，凭证在列上的
+    账号会被当成「本地没有」—— 与远端一比对得出「两边都没有」→
+    `unknown_credential`，或者更糟：本地有 RT 而远端 AT 不同时判成 `synced`
     （实测复现）。这里是两边凭证汇合的唯一入口，统一在这里补齐。
+
+    镜像规则见注册表（`core/credential_fields.py`）：token 列 = 平台主凭证
+    （chatgpt → AT，grok → SSO）；grok 列上是 OAuth 形态的 JWT（被 AT 盖过的
+    脏值）时不认 —— 那是启动迁移要修的行，读侧兜底也要挡住。
     """
     from core.db import account_repository
+    from core.credential_fields import token_column_credential, token_column_field
 
     platforms = _PANEL_PLATFORMS.get(panel_key, ())
     rows: list[dict[str, Any]] = []
@@ -108,12 +113,14 @@ def _local_accounts_for_panel(panel_key: str) -> list[dict[str, Any]]:
             extra = row.get_extra()
             # 列上的值只在 extra 里没有对应键时补 —— extra 是更新的来源，
             # 两处都有值时以 extra 为准（避免列上的旧值盖掉刷新后的新值）。
-            legacy_token = str(getattr(row, "token", "") or "").strip()
-            if legacy_token:
-                if platform == "grok":
-                    extra.setdefault("sso", legacy_token)
-                else:
-                    extra.setdefault("access_token", legacy_token)
+            # 镜像规则见注册表：token 列 = 平台主凭证（chatgpt → AT，
+            # grok → SSO）；grok 列上是 OAuth 形态的 JWT（被 AT 盖过的脏值）
+            # 时不认 —— 那正是迁移要修的行，读侧兜底也要挡住。
+            mirror = token_column_field(platform)
+            if mirror:
+                legacy = token_column_credential(row, platform, mirror)
+                if legacy:
+                    extra.setdefault(mirror, legacy)
             rows.append(
                 {
                     "id": row.id,

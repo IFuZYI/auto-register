@@ -606,6 +606,51 @@ def _drop_trial_end_time_column(engine: Engine | None = None) -> None:
             pass
 
 
+def _normalize_grok_token_column(engine: Engine | None = None) -> None:
+    """把 grok 的 `token` 列修回 SSO 镜像（凭证字段整理的数据收敛）。
+
+    token 列 = **平台主凭证的镜像**（grok → sso）。整理前 AT 刷新路径把
+    grok 的 token 列盖成了 AT（线上 32 行里 12 行如此），读侧 `or account.token`
+    的兜底会把 AT 当 SSO 用。迁移把「等于 extra.access_token 且与 extra.sso
+    不符」的行修回 SSO；token 列既不是 sso 也不是 AT 的行不乱动（来历不明，
+    宁可留着也不误改）。幂等；表不存在时跳过。
+    """
+    import json as _json
+
+    engine = engine or current_engine()
+    if not _is_sqlite(engine):
+        return
+    with engine.begin() as conn:
+        tables = {
+            str(row[0])
+            for row in conn.exec_driver_sql(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        if "accounts" not in tables:
+            return
+        rows = conn.exec_driver_sql(
+            "SELECT id, token, extra_json FROM accounts WHERE platform = 'grok'"
+        ).fetchall()
+        for row in rows:
+            row_id, token, extra_json = row[0], str(row[1] or "").strip(), row[2]
+            if not token:
+                continue
+            try:
+                extra = _json.loads(extra_json or "{}")
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(extra, dict):
+                continue
+            sso = str(extra.get("sso") or "").strip()
+            access = str(extra.get("access_token") or "").strip()
+            # 只修「被 AT 盖过」的行：token == AT 且与 SSO 不符
+            if sso and token == access and token != sso:
+                conn.exec_driver_sql(
+                    "UPDATE accounts SET token = ? WHERE id = ?", (sso, row_id)
+                )
+
+
 def run_migrations(engine: Engine | None = None) -> None:
     """在指定库跑全部迁移；不传则跑「默认库 + 所有平台库」。"""
     if engine is not None:
@@ -633,6 +678,8 @@ def _run_one(engine: Engine) -> None:
     # 状态精简：老库里的 trial / subscribed 归一成 registered，trial_end_time 列删除
     _normalize_removed_account_statuses(engine)
     _drop_trial_end_time_column(engine)
+    # 凭证字段整理：grok 的 token 列修回 SSO 镜像（曾被 AT 刷新路径盖过）
+    _normalize_grok_token_column(engine)
 
 
 __all__ = [
@@ -645,5 +692,6 @@ __all__ = [
     "_migrate_icloud_aliases_schema",
     "_migrate_outlook_accounts_schema",
     "_migrate_used_platforms_columns",
+    "_normalize_grok_token_column",
     "_normalize_removed_account_statuses",
 ]

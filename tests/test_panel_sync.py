@@ -197,7 +197,7 @@ class SyncBatchTests(unittest.TestCase):
         remote = [RemoteAccount(
             email=row.email, platform="grok",
             updated_at=datetime.now(timezone.utc),
-            credentials={"access_token": "new-at", "refresh_token": "new-rt"},
+            credentials={"access_token": "new-at", "refresh_token": "new-rt", "sso": "new-sso"},
         )]
         summary = sync_local_from_remote(local_rows, remote)
         self.assertEqual(summary["pulled"], 1)
@@ -210,7 +210,10 @@ class SyncBatchTests(unittest.TestCase):
         extra = fresh.get_extra()
         self.assertEqual(extra["access_token"], "new-at")
         self.assertEqual(extra["refresh_token"], "new-rt")
-        self.assertEqual(fresh.token, "new-at", "token 列也要同步")
+        # token 列 = 平台主凭证的镜像：grok → sso（**不是 AT**）。
+        # 整理前这里写的是 AT，把 SSO 镜像盖坏（线上 32 行里 12 行如此）。
+        self.assertEqual(fresh.token, "new-sso", "grok 的 token 列应镜像 SSO")
+        self.assertNotEqual(fresh.token, "new-at", "AT 不许写进 grok 的 token 列")
 
     def test_batch_skips_remote_only_accounts(self):
         """远端有、本地没有 → 不在拉回职责内（那是别的方向）。"""

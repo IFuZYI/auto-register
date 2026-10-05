@@ -126,6 +126,23 @@ class AtLifecycleDisplayContractTests(unittest.TestCase):
             "详情弹窗还在只读 token 列 —— 应走 getAccessToken(currentAccount)",
         )
 
+    def test_grok_token_column_is_not_read_as_at(self):
+        """grok 的 token 列镜像是 SSO（不是 AT）—— helper 不许把它当 AT 读。
+
+        整理前 helper 的兜底是无条件 `record.token`：grok 账号在列表里
+        会把 SSO（session_id 的 JWT）显示成「无法解析」。整理后按平台镜像
+        规则短路（`currentPlatform === 'grok'` 时不读列）。
+        """
+        src = self._src()
+        helper_idx = src.find("const getAccessToken")
+        self.assertGreater(helper_idx, -1)
+        block = src[helper_idx : helper_idx + 700]
+        self.assertIn(
+            "currentPlatform === 'grok'",
+            block,
+            "getAccessToken 没有按平台镜像规则短路 —— grok 的 SSO 会被当 AT 显示",
+        )
+
 
 class ICloudTableLayoutTests(unittest.TestCase):
     """iCloud 页两个表格的列宽契约（实测踩过的 bug 的回归网）。

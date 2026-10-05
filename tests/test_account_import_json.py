@@ -2,8 +2,9 @@
 
 JSON 导入是导出（`services/account_export._render_json`）的**逆向**：
 那份导出写 platform / email / password / totp_secret / access_token /
-refresh_token / id_token / session_token / status / created_at 十个字段，
+refresh_token / id_token / session_token / sso / status / created_at 等字段，
 导入必须能原样收回来 —— 否则「导出备份 → 换台机器导入」会丢 token。
+（sso 是 grok 的主凭证，整理前缺失导致 grok 账号往返丢 SSO —— 真 bug 已修。）
 """
 
 from __future__ import annotations
@@ -52,7 +53,7 @@ class JsonImportTests(unittest.TestCase):
             account_repository.delete(row.id, platform)
 
     def test_full_fields_round_trip(self):
-        """导出格式的十个字段都要能导进来（凭证不丢）。"""
+        """导出格式的字段都要能导进来（凭证不丢，含 sso）。"""
         email = "json-full@example.com"
         record = {
             "platform": "chatgpt",
@@ -344,6 +345,48 @@ class ImportExportRoundTripTests(unittest.TestCase):
                 row = account_repository.find_by_email("chatgpt", addr)
                 if row is not None:
                     account_repository.delete(row.id, "chatgpt")
+
+    def test_grok_sso_survives_the_round_trip(self):
+        """grok 账号的主凭证是 SSO —— 导出/导入往返必须保住它。
+
+        整理前的真 bug：导出字段表与导入白名单都没有 sso，grok 账号
+        「导出备份 → 换台机器导入」后 SSO 直接丢失（账号成废号）。
+        """
+        from services.account_export import _render_json
+
+        source_email = "sso-rt-src@example.com"
+        target_email = "sso-rt-dst@example.com"
+        try:
+            account = AccountModel(
+                platform="grok", email=source_email, password="pw-sso", status="registered",
+            )
+            account.set_extra({"sso": "sso-rt-value", "access_token": "at-sso"})
+            account_repository.upsert(account)
+
+            exported = _render_json(
+                [account_repository.find_by_email("grok", source_email)]
+            )
+            rows = json.loads(exported)
+            self.assertEqual(rows[0].get("sso"), "sso-rt-value", "导出里没有 sso")
+            rows[0]["email"] = target_email
+            r = self.client.post("/api/accounts/import", json={
+                "platform": "grok",
+                "lines": [json.dumps(rows, ensure_ascii=False)],
+                "format": "json",
+            })
+            self.assertEqual(r.status_code, 200, r.text[:300])
+
+            saved = account_repository.find_by_email("grok", target_email)
+            self.assertIsNotNone(saved, "导出的 JSON 没能导回来")
+            self.assertEqual(
+                saved.get_extra().get("sso"), "sso-rt-value",
+                "往返后 sso 丢了 —— grok 账号换机器导入即废",
+            )
+        finally:
+            for addr in (source_email, target_email):
+                row = account_repository.find_by_email("grok", addr)
+                if row is not None:
+                    account_repository.delete(row.id, "grok")
 
 
 class CashierUrlRoundTripTests(unittest.TestCase):
