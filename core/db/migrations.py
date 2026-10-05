@@ -355,7 +355,7 @@ def _ensure_account_email_unique(engine: Engine | None = None) -> None:
         for platform, email, _count, keep_id in dup_groups:
             rows = conn.exec_driver_sql(
                 "SELECT id, password, user_id, region, token, status, "
-                "trial_end_time, cashier_url, extra_json FROM accounts "
+                "cashier_url, extra_json FROM accounts "
                 "WHERE platform = ? AND email = ? ORDER BY id",
                 (platform, email),
             ).fetchall()
@@ -365,14 +365,13 @@ def _ensure_account_email_unique(engine: Engine | None = None) -> None:
                 "region": "",
                 "token": "",
                 "status": "registered",
-                "trial_end_time": 0,
                 "cashier_url": "",
                 "extra_json": "{}",
             }
             for row in rows:
                 (
                     _id, password, user_id, region, token, status,
-                    trial_end_time, cashier_url, extra_json,
+                    cashier_url, extra_json,
                 ) = row
                 for key, value in (
                     ("password", password), ("user_id", user_id), ("region", region),
@@ -382,16 +381,14 @@ def _ensure_account_email_unique(engine: Engine | None = None) -> None:
                         merged[key] = value
                 if merged["extra_json"] in ("", "{}") and extra_json not in ("", "{}"):
                     merged["extra_json"] = extra_json
-                if not merged["trial_end_time"] and trial_end_time:
-                    merged["trial_end_time"] = trial_end_time
                 if status and status != "registered":
                     merged["status"] = status
             conn.exec_driver_sql(
                 "UPDATE accounts SET password=?, user_id=?, region=?, token=?, "
-                "status=?, trial_end_time=?, cashier_url=?, extra_json=? WHERE id=?",
+                "status=?, cashier_url=?, extra_json=? WHERE id=?",
                 (
                     merged["password"], merged["user_id"], merged["region"],
-                    merged["token"], merged["status"], merged["trial_end_time"],
+                    merged["token"], merged["status"],
                     merged["cashier_url"], merged["extra_json"], keep_id,
                 ),
             )
@@ -553,6 +550,62 @@ def _drop_stale_pool_tables_from_default_db(engine: Engine) -> None:
                 conn.exec_driver_sql(f"DROP TABLE {table}")
 
 
+def _normalize_removed_account_statuses(engine: Engine | None = None) -> None:
+    """把历史行里的已删除状态（trial / subscribed）归一成 registered。
+
+    用户要求删除「试用中 / 已订阅」两个状态后，老库里可能还存着它们 ——
+    不归一会让界面上重新冒出这两个值（读侧 `AccountStatus.normalize` 只是
+    兜底，数据本身也该收敛）。幂等：每次启动跑一遍，无匹配时零改动。
+    """
+    engine = engine or current_engine()
+    if not _is_sqlite(engine):
+        return
+    with engine.begin() as conn:
+        tables = {
+            str(row[0])
+            for row in conn.exec_driver_sql(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        if "accounts" not in tables:
+            return
+        conn.exec_driver_sql(
+            "UPDATE accounts SET status = 'registered' "
+            "WHERE status IN ('trial', 'subscribed')"
+        )
+
+
+def _drop_trial_end_time_column(engine: Engine | None = None) -> None:
+    """删掉老库 accounts 表上的 `trial_end_time` 列（状态精简的收尾）。
+
+    该列只服务于已删除的「试用中」状态（零写入、零读取）—— 模型里已经去掉，
+    但 `create_all` 不会改动已存在的表，老库会一直留着它。SQLite 3.35+ 支持
+    `DROP COLUMN`（实测 3.53）；列不存在或库不支持时安静跳过（幂等）。
+    """
+    engine = engine or current_engine()
+    if not _is_sqlite(engine):
+        return
+    with engine.begin() as conn:
+        tables = {
+            str(row[0])
+            for row in conn.exec_driver_sql(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        if "accounts" not in tables:
+            return
+        columns = {
+            str(row[1])
+            for row in conn.exec_driver_sql("PRAGMA table_info('accounts')").fetchall()
+        }
+        if "trial_end_time" not in columns:
+            return
+        try:
+            conn.exec_driver_sql("ALTER TABLE accounts DROP COLUMN trial_end_time")
+        except Exception:  # noqa: BLE001 - 旧版 SQLite 不支持 DROP COLUMN 时保留该列
+            pass
+
+
 def run_migrations(engine: Engine | None = None) -> None:
     """在指定库跑全部迁移；不传则跑「默认库 + 所有平台库」。"""
     if engine is not None:
@@ -577,15 +630,20 @@ def _run_one(engine: Engine) -> None:
     _sync_outlook_used_status(engine)
     _ensure_hot_query_indexes(engine)
     _drop_stale_pool_tables_from_default_db(engine)
+    # 状态精简：老库里的 trial / subscribed 归一成 registered，trial_end_time 列删除
+    _normalize_removed_account_statuses(engine)
+    _drop_trial_end_time_column(engine)
 
 
 __all__ = [
     "run_migrations",
     "sync_outlook_used_across_databases",
     "_drop_stale_pool_tables_from_default_db",
+    "_drop_trial_end_time_column",
     "_ensure_account_email_unique",
     "_ensure_hot_query_indexes",
     "_migrate_icloud_aliases_schema",
     "_migrate_outlook_accounts_schema",
     "_migrate_used_platforms_columns",
+    "_normalize_removed_account_statuses",
 ]

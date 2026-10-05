@@ -24,7 +24,7 @@ class BackfillTargetSelectionTests(unittest.TestCase):
             session.add_all(
                 [
                     _account("no-rt-1@example.com"),
-                    _account("no-rt-2@example.com", status="trial"),
+                    _account("no-rt-2@example.com", status="expired"),
                     _account("has-rt@example.com", extra={"refresh_token": "rt"}),
                     _account("other-platform@example.com", platform="cursor"),
                 ]
@@ -43,7 +43,7 @@ class BackfillTargetSelectionTests(unittest.TestCase):
 
     def test_status_and_email_filters_are_applied(self):
         with Session(engine) as session:
-            accounts, _ = select_backfill_targets(session, all_filtered=True, status="trial")
+            accounts, _ = select_backfill_targets(session, all_filtered=True, status="expired")
             self.assertEqual([row.email for row in accounts], ["no-rt-2@example.com"])
 
             accounts, _ = select_backfill_targets(session, all_filtered=True, email="no-rt-1")

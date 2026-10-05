@@ -34,9 +34,9 @@ class AccountModel(SQLModel, table=True):
     region: str = ""
     token: str = ""
     # 列表默认「按状态筛选 + created_at 倒序」，两个条件都建索引；
-    # 状态取值见 AccountStatus 枚举，历史行可能带任意字符串。
+    # 状态取值见 AccountStatus 枚举（registered/expired/invalid/banned），
+    # 历史行可能带任意字符串。
     status: str = Field(default="registered", index=True)
-    trial_end_time: int = 0
     cashier_url: str = ""
     extra_json: str = "{}"   # JSON 存储平台自定义字段
     created_at: datetime = Field(default_factory=_utcnow, index=True)

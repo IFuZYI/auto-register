@@ -86,8 +86,6 @@ type PlusCheck = { status?: string; message?: string; checked_at?: string }
 
 const STATUS_COLORS: Record<string, string> = {
   registered: 'default',
-  trial: 'success',
-  subscribed: 'success',
   expired: 'warning',
   invalid: 'error',
   banned: 'error',
@@ -1147,8 +1145,6 @@ export default function Accounts() {
           onChange={(v) => { setPage(1); setFilterStatus(v) }}
           options={[
             { value: 'registered', label: '已注册' },
-            { value: 'trial', label: '试用中' },
-            { value: 'subscribed', label: '已订阅' },
             { value: 'expired', label: '已过期' },
             { value: 'invalid', label: '已失效' },
             { value: 'banned', label: '已封禁' },
@@ -1344,15 +1340,6 @@ export default function Accounts() {
           <Form.Item name="cashier_url" label="试用链接">
             <Input />
           </Form.Item>
-          <Form.Item name="status" label="状态" initialValue="registered">
-            <Select
-              options={[
-                { value: 'registered', label: '已注册' },
-                { value: 'trial', label: '试用中' },
-                { value: 'subscribed', label: '已订阅' },
-              ]}
-            />
-          </Form.Item>
         </Form>
       </Modal>
 
@@ -1431,8 +1418,6 @@ export default function Accounts() {
                 <Select
                   options={[
                     { value: 'registered', label: '已注册' },
-                    { value: 'trial', label: '试用中' },
-                    { value: 'subscribed', label: '已订阅' },
                     { value: 'expired', label: '已过期' },
                     { value: 'invalid', label: '已失效' },
                     { value: 'banned', label: '已封禁' },

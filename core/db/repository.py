@@ -204,6 +204,12 @@ class AccountRepository:
             ).first()
             status = getattr(account, "status", None)
             status_value = getattr(status, "value", None) or str(status or "registered")
+            # 状态精简的写侧兜底：旧客户端/旧导入文件可能提交已删除的
+            # trial / subscribed —— 落库前统一归一（读侧 AccountStatus.normalize
+            # 是第二道防线；这里保证数据本身收敛）。
+            from core.base_platform import AccountStatus
+
+            status_value = AccountStatus.normalize(status_value)
             # cashier_url 有两个来源：账号表的列（API 层导入/创建写这里）与
             # extra（插件形态的账号走这里）。**列上有值时以列为准** —— 旧实现
             # 无条件用 `extra.get("cashier_url")` 重算，而 JSON 导入恰好把该字段

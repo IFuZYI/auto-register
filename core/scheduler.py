@@ -1,4 +1,4 @@
-"""定时任务调度 - 账号有效性检测、trial 到期提醒、可注册的周期任务。
+"""定时任务调度 - 账号有效性检测、可注册的周期任务。
 
 设计
 ----
@@ -20,7 +20,8 @@ register_job(
 间隔函数返回 0 表示「当前不启用」，scheduler 会跳过该任务（不需要注销）。
 
 当前状态：扩展点保留，但**尚无服务注册任务** —— 原 `cpa_maintenance`
-（CPA 自动维护）已按需求删除。
+（CPA 自动维护）已按需求删除；`check_trial_expiry`（trial 到期检查）
+随「试用中/已订阅」状态一起删除。
 """
 
 from __future__ import annotations
@@ -95,8 +96,6 @@ class Scheduler:
         # 后者第一次出现时也要把 last_run_at 顶到现在（不瞬间触发）。
         self._seen_jobs: set[str] = set()
         self._loop_interval_seconds = 60
-        self._trial_check_interval_seconds = 3600
-        self._last_trial_check_at = 0.0
 
     def start(self):
         if self._running:
@@ -108,7 +107,6 @@ class Scheduler:
 
         now = time.time()
         # 将上次执行时间设为当前时间，避免应用一启动就瞬间触发定时任务（如 CPA 自动注册）
-        self._last_trial_check_at = now
         with _jobs_lock:
             self._seen_jobs = set(_jobs)
             for job in _jobs.values():
@@ -137,13 +135,6 @@ class Scheduler:
     def _loop(self, generation: int):
         while self._running and generation == self._generation:
             now = time.time()
-            if now - self._last_trial_check_at >= self._trial_check_interval_seconds:
-                try:
-                    self.check_trial_expiry()
-                    self._last_trial_check_at = now
-                except Exception as e:
-                    print(f"[Scheduler] Trial 检查错误: {e}")
-
             self._run_due_jobs(now)
 
             # 用 Event.wait 代替 sleep：stop() 能立刻唤醒，不用等满整个周期
@@ -173,21 +164,6 @@ class Scheduler:
                 # （如 CPA token 续期）遇到瞬态网络错误时应当尽快恢复，
                 # 等一小时再试等于白等。代价是持续失败会按 tick 频率重试并打日志。
                 print(f"[Scheduler] 周期任务 {job.name} 错误: {e}")
-
-    def check_trial_expiry(self):
-        """检查 trial 到期账号，更新状态（跨库）"""
-        now = int(datetime.now(timezone.utc).timestamp())
-        updated = 0
-        # 分库后账号散落在各平台库：走仓储跨库列出，否则只看默认库会漏掉平台账号
-        rows = account_repository.list_all_accounts(status="trial")
-        for acc in rows:
-            if acc.trial_end_time and acc.trial_end_time < now:
-                acc.status = AccountStatus.EXPIRED.value
-                acc.updated_at = datetime.now(timezone.utc)
-                account_repository.upsert(acc)
-                updated += 1
-        if updated:
-            print(f"[Scheduler] {updated} 个 trial 账号已到期")
 
     def check_accounts_valid(self, platform: str = None, limit: int = 50):
         """批量检测账号有效性（跨库）"""

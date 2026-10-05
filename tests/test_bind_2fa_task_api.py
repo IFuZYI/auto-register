@@ -25,7 +25,7 @@ class TwoFactorTargetSelectionTests(unittest.TestCase):
             session.add_all(
                 [
                     _account("no-2fa-1@example.com"),
-                    _account("no-2fa-2@example.com", status="trial"),
+                    _account("no-2fa-2@example.com", status="expired"),
                     _account("has-2fa@example.com", extra={"totp_secret": "SECRET"}),
                     _account("other-platform@example.com", platform="cursor"),
                 ]
@@ -44,7 +44,7 @@ class TwoFactorTargetSelectionTests(unittest.TestCase):
 
     def test_status_and_email_filters_are_applied(self):
         with Session(engine) as session:
-            accounts, _ = select_two_factor_targets(session, all_filtered=True, status="trial")
+            accounts, _ = select_two_factor_targets(session, all_filtered=True, status="expired")
             self.assertEqual([row.email for row in accounts], ["no-2fa-2@example.com"])
 
             accounts, _ = select_two_factor_targets(session, all_filtered=True, email="no-2fa-1")

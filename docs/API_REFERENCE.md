@@ -56,8 +56,8 @@ Authorization: Bearer <access_token>
 | `email` / `password` | 账号邮箱（或手机号）与密码；均属敏感数据 |
 | `user_id` / `region` | 平台用户 ID、地区 |
 | `token` | Access Token，敏感数据 |
-| `status` | 账号状态，默认 `registered` |
-| `trial_end_time` / `cashier_url` | 试用结束时间、支付链接 |
+| `status` | 账号状态：`registered` / `expired` / `invalid` / `banned`，默认 `registered` |
+| `cashier_url` | 支付/升级链接 |
 | `extra_json` | 平台扩展字段的 JSON 字符串，例如 RT、Cookie、TOTP |
 | `created_at` / `updated_at` | 创建、更新时间 |
 

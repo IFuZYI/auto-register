@@ -3,7 +3,6 @@ import { Card, Row, Col, Tag, Button, Spin, Empty } from 'antd'
 import {
   UserOutlined,
   CheckCircleOutlined,
-  ClockCircleOutlined,
   CloseCircleOutlined,
   ReloadOutlined,
 } from '@ant-design/icons'
@@ -14,8 +13,6 @@ import { GRID_GAP } from '@/theme'
 
 const STATUS_COLORS: Record<string, string> = {
   registered: 'default',
-  trial: 'success',
-  subscribed: 'success',
   expired: 'warning',
   invalid: 'error',
   banned: 'error',
@@ -23,8 +20,6 @@ const STATUS_COLORS: Record<string, string> = {
 
 const STATUS_LABELS: Record<string, string> = {
   registered: '已注册',
-  trial: '试用中',
-  subscribed: '已订阅',
   expired: '已过期',
   invalid: '已失效',
   banned: '已封禁',
@@ -132,14 +127,8 @@ export default function Dashboard() {
       color: 'var(--accent)',
     },
     {
-      title: '试用中',
-      value: stats?.by_status?.trial ?? 0,
-      icon: <ClockCircleOutlined />,
-      color: 'var(--warning)',
-    },
-    {
-      title: '已订阅',
-      value: stats?.by_status?.subscribed ?? 0,
+      title: '已注册',
+      value: stats?.by_status?.registered ?? 0,
       icon: <CheckCircleOutlined />,
       color: 'var(--success)',
     },

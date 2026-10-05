@@ -7,10 +7,20 @@ import os
 import time
 
 
+#: 已删除的状态值 → 归一目标（用户要求删除「试用中 / 已订阅」）。
+#: 老库、旧导入文件里可能还带着这两个值 —— 统一归一到 registered
+#: （它们都是「账号已注册、可用」的语义）。
+_REMOVED_STATUS_ALIASES = {"trial": "registered", "subscribed": "registered"}
+
+
 class AccountStatus(str, Enum):
+    """账号状态：只保留注册 / 过期 / 失效 / 封禁四个值。
+
+    「试用中（trial）」「已订阅（subscribed）」已按用户要求删除 ——
+    历史数据由 `normalize` 与启动迁移归一成 registered。
+    """
+
     REGISTERED   = "registered"
-    TRIAL        = "trial"
-    SUBSCRIBED   = "subscribed"
     EXPIRED      = "expired"
     INVALID      = "invalid"
     #: 账号被上游封禁/停用（OpenAI 的原话是 "deleted or deactivated"）。
@@ -27,6 +37,20 @@ class AccountStatus(str, Enum):
         return {member.value for member in cls}
 
     @classmethod
+    def normalize(cls, value: Any) -> str:
+        """状态字符串归一：已删除的值（trial / subscribed）→ registered。
+
+        删除功能时的兜底（见 docs/MAINTENANCE.md §6）：老库、旧导入文件、
+        旧客户端都可能还带着已删除的状态值 —— 不归一的话界面上会重新冒出
+        「试用中/已订阅」。空值 → registered；其它未知值原样保留（历史遗留
+        值由各自的读侧处理，不在这里猜测）。
+        """
+        text = str(getattr(value, "value", value) or "").strip().lower()
+        if not text:
+            return cls.REGISTERED.value
+        return _REMOVED_STATUS_ALIASES.get(text, text)
+
+    @classmethod
     def active_values(cls) -> set[str]:
         """「账号还能用」的状态集合（白名单）。
 
@@ -34,7 +58,7 @@ class AccountStatus(str, Enum):
         同一套逻辑——后者是黑名单（只有明确失效的才放行重试），未知状态按
         「已注册」处理以保守地避免重复注册。需要保守判定时用 `retryable()`。
         """
-        return {cls.REGISTERED.value, cls.TRIAL.value, cls.SUBSCRIBED.value}
+        return {cls.REGISTERED.value}
 
     @classmethod
     def dead_values(cls) -> set[str]:
@@ -111,7 +135,6 @@ class Account:
     region: str = ""
     token: str = ""
     status: AccountStatus = AccountStatus.REGISTERED
-    trial_end_time: int = 0       # unix timestamp
     extra: dict = field(default_factory=dict)  # 平台自定义字段
     created_at: int = field(default_factory=lambda: int(time.time()))
 
@@ -214,10 +237,6 @@ class BasePlatform(ABC):
     def check_valid(self, account: Account) -> bool:
         """检测账号是否有效"""
         ...
-
-    def get_trial_url(self, account: Account) -> Optional[str]:
-        """生成试用激活链接（可选实现）"""
-        return None
 
     def get_platform_actions(self) -> list:
         """

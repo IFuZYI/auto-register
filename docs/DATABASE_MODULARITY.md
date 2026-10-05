@@ -203,7 +203,7 @@ API 层的 `GET/PATCH/DELETE /accounts/{id}` 与 `POST /accounts/batch-delete`
 | `api/actions.py` | 批量操作按 `{platform}` 路径参数选库 |
 | `api/integrations.py` | 回填按平台分组，各组用自己库的会话 |
 | `api/tasks.py` | 回填 RT / 绑定 2FA 的目标选择走 `chatgpt` 库 |
-| `core/scheduler.py` | trial 到期检查、批量测活跨库 |
+| `core/scheduler.py` | 批量测活跨库（trial 到期检查已随状态精简删除） |
 | `services/chatgpt_sync.py` | CPA / Sub2API 同步结果写回 `chatgpt` 库 |
 | `services/icloud_service.py` | iCloud 主号/别名走 `icloud` 库 |
 
@@ -231,19 +231,23 @@ API 层的 `GET/PATCH/DELETE /accounts/{id}` 与 `POST /accounts/batch-delete`
 
 ```python
 AccountStatus.REGISTERED   # "registered"
-AccountStatus.TRIAL        # "trial"
-AccountStatus.SUBSCRIBED   # "subscribed"
 AccountStatus.EXPIRED      # "expired"
 AccountStatus.INVALID      # "invalid"
+AccountStatus.BANNED       # "banned"
 ```
+
+（`trial` / `subscribed` 已按用户要求删除；老库里的历史值由
+`_normalize_removed_account_statuses` 启动迁移与 `AccountStatus.normalize`
+读侧兜底统一归一成 `registered`。）
 
 两个判定语义**不同**，不要混用：
 
 | 方法 | 判定方式 | 用途 |
 |------|---------|------|
-| `is_active(v)` | 白名单：只认 registered/trial/subscribed | 测活——宁可漏测也不重测失效账号 |
+| `is_active(v)` | 白名单：只认 registered | 测活——宁可漏测也不重测失效账号 |
 | `counts_as_registered(v)` | 黑名单：只有 invalid/expired 不算 | 判重——未知状态按已注册处理，避免重复占用邮箱 |
 | `coerce(v)` | 转枚举，未知值回落 REGISTERED | 读取历史行（库里可能有枚举外取值），不抛异常 |
+| `normalize(v)` | 已删除值（trial/subscribed）→ registered | 读侧/写侧兜底，防止已删状态回流 |
 
 `coerce` 是为了避免 `AccountStatus(raw)` 在遇到枚举外历史值（如 chatgpt 侧的
 `active`/`banned`）时抛 `ValueError` 打断整个操作。

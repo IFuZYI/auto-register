@@ -60,7 +60,7 @@ class AccountUpdateEndpointTests(unittest.TestCase):
 
         response = self.client.patch(
             f"/accounts/{account_id}?platform=chatgpt",
-            json={"status": "subscribed"},
+            json={"status": "banned"},
         )
 
         self.assertEqual(response.status_code, 200, response.text)

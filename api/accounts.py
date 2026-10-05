@@ -199,17 +199,20 @@ def list_accounts(
 @router.post("")
 def create_account(body: AccountCreate, session: Session = Depends(get_session)):
     """新增账号。同平台同邮箱已存在时更新而不是重复插入（邮箱是唯一键）。"""
+    from core.base_platform import AccountStatus
     from core.db import account_repository, normalize_email
 
     email = normalize_email(body.email)
     if not email:
         raise HTTPException(400, "邮箱不能为空")
 
+    # 状态精简的写侧兜底：旧客户端可能提交已删除的 trial / subscribed
+    status = AccountStatus.normalize(body.status)
     existing = account_repository.find_by_email(body.platform, email)
     if existing is not None:
         existing.password = body.password or existing.password
         existing.token = body.token or existing.token
-        existing.status = body.status or existing.status
+        existing.status = status
         existing.cashier_url = body.cashier_url or existing.cashier_url
         existing.updated_at = datetime.now(timezone.utc)
         with account_repository.session_for(body.platform) as sess:
@@ -222,7 +225,7 @@ def create_account(body: AccountCreate, session: Session = Depends(get_session))
         platform=body.platform,
         email=email,
         password=body.password,
-        status=body.status,
+        status=status,
         token=body.token,
         cashier_url=body.cashier_url,
     )
@@ -543,7 +546,10 @@ def update_account(account_id: int, body: AccountUpdate, platform: str = ""):
     if not acc:
         raise HTTPException(404, "账号不存在")
     if body.status is not None:
-        acc.status = body.status
+        from core.base_platform import AccountStatus
+
+        # 状态精简的写侧兜底：旧客户端可能提交已删除的 trial / subscribed
+        acc.status = AccountStatus.normalize(body.status)
     if body.token is not None:
         acc.token = body.token
     if body.cashier_url is not None:

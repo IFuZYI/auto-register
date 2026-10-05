@@ -275,11 +275,11 @@ def test_migration_creates_unique_index(tmp_path):
     with engine.begin() as conn:
         conn.exec_driver_sql(
             "INSERT INTO accounts (platform, email, password, user_id, region, "
-            "token, status, trial_end_time, cashier_url, extra_json, "
+            "token, status, cashier_url, extra_json, "
             "created_at, updated_at) "
-            "VALUES ('grok', 'Dup@X.ai', 'p1', '', '', '', 'registered', 0, '', '{}', "
+            "VALUES ('grok', 'Dup@X.ai', 'p1', '', '', '', 'registered', '', '{}', "
             "'2026-01-01 00:00:00', '2026-01-01 00:00:00'), "
-            "('grok', 'dup@x.ai', 'p2', 'u2', '', 'tok', 'invalid', 0, '', '{\"k\":1}', "
+            "('grok', 'dup@x.ai', 'p2', 'u2', '', 'tok', 'invalid', '', '{\"k\":1}', "
             "'2026-01-02 00:00:00', '2026-01-02 00:00:00')"
         )
 

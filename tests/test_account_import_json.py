@@ -63,7 +63,8 @@ class JsonImportTests(unittest.TestCase):
             "refresh_token": "rt-abc",
             "id_token": "id-abc",
             "session_token": "st-abc",
-            "status": "subscribed",
+            # 用保留的状态值：已删除的 trial/subscribed 会被写侧归一（有专项测试覆盖）
+            "status": "banned",
             "created_at": "2026-03-31 04:10:00",
         }
         try:
@@ -74,7 +75,7 @@ class JsonImportTests(unittest.TestCase):
             saved = account_repository.find_by_email("chatgpt", email)
             self.assertIsNotNone(saved)
             self.assertEqual(saved.password, "pw-123")
-            self.assertEqual(saved.status, "subscribed")
+            self.assertEqual(saved.status, "banned")
             extra = saved.get_extra()
             self.assertEqual(extra["totp_secret"], "JBSWY3DPEHPK3PXP")
             self.assertEqual(extra["access_token"], "at-abc")
@@ -298,7 +299,8 @@ class ImportExportRoundTripTests(unittest.TestCase):
                 platform="chatgpt",
                 email=source_email,
                 password="pw-rt",
-                status="trial",
+                # 用保留的状态值（trial/subscribed 已删除）
+                status="banned",
                 user_id="uid-1",
             )
             account.set_extra({
