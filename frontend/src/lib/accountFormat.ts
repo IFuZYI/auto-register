@@ -154,6 +154,37 @@ export function formatStructuredText(value?: string) {
   return trimmed
 }
 
+// ── 账号状态（用户要求 2026-10-06：正常 / 过期 / 失效 / 禁用）──
+
+/**
+ * 账号状态 → 展示元数据（标签 + 颜色）。
+ *
+ * 语义（与后端 `services/chatgpt_account_state.py` 同口径）：
+ * - `registered` 正常：正常能使用的账号；
+ * - `expired` 过期：AT 已过期（刷新可能救回）；
+ * - `invalid` 失效：需要重新登录的（凭证被拒），走流程登录；
+ * - `banned` 禁用：被封了的账号。
+ *
+ * 此前账号列表直接渲染英文原值（`<Tag>{status}</Tag>` → "registered"），
+ * 且旧文案是「已注册 / 已过期 / 已失效 / 已封禁」—— 统一收敛到这里，
+ * Accounts 与 Dashboard 共用一处映射。
+ */
+export function accountStatusMeta(status?: string): { label: string; color: string } {
+  switch (String(status || '').trim().toLowerCase()) {
+    case 'registered':
+      return { label: '正常', color: 'success' }
+    case 'expired':
+      return { label: '过期', color: 'warning' }
+    case 'invalid':
+      return { label: '失效', color: 'error' }
+    case 'banned':
+      return { label: '禁用', color: 'default' }
+    default:
+      // 历史库可能带任意字符串 —— 原样显示比吞掉强（能看到真实值）
+      return { label: String(status || '未知'), color: 'default' }
+  }
+}
+
 // ── AT 生命周期（与后端 `services/chatgpt_token_lifecycle.py` 同口径）──
 
 /** 到期前多久算「即将过期」：24 小时（与后端 / 参考实现一致）。 */

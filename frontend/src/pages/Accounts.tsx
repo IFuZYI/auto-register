@@ -8,6 +8,7 @@ import {
 import {
   normalizeAccount,
   formatCreatedAt,
+  accountStatusMeta,
   authStateMeta,
   codexStateMeta,
   plusTrialMeta,
@@ -82,13 +83,6 @@ const PLUS_TRIAL_FILTERS = [
 ]
 
 type PlusCheck = { status?: string; message?: string; checked_at?: string }
-
-const STATUS_COLORS: Record<string, string> = {
-  registered: 'default',
-  expired: 'warning',
-  invalid: 'error',
-  banned: 'error',
-}
 
 // 纯前端动作，不发请求，所以不和后端的 action id 抢命名空间
 const COPY_TOTP_ACTION_ID = '__copy_totp_secret'
@@ -849,7 +843,11 @@ export default function Accounts() {
       dataIndex: 'status',
       key: 'status',
       width: 110,
-      render: (status: string) => <Tag color={STATUS_COLORS[status] || 'default'}>{status}</Tag>,
+      render: (status: string) => {
+        // 显示中文语义标签（正常/过期/失效/禁用）—— 此前直接渲染英文原值
+        const meta = accountStatusMeta(status)
+        return <Tag color={meta.color}>{meta.label}</Tag>
+      },
     },
     {
       // AT 有效期：ChatGPT 与 Grok 的 AT 都是 JWT（都带 iat/exp），
@@ -1161,10 +1159,10 @@ export default function Accounts() {
           style={{ width: 130 }}
           onChange={(v) => { setPage(1); setFilterStatus(v) }}
           options={[
-            { value: 'registered', label: '已注册' },
-            { value: 'expired', label: '已过期' },
-            { value: 'invalid', label: '已失效' },
-            { value: 'banned', label: '已封禁' },
+            { value: 'registered', label: '正常' },
+            { value: 'expired', label: '过期' },
+            { value: 'invalid', label: '失效' },
+            { value: 'banned', label: '禁用' },
           ]}
         />
         {currentPlatform === 'chatgpt' && (
@@ -1434,10 +1432,10 @@ export default function Accounts() {
               <Form.Item name="status" label="状态">
                 <Select
                   options={[
-                    { value: 'registered', label: '已注册' },
-                    { value: 'expired', label: '已过期' },
-                    { value: 'invalid', label: '已失效' },
-                    { value: 'banned', label: '已封禁' },
+                    { value: 'registered', label: '正常' },
+                    { value: 'expired', label: '过期' },
+                    { value: 'invalid', label: '失效' },
+                    { value: 'banned', label: '禁用' },
                   ]}
                 />
               </Form.Item>

@@ -238,6 +238,15 @@ def refresh_via_device_flow(
         tokens = dict(tokens)
         tokens.setdefault("token_type", "Bearer")
         return RefreshResult(ok=True, tokens=tokens, method="device")
+    if tokens and tokens.get("sso_rejected"):
+        # SSO 被上游明确拒绝（重定向到登录页）—— 对齐 grok2api 的
+        # 「SSO credential rejected」：账号需要重新登录，标失效而不是
+        # 瞬时失败（瞬时失败不该动账号状态）。
+        return RefreshResult(
+            ok=False, method="device", kind="permanent",
+            error_code="sso_rejected",
+            error="SSO 已被上游拒绝（登录页重定向），需要重新登录",
+        )
     return RefreshResult(
         ok=False, method="device", kind="retryable",
         error="浏览器登录协议未换到 token（SSO 可能已失效或被风控）",

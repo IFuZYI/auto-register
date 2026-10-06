@@ -164,6 +164,7 @@ def oauth_device_via_browser(
                     _log(log, f"[Grok] 授权页导航异常: {type(exc).__name__}")
 
                 approved = False
+                sso_rejected = False
                 for i in range(24):
                     if time.time() > deadline:
                         break
@@ -173,6 +174,13 @@ def oauth_device_via_browser(
                         cur = ""
                     if "/device/done" in cur:
                         approved = True
+                        break
+                    # SSO 被拒的明确信号：授权页把未登录访客重定向到
+                    # sign-in —— 对齐 grok2api 的「SSO credential rejected」
+                    # （该账号需要重新登录，标失效而不是普通失败）。
+                    if "sign-in" in cur or "sign-up" in cur:
+                        sso_rejected = True
+                        _log(log, "[Grok] SSO 被上游拒绝（重定向到登录页）")
                         break
                     # 点一次授权（点错后续按钮会命中拒绝路径，故只点可见的）
                     for sel in _APPROVE_SELECTORS:
@@ -192,6 +200,9 @@ def oauth_device_via_browser(
                             approved = True
                     except Exception:
                         pass
+                if sso_rejected:
+                    # 明确拒绝 → 由调用方把账号标失效（需要重新登录）
+                    return {"sso_rejected": True}
                 _log(log, f"[Grok] 授权{'完成' if approved else '未确认，仍尝试取 token'}")
             finally:
                 try:

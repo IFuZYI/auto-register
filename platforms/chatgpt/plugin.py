@@ -237,6 +237,25 @@ class ChatGPTPlatform(BasePlatform):
         ).run()
 
         if login_result.success:
+            # 登录链拿到的 AT 也要**真校验**（打一次 /backend-api/me）——
+            # 用户要求「GPT刷新token你要确认AT真的更新了」。此前这里
+            # `verified = True` 是写死的：登录链刚跑完就假定可用，若服务端
+            # 返回一个已失效的令牌，会被当成功写回库，下一个任务全线失败。
+            from platforms.chatgpt.token_refresh import TokenRefreshManager
+
+            verifier = TokenRefreshManager(proxy_url=self.config.proxy if self.config else None)
+            verified, verify_message = verifier.verify_access_token(login_result.access_token)
+            if not verified:
+                result.success = False
+                result.verified = False
+                result.verify_message = verify_message
+                result.error_message = (
+                    f"登录流程拿到 AT 但未通过校验（{verify_message}）"
+                )
+                result.strategy = login_result.strategy
+                log(f"[登录刷新] {result.error_message}")
+                return result
+
             result.success = True
             result.access_token = login_result.access_token
             result.refresh_token = login_result.refresh_token or result.refresh_token

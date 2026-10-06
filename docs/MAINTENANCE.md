@@ -302,6 +302,9 @@ register_job("my_job", interval_seconds=lambda: ..., runner=lambda: ...)
 | `test_credential_fields.py` | 凭证字段注册表（字段/别名/标签、token 列镜像、导出往返含 SSO、启动迁移把被 AT 盖过的 grok token 列修回 SSO 镜像） | 改 `core/credential_fields.py` 的字段表；消费方不再同源 |
 | `test_panel_time_single_side.py` | 时间判定的单侧回落：一侧有 iat、另一侧回落记录时间（`mixed` 档）仍能判方向；iat 两侧可比时优先于记录时间 | 改 `compare_credential_time` 的回落口径 |
 | `test_account_status_removal.py` | 账号状态四值（registered/expired/invalid/banned）、`AccountStatus.normalize` 读侧兜底、启动迁移归一历史行并删除 `trial_end_time` 列 | 改状态枚举或删除迁移 |
+| `test_status_semantics.py` | 状态语义分档（正常/过期/失效/禁用）：AT 过期判「过期」、被拒未过期判「失效」、封禁措辞（含 sign-in session 消息）判「禁用」、正向恢复；前端标签映射与动作接线 | 改 `services/chatgpt_account_state.py` 的判定优先级；前端状态标签改回英文/旧文案 |
+| `test_grok_status_semantics.py` | grok 状态判定对齐 grok2api：SSO 被拒/`invalid_grant` 判「失效」、`blocked-user` 判「禁用」、402/403 无额度仍有效、正向恢复 | 改 `services/grok_account_state.py` |
+| `test_chatgpt_token_refresh_verification.py` | 刷出的 AT 真校验（`/backend-api/me`）、登录链兜底、封禁识别、**登录链 AT 也要 verify** | 改 `platforms/chatgpt/token_refresh.py` 的校验或登录兜底 |
 | `test_runtime_version_stamp.py` | 版本戳语义（未跟踪文件不算脏） | 改 `_read_git_version` |
 | `test_frontend_layout_contract.py::test_typescript_still_compiles` | `npx tsc -b` 0 错误 | 前端类型错误（无 node 时跳过） |
 
@@ -309,7 +312,7 @@ register_job("my_job", interval_seconds=lambda: ..., runner=lambda: ...)
 
 | 脚本 | 跑什么 |
 | --- | --- |
-| `frontend/scripts/run_account_format_checks.mjs` | `lib/accountFormat.ts` 的纯函数（46 条断言） |
+| `frontend/scripts/run_account_format_checks.mjs` | `lib/accountFormat.ts` 的纯函数（53 条断言，含状态标签 正常/过期/失效/禁用） |
 | `frontend/scripts/run_panel_filter_checks.mjs` | `lib/panelComparison.ts` 的筛选/计数（32 条断言） |
 | `tests/test_timezone_display.py` | 三个时区下编译并执行 `lib/time.ts` |
 

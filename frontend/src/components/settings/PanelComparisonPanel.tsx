@@ -7,6 +7,7 @@ import {
   SyncOutlined,
 } from '@ant-design/icons'
 import { apiFetch } from '@/lib/utils'
+import { accountStatusMeta } from '@/lib/accountFormat'
 import { formatLocalTime, localTimezoneLabel } from '@/lib/time'
 import {
   countByPlatform,
@@ -186,7 +187,7 @@ const COLUMNS: ColumnsType<ComparisonRow> = [
         <Typography.Text ellipsis style={{ maxWidth: 220 }}>{value}</Typography.Text>
         <Space size={4}>
           {row.local_id ? (
-            <Tooltip title={`本地账号 id=${row.local_id}，状态 ${row.local_status || '未知'}`}>
+            <Tooltip title={`本地账号 id=${row.local_id}，状态 ${accountStatusMeta(row.local_status).label}`}>
               <Tag color={row.local_status === 'banned' ? 'error' : 'default'} style={{ marginInlineEnd: 0 }}>
                 本地
               </Tag>

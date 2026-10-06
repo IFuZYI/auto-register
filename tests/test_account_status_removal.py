@@ -390,9 +390,12 @@ class FrontendStatusRemovalTests(unittest.TestCase):
         self.assertNotIn("'trial'", src, "账号页还有 trial 状态值")
 
     def test_dashboard_shows_registered_card_instead(self):
-        """删掉的两张卡由「已注册」替代（保留总数 / 好 / 坏三档结构）。"""
+        """删掉的两张卡由「正常」替代（保留总数 / 好 / 坏三档结构）。
+
+        2026-10-06 用户要求改名：「已注册」→「正常」（正常能使用的账号）。
+        """
         src = self._src("pages/Dashboard.tsx")
-        self.assertIn("title: '已注册'", src)
+        self.assertIn("title: '正常'", src)
         self.assertIn("by_status?.registered", src)
 
     def test_add_modal_has_no_status_field(self):

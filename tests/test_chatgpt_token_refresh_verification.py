@@ -239,5 +239,72 @@ class LoginRefresherTests(unittest.TestCase):
         self.assertTrue(result.banned)
 
 
+class LoginChainVerificationTests(unittest.TestCase):
+    """登录链拿到的 AT 也要真校验 —— 用户要求「GPT刷新token你要确认AT真的更新了」。
+
+    回归背景：`_refresh_via_login` 此前把 `result.verified = True` 写死 ——
+    登录链刚跑完就假定可用，若服务端返回一个已失效的令牌会被当成功写回库。
+    """
+
+    def _platform(self):
+        from core.base_platform import RegisterConfig
+        from platforms.chatgpt.plugin import ChatGPTPlatform
+
+        return ChatGPTPlatform(config=RegisterConfig())
+
+    def _account(self):
+        class _A:
+            email = "user@example.com"
+            password = "pw"
+            extra: dict = {}
+
+        return _A()
+
+    def _run(self, verify_ok: bool, verify_reason: str = ""):
+        from unittest.mock import patch
+
+        from platforms.chatgpt.login_refresh import LoginRefreshResult
+        from platforms.chatgpt.token_refresh import TokenRefreshResult
+
+        result = TokenRefreshResult(success=True, access_token="stale", verified=False)
+        login_result = LoginRefreshResult(
+            success=True,
+            access_token="fresh-at",
+            refresh_token="fresh-rt",
+            session_token="fresh-st",
+            strategy="password_2fa",
+        )
+        with patch(
+            "services.chatgpt_otp_mailbox.resolve_otp_mail_provider",
+            return_value=(None, "不在号池里"),
+        ), patch(
+            "platforms.chatgpt.login_refresh.LoginAccessTokenRefresher"
+        ) as refresher_cls, patch(
+            "platforms.chatgpt.token_refresh.TokenRefreshManager"
+        ) as verifier_cls:
+            refresher_cls.return_value.run.return_value = login_result
+            verifier_cls.return_value.verify_access_token.return_value = (
+                verify_ok,
+                verify_reason,
+            )
+            out = self._platform()._refresh_via_login(self._account(), result)
+        return out, verifier_cls
+
+    def test_verified_login_at_is_reported_as_success(self):
+        out, verifier_cls = self._run(verify_ok=True)
+        self.assertTrue(out.success)
+        self.assertTrue(out.verified)
+        self.assertEqual(out.access_token, "fresh-at")
+        # 校验必须真的发生（打了 /backend-api/me），而不是写死 True
+        verifier_cls.return_value.verify_access_token.assert_called_once_with("fresh-at")
+
+    def test_unverified_login_at_is_reported_as_failure(self):
+        """登录链拿到的 AT 未通过校验 → 不写库（success=False）。"""
+        out, _ = self._run(verify_ok=False, verify_reason="新 AT 被服务端拒绝（HTTP 401）")
+        self.assertFalse(out.success, "未通过校验的 AT 不该被当成功")
+        self.assertFalse(out.verified)
+        self.assertIn("未通过校验", out.error_message)
+
+
 if __name__ == "__main__":
     unittest.main()

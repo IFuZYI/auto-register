@@ -7,23 +7,10 @@ import {
   ReloadOutlined,
 } from '@ant-design/icons'
 import { getPlatformTagColor, getPlatformLabel } from '@/lib/platforms'
+import { accountStatusMeta } from '@/lib/accountFormat'
 import { apiFetch } from '@/lib/utils'
 import { PageHeader } from '@/components/PageHeader'
 import { GRID_GAP } from '@/theme'
-
-const STATUS_COLORS: Record<string, string> = {
-  registered: 'default',
-  expired: 'warning',
-  invalid: 'error',
-  banned: 'error',
-}
-
-const STATUS_LABELS: Record<string, string> = {
-  registered: '已注册',
-  expired: '已过期',
-  invalid: '已失效',
-  banned: '已封禁',
-}
 
 /** 平台分布条的配色：按平台名取稳定色相，没有映射时回落主题色。 */
 const PLATFORM_BAR_COLORS: Record<string, string> = {
@@ -127,14 +114,14 @@ export default function Dashboard() {
       color: 'var(--accent)',
     },
     {
-      title: '已注册',
+      title: '正常',
       value: stats?.by_status?.registered ?? 0,
       icon: <CheckCircleOutlined />,
       color: 'var(--success)',
     },
     {
-      title: '已失效',
-      // 封禁（banned）也归这一档：它同样是"这号不能用了"，
+      title: '失效',
+      // 过期 / 失效 / 禁用都归这一档：它们同样是"这号不能用了"，
       // 漏掉的话卡片数字会比下面的明细列表少，看着像统计坏了。
       value: (stats?.by_status?.expired ?? 0)
         + (stats?.by_status?.invalid ?? 0)
@@ -257,7 +244,9 @@ export default function Dashboard() {
                 <Spin />
               </div>
             ) : statusEntries.length ? (
-              statusEntries.map(([status, count], i) => (
+              statusEntries.map(([status, count], i) => {
+                const meta = accountStatusMeta(status)
+                return (
                 <div
                   key={status}
                   className="stagger-item"
@@ -273,8 +262,8 @@ export default function Dashboard() {
                     } as React.CSSProperties
                   }
                 >
-                  <Tag color={STATUS_COLORS[status] || 'default'} style={{ margin: 0 }}>
-                    {STATUS_LABELS[status] || status}
+                  <Tag color={meta.color} style={{ margin: 0 }}>
+                    {meta.label}
                   </Tag>
                   <span
                     style={{
@@ -287,7 +276,8 @@ export default function Dashboard() {
                     {count}
                   </span>
                 </div>
-              ))
+                )
+              })
             ) : (
               <Empty
                 image={Empty.PRESENTED_IMAGE_SIMPLE}

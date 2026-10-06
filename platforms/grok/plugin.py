@@ -208,7 +208,26 @@ class GrokPlatform(BasePlatform):
         return False, (f"HTTP {code}" if code is not None else "请求失败")
 
     def check_valid(self, account: Account) -> bool:
-        """账号是否仍有效（判定语义见 `_probe_verdict`）。"""
+        """账号是否仍有效（判定语义见 `_probe_verdict`）。
+
+        探测细节（探测码/摘要/SSO 状态）存在 `last_probe_detail` 上，
+        供调用方（`_do_check` / 调度器）落状态时区分 过期 / 失效 / 禁用。
+        """
+        detail = self.probe_account_detail(account)
+        self.last_probe_detail = detail
+        return bool(detail.get("usable"))
+
+    def probe_account_detail(self, account: Account) -> dict:
+        """探测账号并返回判定细节（不落库）。
+
+        返回 `{"code", "summary", "usable", "sso_status"}`：
+
+        - 有 AT：走 CLI Proxy 测活（`probe_token`），code/summary 是原始结果；
+        - 无 AT：用 SSO 访问 accounts.x.ai，`sso_status` ∈
+          `alive` / `rejected` / `unknown` —— `rejected` 表示 SSO 已被上游
+          拒绝（对齐 grok2api 的 `markSSOCredentialRejected` → reauthRequired，
+          即「失效，需要重新登录」）；`unknown`（网络异常）不据此改状态。
+        """
         extra = account.extra or {}
         # 凭证读取走注册表：grok 的 token 列镜像 SSO（不是 AT）——
         # 整理前 `or account.token` 会把 SSO 当 AT 拿去 probe。
@@ -219,8 +238,14 @@ class GrokPlatform(BasePlatform):
             # 没有 OAuth token 时，用 SSO 探测账号是否存在
             sso = get_credential(extra, "sso") or token_column_credential(account, "grok", "sso")
             if not sso:
-                return False
-            return self._sso_alive(sso)
+                return {"code": None, "summary": "缺少 AT 与 SSO", "usable": False, "sso_status": "unknown"}
+            sso_status = self._sso_status(sso)
+            return {
+                "code": None,
+                "summary": f"SSO 探测：{sso_status}",
+                "usable": sso_status == "alive",
+                "sso_status": sso_status,
+            }
         try:
             code, summary = probe_token(
                 access,
@@ -237,12 +262,21 @@ class GrokPlatform(BasePlatform):
             log_fn = getattr(self, "_log_fn", None)
             if log_fn:
                 log_fn(f"[Grok] 测活异常（判无效）: {type(exc).__name__}: {str(exc)[:120]}")
-            return False
+            return {"code": None, "summary": str(exc)[:200], "usable": False, "sso_status": ""}
         ok, _reason = self._probe_verdict(code, summary)
-        return ok
+        return {"code": code, "summary": str(summary or ""), "usable": ok, "sso_status": ""}
 
-    def _sso_alive(self, sso: str) -> bool:
-        """用 SSO cookie 访问 accounts.x.ai 判断账号是否仍有效。"""
+    def _sso_status(self, sso: str) -> str:
+        """用 SSO cookie 访问 accounts.x.ai 判断 SSO 状态。
+
+        返回三态（对齐 grok2api 的判定语义）：
+
+        - `alive`：能正常打开（未被重定向到登录页）；
+        - `rejected`：被重定向到 sign-in / sign-up —— SSO 已被上游拒绝
+          （grok2api 的 `markSSOCredentialRejected` → reauthRequired 同款）；
+        - `unknown`：网络/浏览器异常 —— **不据此改状态**（grok2api 也只在
+          上游明确 401 时才标失效，网络错误不算）。
+        """
         try:
             from modules.execution import BrowserExecutorFactory
 
@@ -254,11 +288,13 @@ class GrokPlatform(BasePlatform):
                 executor.set_cookies(cookies)
                 r = executor.get("https://accounts.x.ai/", headers={"User-Agent": DEFAULT_UA})
                 final = str(getattr(r, "url", "") or "")
-                return not ("sign-in" in final or "sign-up" in final)
+                if "sign-in" in final or "sign-up" in final:
+                    return "rejected"
+                return "alive"
             finally:
                 executor.close()
         except Exception:
-            return False
+            return "unknown"
 
     # ------------------------------------------------------------------
     # 平台操作（账号池能力）

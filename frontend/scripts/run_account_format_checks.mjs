@@ -119,5 +119,19 @@ eq(mod.atListSummary(fakeJwt({ iat: 1000, exp: past })).label, '已过期', 'atL
 eq(mod.atListSummary('').label, '无 AT', 'atListSummary(empty).label')
 eq(mod.atListSummary('').expiresShort, '', 'atListSummary(empty).expiresShort 空')
 
+// ── 账号状态标签（accountStatusMeta）：正常 / 过期 / 失效 / 禁用 ──
+// 用户要求（2026-10-06）：「已注册」→「正常」、「已过期」→「过期」、
+// 「已失效」→「失效」、「已封禁」→「禁用」。账号列表此前直接渲染英文
+// 原值（"registered"），这里钉住新映射。
+eq(mod.accountStatusMeta('registered'), { label: '正常', color: 'success' }, 'accountStatusMeta(registered)')
+eq(mod.accountStatusMeta('expired'), { label: '过期', color: 'warning' }, 'accountStatusMeta(expired)')
+eq(mod.accountStatusMeta('invalid'), { label: '失效', color: 'error' }, 'accountStatusMeta(invalid)')
+eq(mod.accountStatusMeta('banned'), { label: '禁用', color: 'default' }, 'accountStatusMeta(banned)')
+// 大小写/空白容错
+eq(mod.accountStatusMeta(' REGISTERED '), { label: '正常', color: 'success' }, 'accountStatusMeta(uppercase)')
+// 未知值原样显示（历史库可能带任意字符串）
+eq(mod.accountStatusMeta('legacy-x'), { label: 'legacy-x', color: 'default' }, 'accountStatusMeta(unknown)')
+eq(mod.accountStatusMeta(''), { label: '未知', color: 'default' }, 'accountStatusMeta(empty)')
+
 console.log(JSON.stringify({ passed: failures.length === 0, checked, failures }, null, 2))
 process.exit(failures.length === 0 ? 0 : 1)

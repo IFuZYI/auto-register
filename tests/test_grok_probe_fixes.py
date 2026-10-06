@@ -132,6 +132,9 @@ class CheckValidTests(unittest.TestCase):
     def test_check_valid_does_not_swallow_signature_errors(self):
         """回归：proxy 参数缺失时 check_valid 会静默返回 False。
         这里断言它确实把 proxy 传下去了（用真签名校验，不用 mock）。
+
+        2026-10-06：探测主体抽到 `probe_account_detail`（check_valid 变薄
+        包装，细节供状态落库用），pin 的位置跟着移。
         """
         import inspect
 
@@ -140,8 +143,8 @@ class CheckValidTests(unittest.TestCase):
         params = inspect.signature(real_probe).parameters
         self.assertIn("proxy", params)
         # 且 plugin 里的调用确实带 proxy
-        src = inspect.getsource(plugin_mod.GrokPlatform.check_valid)
-        self.assertIn("proxy=", src, "check_valid 应当把 proxy 传下去")
+        src = inspect.getsource(plugin_mod.GrokPlatform.probe_account_detail)
+        self.assertIn("proxy=", src, "probe_account_detail 应当把 proxy 传下去")
 
 
 class ProbeVerdictConsistencyTests(unittest.TestCase):

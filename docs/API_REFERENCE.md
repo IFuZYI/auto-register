@@ -56,7 +56,7 @@ Authorization: Bearer <access_token>
 | `email` / `password` | 账号邮箱（或手机号）与密码；均属敏感数据 |
 | `user_id` / `region` | 平台用户 ID、地区 |
 | `token` | 平台主凭证的镜像（历史遗留列）：`chatgpt` → Access Token，`grok` → SSO；敏感数据 |
-| `status` | 账号状态：`registered` / `expired` / `invalid` / `banned`，默认 `registered` |
+| `status` | 账号状态：`registered`（正常）/ `expired`（过期，AT 已过期）/ `invalid`（失效，需要重新登录）/ `banned`（禁用，被封），默认 `registered` |
 | `cashier_url` | 支付/升级链接 |
 | `extra_json` | 平台扩展字段的 JSON 字符串，例如 RT、Cookie、TOTP、SSO |
 | `created_at` / `updated_at` | 创建、更新时间 |

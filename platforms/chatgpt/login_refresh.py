@@ -36,11 +36,17 @@ logger = logging.getLogger(__name__)
 #: 登录链里 OpenAI 对「号没了」的措辞。命中即判定账号已封禁 —— 见
 #: `services.chatgpt_account_state.is_account_deactivated_message`（同一套判定，
 #: 这里再引一次是为了让本模块不依赖 service 层）。
+#:
+#: `sign-in session is no longer valid`：用户实测（2026-10-06）——被封的
+#: 账号走登录流程时会遇到这句（原文「Your sign-in session is no longer
+#: valid. Please start over to continue.」）。注意与普通 OAuth 流程的
+#: `invalid_state`（可重开入口重试）区分：这里只认完整的这句话。
 _BANNED_MARKERS = (
     "deleted or deactivated",
     "account_deactivated",
     "account has been deactivated",
     "you do not have an account",
+    "sign-in session is no longer valid",
 )
 
 

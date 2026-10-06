@@ -192,9 +192,23 @@ class Scheduler:
                     fresh = account_repository.get(acc.id, platform=acc.platform)
                     if fresh:
                         if fresh.platform != "chatgpt":
-                            fresh.status = (
-                                fresh.status if valid else AccountStatus.INVALID.value
-                            )
+                            if valid:
+                                # 正向确认可用 → 过期/失效恢复「正常」（禁用不动）
+                                if fresh.status in ("expired", "invalid"):
+                                    fresh.status = "registered"
+                            elif fresh.platform == "grok":
+                                # 与 _do_check 同款：grok 用探测细节区分 过期/失效/禁用
+                                from services.grok_account_state import apply_grok_status_policy
+
+                                detail = getattr(plugin, "last_probe_detail", {}) or {}
+                                apply_grok_status_policy(
+                                    fresh,
+                                    probe_code=detail.get("code"),
+                                    probe_summary=str(detail.get("summary") or ""),
+                                    sso_rejected=(detail.get("sso_status") == "rejected"),
+                                )
+                            else:
+                                fresh.status = "invalid"
                         fresh.updated_at = datetime.now(timezone.utc)
                         account_repository.upsert(fresh)
                 if valid:

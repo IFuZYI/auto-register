@@ -131,8 +131,54 @@ def _apply_action_result(
         elif action_id == "sync_cliproxyapi_status":
             status_reason = apply_chatgpt_status_policy(acc_model, remote_sync=data.get("sync"))
         elif action_id == "refresh_token":
-            # 刷新链自己认过封禁措辞，这里只把结论交给共享策略落状态
-            status_reason = apply_chatgpt_status_policy(acc_model, banned=bool(data.get("banned")))
+            # 刷新链自己认过封禁措辞，这里只把结论交给共享策略落状态。
+            # 刷新成功（ok）是正向信号 → usable=True 让过期/失效恢复「正常」。
+            status_reason = apply_chatgpt_status_policy(
+                acc_model,
+                banned=bool(data.get("banned")),
+                usable=bool(result.get("ok")),
+            )
+        if status_reason:
+            from datetime import datetime, timezone
+
+            acc_model.updated_at = datetime.now(timezone.utc)
+            session.add(acc_model)
+    elif platform == "grok":
+        # grok 的探测/刷新动作同样要落状态（对齐 grok2api 的失效判定）——
+        # 此前只有 chatgpt 有状态策略，grok 测活失败不会改状态。
+        from services.grok_account_state import apply_grok_status_policy
+
+        raw_data = result.get("data")
+        data: dict = raw_data if isinstance(raw_data, dict) else {}
+        status_reason = ""
+        if action_id == "probe":
+            code = data.get("status")
+            status_reason = apply_grok_status_policy(
+                acc_model,
+                probe_code=int(code) if code is not None else None,
+                probe_summary=str(data.get("summary") or ""),
+            )
+        elif action_id == "probe_refresh":
+            status_reason = apply_grok_status_policy(
+                acc_model,
+                refresh_kind=str(data.get("kind") or ""),
+                refresh_error=str(data.get("error_code") or result.get("error") or ""),
+                usable=bool(result.get("ok")),
+            )
+        elif action_id == "sync_cliproxyapi_status":
+            sync_raw = data.get("sync")
+            sync = sync_raw if isinstance(sync_raw, dict) else {}
+            status_reason = apply_grok_status_policy(
+                acc_model,
+                remote_state=str(sync.get("remote_state") or ""),
+            )
+        elif action_id == "refresh_token":
+            status_reason = apply_grok_status_policy(
+                acc_model,
+                refresh_kind=str(data.get("kind") or ""),
+                refresh_error=str(result.get("error") or ""),
+                usable=bool(result.get("ok")),
+            )
         if status_reason:
             from datetime import datetime, timezone
 
