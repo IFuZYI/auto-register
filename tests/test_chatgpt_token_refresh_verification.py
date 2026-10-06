@@ -581,6 +581,40 @@ class RefreshActionFallbackTests(unittest.TestCase):
         # 失败时是 False，不重算会把「换发了」误报成「没换发」）。
         self.assertTrue(out["data"]["refreshed"], "登录链救回后 refreshed 应为 True")
 
+    def test_unverified_at_then_login_reissue_reports_refreshed(self):
+        """复审复现场景：session 原样返回旧 AT 且校验不过 → 登录链换发新 AT。
+
+        刷新链返回的 `refreshed=False` 是「没换发」的语义；登录链换回新 AT 后
+        必须按它重算，否则界面在真正换发的时刻反而显示「无需换发」——
+        与「如实报告」的目标相反。
+        """
+        from platforms.chatgpt.plugin import ChatGPTPlatform
+        from platforms.chatgpt.token_refresh import TokenRefreshResult
+
+        unchanged = TokenRefreshResult(
+            success=True, verified=False, refreshed=False, access_token="same-at",
+            verify_message="新 AT 被服务端拒绝（HTTP 401）",
+        )
+        reissued = TokenRefreshResult(
+            success=True, verified=True, refreshed=False, access_token="login-new-at",
+            strategy="password_2fa",
+        )
+        with patch.object(
+            TokenRefreshManager, "refresh_account", return_value=unchanged
+        ), patch.object(
+            ChatGPTPlatform, "_refresh_via_login", return_value=reissued
+        ) as login:
+            out = self._platform().execute_action(
+                "refresh_token", self._account(access_token="same-at"), {}
+            )
+
+        login.assert_called_once()
+        self.assertTrue(out["ok"])
+        self.assertTrue(out["data"]["refreshed"], "登录链换发的新 AT 要报 refreshed=True")
+        self.assertIn("已换发", out["data"]["message"])
+        stamp = out["account_extra_patch"]["chatgpt_token_refresh"]
+        self.assertTrue(stamp["refreshed"], "stamp 里的 refreshed 也要按新 AT 重算")
+
     def test_verified_refresh_does_not_fall_back(self):
         """刷新链直接产出可用 AT → 不跑登录链（那是几十秒的协议重登）。"""
         from platforms.chatgpt.plugin import ChatGPTPlatform
