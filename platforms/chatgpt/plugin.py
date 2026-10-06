@@ -213,13 +213,17 @@ class ChatGPTPlatform(BasePlatform):
             result.strategy = ""
             return result
 
-        # 邮箱是否入池 —— 没入池就没有验证码可读，提前失败好过等满一个超时
+        # 邮箱是否入池 —— 没入池就没有验证码可读，提前失败好过等满一个超时。
+        # task_control/attempt_id 一并透传：等码是这条链里最长的一段，批量
+        # 任务点「停止/跳过」时要能当场打断（与补 RT / 绑 2FA 同款）。
         mail_provider, mail_reason = resolve_otp_mail_provider(
             email,
             account_extra=extra,
             config=config,
             proxy=self.config.proxy if self.config else None,
             log_fn=log,
+            task_control=getattr(self, "_task_control", None),
+            attempt_id=getattr(self, "_task_attempt_token", None),
         )
         if mail_provider is None:
             log(f"[登录刷新] 邮箱 {email} 不在号池里，读不到收件箱（{mail_reason}）")
@@ -387,27 +391,30 @@ class ChatGPTPlatform(BasePlatform):
             #    要求：禁用靠登录流程发掘）。实测 10 个 chatgpt 账号全是
             #    session-only，会话死了刷新链自身无路可走。
             # 封禁是终局结论，不兜底（登录链只会被同样拒绝）。
-            refresh_failed_reason = ""
+            refresh_failed_reason = result.error_message or result.verify_message or ""
             if result.success and not result.verified:
                 _log(f"[刷新Token] 刷出的 AT 未通过校验（{result.verify_message}），改走登录流程")
                 result = self._refresh_via_login(a, result)
             elif not result.success and not result.banned:
-                refresh_failed_reason = (
-                    result.error_message or result.verify_message or "刷新失败"
-                )
+                refresh_failed_reason = refresh_failed_reason or "刷新失败"
                 _log(f"[刷新Token] {refresh_failed_reason}，改走登录流程")
                 result = self._refresh_via_login(a, result)
-                if not result.success and not result.banned:
-                    # 登录链也失败：两段原因都要留下（否则「为什么没刷上」
-                    # 只剩后半句，用户看不到刷新链为什么先失败）。
-                    login_reason = result.error_message or "登录流程刷新失败"
-                    if refresh_failed_reason and refresh_failed_reason not in login_reason:
-                        result.error_message = f"{refresh_failed_reason}；登录流程：{login_reason}"
 
             if result.success:
                 # 登录链换回来的 AT 是新签发的 —— refreshed 要按它重算，
                 # 不能沿用刷新链失败时的旧值（那是「没换发」的语义）。
                 result.refreshed = bool(result.access_token) and result.access_token != previous_at
+            else:
+                # 失败不写库：stamp 里 refreshed 必须为 False。此前「刷新链
+                # 换发了新 AT 但校验不过 → 登录链也失败」时 refreshed 仍是
+                # True，落库的是一条 ok=false + refreshed=true 的矛盾记录
+                # （复审建议：失败路径要清掉）。
+                result.refreshed = False
+                # 两段原因都要留下（否则「为什么没刷上」只剩后半句，用户
+                # 看不到刷新链为什么先失败）。两个兜底分支统一处理。
+                login_reason = result.error_message or "登录流程刷新失败"
+                if refresh_failed_reason and refresh_failed_reason not in login_reason:
+                    result.error_message = f"{refresh_failed_reason}；登录流程：{login_reason}"
 
             stamp = {"ok": result.success, "verified": bool(result.verified),
                      "refreshed": bool(result.refreshed),

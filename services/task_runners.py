@@ -689,6 +689,10 @@ def _run_refresh_token(task_id: str, account_ids: list[int], req: RefreshTokenTa
         if proxy:
             instance.config.proxy = proxy
         instance._log_fn = lambda msg: _api._log(task_id, f"  {msg}")
+        # 停止/跳过开关透进登录兜底（等码最长一个 OTP 超时，批量任务里要能
+        # 当场打断）—— 与注册 runner 同款接线。
+        instance.bind_task_control(control)
+        instance._task_attempt_token = attempt_id
 
         # 网络链（几十秒）不能占着数据库连接：先把行读成纯数据、归还连接，
         # 跑完再开短会话落库 —— 与补 RT / 绑 2FA 同款（见 `_load_account_fields`

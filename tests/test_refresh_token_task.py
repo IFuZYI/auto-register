@@ -189,7 +189,15 @@ class RefreshTokenRunnerTests(unittest.TestCase):
 
         约定见 `_load_account_fields` 的 docstring（补 RT / 绑 2FA 都遵守）：
         先把行读成纯数据、归还连接，跑完网络再开短会话落库。
+
+        探针按**线程**统计在借连接（复审建议）：全局 checkedout 会被
+        无关的后台写线程（`_save_task_log` daemon）干扰，线程作用域只反映
+        本任务自己握着的连接。
         """
+        import threading as _threading
+
+        from sqlalchemy import event as _event
+
         account_id = self._id_of("runner-me@example.com")
         fake_action_result = {
             "ok": True,
@@ -210,11 +218,26 @@ class RefreshTokenRunnerTests(unittest.TestCase):
                 "session_token": "st-rotated",
             },
         }
+        held_by_thread: dict[int, int] = {}
+
+        def _on_checkout(_dbapi_conn, _conn_record, _conn_proxy):
+            tid = _threading.get_ident()
+            held_by_thread[tid] = held_by_thread.get(tid, 0) + 1
+
+        def _on_checkin(_dbapi_conn, _conn_record):
+            tid = _threading.get_ident()
+            held_by_thread[tid] = held_by_thread.get(tid, 0) - 1
+
+        _event.listen(engine, "checkout", _on_checkout)
+        _event.listen(engine, "checkin", _on_checkin)
+        self.addCleanup(lambda: _event.remove(engine, "checkout", _on_checkout))
+        self.addCleanup(lambda: _event.remove(engine, "checkin", _on_checkin))
+
         observed: list[int] = []
 
         def _probe(_instance, _action_id, _account, _params):
-            # 网络调用发生在这一层；此刻不该有连接被这个任务占着。
-            observed.append(engine.pool.checkedout())
+            # 网络调用发生在这一层；此刻本线程不该还握着连接。
+            observed.append(held_by_thread.get(_threading.get_ident(), 0))
             return fake_action_result
 
         with mock.patch(
@@ -233,8 +256,33 @@ class RefreshTokenRunnerTests(unittest.TestCase):
         self.assertTrue(observed, "execute_action 没有被调用 —— 探针无效")
         self.assertEqual(
             observed[0], 0,
-            f"网络调用期间仍有 {observed[0]} 条连接被占 —— 并发批量会拖垮连接池",
+            f"网络调用期间本线程仍有 {observed[0]} 条连接在借 —— 并发批量会拖垮连接池",
         )
+
+    def test_runner_binds_task_control_to_the_platform_instance(self):
+        """停止/跳过开关要绑到平台实例（登录兜底等码时能当场打断）。"""
+        account_id = self._id_of("runner-me@example.com")
+        seen: dict = {}
+
+        def _probe(instance, _action_id, _account, _params):
+            seen["control"] = getattr(instance, "_task_control", None)
+            seen["attempt"] = getattr(instance, "_task_attempt_token", None)
+            return {"ok": True, "data": {"message": "ok"}, "account_extra_patch": {}}
+
+        with mock.patch(
+            "platforms.chatgpt.plugin.ChatGPTPlatform.execute_action",
+            autospec=True,
+            side_effect=_probe,
+        ):
+            response = self.client.post(
+                "/tasks/refresh-token",
+                json={"account_ids": [account_id], "delay_seconds": 0},
+            )
+            task_id = response.json()["task_id"]
+            self.client.get(f"/tasks/{task_id}")
+
+        self.assertIsNotNone(seen.get("control"), "停止/跳过开关没绑到平台实例")
+        self.assertTrue(hasattr(seen["control"], "checkpoint"))
 
     def test_runner_counts_failure_and_keeps_credentials(self):
         account_id = self._id_of("runner-me@example.com")

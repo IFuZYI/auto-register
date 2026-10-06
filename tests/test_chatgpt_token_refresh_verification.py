@@ -475,6 +475,57 @@ class RefreshChangedFlagTests(unittest.TestCase):
         self.assertFalse(result.refreshed)
 
 
+class LoginFallbackControlTests(unittest.TestCase):
+    """刷新兜底的登录链要能被任务的停止/跳过打断（与补 RT / 绑 2FA 同款）。
+
+    复审建议：`_run_refresh_token` 没有把 task_control/attempt_id 透到登录
+    兜底里 —— 等码最长一个 OTP 超时，批量任务里停不下来。
+    """
+
+    def _platform(self):
+        from core.base_platform import RegisterConfig
+        from platforms.chatgpt.plugin import ChatGPTPlatform
+
+        return ChatGPTPlatform(config=RegisterConfig())
+
+    def _account(self):
+        class _A:
+            email = "user@example.com"
+            password = "pw"
+            extra: dict = {}
+
+        return _A()
+
+    def test_mail_provider_resolution_gets_task_control_and_attempt(self):
+        from platforms.chatgpt.login_refresh import LoginRefreshResult
+        from platforms.chatgpt.token_refresh import TokenRefreshResult
+
+        control = object()
+        platform = self._platform()
+        platform.bind_task_control(control)
+        platform._task_attempt_token = 7
+
+        with patch(
+            "services.chatgpt_otp_mailbox.resolve_otp_mail_provider",
+            return_value=(None, "不在号池里"),
+        ) as resolver, patch(
+            "platforms.chatgpt.login_refresh.LoginAccessTokenRefresher"
+        ) as refresher_cls:
+            refresher_cls.return_value.run.return_value = LoginRefreshResult(
+                success=False, error_message="登录失败"
+            )
+            platform._refresh_via_login(
+                self._account(), TokenRefreshResult(success=False)
+            )
+
+        kwargs = resolver.call_args.kwargs
+        self.assertIs(
+            kwargs.get("task_control"), control,
+            "停止/跳过开关没透传给登录链 —— 等码时停不下来",
+        )
+        self.assertEqual(kwargs.get("attempt_id"), 7)
+
+
 class RefreshActionFallbackTests(unittest.TestCase):
     """刷新动作的最后兜底：刷新链没产出可用 AT（非封禁）→ 走登录链。
 
@@ -576,6 +627,66 @@ class RefreshActionFallbackTests(unittest.TestCase):
         self.assertFalse(out["ok"])
         self.assertIn("HTTP 401", out["error"])
         self.assertIn("没有密码", out["error"])
+
+    def test_unverified_at_plus_failed_login_clears_refreshed_in_stamp(self):
+        """失败不写库：「换发了但没用上」不该落 refreshed=true（复审建议）。"""
+        from platforms.chatgpt.plugin import ChatGPTPlatform
+        from platforms.chatgpt.token_refresh import TokenRefreshResult
+
+        stale = TokenRefreshResult(
+            success=True, verified=False, refreshed=True, access_token="new-unverified",
+            verify_message="新 AT 被服务端拒绝（HTTP 401）",
+        )
+
+        def _fail_login(_instance, _account, result):
+            """像真实 `_refresh_via_login` 那样**原地改写**同一个 result。"""
+            result.success = False
+            result.banned = False
+            result.error_message = "登录流程跑完但没拿到 access_token"
+            result.strategy = ""
+            return result
+
+        with patch.object(
+            TokenRefreshManager, "refresh_account", return_value=stale
+        ), patch.object(
+            ChatGPTPlatform, "_refresh_via_login", autospec=True, side_effect=_fail_login
+        ):
+            out = self._platform().execute_action("refresh_token", self._account(), {})
+
+        stamp = out["account_extra_patch"]["chatgpt_token_refresh"]
+        self.assertFalse(out["ok"])
+        self.assertFalse(
+            stamp["refreshed"],
+            "失败没写库时 stamp 还报「已换发」—— ok=false + refreshed=true 是矛盾组合",
+        )
+
+    def test_verify_reason_is_kept_when_login_fallback_also_fails(self):
+        """登录兜底也失败时，刷新链的校验原因不能被丢掉（复审建议）。"""
+        from platforms.chatgpt.plugin import ChatGPTPlatform
+        from platforms.chatgpt.token_refresh import TokenRefreshResult
+
+        stale = TokenRefreshResult(
+            success=True, verified=False, refreshed=True, access_token="new-unverified",
+            verify_message="新 AT 被服务端拒绝（HTTP 401）",
+        )
+
+        def _fail_login(_instance, _account, result):
+            result.success = False
+            result.banned = False
+            result.error_message = "登录流程跑完但没拿到 access_token"
+            result.strategy = ""
+            return result
+
+        with patch.object(
+            TokenRefreshManager, "refresh_account", return_value=stale
+        ), patch.object(
+            ChatGPTPlatform, "_refresh_via_login", autospec=True, side_effect=_fail_login
+        ):
+            out = self._platform().execute_action("refresh_token", self._account(), {})
+
+        self.assertFalse(out["ok"])
+        self.assertIn("HTTP 401", out["error"], "刷新链的校验原因被丢了")
+        self.assertIn("登录流程跑完", out["error"])
 
 
 if __name__ == "__main__":
