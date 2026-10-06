@@ -983,11 +983,18 @@ body {
    实测需要 1328px，卡到 1200 会让它横向溢出 64px —— 限宽是为了「别太散」，
    不是为了把数据挤出屏幕。
 
+   `width: 100%` 不能少（dogfood 实测 2026-10-06）：/settings、/proxies、
+   /history、/panel-management 的页顶容器是 flex 列，flex 子项上的
+   auto margin 会吸收全部自由空间、覆盖 stretch —— 顶栏收缩成内容宽度
+   居中悬空（实测 256~741px vs 容器 1296px）。显式满宽后
+   max-width + auto margin 的限宽居中在 block / flex 父容器下都成立。
+
    `margin-inline: auto` 不能少：只设 max-width 的话，2200px 上内容贴左
    （实测左边距 264px / 右边距 32px，差 232px），看起来像没对齐。 */
 @media (min-width: 1600px) {
   .page-header,
   .page-enter > div {
+    width: 100%;
     max-width: 1440px;
     margin-inline: auto;
   }

@@ -687,5 +687,40 @@ class UIScaleContractTests(unittest.TestCase):
             )
 
 
+class WideScreenHeaderContractTests(unittest.TestCase):
+    """≥1600px 限宽居中的两个选择器必须显式满宽。
+
+    dogfood 实测（2026-10-06，用户截图报「UI出现问题」）：页顶容器是
+    flex 列时（/settings、/proxies、/history、/panel-management），子项的
+    auto margin 会吸收自由空间、覆盖 stretch —— `.page-header` 收缩成
+    内容宽度居中（实测 256~741px vs 容器 1296px）。满宽声明让
+    max-width + auto margin 的限宽居中在 block / flex 两种父容器下都成立。
+    """
+
+    def _css(self) -> str:
+        return (FRONTEND / "src" / "index.css").read_text(encoding="utf-8")
+
+    def test_wide_screen_rules_declare_full_width(self):
+        css = self._css()
+        idx = css.find("@media (min-width: 1600px)")
+        self.assertGreater(idx, -1, "找不到 ≥1600px 媒体查询")
+        nxt = css.find("\n@media", idx + 1)
+        block = css[idx:nxt] if nxt != -1 else css[idx:]
+        # 只取媒体查询内第一条规则的声明区，避免注释里的字样造成假绿
+        self.assertIn("{", block)
+        rule = block.split("{", 1)[1].split("}", 1)[0]
+        self.assertIn(".page-header", rule, "媒体查询里丢了 .page-header 选择器")
+        self.assertIn(
+            ".page-enter > div", rule, "媒体查询里丢了 .page-enter > div 选择器"
+        )
+        self.assertIn(
+            "width: 100%",
+            rule,
+            "flex 父容器下 auto margin 会覆盖 stretch —— 缺满宽声明顶栏会收缩",
+        )
+        self.assertIn("max-width: 1440px", rule, "限宽上限丢了")
+        self.assertIn("margin-inline: auto", rule, "居中声明丢了")
+
+
 if __name__ == "__main__":
     unittest.main()
