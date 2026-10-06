@@ -29,6 +29,7 @@ if TYPE_CHECKING:  # 仅类型标注用（from __future__ import annotations 下
     from api.tasks import (  # noqa: F401
         BackfillRtTaskRequest,
         Bind2faTaskRequest,
+        RefreshTokenTaskRequest,
         RegisterTaskRequest,
     )
 
@@ -655,6 +656,80 @@ def _run_backfill_rt(task_id: str, account_ids: list[int], req: BackfillRtTaskRe
         task_id,
         account_ids,
         label="补 RT",
+        concurrency=req.concurrency,
+        delay_seconds=req.delay_seconds,
+        proxy=req.proxy,
+        handle_account=_handle,
+    )
+
+
+def _run_refresh_token(task_id: str, account_ids: list[int], req: RefreshTokenTaskRequest):
+    from api import tasks as _api  # 延迟 import：patch 打在 api.tasks 上必须被看到
+    """批量刷新 Token。逐号跑，可停可跳，进度和日志复用注册任务那套。
+
+    走 `refresh_token` 动作的完整链（session → OAuth → 登录兜底），
+    与单账号按钮同一条路径 —— 结果落库也复用 `_apply_action_result`
+    （状态策略、token 列镜像、凭证写回全在那一处）。
+    """
+    from core.config_store import config_store
+
+    base_config = config_store.get_all() or {}
+
+    def _handle(*, account_id, fields, proxy, control, attempt_id) -> AttemptResult:
+        from api.actions import _apply_action_result, _result_message, _to_platform_account
+        from core.base_platform import RegisterConfig
+        from core.db import AccountModel, platform_session
+        from core.registry import get
+
+        email = fields["email"]
+        control.checkpoint(attempt_id=attempt_id)
+
+        PlatformCls = get("chatgpt")
+        instance = PlatformCls(config=RegisterConfig(extra=base_config))
+        if proxy:
+            instance.config.proxy = proxy
+        instance._log_fn = lambda msg: _api._log(task_id, f"  {msg}")
+
+        # 网络链（几十秒）不能占着数据库连接：先把行读成纯数据、归还连接，
+        # 跑完再开短会话落库 —— 与补 RT / 绑 2FA 同款（见 `_load_account_fields`
+        # 的 docstring）。并发批量时每条连接都攥着不放会拖垮连接池。
+        with platform_session("chatgpt") as s:
+            row = s.get(AccountModel, account_id)
+            if row is None:
+                _api._log(task_id, f"[SKIP] 账号 #{account_id} 不存在")
+                return AttemptResult.skipped("账号不存在")
+            plat_account = _to_platform_account(row)
+
+        result = instance.execute_action("refresh_token", plat_account, {})
+
+        with platform_session("chatgpt") as s:
+            account = s.get(AccountModel, account_id)
+            if account is not None:
+                _apply_action_result("chatgpt", "refresh_token", account, result, s)
+                s.add(account)
+                s.commit()
+
+        if result.get("ok"):
+            message = _result_message(result) or "刷新完成"
+            _api._log(task_id, f"[OK] {email} {message}")
+            _api._save_task_log("chatgpt", email, "success", detail={"action": "refresh_token"})
+            return AttemptResult.success()
+
+        message = str(result.get("error") or _result_message(result) or "刷新失败")
+        _api._log(task_id, f"[FAIL] {email} {message}")
+        _api._save_task_log(
+            "chatgpt",
+            email,
+            "failed",
+            error=message,
+            detail={"action": "refresh_token"},
+        )
+        return AttemptResult.failed(f"{email}: {message}")
+
+    _run_account_batch_task(
+        task_id,
+        account_ids,
+        label="刷新 Token",
         concurrency=req.concurrency,
         delay_seconds=req.delay_seconds,
         proxy=req.proxy,

@@ -376,16 +376,41 @@ class ChatGPTPlatform(BasePlatform):
             from platforms.chatgpt.token_refresh import TokenRefreshManager
 
             manager = TokenRefreshManager(proxy_url=proxy)
+            previous_at = str(getattr(a, "access_token", "") or "").strip()
             result = manager.refresh_account(a)
+            _log = getattr(self, "_log_fn", None) or logger.info
 
-            # 刷新调用回了 200 不代表这个 AT 真能用（见 verify_access_token）。
-            # 没通过校验就往下走登录链，而不是把废 token 写回库。
+            # 兜底两条触发条件：
+            # ① 刷新调用回了 200 但 AT 没通过校验（见 verify_access_token）；
+            # ② 整链失败（session/OAuth 都拿不到可用 AT）—— 登录链是最后一条
+            #    能拿回 AT 的路，也是「号没了」措辞唯一会出现的地方（用户
+            #    要求：禁用靠登录流程发掘）。实测 10 个 chatgpt 账号全是
+            #    session-only，会话死了刷新链自身无路可走。
+            # 封禁是终局结论，不兜底（登录链只会被同样拒绝）。
+            refresh_failed_reason = ""
             if result.success and not result.verified:
-                _log = getattr(self, "_log_fn", None) or logger.info
                 _log(f"[刷新Token] 刷出的 AT 未通过校验（{result.verify_message}），改走登录流程")
                 result = self._refresh_via_login(a, result)
+            elif not result.success and not result.banned:
+                refresh_failed_reason = (
+                    result.error_message or result.verify_message or "刷新失败"
+                )
+                _log(f"[刷新Token] {refresh_failed_reason}，改走登录流程")
+                result = self._refresh_via_login(a, result)
+                if not result.success and not result.banned:
+                    # 登录链也失败：两段原因都要留下（否则「为什么没刷上」
+                    # 只剩后半句，用户看不到刷新链为什么先失败）。
+                    login_reason = result.error_message or "登录流程刷新失败"
+                    if refresh_failed_reason and refresh_failed_reason not in login_reason:
+                        result.error_message = f"{refresh_failed_reason}；登录流程：{login_reason}"
+
+            if result.success:
+                # 登录链换回来的 AT 是新签发的 —— refreshed 要按它重算，
+                # 不能沿用刷新链失败时的旧值（那是「没换发」的语义）。
+                result.refreshed = bool(result.access_token) and result.access_token != previous_at
 
             stamp = {"ok": result.success, "verified": bool(result.verified),
+                     "refreshed": bool(result.refreshed),
                      "strategy": str(result.strategy or ""),
                      "message": result.error_message or result.verify_message or "",
                      "at": _utcnow_iso()}
@@ -402,6 +427,17 @@ class ChatGPTPlatform(BasePlatform):
                     },
                     "account_extra_patch": {"chatgpt_token_refresh": stamp},
                 }
+
+            # 如实区分「真的换发了」与「服务端认为无需换发」：AT 未到期时
+            # session 端点原样返回旧 AT（实测 2026-10-06），此时显示「已换新」
+            # 是误导 —— 用户看到的 AT 根本没变。
+            if result.refreshed:
+                message = f"Token 已刷新（{result.strategy or '未知方式'}，AT 已换发）"
+            else:
+                message = (
+                    f"AT 仍有效、无需换发（{result.strategy or '未知方式'}）"
+                    "—— 服务端在令牌未到期时返回原值"
+                )
 
             # 只写非空字段：登录链可能只换到 AT，用空串覆盖库里的 session_token
             # 等于把号弄坏（同 build_extra_patch 的理由）。
@@ -422,9 +458,11 @@ class ChatGPTPlatform(BasePlatform):
             return {
                 "ok": True,
                 "data": {
+                    "message": message,
                     "access_token": result.access_token,
                     "refresh_token": result.refresh_token,
                     "verified": bool(result.verified),
+                    "refreshed": bool(result.refreshed),
                     "strategy": str(result.strategy or ""),
                 },
                 "account_extra_patch": patch,
@@ -445,7 +483,9 @@ class ChatGPTPlatform(BasePlatform):
             )
             return {
                 "ok": result.success,
-                "data": {"message": result.summary(), "strategy": result.strategy},
+                # 登录链发掘的封禁结论要带出来：状态接线（api/actions.py）与
+                # 批量界面都读 data.banned。
+                "data": {"message": result.summary(), "strategy": result.strategy, "banned": bool(result.banned)},
                 "error": "" if result.success else result.summary(),
                 "account_extra_patch": build_extra_patch(result),
             }
@@ -475,8 +515,14 @@ class ChatGPTPlatform(BasePlatform):
             ok = result.ok or result.already_bound
             return {
                 "ok": ok,
-                # 密钥只下发这一次，返回给前端让用户当场导入验证器
-                "data": {"message": result.summary(), "totp_secret": result.secret},
+                # 密钥只下发这一次，返回给前端让用户当场导入验证器。
+                # banned 是登录链发掘的封禁结论（用户要求：禁用靠登录流程发掘），
+                # 状态接线（api/actions.py）与批量界面都读它。
+                "data": {
+                    "message": result.summary(),
+                    "totp_secret": result.secret,
+                    "banned": bool(result.banned),
+                },
                 "error": "" if ok else result.summary(),
                 "account_extra_patch": build_extra_patch(result),
             }

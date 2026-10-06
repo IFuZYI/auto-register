@@ -146,6 +146,7 @@ JWT 默认有效期为 7 天。密码与 JWT 签名密钥存入配置存储；�
 | POST | `/api/tasks/register` | `RegisterTaskRequest` | 创建通用平台注册任务，返回 `{task_id}` |
 | POST | `/api/tasks/backfill-rt` | `AccountBatchTaskRequest` | 为 ChatGPT 账号批量补 Refresh Token |
 | POST | `/api/tasks/bind-2fa` | `AccountBatchTaskRequest` | 为 ChatGPT 账号批量绑定 TOTP 2FA |
+| POST | `/api/tasks/refresh-token` | `RefreshTokenTaskRequest` | 为 ChatGPT 账号批量刷新 Token（session → OAuth → 登录链） |
 | POST | `/api/tasks/{task_id}/skip-current` | — | 跳过正在执行的当前账号 |
 | POST | `/api/tasks/{task_id}/stop` | — | 请求停止任务 |
 
@@ -190,6 +191,12 @@ JWT 默认有效期为 7 天。密码与 JWT 签名密钥存入配置存储；�
 ```
 
 补 RT 使用 `only_missing_rt`，绑定 2FA 使用 `only_missing_2fa`；未提供 `account_ids` 时必须设 `all_filtered:true`。
+
+`RefreshTokenTaskRequest`（批量刷新 Token）与 `AccountBatchTaskRequest` 的选号字段一致，
+但没有 `only_missing_rt` / `only_missing_2fa` / `allow_login` —— 刷新走
+`refresh_token` 动作的完整链：session token 优先，OAuth RT 兜底，最后登录链；
+新 AT 会用 `/backend-api/me` 真校验，未通过校验不写库。AT 未到期时服务端返回原值，
+刷新结果会如实区分「AT 已换发」与「无需换发」。
 
 ### 4.2 查询、日志与删除
 

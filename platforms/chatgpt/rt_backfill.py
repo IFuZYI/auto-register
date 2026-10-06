@@ -26,6 +26,7 @@ from typing import Callable, Optional
 from core.base_platform import resolve_mailbox_otp_timeout
 from core.task_runtime import TaskInterruption
 from platforms.chatgpt.protocol import AuthFlow, Config, MailProvider
+from platforms.chatgpt.protocol.banned_signals import looks_like_banned
 from platforms.chatgpt.protocol_log_relay import mirror_protocol_logs
 
 logger = logging.getLogger(__name__)
@@ -117,11 +118,16 @@ class BackfillResult:
     cookie_header: str = ""
     error_message: str = ""
     attempts: list[BackfillAttempt] = field(default_factory=list)
+    #: 登录链认出「号没了」（用户要求：禁用靠登录流程发掘）。
+    #: 命中后不再尝试后续策略 —— 号都废了，协议重登救不回，白耗一轮风控额度。
+    banned: bool = False
 
     def summary(self) -> str:
         if self.success:
             label = "复用会话" if self.strategy == STRATEGY_SESSION else "协议重登"
             return f"补 RT 成功（{label}）"
+        if self.banned:
+            return f"账号已封禁：{self.error_message or '登录链认出账号已停用'}"
         return self.error_message or "补 RT 失败"
 
 
@@ -190,6 +196,11 @@ class RefreshTokenBackfiller:
             except Exception as exc:
                 failure = str(exc) or exc.__class__.__name__
                 self.log(f"[补RT] {self._label(strategy)}报错: {failure}")
+                # 「号没了」的措辞在任意一步出现都要当场定性：封号不进重试队列，
+                # 也不值得再跑下一条策略（协议重登同样会被拒）。
+                if looks_like_banned(failure):
+                    result.banned = True
+                    self.log("[补RT] 账号已封禁（登录链明确拒绝），不再尝试后续策略")
 
             # 即使抛了异常也要看一眼手上的凭证：RT 是在链路中段换到的，末段
             # 再炸（拉 session、写 cookie 之类）不该把已经到手的 RT 一起扔掉。
@@ -207,6 +218,11 @@ class RefreshTokenBackfiller:
             message = failure or "流程跑完但没拿到 refresh_token"
             self.log(f"[补RT] {self._label(strategy)}未果: {message}")
             result.attempts.append(BackfillAttempt(strategy, False, message))
+
+            # 封号是终局结论：下一条策略（协议重登）只会被同样拒绝，
+            # 再跑一遍纯属白耗一轮风控额度。到此为止。
+            if result.banned:
+                break
 
         result.error_message = self._compose_error(result)
         return result

@@ -138,6 +138,10 @@ ChatGPT 是当前功能最完整的平台：支持注册、Token 生命周期管
 **补 RT** 的语义：先用库里的会话直接换 `refresh_token`；会话失效时再用邮箱密码重新登录
 （可能需要收一封验证码）。跑成后台任务，日志弹窗实时显示。
 
+**刷新 Token** 的语义：走 session token → OAuth RT → 登录链拿 AT，并用 `/backend-api/me`
+真校验（校验不过不写库）；AT 未到期时服务端返回原值，界面如实显示「无需换发」而不是
+「已换新」。批量入口在「更多」菜单，选号规则与补 RT 相同。
+
 **面板动作**（上传 CPA / 上传 Sub2API / 上传 chatgpt2api / 同步 CLIProxyAPI 状态）
 已从账号页移到「面板管理」页 —— 目标是外部面板，与账号自身状态不是一回事。
 账号页菜单按 `scope` 过滤掉它们（见 `platforms/chatgpt/plugin.py` 的 `get_platform_actions`）。

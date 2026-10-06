@@ -14,6 +14,7 @@ from datetime import datetime, timedelta
 
 from curl_cffi import requests as cffi_requests
 
+from platforms.chatgpt.protocol.banned_signals import looks_like_banned
 from platforms.chatgpt.protocol.response_summary import describe_error
 
 # from ..config.settings import get_settings  # removed: external dep
@@ -39,6 +40,13 @@ class TokenRefreshResult:
     #: 刷新接口回 200 + AT，但那个 AT 打任何接口都是 401）。只看 `success`
     #: 会把它当成功写回库，下一个任务拿着废 AT 全线失败。
     verified: bool = False
+    #: 新 AT 与旧值**不同**（真的换发了）。
+    #:
+    #: 实测（2026-10-06）：AT 未到期时，session 端点返回的 AT 与请求方
+    #: 已有的**完全一致**（iat/exp 不变）—— 服务端不签发新令牌。这不是
+    #: 错误（旧 AT 仍有效），但界面上不能把它说成「已换新」。`refreshed`
+    #: 让调用方能如实区分「真的换发了」与「服务端认为无需换发」。
+    refreshed: bool = False
     #: 校验失败时的原因（区分「AT 无效」与「网络没打通」）。
     verify_message: str = ""
     #: 登录链认出「账号已封禁」（OpenAI 原话 "deleted or deactivated"）。
@@ -114,7 +122,15 @@ class TokenRefreshManager:
             )
 
             if response.status_code != 200:
-                result.error_message = f"Session token 刷新失败: HTTP {response.status_code}"
+                # 非 200 也要读响应体：号被停用时服务端会在 body 里写明
+                # 「deleted or deactivated」（用户实测 2026-10-06），只报
+                # 「HTTP 401」会把封号与普通过期混成同一种失败。
+                body_text = str(getattr(response, "text", "") or "")
+                if looks_like_banned(body_text):
+                    result.banned = True
+                    result.error_message = f"账号已封禁（session 端点拒绝: HTTP {response.status_code}）"
+                else:
+                    result.error_message = f"Session token 刷新失败: HTTP {response.status_code}"
                 logger.warning(result.error_message)
                 return result
 
@@ -126,6 +142,23 @@ class TokenRefreshManager:
                 result.error_message = "Session token 刷新失败: 未找到 accessToken"
                 logger.warning(result.error_message)
                 return result
+
+            # 保存轮换后的 session token：OpenAI 对每次 /api/auth/session 响应
+            # 都会下发新的 `sessionToken`（滑动窗口，实测 2026-10-06：连续两次
+            # 请求返回的 ST 都不同）。此前只读 accessToken，轮换值从未保存 ——
+            # 旧值滑出窗口后账号就登不上了。只写非空值。
+            rotated = str(data.get("sessionToken") or data.get("session_token") or "").strip()
+            if rotated:
+                result.session_token = rotated
+                try:
+                    session.cookies.set(
+                        "__Secure-next-auth.session-token",
+                        rotated,
+                        domain=".chatgpt.com",
+                        path="/",
+                    )
+                except Exception:  # noqa: BLE001 - cookie jar 写失败不阻断刷新结果
+                    pass
 
             # 提取过期时间
             expires_at = None
@@ -190,7 +223,13 @@ class TokenRefreshManager:
             )
 
             if response.status_code != 200:
-                result.error_message = f"OAuth token 刷新失败: HTTP {response.status_code}"
+                # 同 session 端点：错误体里可能带着「号没了」的措辞。
+                body_text = str(getattr(response, "text", "") or "")
+                if looks_like_banned(body_text):
+                    result.banned = True
+                    result.error_message = f"账号已封禁（OAuth 端点拒绝: HTTP {response.status_code}）"
+                else:
+                    result.error_message = f"OAuth token 刷新失败: HTTP {response.status_code}"
                 logger.warning(f"{result.error_message}, 服务端说: {describe_error(response.text)}")
                 return result
 
@@ -235,12 +274,18 @@ class TokenRefreshManager:
         401 的令牌。校验不通过的结果会把 `verified` 留成 False，调用方据此
         决定「别写库」或「换下一条路」。
 
+        `refreshed` 区分「真的换发了新 AT」与「服务端返回原值」：AT 未到期时
+        session 端点会原样返回旧 AT（实测 2026-10-06），此时 `success=True`
+        但 `refreshed=False` —— 调用方据此如实展示「无需刷新」而不是「已换新」。
+
         Args:
             account: 账号对象
 
         Returns:
             TokenRefreshResult: 刷新结果
         """
+        previous_at = str(getattr(account, "access_token", "") or "").strip()
+
         # 优先尝试 Session Token
         session_result: Optional[TokenRefreshResult] = None
         if account.session_token:
@@ -248,6 +293,7 @@ class TokenRefreshManager:
             result = self.refresh_by_session_token(account.session_token)
             if result.success:
                 result.strategy = "session"
+                result.refreshed = bool(result.access_token) and result.access_token != previous_at
                 self._verify(result)
                 if result.verified:
                     return result
@@ -256,6 +302,11 @@ class TokenRefreshManager:
                     "Session Token 刷出的 AT 未通过校验（%s），尝试 OAuth 刷新",
                     result.verify_message or "未知原因",
                 )
+            elif result.banned:
+                # 封号是终局结论：session 端点已明确「号没了」，再试 OAuth
+                # 与登录链只会被同样拒绝 —— 直接返回，不浪费一次网络往返。
+                logger.warning("Session Token 刷新被拒：账号已封禁，不再尝试其它刷新方式")
+                return result
 
         # 尝试 OAuth Refresh Token
         if account.refresh_token:
@@ -266,6 +317,8 @@ class TokenRefreshManager:
             )
             if oauth_result.success:
                 oauth_result.strategy = "oauth"
+                # OAuth 端点签发的 AT 带新 iat —— 与旧值不同才算真换发
+                oauth_result.refreshed = bool(oauth_result.access_token) and oauth_result.access_token != previous_at
                 self._verify(oauth_result)
                 return oauth_result
             # OAuth 这条路**失败**时不能直接把它还回去：session 那条路可能刚拿回

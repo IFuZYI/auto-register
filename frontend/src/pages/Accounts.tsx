@@ -398,6 +398,10 @@ export default function Accounts() {
   const [backfillRtLoading, setBackfillRtLoading] = useState(false)
   const [backfillRtTaskId, setBackfillRtTaskId] = useState<string | null>(null)
   const [backfillRtForm] = Form.useForm()
+  const [refreshTokenModalOpen, setRefreshTokenModalOpen] = useState(false)
+  const [refreshTokenLoading, setRefreshTokenLoading] = useState(false)
+  const [refreshTokenTaskId, setRefreshTokenTaskId] = useState<string | null>(null)
+  const [refreshTokenForm] = Form.useForm()
 
   useEffect(() => {
     if (platform) setCurrentPlatform(platform)
@@ -741,6 +745,47 @@ export default function Accounts() {
     setBackfillRtModalOpen(false)
     setBackfillRtTaskId(null)
     backfillRtForm.resetFields()
+  }
+
+  const handleRefreshToken = async () => {
+    const values = await refreshTokenForm.validateFields()
+    const scope = selectedRowKeys.length > 0 ? 'selected' : 'all'
+
+    const body: Record<string, unknown> = {
+      concurrency: Number(values.concurrency) || 1,
+      delay_seconds: Number(values.delay_seconds) || 0,
+    }
+
+    if (scope === 'selected') {
+      body.account_ids = Array.from(selectedRowKeys)
+        .map((value) => Number(value))
+        .filter((value) => Number.isInteger(value) && value > 0)
+    } else {
+      body.all_filtered = true
+      if (search) body.email = search
+      if (filterStatus) body.status = filterStatus
+      if (filterPlusStatus) body.plus_status = filterPlusStatus
+    }
+
+    setRefreshTokenLoading(true)
+    try {
+      const result = await apiFetch('/tasks/refresh-token', {
+        method: 'POST',
+        body: JSON.stringify(body),
+      })
+      setRefreshTokenTaskId(result.task_id)
+      message.success(`已开始刷新 ${result.total} 个账号的 Token`)
+    } catch (e) {
+      message.error(`刷新 Token 启动失败: ${e instanceof Error ? e.message : String(e)}`)
+    } finally {
+      setRefreshTokenLoading(false)
+    }
+  }
+
+  const closeRefreshTokenModal = () => {
+    setRefreshTokenModalOpen(false)
+    setRefreshTokenTaskId(null)
+    refreshTokenForm.resetFields()
   }
 
   const getStatusSyncScope = (): 'selected' | 'all' => (selectedRowKeys.length > 0 ? 'selected' : 'all')
@@ -1104,6 +1149,11 @@ export default function Accounts() {
                     icon: <KeyOutlined />,
                     label: selectedRowKeys.length > 0 ? `补 RT (${selectedRowKeys.length})` : '补 RT',
                     disabled: total === 0,
+                  }, {
+                    key: 'refresh_token',
+                    icon: <SyncOutlined />,
+                    label: selectedRowKeys.length > 0 ? `刷新 Token (${selectedRowKeys.length})` : '刷新 Token',
+                    disabled: total === 0,
                   }] : []),
                   { key: 'import', icon: <UploadOutlined />, label: '导入' },
                   { key: 'export', icon: <DownloadOutlined />, label: selectedRowKeys.length > 0 ? `导出 (${selectedRowKeys.length})` : '导出', disabled: total === 0 },
@@ -1120,6 +1170,7 @@ export default function Accounts() {
                 ],
                 onClick: ({ key }) => {
                   if (key === 'rt') setBackfillRtModalOpen(true)
+                  else if (key === 'refresh_token') setRefreshTokenModalOpen(true)
                   else if (key === 'import') setImportModalOpen(true)
                   else if (key === 'export') setExportModalOpen(true)
                   else if (key === 'add') setAddModalOpen(true)
@@ -1330,6 +1381,51 @@ export default function Accounts() {
           </>
         ) : (
           <TaskLogPanel taskId={backfillRtTaskId} kind="backfill_rt" onDone={() => { load() }} />
+        )}
+      </Modal>
+
+      <Modal
+        title="批量刷新 Token"
+        open={refreshTokenModalOpen}
+        onCancel={closeRefreshTokenModal}
+        footer={null}
+        width={refreshTokenTaskId ? 720 : 520}
+        maskClosable={false}
+      >
+        {!refreshTokenTaskId ? (
+          <>
+            <Alert
+              type="info"
+              showIcon
+              style={{ marginBottom: 16 }}
+              message={
+                selectedRowKeys.length > 0
+                  ? `处理所选 ${selectedRowKeys.length} 个账号`
+                  : `处理当前筛选的 ${total} 个账号`
+              }
+              description="走 session token → OAuth → 登录链，并用 /backend-api/me 校验新 AT；AT 未到期时服务端返回原值，会如实显示「无需换发」。"
+            />
+            <Form form={refreshTokenForm} layout="vertical" onFinish={handleRefreshToken}>
+              <Form.Item name="concurrency" label="并发数" initialValue={1}>
+                <InputNumber min={1} max={10} style={{ width: '100%' }} />
+              </Form.Item>
+              <Form.Item
+                name="delay_seconds"
+                label="每个账号间隔(秒)"
+                initialValue={5}
+                extra="连续打会话/授权端点容易触发风控，建议留几秒"
+              >
+                <InputNumber min={0} precision={1} step={1} style={{ width: '100%' }} />
+              </Form.Item>
+              <Form.Item>
+                <Button type="primary" htmlType="submit" block loading={refreshTokenLoading}>
+                  开始刷新
+                </Button>
+              </Form.Item>
+            </Form>
+          </>
+        ) : (
+          <TaskLogPanel taskId={refreshTokenTaskId} kind="refresh_token" onDone={() => { load() }} />
         )}
       </Modal>
 

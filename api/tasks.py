@@ -123,6 +123,23 @@ class Bind2faTaskRequest(BaseModel):
     proxy: Optional[str] = None
 
 
+class RefreshTokenTaskRequest(BaseModel):
+    """批量刷新 Token 的任务参数（用户要求「选中多个批量刷新token」）。
+
+    刷新走 `refresh_token` 动作：session token 优先，OAuth RT 兜底，最后
+    登录链。默认串行 + 间隔几秒 —— 连着打 OpenAI 的会话/授权端点容易触发风控。
+    """
+
+    account_ids: list[int] = Field(default_factory=list)
+    all_filtered: bool = False
+    email: str = ""
+    status: str = ""
+    plus_status: str = ""
+    concurrency: int = 1
+    delay_seconds: float = 5
+    proxy: Optional[str] = None
+
+
 # ── 拆包后的重导出：测试按名字 patch 这些目标，必须仍能从 api.tasks 取到 ──
 from services.task_store_io import (  # noqa: E402,F401
     _ensure_task_exists,
@@ -146,6 +163,7 @@ from services.task_runners import (  # noqa: E402,F401
     _run_account_batch_task,
     _run_backfill_rt,
     _run_bind_2fa,
+    _run_refresh_token,
     _run_register,
 )
 
@@ -374,6 +392,54 @@ def create_bind_2fa_task(req: Bind2faTaskRequest, background_tasks: BackgroundTa
     if missing_ids:
         _log(task_id, f"忽略不存在的账号: {missing_ids}")
     background_tasks.add_task(_run_bind_2fa, task_id, account_ids, req)
+    return {"task_id": task_id, "total": len(account_ids), "missing_ids": missing_ids}
+
+
+@router.post("/refresh-token")
+def create_refresh_token_task(req: RefreshTokenTaskRequest, background_tasks: BackgroundTasks):
+    """批量刷新 ChatGPT 账号的 Token（session → OAuth → 登录链）。
+
+    用户要求：「ChatGPT应该可以选中多个批量刷新token」。
+    """
+    from core.db import platform_session
+    from services.chatgpt_account_selection import select_chatgpt_accounts
+
+    with platform_session("chatgpt") as s:
+        try:
+            accounts, missing_ids = select_chatgpt_accounts(
+                s,
+                account_ids=req.account_ids,
+                all_filtered=req.all_filtered,
+                email=req.email,
+                status=req.status,
+                plus_status=req.plus_status,
+            )
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        account_ids = [int(row.id) for row in accounts if row.id]
+
+    if not account_ids:
+        detail = "所选账号不存在" if missing_ids else "没有匹配的账号"
+        raise HTTPException(400, detail)
+
+    task_id = f"refresh_token_{int(time.time() * 1000)}"
+    _task_store.create(
+        task_id,
+        platform="chatgpt",
+        total=len(account_ids),
+        source="refresh_token",
+        meta={
+            "kind": "refresh_token",
+            "concurrency": req.concurrency,
+            "delay_seconds": req.delay_seconds,
+            "missing_ids": missing_ids,
+        },
+    )
+    _persist_task_snapshot(task_id)
+    _log(task_id, f"待刷新 Token 账号 {len(account_ids)} 个")
+    if missing_ids:
+        _log(task_id, f"忽略不存在的账号: {missing_ids}")
+    background_tasks.add_task(_run_refresh_token, task_id, account_ids, req)
     return {"task_id": task_id, "total": len(account_ids), "missing_ids": missing_ids}
 
 

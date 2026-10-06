@@ -138,6 +138,13 @@ def _apply_action_result(
                 banned=bool(data.get("banned")),
                 usable=bool(result.get("ok")),
             )
+        elif action_id in ("backfill_refresh_token", "bind_2fa"):
+            # 补 RT / 绑 2FA 的登录链同样会发掘「号没了」（用户要求：禁用
+            # 靠登录流程发掘）—— 结论经 data.banned 传上来，这里落状态。
+            status_reason = apply_chatgpt_status_policy(
+                acc_model,
+                banned=bool(data.get("banned")),
+            )
         if status_reason:
             from datetime import datetime, timezone
 

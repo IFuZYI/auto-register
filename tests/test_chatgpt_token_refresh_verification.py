@@ -22,12 +22,23 @@ DEACTIVATED_TEXT = (
 
 
 class FakeResponse:
-    def __init__(self, status_code: int, body: dict | None = None):
+    def __init__(self, status_code: int, body: dict | None = None, text: str = ""):
         self.status_code = status_code
         self._body = body or {}
+        self.text = text
 
     def json(self):
         return self._body
+
+
+class _FakeCookies:
+    """假 cookie jar：`refresh_by_session_token` 会往里 set session cookie。"""
+
+    def __init__(self):
+        self.store: dict[str, str] = {}
+
+    def set(self, name, value, domain=None, path=None):
+        self.store[name] = value
 
 
 class FakeSession:
@@ -35,6 +46,7 @@ class FakeSession:
         self._response = response
         self._error = error
         self.calls: list[tuple[str, dict]] = []
+        self.cookies = _FakeCookies()
 
     def get(self, url, headers=None, timeout=None):
         self.calls.append((url, headers or {}))
@@ -168,6 +180,66 @@ class RefreshAccountFallbackTests(unittest.TestCase):
         result = manager.refresh_account(self._account(refresh_token="rt"))
         self.assertFalse(result.success)
         self.assertEqual(result.error_message, "invalid_grant")
+
+
+class SessionBannedDetectionTests(unittest.TestCase):
+    """session 端点对已停用账号会在响应体里写明「号没了」的措辞 —— 必须读出来。
+
+    用户原文（2026-10-06）：You do not have an account because it has been
+    deleted or deactivated. …（= 账号被停用的报错）。
+
+    此前非 200 分支只报「HTTP 401」，响应体从不读 —— 号被停用与
+    「session 过期」表现完全一样，封号被当普通失败重试。
+    """
+
+    def _account(self, **overrides):
+        class _Account:
+            email = "user@example.com"
+            password = "pw"
+            session_token = ""
+            refresh_token = ""
+            client_id = ""
+            access_token = ""
+
+        account = _Account()
+        for key, value in overrides.items():
+            setattr(account, key, value)
+        return account
+
+    def test_deactivated_body_marks_banned(self):
+        session = FakeSession(
+            FakeResponse(
+                401,
+                {"error": {"code": "account_deactivated", "message": DEACTIVATED_TEXT}},
+                text='{"error":{"code":"account_deactivated","message":"' + DEACTIVATED_TEXT + '"}}',
+            )
+        )
+        manager = _manager_with_session(session)
+        result = manager.refresh_by_session_token("st-old")
+        self.assertFalse(result.success)
+        self.assertTrue(result.banned, "session 端点回了停用措辞，却没被认成封禁")
+
+    def test_plain_401_is_not_banned(self):
+        session = FakeSession(FakeResponse(401, {"error": "unauthorized"}, text="unauthorized"))
+        manager = _manager_with_session(session)
+        result = manager.refresh_by_session_token("st-old")
+        self.assertFalse(result.success)
+        self.assertFalse(result.banned, "普通 401 被误判成封禁")
+
+    def test_banned_session_result_skips_oauth_and_login(self):
+        """封号是终局结论：session 已明确「号没了」，不再试 OAuth。"""
+        manager = _manager_with_session(
+            FakeSession(FakeResponse(403, text=DEACTIVATED_TEXT))
+        )
+        manager.refresh_by_oauth_token = lambda **_: TokenRefreshResult(  # type: ignore[method-assign]
+            success=True, access_token="should-not-be-tried"
+        )
+        result = manager.refresh_account(
+            self._account(session_token="st", refresh_token="rt")
+        )
+        self.assertFalse(result.success)
+        self.assertTrue(result.banned)
+        self.assertNotEqual(result.access_token, "should-not-be-tried")
 
 
 class BannedDetectionTests(unittest.TestCase):
@@ -304,6 +376,206 @@ class LoginChainVerificationTests(unittest.TestCase):
         self.assertFalse(out.success, "未通过校验的 AT 不该被当成功")
         self.assertFalse(out.verified)
         self.assertIn("未通过校验", out.error_message)
+
+
+class SessionTokenRotationTests(unittest.TestCase):
+    """session 端点每次响应都会轮换 session token（实测 2026-10-06）。
+
+    OpenAI 对 `/api/auth/session` 的每次响应都会在 JSON 里下发**新的**
+    `sessionToken`（滑动窗口）。此前代码只读 `accessToken`，轮换后的新值
+    从未保存 —— 长期不更新会让旧值滑出窗口后失效。必须保存回来。
+    """
+
+    def test_rotated_session_token_is_captured(self):
+        session = FakeSession(
+            FakeResponse(200, {"accessToken": "at-1", "sessionToken": "st-rotated"})
+        )
+        manager = _manager_with_session(session)
+        result = manager.refresh_by_session_token("st-old")
+        self.assertTrue(result.success)
+        self.assertEqual(
+            result.session_token, "st-rotated",
+            "响应里的新 sessionToken 没有被保存 —— 轮换值丢了",
+        )
+
+    def test_missing_rotation_keeps_previous_value(self):
+        """响应里没有 sessionToken 时不误写空值。"""
+        session = FakeSession(FakeResponse(200, {"accessToken": "at-1"}))
+        manager = _manager_with_session(session)
+        result = manager.refresh_by_session_token("st-old")
+        self.assertTrue(result.success)
+        self.assertEqual(result.session_token, "")
+
+
+class RefreshChangedFlagTests(unittest.TestCase):
+    """`refreshed` 标志：AT 是否真的换发了（用户要求「确保AT真的刷新了」）。
+
+    实测（2026-10-06）：AT 未到期时服务端返回**原值**（iat/exp 不变）——
+    此时不能假装「刷新成功换新」，必须如实标记未换发。
+    """
+
+    def _account(self, **overrides):
+        class _Account:
+            email = "user@example.com"
+            password = "pw"
+            session_token = ""
+            refresh_token = ""
+            client_id = ""
+            access_token = ""
+
+        account = _Account()
+        for key, value in overrides.items():
+            setattr(account, key, value)
+        return account
+
+    def test_unchanged_at_is_not_marked_refreshed(self):
+        manager = _manager_with_session(
+            FakeSession(FakeResponse(200, {"accessToken": "same-at"}))
+        )
+        result = manager.refresh_account(
+            self._account(session_token="st", access_token="same-at")
+        )
+        self.assertTrue(result.success)
+        self.assertFalse(
+            result.refreshed,
+            "服务端返回的 AT 与旧值相同，refreshed 不该为 True",
+        )
+
+    def test_changed_at_is_marked_refreshed(self):
+        manager = _manager_with_session(
+            FakeSession(FakeResponse(200, {"accessToken": "new-at"}))
+        )
+        result = manager.refresh_account(
+            self._account(session_token="st", access_token="old-at")
+        )
+        self.assertTrue(result.success)
+        self.assertTrue(result.refreshed, "拿到新 AT 后 refreshed 应为 True")
+
+    def test_oauth_always_marks_refreshed(self):
+        """OAuth 路径签发的新 AT 与旧值不同 → refreshed=True。"""
+        manager = _manager_with_session(FakeSession(FakeResponse(200)))
+        manager.refresh_by_oauth_token = lambda **_: TokenRefreshResult(  # type: ignore[method-assign]
+            success=True, access_token="oauth-new"
+        )
+        result = manager.refresh_account(
+            self._account(refresh_token="rt", access_token="old-at")
+        )
+        self.assertTrue(result.refreshed)
+
+    def test_unchanged_at_still_reports_success_when_verified(self):
+        """AT 未变但验证可用 —— 刷新流程本身成功（未到期无需刷新）。"""
+        manager = _manager_with_session(
+            FakeSession(FakeResponse(200, {"accessToken": "same-at"}))
+        )
+        result = manager.refresh_account(
+            self._account(session_token="st", access_token="same-at")
+        )
+        self.assertTrue(result.success)
+        self.assertTrue(result.verified)
+        self.assertFalse(result.refreshed)
+
+
+class RefreshActionFallbackTests(unittest.TestCase):
+    """刷新动作的最后兜底：刷新链没产出可用 AT（非封禁）→ 走登录链。
+
+    用户要求：「失效 = 需要重新登录的，走流程登录」「禁用靠登录流程发掘」。
+    实测（2026-10-06）：10 个 chatgpt 账号全是 session-only —— 会话死了之后
+    刷新链自身无路可走，登录链是唯一能拿回 AT 的路；「号没了」的措辞也只
+    在登录链里出现。此前只在「拿到 AT 但校验不过」时兜底，整链失败直接返回，
+    死会话的号永远刷不活、封禁也发掘不到。
+    """
+
+    def _platform(self):
+        from core.base_platform import RegisterConfig
+        from platforms.chatgpt.plugin import ChatGPTPlatform
+
+        return ChatGPTPlatform(config=RegisterConfig())
+
+    def _account(self, **overrides):
+        from core.base_platform import Account, AccountStatus
+
+        account = Account(
+            platform="chatgpt",
+            email="user@example.com",
+            password="pw",
+            status=AccountStatus.REGISTERED,
+            extra={"session_token": "st"},
+        )
+        for key, value in overrides.items():
+            setattr(account, key, value)
+        return account
+
+    def test_dead_session_falls_back_to_login(self):
+        """session 死了（整链失败）→ 登录链兜底把 AT 拿回来。"""
+        from platforms.chatgpt.plugin import ChatGPTPlatform
+        from platforms.chatgpt.token_refresh import TokenRefreshResult
+
+        failed = TokenRefreshResult(
+            success=False, error_message="Session token 刷新失败: HTTP 401"
+        )
+        recovered = TokenRefreshResult(
+            success=True, verified=True, access_token="fresh-at", strategy="password_2fa"
+        )
+        with patch.object(
+            TokenRefreshManager, "refresh_account", return_value=failed
+        ), patch.object(
+            ChatGPTPlatform, "_refresh_via_login", return_value=recovered
+        ) as login:
+            out = self._platform().execute_action("refresh_token", self._account(), {})
+
+        login.assert_called_once()
+        self.assertTrue(out["ok"], "登录链救回后应报成功")
+        self.assertEqual(out["data"]["access_token"], "fresh-at")
+        # 登录链换回来的 AT 是新签发的 —— refreshed 必须按它重算（此前刷新链
+        # 失败时是 False，不重算会把「换发了」误报成「没换发」）。
+        self.assertTrue(out["data"]["refreshed"], "登录链救回后 refreshed 应为 True")
+
+    def test_verified_refresh_does_not_fall_back(self):
+        """刷新链直接产出可用 AT → 不跑登录链（那是几十秒的协议重登）。"""
+        from platforms.chatgpt.plugin import ChatGPTPlatform
+        from platforms.chatgpt.token_refresh import TokenRefreshResult
+
+        ok = TokenRefreshResult(success=True, verified=True, access_token="same-at")
+        with patch.object(
+            TokenRefreshManager, "refresh_account", return_value=ok
+        ), patch.object(ChatGPTPlatform, "_refresh_via_login") as login:
+            out = self._platform().execute_action("refresh_token", self._account(), {})
+
+        login.assert_not_called()
+        self.assertTrue(out["ok"])
+
+    def test_banned_refresh_does_not_fall_back(self):
+        """封禁是终局结论：不再兜底（登录链只会被同样拒绝）。"""
+        from platforms.chatgpt.plugin import ChatGPTPlatform
+        from platforms.chatgpt.token_refresh import TokenRefreshResult
+
+        banned = TokenRefreshResult(
+            success=False, banned=True, error_message="账号已封禁（session 端点拒绝: HTTP 403）"
+        )
+        with patch.object(
+            TokenRefreshManager, "refresh_account", return_value=banned
+        ), patch.object(ChatGPTPlatform, "_refresh_via_login") as login:
+            out = self._platform().execute_action("refresh_token", self._account(), {})
+
+        login.assert_not_called()
+        self.assertFalse(out["ok"])
+        self.assertTrue(out["data"]["banned"])
+
+    def test_no_password_keeps_both_reasons(self):
+        """登录链跑不动（没密码）时，两段原因都要留下。"""
+        from platforms.chatgpt.token_refresh import TokenRefreshResult
+
+        failed = TokenRefreshResult(
+            success=False, error_message="Session token 刷新失败: HTTP 401"
+        )
+        with patch.object(TokenRefreshManager, "refresh_account", return_value=failed):
+            out = self._platform().execute_action(
+                "refresh_token", self._account(password=""), {}
+            )
+
+        self.assertFalse(out["ok"])
+        self.assertIn("HTTP 401", out["error"])
+        self.assertIn("没有密码", out["error"])
 
 
 if __name__ == "__main__":

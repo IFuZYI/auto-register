@@ -30,6 +30,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
 from platforms.chatgpt.protocol.auth_flow import AuthFlow
+from platforms.chatgpt.protocol.banned_signals import looks_like_banned
 from platforms.chatgpt.protocol.config import Config
 from platforms.chatgpt.protocol.mail_provider import MailProvider
 from platforms.chatgpt.protocol.response_summary import describe_error
@@ -58,12 +59,16 @@ class TwoFactorBindResult:
     factor_id: str = ""
     already_bound: bool = False
     error_message: str = ""
+    #: 登录链认出「号没了」（用户要求：禁用靠登录流程发掘）。
+    banned: bool = False
 
     def summary(self) -> str:
         if self.already_bound:
             return "账号已绑定 2FA（密钥无法从服务端取回）"
         if self.ok:
             return "2FA 绑定成功"
+        if self.banned:
+            return f"账号已封禁：{self.error_message or '登录链认出账号已停用'}"
         return self.error_message or "2FA 绑定失败"
 
 
@@ -181,10 +186,16 @@ def bind_totp_via_login(
         if error == _ALREADY_BOUND:
             return TwoFactorBindResult(already_bound=True)
         if error:
-            return TwoFactorBindResult(error_message=error)
+            return TwoFactorBindResult(error_message=error, banned=looks_like_banned(error))
         return enroll_totp(flow, access_token, on_secret=on_secret)
     except Exception as exc:  # noqa: BLE001
-        return TwoFactorBindResult(error_message=f"重新登录绑定异常: {exc}")
+        message = str(exc) or exc.__class__.__name__
+        # 登录链在任意一步撞上「号没了」的措辞都要定性为封禁（用户要求：
+        # 禁用靠登录流程发掘）—— 普通失败与封禁在重试语义上不是一回事。
+        return TwoFactorBindResult(
+            error_message=f"重新登录绑定异常: {message}",
+            banned=looks_like_banned(message),
+        )
 
 
 # ── mfa 接口三步 ──

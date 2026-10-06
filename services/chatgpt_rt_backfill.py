@@ -153,13 +153,21 @@ def apply_backfill_result(
     session: Optional[Session] = None,
     commit: bool = False,
 ) -> dict[str, Any]:
-    """把补号结果落到账号行上，返回实际写入的补丁。"""
+    """把补号结果落到账号行上，返回实际写入的补丁。
+
+    ``result.banned`` 为真时同时把状态落成「禁用」—— 用户要求禁用靠登录
+    流程发掘：补 RT 重登撞上「号没了」的措辞，正是这个结论的一手来源。
+    """
     patch = build_extra_patch(result)
     extra = model.get_extra()
     extra.update(patch)
     model.set_extra(extra)
     if patch.get("access_token"):
         model.token = patch["access_token"]
+    if result.banned:
+        from services.chatgpt_account_state import apply_chatgpt_status_policy
+
+        apply_chatgpt_status_policy(model, banned=True)
     model.updated_at = datetime.now(timezone.utc)
     if session is not None:
         session.add(model)
