@@ -392,13 +392,16 @@ class ChatGPTPlatform(BasePlatform):
             #    session-only，会话死了刷新链自身无路可走。
             # 封禁是终局结论，不兜底（登录链只会被同样拒绝）。
             refresh_failed_reason = result.error_message or result.verify_message or ""
+            fallback_ran = False
             if result.success and not result.verified:
                 _log(f"[刷新Token] 刷出的 AT 未通过校验（{result.verify_message}），改走登录流程")
                 result = self._refresh_via_login(a, result)
+                fallback_ran = True
             elif not result.success and not result.banned:
                 refresh_failed_reason = refresh_failed_reason or "刷新失败"
                 _log(f"[刷新Token] {refresh_failed_reason}，改走登录流程")
                 result = self._refresh_via_login(a, result)
+                fallback_ran = True
 
             if result.success:
                 # 登录链换回来的 AT 是新签发的 —— refreshed 要按它重算，
@@ -411,10 +414,13 @@ class ChatGPTPlatform(BasePlatform):
                 # （复审建议：失败路径要清掉）。
                 result.refreshed = False
                 # 两段原因都要留下（否则「为什么没刷上」只剩后半句，用户
-                # 看不到刷新链为什么先失败）。两个兜底分支统一处理。
-                login_reason = result.error_message or "登录流程刷新失败"
-                if refresh_failed_reason and refresh_failed_reason not in login_reason:
-                    result.error_message = f"{refresh_failed_reason}；登录流程：{login_reason}"
+                # 看不到刷新链为什么先失败）。**只有兜底真跑过才合并**：
+                # 封禁是终局、登录链没跑，硬合并会拼出「登录流程：登录流程
+                # 刷新失败」——一段没发生过的经历（复审建议）。
+                if fallback_ran:
+                    login_reason = result.error_message or "登录流程刷新失败"
+                    if refresh_failed_reason and refresh_failed_reason not in login_reason:
+                        result.error_message = f"{refresh_failed_reason}；登录流程：{login_reason}"
 
             stamp = {"ok": result.success, "verified": bool(result.verified),
                      "refreshed": bool(result.refreshed),

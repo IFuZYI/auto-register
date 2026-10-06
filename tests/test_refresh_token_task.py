@@ -219,6 +219,9 @@ class RefreshTokenRunnerTests(unittest.TestCase):
             },
         }
         held_by_thread: dict[int, int] = {}
+        # 无锁是有意的：每个线程只读写自己 tid 的键，Python dict 的单键
+        # 读改写在这里由 GIL 保证原子性；探针若被复用到跨线程共享计数的
+        # 场景，需要改成加锁或 Counter（复审建议）。
 
         def _on_checkout(_dbapi_conn, _conn_record, _conn_proxy):
             tid = _threading.get_ident()

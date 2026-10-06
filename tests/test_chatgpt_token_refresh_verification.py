@@ -605,7 +605,11 @@ class RefreshActionFallbackTests(unittest.TestCase):
             ChatGPTPlatform, "_refresh_via_login", return_value=reissued
         ) as login:
             out = self._platform().execute_action(
-                "refresh_token", self._account(access_token="same-at"), {}
+                # AT 要放进 extra（插件从 extra/token 列读），否则 previous_at
+                # 是空串，「旧 AT 未变」这个复现场景没被真正建模（复审建议）。
+                "refresh_token",
+                self._account(extra={"session_token": "st", "access_token": "same-at"}),
+                {},
             )
 
         login.assert_called_once()
@@ -645,6 +649,30 @@ class RefreshActionFallbackTests(unittest.TestCase):
         login.assert_not_called()
         self.assertFalse(out["ok"])
         self.assertTrue(out["data"]["banned"])
+
+    def test_banned_terminal_does_not_claim_a_login_attempt(self):
+        """封禁是终局（登录链没跑）：失败原因里不能拼「登录流程：…」的假经历。
+
+        复审建议：原因合并只在兜底真跑过时执行。真实封禁产出方总带
+        error_message（见 token_refresh 两条路径），这里构造的是空原因的
+        极端形态 —— 闸门要挡住它，否则会拼出「…；登录流程：登录流程刷新失败」。
+        """
+        from platforms.chatgpt.plugin import ChatGPTPlatform
+        from platforms.chatgpt.token_refresh import TokenRefreshResult
+
+        banned = TokenRefreshResult(
+            success=False, banned=True, error_message="",
+            verify_message="账号已封禁（session 端点拒绝: HTTP 403）",
+        )
+        with patch.object(
+            TokenRefreshManager, "refresh_account", return_value=banned
+        ), patch.object(ChatGPTPlatform, "_refresh_via_login") as login:
+            out = self._platform().execute_action("refresh_token", self._account(), {})
+
+        login.assert_not_called()
+        self.assertFalse(out["ok"])
+        self.assertNotIn("登录流程", out["error"], "登录链没跑过，不能出现在原因里")
+        self.assertIn("已封禁", out["data"]["message"], "封禁原因要透传给界面")
 
     def test_no_password_keeps_both_reasons(self):
         """登录链跑不动（没密码）时，两段原因都要留下。"""
