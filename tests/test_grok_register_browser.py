@@ -453,5 +453,123 @@ class CookieChainPollingTests(unittest.TestCase):
         self.assertLess(elapsed, 3, f"超时必须按时返回，实际 {elapsed:.1f}s")
 
 
+class CookieBannerTests(unittest.TestCase):
+    """cookie 同意横幅：文案各家不同、还会变（实测真机 OneTrust 是 'Allow All'）。
+
+    实测（2026-10-06）：真机 DOM 里横幅按钮是 'Allow All' / 'Reject All' /
+    'Confirm My Choices'，旧实现只试 'Accept All Cookies' / 'Close' /
+    'Accept all' —— 全部落空，横幅遮住按钮时点击落空，表象是
+    「找不到邮箱输入框」。
+    """
+
+    def test_observed_wording_is_covered(self):
+        from platforms.grok import register_browser as rb
+
+        for observed in ("Allow All", "Accept All Cookies", "Accept all"):
+            self.assertIn(
+                observed, rb._COOKIE_BANNER_BUTTON_NAMES,
+                f"真机文案 {observed!r} 没进兜底清单",
+            )
+
+    def test_dismiss_clicks_the_observed_button(self):
+        from platforms.grok.register_browser import _dismiss_cookie_banner
+
+        clicks = []
+        page = MagicMock()
+
+        def _role(role, name=None):
+            if name == "Allow All":
+                btn = MagicMock()
+                btn.first.click.side_effect = lambda timeout=None: clicks.append(name)
+                return btn
+            raise RuntimeError(f"no button named {name}")
+
+        page.get_by_role.side_effect = _role
+        page.locator.return_value.first.count.return_value = 0  # OneTrust id 选择器不命中
+        _dismiss_cookie_banner(page)
+        self.assertEqual(clicks, ["Allow All"], "真机文案 'Allow All' 必须被点到")
+
+
+class SignupFormFillTests(unittest.TestCase):
+    """建号表单填充要读回校验 + 多选择器兜底。
+
+    实测（2026-10-06）：填充静默失败（选择器没命中/受控输入拒收）时照样
+    提交，表象是「未拿到 SSO」，排查方向全错。
+    """
+
+    def _page(self, *, count=1, readback="James"):
+        page = MagicMock()
+        page.locator.return_value.first.count.return_value = count
+        page.locator.return_value.first.fill.return_value = None
+        page.evaluate.return_value = readback
+        return page
+
+    def test_all_fields_filled_returns_empty_missing(self):
+        from platforms.grok.register_browser import _fill_signup_form
+
+        missing = _fill_signup_form(self._page(), "Pw123!")
+        self.assertEqual(missing, [], "正常填充不应报缺字段")
+
+    def test_no_selector_match_reports_fields(self):
+        from platforms.grok.register_browser import _fill_signup_form
+
+        page = self._page(count=0)
+        page.get_by_placeholder.side_effect = RuntimeError("no placeholder")
+        missing = _fill_signup_form(page, "Pw123!")
+        self.assertIn("givenName", missing)
+        self.assertIn("password", missing)
+
+    def test_readback_empty_flags_field(self):
+        """fill 静默落空（读回为空）→ 字段被判 missing，不盲提交。"""
+        from platforms.grok.register_browser import _fill_signup_form
+
+        page = self._page(readback="")
+        page.get_by_placeholder.side_effect = RuntimeError("no placeholder")
+        missing = _fill_signup_form(page, "Pw123!")
+        self.assertIn("password", missing, "读回为空必须报出字段，不能盲提交")
+
+
+class SignupSubmitTests(unittest.TestCase):
+    """提交按钮文案会变（实测 'Complete your sign up'）；多策略兜底。"""
+
+    def test_prefers_observed_wording(self):
+        from platforms.grok.register_browser import _submit_signup_form
+
+        clicked = []
+        page = MagicMock()
+
+        def _role(role, name=None):
+            if name == "Complete your sign up":
+                btn = MagicMock()
+                btn.last.click.side_effect = lambda timeout=None: clicked.append(name)
+                return btn
+            raise RuntimeError(name)
+
+        page.get_by_role.side_effect = _role
+        _submit_signup_form(page)
+        self.assertEqual(clicked, ["Complete your sign up"])
+
+    def test_falls_back_to_form_submit_button(self):
+        from platforms.grok.register_browser import _submit_signup_form
+
+        page = MagicMock()
+        page.get_by_role.side_effect = RuntimeError("none")
+        submitted = []
+        page.locator.return_value.last.click.side_effect = (
+            lambda timeout=None: submitted.append("form")
+        )
+        _submit_signup_form(page)
+        self.assertEqual(submitted, ["form"])
+
+    def test_last_resort_is_enter(self):
+        from platforms.grok.register_browser import _submit_signup_form
+
+        page = MagicMock()
+        page.get_by_role.side_effect = RuntimeError("none")
+        page.locator.return_value.last.click.side_effect = RuntimeError("no form button")
+        _submit_signup_form(page)
+        page.keyboard.press.assert_called_once_with("Enter")
+
+
 if __name__ == "__main__":
     unittest.main()

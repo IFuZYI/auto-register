@@ -22,6 +22,7 @@ from typing import Any, Optional
 
 from core.base_mailbox import BaseMailbox
 from core.base_platform import Account, AccountStatus, BasePlatform, RegisterConfig
+from core.environment import EnvironmentNotReadyError
 from core.registry import register
 from core.task_runtime import TaskInterruption
 
@@ -123,6 +124,18 @@ class GrokPlatform(BasePlatform):
         super().__init__(config)
         self.mailbox = mailbox
 
+    @classmethod
+    def check_environment(cls):
+        """任务级环境预检：camoufox 配对浏览器是否就绪。
+
+        注册 runner 在分配邮箱/代理之前调用（见 `_run_register` 的预检段）。
+        浏览器没装好时整个任务直接失败并带修复指引 —— 而不是让每个账号
+        白跑一遍、重试轮全烧在同一个环境错误上。
+        """
+        from core.environment import check_camoufox_ready
+
+        return check_camoufox_ready()
+
     # ------------------------------------------------------------------
     # 注册
     # ------------------------------------------------------------------
@@ -131,6 +144,18 @@ class GrokPlatform(BasePlatform):
         extra = dict((self.config.extra or {}) if self.config else {})
         proxy = (self.config.proxy if self.config else None) or None
         log = getattr(self, "_log_fn", print)
+
+        # -1) 环境预检（fail-fast）：浏览器路径依赖 camoufox 配对浏览器。
+        #     浏览器没装好时（包升级后没跑 `camoufox fetch` 是常见形态），
+        #     在**分配邮箱/推代理之前**就带修复指引失败 —— 否则每条链路
+        #     白跑一遍，重试轮还全烧在同一个环境错误上（实测事故：
+        #     task_1791300512055 两轮 3 秒全挂在 CamoufoxNotInstalled）。
+        from core.environment import check_camoufox_ready
+
+        verdict = check_camoufox_ready()
+        if not verdict.ok:
+            log(f"[Grok] 环境预检失败：{verdict.message}")
+            raise EnvironmentNotReadyError(verdict.message)
 
         # 0) 判重：邮箱是账号唯一业务键，已注册的不再重复注册。
         #    渠道池常常会重复发出同一个邮箱（如 Outlook 邮箱池轮转），

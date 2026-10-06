@@ -70,6 +70,18 @@ class ChatGPTPlatform(BasePlatform):
         super().__init__(config)
         self.mailbox = mailbox
 
+    @classmethod
+    def check_environment(cls):
+        """任务级环境预检：Sentinel PoW 依赖的 Node 运行时是否可用。
+
+        注册 runner 在分配邮箱/代理之前调用（见 `_run_register` 的预检段）。
+        缺 Node 时注册链会「表面全通、验证码邮件被静默丢弃」—— 提前拦下
+        比跑完一轮拿不到码再排查便宜得多。
+        """
+        from core.environment import check_node_ready
+
+        return check_node_ready()
+
     def check_valid(self, account: Account) -> bool:
         """账号有效性 = access_token 能通过 /backend-api/me 认证。
 
@@ -102,6 +114,18 @@ class ChatGPTPlatform(BasePlatform):
         proxy = self.config.proxy if self.config else None
         extra_config = (self.config.extra or {}) if self.config and getattr(self.config, "extra", None) else {}
         log_fn = getattr(self, "_log_fn", print)
+
+        # 环境预检（fail-fast）：Sentinel PoW 依赖 Node 运行时，缺了它注册
+        # 流程表面全通、验证码邮件却被服务端静默丢弃 —— 在分配邮箱之前就
+        # 带修复指引失败（与 Grok 的 camoufox 预检同款）。
+        from core.environment import check_node_ready
+
+        node_verdict = check_node_ready()
+        if not node_verdict.ok:
+            log_fn(f"[ChatGPT] 环境预检失败：{node_verdict.message}")
+            from core.environment import EnvironmentNotReadyError
+
+            raise EnvironmentNotReadyError(node_verdict.message)
 
         # 没有邮箱池就直接报错：曾经这里会悄悄兜底成 TempMail.lol（一次性临时
         # 邮箱），注册出来的账号在临时邮箱过期后就永远收不到验证码了 —— 用户看到

@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Callable, Optional
 from sqlmodel import Session, select
 
 from core.db import TaskLog, current_engine
+from core.environment import EnvironmentNotReadyError, is_environment_error_message
 from core.task_runtime import (
     AttemptOutcome,
     AttemptResult,
@@ -66,6 +67,20 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
 
     try:
         PlatformCls = get(req.platform)
+
+        # 任务级环境预检：环境不就绪（如 camoufox 浏览器没装/与包版本不配对）
+        # 在分配邮箱/代理**之前**终止整个任务 —— 否则每个账号白跑一遍、重试
+        # 轮全烧在同一个环境错误上（实测事故：task_1791300512055 两轮 3 秒
+        # 全挂在 CamoufoxNotInstalled，还白领了别名）。平台没实现预检时默认放行。
+        preflight = getattr(PlatformCls, "check_environment", None)
+        if callable(preflight):
+            verdict = preflight()
+            if not verdict.ok:
+                _api._log(
+                    task_id,
+                    f"[环境预检] 环境未就绪，任务终止（重开一轮同样结局）：{verdict.message}",
+                )
+                raise EnvironmentNotReadyError(verdict.message)
 
         # 预先计算 merged_extra，所有线程共享只读副本，避免每线程重复调用 config_store
         from core.config_store import config_store as _cs
@@ -277,9 +292,15 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
                 if _proxy:
                     _proxy_pool.report_fail(_proxy)
                 _api._log(task_id, f"[FAIL] 注册失败{round_suffix}: {e}")
+                # 环境类错误（浏览器/Node 缺失等）即使以字符串形态传上来
+                # （register_browser 的兜底 except 会把异常文本化）也判成
+                # 不可重试 —— 重开一轮是同样的结局。
+                non_retryable = isinstance(e, NonRetryableRegisterError) or (
+                    is_environment_error_message(e)
+                )
                 return AttemptResult.failed(
                     str(e),
-                    retryable=not isinstance(e, NonRetryableRegisterError),
+                    retryable=not non_retryable,
                     email=current_email,
                 )
             finally:

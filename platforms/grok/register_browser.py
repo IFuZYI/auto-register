@@ -98,6 +98,158 @@ def _wait_for_sso_cookie(
         page.wait_for_timeout(poll_ms)
 
 
+#: cookie 同意横幅的按钮文案兜底清单。
+#: 实测（2026-10-06）：真机是 OneTrust 横幅，按钮文案为 'Allow All' /
+#: 'Reject All' / 'Confirm My Choices' —— 旧实现只试 'Accept All Cookies' /
+#: 'Close' / 'Accept all'，全部落空；横幅遮住表单时点击落空，
+#: 表象是「找不到邮箱输入框」（排查方向全错）。
+_COOKIE_BANNER_BUTTON_NAMES = (
+    "Allow All",
+    "Accept All Cookies",
+    "Accept all",
+    "Accept All",
+    "I Accept",
+    "Close",
+)
+
+#: OneTrust 横幅的 id 选择器（文案兜底之外的第二条路）。
+_COOKIE_BANNER_SELECTORS = (
+    "#onetrust-accept-btn-handler",
+    ".onetrust-close-btn-handler",
+    "#onetrust-pc-btn-handler",
+)
+
+
+def _dismiss_cookie_banner(page: Any) -> None:
+    """尽力关掉 cookie 同意横幅（有就点，没有就过，绝不抛错）。
+
+    两条路：文案兜底（`_COOKIE_BANNER_BUTTON_NAMES`）+ OneTrust id 选择器。
+    """
+    for name in _COOKIE_BANNER_BUTTON_NAMES:
+        try:
+            page.get_by_role("button", name=name).first.click(timeout=1200)
+            page.wait_for_timeout(400)
+            return
+        except Exception:
+            continue
+    for sel in _COOKIE_BANNER_SELECTORS:
+        try:
+            loc = page.locator(sel).first
+            if loc.count():
+                loc.click(timeout=1200)
+                page.wait_for_timeout(400)
+                return
+        except Exception:
+            continue
+
+
+#: 建号表单三个字段的选择器清单（按优先级）。
+#: 命名约定两套并存：服务端 JSON 用 givenName/familyName，DOM 上实测
+#: 还可能是 firstName/lastName（placeholder 'First name'/'Last name'）。
+_SIGNUP_FIELD_SELECTORS = {
+    "givenName": (
+        "input[name=givenName]",
+        "input#firstName",
+        "input[name=firstName]",
+    ),
+    "familyName": (
+        "input[name=familyName]",
+        "input#lastName",
+        "input[name=lastName]",
+    ),
+    "password": (
+        "input[type=password]",
+        "input[name=password]",
+    ),
+}
+
+#: placeholder 兜底（选择器都落空时按可见文案找）。
+_SIGNUP_FIELD_PLACEHOLDERS = {
+    "givenName": ("First name", "Given name"),
+    "familyName": ("Last name", "Family name"),
+    "password": ("Password",),
+}
+
+
+def _fill_signup_form(page: Any, password: str) -> list[str]:
+    """填建号表单，返回**读回为空**的字段名列表（空列表 = 全部填上）。
+
+    实测教训（2026-10-06）：填充静默失败（选择器没命中 / 受控输入拒收）
+    时照样提交，表象是「未拿到 SSO」—— 排查方向全错。这里每填一个字段
+    就**读回校验**，读不回值即计入 missing，由调用方决定报错而不是盲提交。
+    """
+    missing: list[str] = []
+    values = {"givenName": "James", "familyName": "Smith", "password": password}
+
+    for field, value in values.items():
+        filled = False
+        for sel in _SIGNUP_FIELD_SELECTORS[field]:
+            try:
+                loc = page.locator(sel).first
+                if loc.count():
+                    loc.fill(value, timeout=3500)
+                    filled = True
+                    break
+            except Exception:
+                continue
+        if not filled:
+            # placeholder 兜底
+            for name in _SIGNUP_FIELD_PLACEHOLDERS[field]:
+                try:
+                    loc = page.get_by_placeholder(name).first
+                    if loc.count():
+                        loc.fill(value, timeout=3500)
+                        filled = True
+                        break
+                except Exception:
+                    continue
+        if not filled:
+            missing.append(field)
+            continue
+        # 读回校验：fill 成功不代表值真的进去了（受控输入可能拒收）
+        try:
+            readback = page.evaluate(
+                """(field) => {
+                    const sels = {
+                        givenName: ['input[name=givenName]', 'input#firstName', 'input[name=firstName]'],
+                        familyName: ['input[name=familyName]', 'input#lastName', 'input[name=lastName]'],
+                        password: ['input[type=password]', 'input[name=password]'],
+                    }[field] || [];
+                    for (const s of sels) {
+                        const el = document.querySelector(s);
+                        if (el && el.value) return el.value;
+                    }
+                    return '';
+                }""",
+                field,
+            )
+        except Exception:
+            readback = ""
+        if not str(readback or "").strip():
+            missing.append(field)
+    return missing
+
+
+def _submit_signup_form(page: Any) -> None:
+    """提交建号表单：按钮文案 → 表单 submit 按钮 → Enter，三档兜底。
+
+    实测（2026-10-06）：真机按钮文案是 'Complete your sign up'；旧实现
+    只匹配 complete sign up|create|sign up（缺 'your'），且只试一次。
+    """
+    for name in ("Complete your sign up", re.compile(r"complete sign ?up|create account|sign up", re.I)):
+        try:
+            page.get_by_role("button", name=name).last.click(timeout=6000)
+            return
+        except Exception:
+            continue
+    try:
+        page.locator("form button[type=submit], button[type=submit]").last.click(timeout=3000)
+        return
+    except Exception:
+        pass
+    page.keyboard.press("Enter")
+
+
 # 密码生成统一走 profile.generate_password（secrets + 与参考实现同格式）。
 # 这里原先自己写了一份 random 版，等于同一件事有两套实现、两套强度 ——
 # 评审发现后删掉，只保留别名，避免调用点还要改 import。
@@ -176,14 +328,9 @@ def register_grok_via_browser(
             email_input = "input#email, input[type=email], input[name=email]"
             for attempt in range(1, 4):
                 page.wait_for_timeout(3000)
-                # 关 cookie 弹窗：它盖住按钮时点击会落空
-                for name in ("Accept All Cookies", "Close", "Accept all"):
-                    try:
-                        page.get_by_role("button", name=name).click(timeout=1200)
-                        page.wait_for_timeout(500)
-                        break
-                    except Exception:
-                        continue
+                # 关 cookie 弹窗：它盖住按钮时点击会落空（文案兜底清单见
+                # `_dismiss_cookie_banner` —— 真机是 OneTrust 'Allow All'）
+                _dismiss_cookie_banner(page)
                 if page.locator(email_input).count():
                     break
                 try:
@@ -306,20 +453,14 @@ def register_grok_via_browser(
 
             # 建号表单
             _log(log, "[Grok] 填建号资料…")
-            for sel, val in (
-                ("input[name=givenName], input[name=firstName], input#firstName", "James"),
-                ("input[name=familyName], input[name=lastName], input#lastName", "Smith"),
-                ("input[type=password]", result["password"]),
-            ):
-                try:
-                    page.locator(sel).first.fill(val, timeout=3500)
-                except Exception:
-                    pass
+            missing = _fill_signup_form(page, result["password"])
+            if missing:
+                # 读回为空 = 没真填上。盲提交只会停在原页，表象是「未拿到
+                # SSO」—— 排查方向全错（实测 2026-10-06）。直接报字段名。
+                result["error"] = f"建号表单填充失败（读回为空）: {', '.join(missing)}"
+                return result
             page.wait_for_timeout(1500)
-            try:
-                page.get_by_role("button", name=re.compile("complete sign up|create|sign up", re.I)).last.click(timeout=6000)
-            except Exception:
-                page.keyboard.press("Enter")
+            _submit_signup_form(page)
 
             # 提交后 x.ai 用 cookie-chain 跳链下发 sso（详见 `_wait_for_sso_cookie`）。
             # 必须轮询等它落地，不能只等固定时长 —— 否则跳链没跑完就返回，

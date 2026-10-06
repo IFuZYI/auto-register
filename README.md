@@ -211,6 +211,11 @@ Grok 只有 camoufox 浏览器路径。确认 Solver/browser 依赖已装
 （`python -m camoufox fetch`），并检查发码节流（`grok_send_code_min_interval`）——
 x.ai 对同一 IP 的取码有频率限制，太密会把出口打进长冷却。
 
+> **升级过 camoufox 包（pip 装新版）之后必须重跑一次 `python -m camoufox fetch`**：
+> 每个 camoufox 包版本钉死配套的浏览器 build，包升级后旧浏览器会立刻不被认。
+> 注册任务现在会**在分配邮箱之前**做环境预检，直接以这条修复指引失败，
+> 不会再让每个账号白跑一轮、重试轮全烧在同一个环境错误上。
+
 ## 项目结构
 
 ```text
