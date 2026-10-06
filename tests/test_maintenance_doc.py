@@ -75,6 +75,8 @@ class MaintenanceDocReferenceTests(unittest.TestCase):
         "docs/API_REFERENCE.md",
         "docs/DATABASE_MODULARITY.md",
         "docs/DATA_DIRECTORY.md",
+        "docs/FEATURES.md",
+        "docs/DEPLOYMENT.md",
     )
 
     def test_referenced_files_exist(self):

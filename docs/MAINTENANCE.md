@@ -7,7 +7,9 @@
 
 | 文档 | 回答的问题 |
 | --- | --- |
-| [README.md](../README.md) | 这是什么、怎么部署、怎么用 |
+| [README.md](../README.md) | 这是什么、怎么跑起来、怎么用（核心功能 + 快速开始 + 使用教程） |
+| [FEATURES.md](FEATURES.md) | 平台能力、邮箱服务、面板对接、导出格式的完整说明 |
+| [DEPLOYMENT.md](DEPLOYMENT.md) | Docker 部署、环境变量、数据目录与一键迁移 |
 | [EXTENDING.md](EXTENDING.md) | 新增平台 / 注册流程 / 邮箱渠道**怎么写**（代码骨架） |
 | **本文** | 改完之后**还要动哪些文件**（接线清单）、升级与迁移步骤、验证门禁 |
 | [API_REFERENCE.md](API_REFERENCE.md) | 每个接口的请求/响应形状 |
