@@ -391,6 +391,80 @@ class LoginChainVerificationTests(unittest.TestCase):
         self.assertFalse(out.verified)
         self.assertIn("未通过校验", out.error_message)
 
+    def test_unverified_login_at_keeps_refresh_strategy(self):
+        """登录链拿到 AT 但校验不过时，刷新链 strategy 不能被空值覆盖。"""
+        from platforms.chatgpt.login_refresh import LoginRefreshResult
+        from platforms.chatgpt.token_refresh import TokenRefreshResult
+
+        result = TokenRefreshResult(
+            success=True, verified=True, refreshed=False, access_token="same-at",
+            strategy="session",
+        )
+        login_result = LoginRefreshResult(
+            success=True, access_token="fresh-at", strategy="",
+        )
+        with patch(
+            "services.chatgpt_otp_mailbox.resolve_otp_mail_provider",
+            return_value=(None, "不在号池里"),
+        ), patch(
+            "platforms.chatgpt.login_refresh.LoginAccessTokenRefresher"
+        ) as refresher_cls, patch(
+            "platforms.chatgpt.token_refresh.TokenRefreshManager"
+        ) as verifier_cls:
+            refresher_cls.return_value.run.return_value = login_result
+            verifier_cls.return_value.verify_access_token.return_value = (False, "HTTP 401")
+            out = self._platform()._refresh_via_login(self._account(), result)
+
+        self.assertEqual(
+            out.strategy, "session",
+            "登录链未通过校验时把刷新链的 strategy 覆盖成空了",
+        )
+
+    def test_failed_login_keeps_refresh_strategy(self):
+        """登录链失败时不能把刷新链的 strategy 覆盖成空（复审建议）。
+
+        stamp.strategy 是「这次刷新实际走过哪条路」的唯一记录；被登录链
+        的空 strategy 覆盖后，日志里就说不清先走的 session 还是 oauth。
+        """
+        from platforms.chatgpt.login_refresh import LoginRefreshResult
+        from platforms.chatgpt.token_refresh import TokenRefreshResult
+
+        result = TokenRefreshResult(
+            success=True, verified=True, refreshed=False, access_token="same-at",
+            strategy="session",
+        )
+        login_result = LoginRefreshResult(
+            success=False, error_message="登录流程失败", strategy="",
+        )
+        with patch(
+            "services.chatgpt_otp_mailbox.resolve_otp_mail_provider",
+            return_value=(None, "不在号池里"),
+        ), patch(
+            "platforms.chatgpt.login_refresh.LoginAccessTokenRefresher"
+        ) as refresher_cls:
+            refresher_cls.return_value.run.return_value = login_result
+            out = self._platform()._refresh_via_login(self._account(), result)
+
+        self.assertEqual(
+            out.strategy,
+            "session",
+            "登录链失败时把刷新链的 strategy 覆盖成空了",
+        )
+
+    def test_no_password_keeps_refresh_strategy(self):
+        """无密码提前失败时同样不能清掉刷新链的 strategy。"""
+        from platforms.chatgpt.token_refresh import TokenRefreshResult
+
+        result = TokenRefreshResult(
+            success=True, verified=True, refreshed=False, access_token="same-at",
+            strategy="session",
+        )
+        account = self._account()
+        account.password = ""
+        out = self._platform()._refresh_via_login(account, result)
+
+        self.assertEqual(out.strategy, "session", "无密码路径清掉了刷新链的 strategy")
+
     def test_login_fallback_keeps_rotated_session_token_when_login_has_none(self):
         """登录链没换到 session_token 时，刷新链刚轮换回来的值不能被冲成空串。
 

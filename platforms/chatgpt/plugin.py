@@ -210,7 +210,8 @@ class ChatGPTPlatform(BasePlatform):
             result.success = False
             result.banned = False
             result.error_message = "账号没有密码，无法走登录流程（需要密码 + 2FA）"
-            result.strategy = ""
+            # 不清 strategy：那是刷新链走过哪条路的记录（如 session），
+            # 提前失败不该把它抹掉（复审建议）。
             return result
 
         # 邮箱是否入池 —— 没入池就没有验证码可读，提前失败好过等满一个超时。
@@ -256,7 +257,8 @@ class ChatGPTPlatform(BasePlatform):
                 result.error_message = (
                     f"登录流程拿到 AT 但未通过校验（{verify_message}）"
                 )
-                result.strategy = login_result.strategy
+                if login_result.strategy:
+                    result.strategy = login_result.strategy
                 log(f"[登录刷新] {result.error_message}")
                 return result
 
@@ -281,7 +283,9 @@ class ChatGPTPlatform(BasePlatform):
         result.success = False
         result.banned = bool(login_result.banned)
         result.error_message = login_result.error_message or "登录流程刷新失败"
-        result.strategy = login_result.strategy
+        # 同样只在非空时覆盖：失败时保留刷新链的 strategy（复审建议）。
+        if login_result.strategy:
+            result.strategy = login_result.strategy
         return result
 
     def execute_action(self, action_id: str, account: Account, params: dict) -> dict:
