@@ -114,9 +114,22 @@ const PANEL_SECTIONS: PanelSection[] = [
       desc: 'ChatGPT 网页号池（只认 access_token，与 CPA 的 codex 凭据互不相干）。',
       fields: [
         { key: 'chatgpt2api_enabled', label: '启用自动上传', type: 'boolean' },
+        { key: 'chatgpt2api_auto_sync_enabled', label: '凭证自动维护（本地较新自动推送更新）', type: 'boolean' },
         { key: 'chatgpt2api_upload_proxy_enabled', label: '上传代理（账号绑定的代理）', type: 'boolean' },
         { key: 'chatgpt2api_api_url', label: 'API URL', placeholder: 'http://127.0.0.1:8000' },
         { key: 'chatgpt2api_api_key', label: '管理密钥', secret: true },
+      ],
+    },
+  },
+  {
+    anchor: 'chatgpt-auto-maintenance',
+    section: {
+      title: 'ChatGPT Token 自动维护',
+      desc:
+        '定时扫描 ChatGPT 账号：AT 临期（剩余 ≤ 24h）或已过期时，在到期前随机一个时刻自动刷新（至少提前 1 小时，不设固定更新时刻）；' +
+        '失败自动退避重试，连续失败 3 次或已封禁的账号不再自动尝试。手动刷新 Token 与注册任务不受影响。',
+      fields: [
+        { key: 'chatgpt_auto_refresh_enabled', label: '自动刷新临期/过期 Token', type: 'boolean' },
       ],
     },
   },
@@ -131,6 +144,8 @@ const BOOLEAN_KEYS = [
   'grok2api_enabled',
   'chatgpt2api_enabled',
   'chatgpt2api_upload_proxy_enabled',
+  'chatgpt2api_auto_sync_enabled',
+  'chatgpt_auto_refresh_enabled',
 ] as const
 
 /**
@@ -294,6 +309,13 @@ export function PanelConfigPanel() {
         config.chatgpt2api_enabled,
         Boolean(String(config.chatgpt2api_api_url ?? '').trim() && config.chatgpt2api_api_key_set),
       )
+      // 其余布尔开关（上传代理 ×2 + 自动维护 ×2）：库里存 "0"/"1" 字符串，
+      // 必须归一成布尔再回填 —— antd Switch 把非空字符串一律视为真，
+      // 直接回填 "0" 会把关闭的开关渲染成「开启」（实测复现）。
+      // 默认值一律 false：它们没有「已配置即开启」的语义。
+      for (const key of BOOLEAN_KEYS) {
+        config[key] = resolveFeatureEnabledConfig(config[key], false)
+      }
       // 口令字段留空 = 「不修改」：接口本就不回明文，这里再清一遍是双保险
       // （服务端也会拦空串，见 api/config.py 的 SECRET_CONFIG_KEYS 处理）。
       // 两个来源的口令都要清（注册表声明的 + 本节声明的）。

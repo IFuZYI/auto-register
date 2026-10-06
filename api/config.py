@@ -89,6 +89,12 @@ CONFIG_KEYS = [
     "chatgpt2api_enabled",
     "chatgpt2api_api_url",
     "chatgpt2api_api_key",
+    # ChatGPT 自动维护（用户要求 2026-10-06）：
+    # - chatgpt_auto_refresh_enabled：临期/过期 AT 的自动刷新（临期窗口内随机时刻）；
+    # - chatgpt2api_auto_sync_enabled：本地较新凭证自动推送 chatgpt2api。
+    # 见 services/chatgpt_maintenance.py 的周期任务。
+    "chatgpt_auto_refresh_enabled",
+    "chatgpt2api_auto_sync_enabled",
     "cliproxyapi_base_url",
     "cliproxyapi_management_key",
     "grok2api_base_url",

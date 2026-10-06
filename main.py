@@ -156,6 +156,7 @@ async def lifespan(app: FastAPI):
     from core.registry import list_platforms
     print(f"[OK] 已加载平台: {[p['name'] for p in list_platforms()]}")
     # 业务周期任务自注册（core.scheduler 不认识具体业务，见其模块 docstring）
+    from services import chatgpt_maintenance  # noqa: F401  注册自动维护任务
     from core.scheduler import registered_jobs, scheduler
     print(f"[OK] 周期任务: {registered_jobs()}")
     scheduler.start()
