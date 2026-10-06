@@ -8,12 +8,12 @@ OpenAI 对已停用/删除的账号会回一些固定措辞 —— 不管出现�
 用户实测原文（2026-10-06）：
 
 - ``You do not have an account because it has been deleted or deactivated.``
-  （账号被停用的报错）
-- ``Your sign-in session is no longer valid. Please start over to continue.``
-  （封禁账号走登录流程时遇到）
+  （账号被停用的报错）—— 这是封禁判定唯一的措辞来源。
 
-注意与普通 OAuth 流程的 ``invalid_state``（可重开入口重试）区分：这里只认
-完整的「号没了」句子，``invalid_state`` 单独出现不算。
+用户修正（2026-10-06）：``Your sign-in session is no longer valid. Please
+start over to continue.`` / ``invalid_state`` **不是封禁** —— 那是会话
+失效或 OAuth state 参数不匹配（Cookie、会话或跳转不同步），可重开重试。
+不要把这两句认成封禁（此前误认，实测把正常账号标成了「禁用」）。
 """
 
 from __future__ import annotations
@@ -21,12 +21,13 @@ from __future__ import annotations
 from typing import Any
 
 #: 全部小写后按子串匹配。新增措辞只加在这里。
+#: **只收「号没了」的措辞** —— 会话/state 类错误（invalid_state 等）可重试，
+#: 不能进这张表。
 BANNED_MARKERS = (
     "deleted or deactivated",
     "account_deactivated",
     "account has been deactivated",
     "you do not have an account",
-    "sign-in session is no longer valid",
 )
 
 

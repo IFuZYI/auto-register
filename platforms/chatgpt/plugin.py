@@ -267,10 +267,14 @@ class ChatGPTPlatform(BasePlatform):
             result.verify_message = ""
             result.error_message = ""
             result.strategy = login_result.strategy
-            # 登录链顺带换到的其它凭证也要能落库，否则白跑一趟
-            result.session_token = login_result.session_token
-            result.id_token = login_result.id_token
-            result.cookie_header = login_result.cookie_header
+            # 登录链顺带换到的其它凭证也要能落库，否则白跑一趟。
+            # **只覆盖非空值**：登录链没换到 ST 时，刷新链刚轮换回来的 ST
+            # 不能被冲成空串（插件按「非空才写库」落凭证，冲空 = 轮换值丢了，
+            # 旧 ST 滑出窗口后账号就登不上）。
+            for attr in ("session_token", "id_token", "cookie_header"):
+                value = str(getattr(login_result, attr, "") or "").strip()
+                if value:
+                    setattr(result, attr, value)
             return result
 
         # 登录链认出封禁 → 把结论带回去（调用方据此标「已封禁」）
@@ -384,17 +388,26 @@ class ChatGPTPlatform(BasePlatform):
             result = manager.refresh_account(a)
             _log = getattr(self, "_log_fn", None) or logger.info
 
-            # 兜底两条触发条件：
+            # 兜底三条触发条件：
             # ① 刷新调用回了 200 但 AT 没通过校验（见 verify_access_token）；
-            # ② 整链失败（session/OAuth 都拿不到可用 AT）—— 登录链是最后一条
+            # ② 刷新调用成功、AT 也校验通过，但**只返还了原本的 AT**（未换发）
+            #    —— 用户要求（2026-10-06）：「刷新AT的使用sessiontoken刷新
+            #    gptAT请校验AT是否真的刷新成功，还是只返还了原本的AT。如果
+            #    没成功需要走登录流程」；
+            # ③ 整链失败（session/OAuth 都拿不到可用 AT）—— 登录链是最后一条
             #    能拿回 AT 的路，也是「号没了」措辞唯一会出现的地方（用户
-            #    要求：禁用靠登录流程发掘）。实测 10 个 chatgpt 账号全是
-            #    session-only，会话死了刷新链自身无路可走。
+            #    要求：禁用靠登录流程发掘）。实测 chatgpt 账号多为 session-only，
+            #    会话死了刷新链自身无路可走。
             # 封禁是终局结论，不兜底（登录链只会被同样拒绝）。
             refresh_failed_reason = result.error_message or result.verify_message or ""
             fallback_ran = False
             if result.success and not result.verified:
                 _log(f"[刷新Token] 刷出的 AT 未通过校验（{result.verify_message}），改走登录流程")
+                result = self._refresh_via_login(a, result)
+                fallback_ran = True
+            elif result.success and result.verified and not result.refreshed:
+                refresh_failed_reason = "只返还原本的 AT（未换发）"
+                _log("[刷新Token] 只返还原本的 AT（未换发），改走登录流程换发新 AT")
                 result = self._refresh_via_login(a, result)
                 fallback_ran = True
             elif not result.success and not result.banned:

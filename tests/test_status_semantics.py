@@ -7,9 +7,13 @@
 - 「已封禁」改名「禁用」= 被封了的账号（登录流程发掘）。
 
 判定优先级（探测发现凭证被拒时）：禁用 > 过期 > 失效。
-- 封禁措辞（deleted or deactivated / sign-in session is no longer valid）→ banned；
+- 封禁措辞（deleted or deactivated）→ banned；
 - 否则 AT 的 exp 已过 → expired（刷新可能救回）；
 - 否则（AT 未过期却被拒 = 被吊销/会话失效）→ invalid（需要重新登录）。
+
+用户修正（2026-10-06）：「Your sign-in session is no longer valid…invalid_state」
+不是封禁 —— 会话/state 不同步而已，可重试；只有「deleted or deactivated」
+这类「号没了」措辞才判禁用。
 """
 
 from __future__ import annotations
@@ -27,7 +31,7 @@ from services.chatgpt_account_state import (
     classify_local_probe_state,
 )
 
-# 用户原文：GPT 登录流程遇到这个 = 被封
+# 用户修正（2026-10-06）：这不是封禁 —— 会话/state 不同步，可重试。
 SIGNIN_SESSION_TEXT = (
     "Your sign-in session is no longer valid. Please start over to continue."
 )
@@ -116,20 +120,31 @@ class ExpiredVsInvalidTests(unittest.TestCase):
 
 
 class BannedSignalTests(unittest.TestCase):
-    """禁用（banned）信号：deactivated 措辞 + 用户给的 sign-in session 消息。"""
+    """禁用（banned）信号：只认「deleted or deactivated」这类「号没了」措辞。
 
-    def test_signin_session_message_is_banned(self):
-        """用户原文：「Your sign-in session is no longer valid...」= 被封。"""
-        self.assertTrue(
+    用户修正（2026-10-06）：「Your sign-in session is no longer valid…invalid_state」
+    **不是封禁** —— 那是会话失效 / OAuth state 参数不同步（Cookie、会话或跳转
+    不同步导致），可重开入口重试。只有「deleted or deactivated」才是封禁。
+    """
+
+    def test_signin_session_message_is_not_banned(self):
+        """用户修正：sign-in session 消息 = 会话失效，不是封禁。"""
+        self.assertFalse(
             looks_like_login_banned(SIGNIN_SESSION_TEXT),
-            "sign-in session 消息必须被认成封禁信号",
+            "sign-in session 消息被误判成封禁 —— 它只是会话/state 不同步",
         )
 
     def test_deactivated_message_still_banned(self):
         self.assertTrue(looks_like_login_banned(DEACTIVATED_TEXT))
 
     def test_ordinary_failures_not_banned(self):
-        for text in ("invalid_grant", "invalid_state", "network timeout", ""):
+        for text in (
+            "invalid_grant",
+            "invalid_state",
+            SIGNIN_SESSION_TEXT,
+            "network timeout",
+            "",
+        ):
             self.assertFalse(looks_like_login_banned(text), text)
 
     def test_banned_beats_expired(self):

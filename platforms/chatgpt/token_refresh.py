@@ -45,7 +45,9 @@ class TokenRefreshResult:
     #: 实测（2026-10-06）：AT 未到期时，session 端点返回的 AT 与请求方
     #: 已有的**完全一致**（iat/exp 不变）—— 服务端不签发新令牌。这不是
     #: 错误（旧 AT 仍有效），但界面上不能把它说成「已换新」。`refreshed`
-    #: 让调用方能如实区分「真的换发了」与「服务端认为无需换发」。
+    #: 让调用方能如实区分「真的换发了」与「服务端认为无需换发」；
+    #: **未换发不算刷新成功** —— 插件层据此继续走登录流程换发新 AT
+    #: （用户修正 2026-10-06）。
     refreshed: bool = False
     #: 校验失败时的原因（区分「AT 无效」与「网络没打通」）。
     verify_message: str = ""
@@ -276,7 +278,8 @@ class TokenRefreshManager:
 
         `refreshed` 区分「真的换发了新 AT」与「服务端返回原值」：AT 未到期时
         session 端点会原样返回旧 AT（实测 2026-10-06），此时 `success=True`
-        但 `refreshed=False` —— 调用方据此如实展示「无需刷新」而不是「已换新」。
+        但 `refreshed=False` —— 调用方（插件层）据此继续走登录流程换发新 AT
+        （用户修正：未换发不算刷新成功），而不是把它当「已换新」写库。
 
         Args:
             account: 账号对象

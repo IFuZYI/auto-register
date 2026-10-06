@@ -195,8 +195,8 @@ JWT 默认有效期为 7 天。密码与 JWT 签名密钥存入配置存储；�
 `RefreshTokenTaskRequest`（批量刷新 Token）与 `AccountBatchTaskRequest` 的选号字段一致，
 但没有 `only_missing_rt` / `only_missing_2fa` / `allow_login` —— 刷新走
 `refresh_token` 动作的完整链：session token 优先，OAuth RT 兜底，最后登录链；
-新 AT 会用 `/backend-api/me` 真校验，未通过校验不写库。AT 未到期时服务端返回原值，
-刷新结果会如实区分「AT 已换发」与「无需换发」。
+新 AT 会用 `/backend-api/me` 真校验，未通过校验不写库。**只返还原本的 AT
+（未换发）会继续走登录流程换发新 AT**；刷新结果如实区分「AT 已换发」与「无需换发」。
 
 ### 4.2 查询、日志与删除
 

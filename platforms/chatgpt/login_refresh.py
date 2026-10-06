@@ -37,10 +37,10 @@ logger = logging.getLogger(__name__)
 #: 「号没了」的判定统一放在 `platforms.chatgpt.protocol.banned_signals`，
 #: 这里只做转发（登录链、补 RT、绑 2FA 三条路共用同一份标记表）。
 #:
-#: `sign-in session is no longer valid`：用户实测（2026-10-06）——被封的
-#: 账号走登录流程时会遇到这句（原文「Your sign-in session is no longer
-#: valid. Please start over to continue.」）。注意与普通 OAuth 流程的
-#: `invalid_state`（可重开入口重试）区分：这里只认完整的这句话。
+#: 用户修正（2026-10-06）：「Your sign-in session is no longer valid. Please
+#: start over to continue.」**不是封禁** —— 会话/state 不同步（Cookie、
+#: 会话或跳转不同步），可重开重试。封禁判定只认「deleted or deactivated」
+#: 这类「号没了」措辞。
 
 
 @dataclass

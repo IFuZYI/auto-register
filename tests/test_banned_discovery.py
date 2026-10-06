@@ -2,9 +2,12 @@
 
 用户要求（2026-10-06）：
 - 「已封禁可能无法直接查询，需要走登录流程发掘」；
-- 原文一：You do not have an account because it has been deleted or
-  deactivated. …（= 账号被停用的报错）；
-- 原文二：Your sign-in session is no longer valid. …（= 封禁信号）。
+- 原文：You do not have an account because it has been deleted or
+  deactivated. …（= 账号被停用的报错）。
+
+用户修正（2026-10-06）：「Your sign-in session is no longer valid…」**不是
+封禁** —— 会话/state 不同步（Cookie、会话或跳转不同步），可重开重试。
+封禁判定只认「deleted or deactivated」这类「号没了」措辞。
 
 实测（DB task_runs 日志）：补 RT 的登录链撞上这些措辞时只报普通失败、
 账号状态不动 —— 号没了还留在重试队列里，白耗代理与风控额度。
@@ -21,6 +24,7 @@ DEACTIVATED_TEXT = (
     "You do not have an account because it has been deleted or deactivated. "
     "If you believe this was an error, please contact us through our help center at help.openai.com."
 )
+# 用户修正（2026-10-06）：这不是封禁 —— 会话/state 不同步，可重试。
 SIGNIN_SESSION_TEXT = "Your sign-in session is no longer valid. Please start over to continue."
 
 
@@ -82,7 +86,8 @@ class SharedMarkerSourceTests(unittest.TestCase):
         from platforms.chatgpt.protocol.banned_signals import looks_like_banned
 
         self.assertTrue(looks_like_banned(DEACTIVATED_TEXT))
-        self.assertTrue(looks_like_banned(SIGNIN_SESSION_TEXT))
+        # 用户修正：sign-in session 措辞不是封禁（会话/state 不同步，可重试）。
+        self.assertFalse(looks_like_banned(SIGNIN_SESSION_TEXT))
         self.assertFalse(looks_like_banned("invalid_grant"))
         self.assertFalse(looks_like_banned(""))
 
@@ -101,9 +106,10 @@ class BackfillBannedDetectionTests(unittest.TestCase):
         self.assertFalse(result.success)
         self.assertTrue(result.banned, "「deleted or deactivated」没被认成封禁")
 
-    def test_signin_session_message_marks_banned(self):
+    def test_signin_session_message_is_not_banned(self):
+        """用户修正：sign-in session 措辞 = 会话失效（可重试），不是封禁。"""
         result = _backfiller(RuntimeError(SIGNIN_SESSION_TEXT)).run()
-        self.assertTrue(result.banned, "「sign-in session is no longer valid」没被认成封禁")
+        self.assertFalse(result.banned, "「sign-in session is no longer valid」被误判成封禁")
 
     def test_ordinary_failure_is_not_banned(self):
         result = _backfiller(RuntimeError("密码错误")).run()
@@ -150,9 +156,9 @@ class TwoFactorBannedDetectionTests(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertTrue(result.banned)
 
-    def test_signin_session_message_marks_banned(self):
+    def test_signin_session_message_is_not_banned(self):
         result = self._run(RuntimeError(SIGNIN_SESSION_TEXT))
-        self.assertTrue(result.banned)
+        self.assertFalse(result.banned, "sign-in session 措辞被误判成封禁")
 
     def test_ordinary_failure_is_not_banned(self):
         result = self._run(RuntimeError("invalid_state"))

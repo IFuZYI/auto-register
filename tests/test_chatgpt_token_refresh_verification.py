@@ -219,6 +219,20 @@ class SessionBannedDetectionTests(unittest.TestCase):
         self.assertFalse(result.success)
         self.assertTrue(result.banned, "session 端点回了停用措辞，却没被认成封禁")
 
+    def test_signin_session_body_is_not_banned(self):
+        """用户修正：sign-in session 措辞 = 会话失效（可重试），不是封禁。"""
+        session = FakeSession(
+            FakeResponse(
+                401,
+                {},
+                text="Your sign-in session is no longer valid. Please start over to continue.",
+            )
+        )
+        manager = _manager_with_session(session)
+        result = manager.refresh_by_session_token("st-old")
+        self.assertFalse(result.success)
+        self.assertFalse(result.banned, "sign-in session 措辞被误判成封禁")
+
     def test_plain_401_is_not_banned(self):
         session = FakeSession(FakeResponse(401, {"error": "unauthorized"}, text="unauthorized"))
         manager = _manager_with_session(session)
@@ -377,6 +391,39 @@ class LoginChainVerificationTests(unittest.TestCase):
         self.assertFalse(out.verified)
         self.assertIn("未通过校验", out.error_message)
 
+    def test_login_fallback_keeps_rotated_session_token_when_login_has_none(self):
+        """登录链没换到 session_token 时，刷新链刚轮换回来的值不能被冲成空串。
+
+        插件按「非空才写库」落凭证 —— 冲成空串等于把轮换值丢了，
+        旧 ST 滑出窗口后账号就登不上。
+        """
+        from platforms.chatgpt.login_refresh import LoginRefreshResult
+        from platforms.chatgpt.token_refresh import TokenRefreshResult
+
+        result = TokenRefreshResult(
+            success=True, verified=False, access_token="stale", session_token="st-rotated",
+        )
+        login_result = LoginRefreshResult(
+            success=True, access_token="fresh-at", session_token="", strategy="password_2fa",
+        )
+        with patch(
+            "services.chatgpt_otp_mailbox.resolve_otp_mail_provider",
+            return_value=(None, "不在号池里"),
+        ), patch(
+            "platforms.chatgpt.login_refresh.LoginAccessTokenRefresher"
+        ) as refresher_cls, patch(
+            "platforms.chatgpt.token_refresh.TokenRefreshManager"
+        ) as verifier_cls:
+            refresher_cls.return_value.run.return_value = login_result
+            verifier_cls.return_value.verify_access_token.return_value = (True, "")
+            out = self._platform()._refresh_via_login(self._account(), result)
+
+        self.assertEqual(
+            out.session_token,
+            "st-rotated",
+            "登录链没换到 ST 时把刷新链轮换的值冲掉了 —— 轮换值丢了",
+        )
+
 
 class SessionTokenRotationTests(unittest.TestCase):
     """session 端点每次响应都会轮换 session token（实测 2026-10-06）。
@@ -411,7 +458,8 @@ class RefreshChangedFlagTests(unittest.TestCase):
     """`refreshed` 标志：AT 是否真的换发了（用户要求「确保AT真的刷新了」）。
 
     实测（2026-10-06）：AT 未到期时服务端返回**原值**（iat/exp 不变）——
-    此时不能假装「刷新成功换新」，必须如实标记未换发。
+    此时不能假装「刷新成功换新」，必须如实标记未换发；插件层据此继续走
+    登录流程换发新 AT（用户修正：未换发不算刷新成功）。
     """
 
     def _account(self, **overrides):
@@ -619,12 +667,84 @@ class RefreshActionFallbackTests(unittest.TestCase):
         stamp = out["account_extra_patch"]["chatgpt_token_refresh"]
         self.assertTrue(stamp["refreshed"], "stamp 里的 refreshed 也要按新 AT 重算")
 
-    def test_verified_refresh_does_not_fall_back(self):
-        """刷新链直接产出可用 AT → 不跑登录链（那是几十秒的协议重登）。"""
+    def test_same_at_from_session_triggers_login_reissue(self):
+        """用户要求：session 只返还原本的 AT（未换发）→ 不算刷新成功，走登录链换发。
+
+        「刷新AT的使用sessiontoken刷新gptAT请校验AT是否真的刷新成功，还是只
+        返还了原本的AT。如果没成功需要走登录流程。」
+        """
         from platforms.chatgpt.plugin import ChatGPTPlatform
         from platforms.chatgpt.token_refresh import TokenRefreshResult
 
-        ok = TokenRefreshResult(success=True, verified=True, access_token="same-at")
+        unchanged = TokenRefreshResult(
+            success=True, verified=True, refreshed=False, access_token="same-at",
+            strategy="session",
+        )
+        reissued = TokenRefreshResult(
+            success=True, verified=True, access_token="login-new-at", strategy="password_2fa",
+        )
+        with patch.object(
+            TokenRefreshManager, "refresh_account", return_value=unchanged
+        ), patch.object(
+            ChatGPTPlatform, "_refresh_via_login", return_value=reissued
+        ) as login:
+            out = self._platform().execute_action(
+                "refresh_token",
+                self._account(extra={"session_token": "st", "access_token": "same-at"}),
+                {},
+            )
+
+        login.assert_called_once()
+        self.assertTrue(out["ok"], "登录链换发新 AT 后应报成功")
+        self.assertTrue(out["data"]["refreshed"], "换发的新 AT 要报 refreshed=True")
+        self.assertIn("已换发", out["data"]["message"])
+        stamp = out["account_extra_patch"]["chatgpt_token_refresh"]
+        self.assertTrue(stamp["refreshed"])
+
+    def test_same_at_and_login_failure_reports_both_reasons(self):
+        """只返还原值、登录链也没跑通 → 失败，两段原因都要留下。"""
+        from platforms.chatgpt.plugin import ChatGPTPlatform
+        from platforms.chatgpt.token_refresh import TokenRefreshResult
+
+        unchanged = TokenRefreshResult(
+            success=True, verified=True, refreshed=False, access_token="same-at",
+            strategy="session",
+        )
+
+        def _fail_login(_instance, _account, result):
+            result.success = False
+            result.banned = False
+            result.error_message = "登录流程跑完但没拿到 access_token"
+            result.strategy = ""
+            return result
+
+        with patch.object(
+            TokenRefreshManager, "refresh_account", return_value=unchanged
+        ), patch.object(
+            ChatGPTPlatform, "_refresh_via_login", autospec=True, side_effect=_fail_login
+        ):
+            out = self._platform().execute_action(
+                "refresh_token",
+                self._account(extra={"session_token": "st", "access_token": "same-at"}),
+                {},
+            )
+
+        self.assertFalse(out["ok"])
+        self.assertIn("未换发", out["error"], "没换发新 AT 的原因被丢了")
+        self.assertIn("登录流程", out["error"])
+
+    def test_verified_refresh_does_not_fall_back(self):
+        """刷新链换发了新 AT 且校验通过 → 不跑登录链（那是几十秒的协议重登）。
+
+        注意与「只返还原值」区分（见 test_same_at_from_session_triggers_login_reissue）：
+        未换发的刷新不算成功，会走登录链。
+        """
+        from platforms.chatgpt.plugin import ChatGPTPlatform
+        from platforms.chatgpt.token_refresh import TokenRefreshResult
+
+        ok = TokenRefreshResult(
+            success=True, verified=True, refreshed=True, access_token="brand-new-at"
+        )
         with patch.object(
             TokenRefreshManager, "refresh_account", return_value=ok
         ), patch.object(ChatGPTPlatform, "_refresh_via_login") as login:
