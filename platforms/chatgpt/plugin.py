@@ -268,7 +268,11 @@ class ChatGPTPlatform(BasePlatform):
             result.verified = True
             result.verify_message = ""
             result.error_message = ""
-            result.strategy = login_result.strategy
+            # 对称守卫：空 strategy 不覆盖已有记录。成功时 `_run_login` 必设
+            # password_2fa / password_only（理论不可达），守卫让「空值不覆盖」
+            # 的不变量在各路径上一致（复审建议）。
+            if login_result.strategy:
+                result.strategy = login_result.strategy
             # 登录链顺带换到的其它凭证也要能落库，否则白跑一趟。
             # **只覆盖非空值**：登录链没换到 ST 时，刷新链刚轮换回来的 ST
             # 不能被冲成空串（插件按「非空才写库」落凭证，冲空 = 轮换值丢了，
