@@ -718,8 +718,58 @@ class WideScreenHeaderContractTests(unittest.TestCase):
             rule,
             "flex 父容器下 auto margin 会覆盖 stretch —— 缺满宽声明顶栏会收缩",
         )
-        self.assertIn("max-width: 1440px", rule, "限宽上限丢了")
+        self.assertIn(
+            "max-width: max(1440px, 75vw)",
+            rule,
+            "限宽上限必须随视口增长 —— 固定值在 50% 缩放下缩成窄条孤岛（实测）",
+        )
+        self.assertNotIn(
+            "max-width: 1440px",
+            rule,
+            "固定 1440px 上限回归 —— 宽视口（缩放开大的 CSS 视口）会缩成窄条",
+        )
         self.assertIn("margin-inline: auto", rule, "居中声明丢了")
+
+
+class ViewportAdaptiveCapContractTests(unittest.TestCase):
+    """内容列上限必须随视口增长（用户报「50% 缩放部分 UI 异常/割裂」）。
+
+    根因（Chrome 145 实测，dogfood 2026-10-06）：50% 缩放把 CSS 视口放大
+    一倍（1873px 窗口 → 3746px 视口），固定 1440px 上限让内容缩成只占窗口
+    ~29% 的窄条、两侧各留 ~33% 死区 —— 侧栏贴左、内容悬浮中间，视觉割裂。
+
+    修复：上限改为 `max(1440px, 75vw)` —— ≤1920px 视口维持原 1440
+    （100% 缩放行为不变），更宽时按 75% 视口增长。表单页的 `--w-page`
+    同理改为 `max(1200px, 62.5vw)`；theme.ts 不得再以固定像素注入它
+    （documentElement 内联样式会压掉 CSS 里的响应式表达式）。
+    """
+
+    def _css(self) -> str:
+        return (FRONTEND / "src" / "index.css").read_text(encoding="utf-8")
+
+    def test_form_page_cap_grows_with_the_viewport(self):
+        css = self._css()
+        self.assertIn(
+            "--w-page: max(1200px, 62.5vw)",
+            css,
+            "表单页 --w-page 仍是固定值 —— 50% 缩放下表单缩成窄条",
+        )
+        theme = (FRONTEND / "src" / "theme.ts").read_text(encoding="utf-8")
+        self.assertNotIn(
+            "page: '--w-page'",
+            theme,
+            "theme.ts 又在注入 --w-page —— 内联固定值会压掉 CSS 的响应式表达式",
+        )
+        for page in (
+            "pages/RegisterTaskPage.tsx",
+            "components/mail/MailServicePage.tsx",
+        ):
+            src = (FRONTEND / "src" / page).read_text(encoding="utf-8")
+            self.assertIn(
+                "maxWidth: 'var(--w-page)'",
+                src,
+                f"{page} 不再引用 --w-page",
+            )
 
 
 if __name__ == "__main__":

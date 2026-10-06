@@ -277,13 +277,20 @@ body {
 
 /* ── 表单控件宽度梯度（theme.ts 的 FIELD_WIDTH 写成 CSS 变量）──
    用法：style={{ maxWidth: 'var(--w-field)' }}
-   不设这些变量时回落到与 FIELD_WIDTH 相同的值，避免主题未应用时宽度失控。 */
+   不设这些变量时回落到与 FIELD_WIDTH 相同的值，避免主题未应用时宽度失控。
+   注：--w-page 是页面级上限，**不**随 FIELD_WIDTH 注入 —— 内联值会压掉
+   下面的响应式表达式（theme.ts 的 applyThemeVars 写 documentElement 内联
+   样式，优先级高于样式表）。 */
 :root {
   --w-field: 200px;
   --w-field-md: 360px;
   --w-field-lg: 480px;
   --w-prose: 720px;
-  --w-page: 1200px;
+  /* 页面内容最大宽（表单类页面）。低缩放（如 50%）下浏览器把 CSS 视口放大
+     一倍，固定上限会让表单缩成窄条孤岛、两侧各空 ~33%（实测 3746px 视口）。
+     改为随视口增长：≤1920px 视口维持 1200px（原行为），更宽按 62.5% 视口
+     增长 —— 与宽屏限宽 max(1440px, 75vw) 同一增长比（1200:1440）。 */
+  --w-page: max(1200px, 62.5vw);
 
   /* 页面内边距与间距：App.tsx / 各页面统一引用，窄屏由媒体查询收紧。
      之前 28px 32px 写死在 App.tsx 的 Content 上，手机上白边就吃掉 64px。
@@ -979,9 +986,14 @@ body {
 }
 
 /* ── 宽屏：内容区限宽，避免超宽屏上表单被拉成一条 ─────────────
-   上限取 1440px 而不是 FIELD_WIDTH.page（1200）：账号列表这类宽表
-   实测需要 1328px，卡到 1200 会让它横向溢出 64px —— 限宽是为了「别太散」，
-   不是为了把数据挤出屏幕。
+   上限 max(1440px, 75vw)：≤1920px 视口维持 1440（原行为），更宽按 75%
+   视口增长 —— 低缩放（50%）下 CSS 视口被放大一倍，固定 1440 会让内容
+   缩成只占窗口 ~29% 的窄条、两侧各空 ~33%（实测割裂），增长后 50% 缩放
+   下内容填充 ~75% 窗口。
+
+   上限取 1440 而不是表单页的 1200：账号列表这类宽表实测需要 1328px，
+   卡到 1200 会让它横向溢出 64px —— 限宽是为了「别太散」，不是为了把数据
+   挤出屏幕。
 
    `width: 100%` 不能少（dogfood 实测 2026-10-06）：/settings、/proxies、
    /history、/panel-management 的页顶容器是 flex 列，flex 子项上的
@@ -995,7 +1007,7 @@ body {
   .page-header,
   .page-enter > div {
     width: 100%;
-    max-width: 1440px;
+    max-width: max(1440px, 75vw);
     margin-inline: auto;
   }
 }

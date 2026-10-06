@@ -437,8 +437,9 @@ export const FIELD_WIDTH = {
   fieldLg: 480,
   /** 说明性长文本 */
   prose: 720,
-  /** 页面内容最大宽 —— 替代各处硬编码的 800，超宽屏下避免表单拉得太散 */
-  page: 1200,
+  // 注：页面级上限（原 page: 1200）已挪到 index.css 的 --w-page ——
+  // 它需要是响应式表达式 max(1200px, 62.5vw)（低缩放/超宽屏下随视口增长），
+  // 而 applyThemeVars 注入的是固定像素值，会压掉表达式。
 } as const
 
 /**
@@ -455,7 +456,8 @@ const WIDTH_CSS_VAR_NAMES: Record<keyof typeof FIELD_WIDTH, string> = {
   fieldMd: '--w-field-md',
   fieldLg: '--w-field-lg',
   prose: '--w-prose',
-  page: '--w-page',
+  // --w-page 不在这里 —— 它是响应式表达式（index.css 定义），
+  // 内联固定值会覆盖样式表里的 max()，低缩放下又会缩成窄条。
 }
 
 
