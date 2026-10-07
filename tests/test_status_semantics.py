@@ -310,6 +310,34 @@ class FrontendStatusLabelContractTests(unittest.TestCase):
         for stale in ("'已注册'", "'已封禁'"):
             self.assertNotIn(stale, src, f"仪表盘还留着旧文案 {stale}")
 
+    def test_dashboard_has_a_dedicated_banned_card(self):
+        """用户要求（2026-10-07）：仪表盘在「失效」右侧补一张「禁用」卡。
+
+        此前「禁用」被并进「失效」卡的合计里（过期+失效+禁用），且三张卡
+        （总账号数/正常/失效）按 `lg=6` 只占 18 列 —— 右侧空 6 列。补第四张卡
+        恰好填满 24 列，同时让「禁用」单独可见（它是强判断，不因探测复活，
+        与「过期」「失效」的处置方式不同，合在一起看不出量）。
+        """
+        src = self._src("pages/Dashboard.tsx")
+        # 卡片标题与取值来源
+        self.assertIn("title: '禁用'", src, "仪表盘缺「禁用」卡片")
+        self.assertIn("by_status?.banned", src, "「禁用」卡片必须读 by_status.banned")
+        # 四张卡各占 lg=6 → 24 列满行（不补位就留 6 列空档）
+        self.assertIn("lg={6}", src, "统计卡栅格应保持 lg=6（四张满行）")
+        # 失效卡不再把 banned 并进去（已由独立卡片承担）
+        invalid_block = src.split("title: '失效'", 1)[1].split("},", 1)[0]
+        self.assertNotIn(
+            "banned", invalid_block,
+            "「失效」卡仍把 banned 并进合计 —— 会和「禁用」卡双记",
+        )
+
+    def test_dashboard_banned_card_uses_stop_icon_and_theme_token(self):
+        """禁用卡的图标与配色走现有 token（不引新色板）。"""
+        src = self._src("pages/Dashboard.tsx")
+        banned_block = src.split("title: '禁用'", 1)[1].split("},", 1)[0]
+        self.assertIn("StopOutlined", banned_block, "禁用卡应使用 StopOutlined 图标")
+        self.assertIn("var(--", banned_block, "禁用卡颜色应引用主题 CSS 变量")
+
 
 class ActionWiringContractTests(unittest.TestCase):
     """动作结果 → 状态落库的接线（api/actions.py `_apply_action_result`）。

@@ -4,6 +4,7 @@ import {
   UserOutlined,
   CheckCircleOutlined,
   CloseCircleOutlined,
+  StopOutlined,
   ReloadOutlined,
 } from '@ant-design/icons'
 import { getPlatformTagColor, getPlatformLabel } from '@/lib/platforms'
@@ -121,13 +122,22 @@ export default function Dashboard() {
     },
     {
       title: '失效',
-      // 过期 / 失效 / 禁用都归这一档：它们同样是"这号不能用了"，
-      // 漏掉的话卡片数字会比下面的明细列表少，看着像统计坏了。
+      // 过期 / 失效归这一档：它们同样是「这号还能救」——过期刷新可能救回、
+      // 失效重登可能救回。禁用是「号没了」，单独一张卡（用户要求 2026-10-07：
+      // 在失效右侧补位，同时四张卡 lg=6 恰好填满整行）。
       value: (stats?.by_status?.expired ?? 0)
-        + (stats?.by_status?.invalid ?? 0)
-        + (stats?.by_status?.banned ?? 0),
+        + (stats?.by_status?.invalid ?? 0),
       icon: <CloseCircleOutlined />,
       color: 'var(--danger)',
+    },
+    {
+      title: '禁用',
+      // 被封的账号（deleted or deactivated）—— 强判断，不因一次可用探测
+      // 复活；与「失效」分开看量：处置方式不同（这号该弃，不重试）。
+      // 紫色：红已归「失效」，橙的轻重感与「禁用更严重」倒挂。
+      value: stats?.by_status?.banned ?? 0,
+      icon: <StopOutlined />,
+      color: 'var(--purple)',
     },
   ]
 
