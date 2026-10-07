@@ -26,6 +26,10 @@
 - **退避**：失败后 1h → 6h 退避重试；连续 3 次失败置 `disabled`，
   同一 AT 周期内不再尝试。手动刷新成功（AT 换发）后 exp 变化会自然
   复位重排。
+- **任务可见性**（用户要求 2026-10-07）：「任务运行」页要能看到这些维护
+  任务、方便查看日志。两趟维护在**有实际动作**时创建任务记录
+  （source = `auto_refresh` / `chatgpt2api_sync`），日志逐行进记录、
+  支持停止/跳过；空轮不建记录（每 5/10 分钟一条空任务会把列表淹掉）。
 """
 
 from __future__ import annotations
@@ -206,6 +210,10 @@ _SCAN_BATCH_SIZE = 5
 #: 相邻两个账号执行之间的间隔（秒）—— 串行 + 间隔，进一步错峰。
 _PER_ACCOUNT_DELAY_SECONDS = 3.0
 
+#: 自动维护任务记录的 source 值（任务运行页据此显示彩色标签）。
+AUTO_REFRESH_SOURCE = "auto_refresh"
+CHATGPT2API_SYNC_SOURCE = "chatgpt2api_sync"
+
 #: 自动刷新的扫描间隔（秒）。5 分钟一跳：随机窗口的粒度是分钟级，
 #: 更密只是空转。
 AUTO_REFRESH_INTERVAL_SECONDS = 5 * 60
@@ -320,6 +328,9 @@ def run_auto_refresh_pass(
     每轮最多执行 `max_accounts` 个（避免高并发），串行 + `delay_seconds`
     间隔；结果按账号落库（`record_auto_refresh_result` 的语义）。
 
+    **有实际执行**时创建任务记录（source=`auto_refresh`）——「任务运行」页
+    可见、日志可回看、支持停止/跳过（用户要求 2026-10-07）；空轮不建记录。
+
     返回 `{scanned, scheduled, due, executed, ok, failed, skipped}`。
     """
     import time as _time
@@ -329,7 +340,6 @@ def run_auto_refresh_pass(
 
     now_s = int(now if now is not None else _time.time())
     execute_fn = execute or _default_execute
-    log_fn = log or (lambda msg: print(f"[ChatGPT 维护] {msg}"))
 
     summary = {
         "scanned": 0,
@@ -373,9 +383,48 @@ def run_auto_refresh_pass(
                     extra.pop(AUTO_REFRESH_STATE_KEY, None)
                     _write_extra(int(row.id), extra)
 
-    for index, account_id in enumerate(due_ids[: max(0, int(max_accounts))]):
+    to_run = due_ids[: max(0, int(max_accounts))]
+    # 有实际执行才建任务记录（空轮不建 —— 每 5 分钟一条空任务会淹列表）。
+    task_id: Optional[str] = None
+    control = None
+    if to_run:
+        task_id, control = _open_auto_task(
+            source=AUTO_REFRESH_SOURCE,
+            platform="chatgpt",
+            total=len(to_run),
+            meta={"due": len(due_ids), "batch": len(to_run)},
+        )
+    log_fn = _make_logger(task_id, log, "[ChatGPT 维护]")
+
+    if task_id is not None:
+        log_fn(
+            f"本轮待刷新 {len(to_run)} 个账号（共 {len(due_ids)} 个到点，"
+            "每轮限量避免高并发）"
+        )
+
+    exec_errors: list[str] = []
+    exec_skipped = 0
+    stopped = False
+    for index, account_id in enumerate(to_run):
         if index > 0 and delay_seconds > 0:
             _time.sleep(float(delay_seconds))
+        # 停止/跳过在账号间隙生效（与批量刷新任务同款协作式控制）。
+        if control is not None:
+            try:
+                control.checkpoint()
+            except Exception as exc:  # StopTaskRequested / SkipCurrentAttemptRequested
+                from core.task_runtime import SkipCurrentAttemptRequested, StopTaskRequested
+
+                if isinstance(exc, StopTaskRequested):
+                    stopped = True
+                    log_fn("收到停止请求，本轮剩余账号不再执行")
+                    break
+                if isinstance(exc, SkipCurrentAttemptRequested):
+                    summary["skipped"] += 1
+                    exec_skipped += 1
+                    log_fn(f"跳过账号 #{account_id}（手动跳过）")
+                    continue
+                raise
         summary["executed"] += 1
         # 执行前复查：扫描与执行之间 AT 可能被手动刷新（exp 变了）或账号
         # 状态变了 —— 按**当下**的状态重新判定，避免对已换发的 AT 白跑一次
@@ -385,6 +434,7 @@ def run_auto_refresh_pass(
                 fresh = s.get(AccountModel, account_id)
                 if fresh is None:
                     summary["skipped"] += 1
+                    exec_skipped += 1
                     summary["executed"] -= 1
                     continue
                 fresh_extra = fresh.get_extra()
@@ -399,11 +449,13 @@ def run_auto_refresh_pass(
             )
             if fresh_plan.action != "due":
                 summary["skipped"] += 1
+                exec_skipped += 1
                 summary["executed"] -= 1
                 continue
         except Exception as exc:  # noqa: BLE001 - 复查失败按跳过处理，不毁整轮
             log_fn(f"账号 #{account_id} 执行前复查失败（跳过）: {type(exc).__name__}: {exc}")
             summary["skipped"] += 1
+            exec_skipped += 1
             summary["executed"] -= 1
             continue
 
@@ -441,6 +493,7 @@ def run_auto_refresh_pass(
             suffix = ""
             if state.get("disabled"):
                 suffix = "；已连续失败 3 次，本 AT 周期内不再自动尝试"
+            exec_errors.append(f"账号 #{account_id}: {reason}")
             log_fn(f"账号 #{account_id} 自动刷新失败: {reason}{suffix}")
 
     if due_ids[max(0, int(max_accounts)):]:
@@ -448,6 +501,17 @@ def run_auto_refresh_pass(
             f"本轮执行 {min(len(due_ids), max_accounts)}/{len(due_ids)} 个，"
             "其余下轮继续（避免高并发）"
         )
+    # 收尾任务记录：停止优先；否则 done（部分失败也如实带 errors）。
+    # skipped 只统计**执行阶段**的跳过（手动跳过/账号消失/计划过期）——
+    # 扫描阶段的「未临期」是 170+ 量级的正常跳过，进记录会误导。
+    _close_auto_task(
+        task_id,
+        status="stopped" if stopped else "done",
+        success=summary["ok"],
+        registered=summary["ok"] + summary["failed"],
+        skipped=exec_skipped,
+        errors=exec_errors,
+    )
     return summary
 
 
@@ -463,6 +527,87 @@ def _write_extra(account_id: int, extra: dict[str, Any]) -> None:
             s.commit()
 
 
+def _open_auto_task(
+    *,
+    source: str,
+    platform: str,
+    total: int,
+    meta: Optional[dict[str, Any]] = None,
+) -> tuple[Optional[str], Any]:
+    """为自动维护的一轮创建任务记录（「任务运行」页可见 + 日志可回看）。
+
+    返回 `(task_id, control)`；创建失败返回 `(None, None)` —— 可见性是
+    尽力而为，记录层的异常不能让维护本身失败。
+    """
+    try:
+        import time as _time
+
+        from api import tasks as _api
+
+        task_id = f"{source}_{int(_time.time() * 1000)}"
+        _api._task_store.create(
+            task_id,
+            platform=platform,
+            total=max(0, int(total)),
+            source=source,
+            meta=dict(meta or {}),
+        )
+        _api._task_store.mark_running(task_id)
+        _api._persist_task_snapshot(task_id)
+        return task_id, _api._task_store.control_for(task_id)
+    except Exception:  # noqa: BLE001 - 记录失败不影响本轮执行
+        return None, None
+
+
+def _close_auto_task(
+    task_id: Optional[str],
+    *,
+    status: str,
+    success: int,
+    registered: int,
+    skipped: int,
+    errors: list[str],
+) -> None:
+    """收尾自动维护的任务记录（状态 + 计数 + 落库）。"""
+    if task_id is None:
+        return
+    try:
+        from api import tasks as _api
+
+        _api._task_store.finish(
+            task_id,
+            status=status,
+            success=max(0, int(success)),
+            registered=max(0, int(registered)),
+            skipped=max(0, int(skipped)),
+            errors=[str(e) for e in errors],
+        )
+        _api._persist_task_snapshot(task_id)
+        _api._task_store.cleanup()
+    except Exception:  # noqa: BLE001 - 收尾失败只影响可见性
+        pass
+
+
+def _make_logger(
+    task_id: Optional[str],
+    sink: Optional[Callable[[str], None]],
+    prefix: str,
+) -> Callable[[str], None]:
+    """日志出口：注入的 sink 优先（测试）；有任务记录时同步进记录（UI 可查）。"""
+
+    def _emit(msg: str) -> None:
+        if sink is not None:
+            sink(msg)
+        if task_id is not None:
+            from api import tasks as _api
+
+            _api._log(task_id, msg)
+        elif sink is None:
+            print(f"{prefix} {msg}")
+
+    return _emit
+
+
 def run_chatgpt2api_auto_sync(
     *,
     push: Optional[Callable[[], dict[str, Any]]] = None,
@@ -473,30 +618,75 @@ def run_chatgpt2api_auto_sync(
     复用 `POST /api/integrations/panels/chatgpt2api/push` 的完整管线
     （方向判定 + 推送 + 旧记录清理 + 落库），`delete_old=true` ——
     chatgpt2api 是新建式面板，不删旧记录会留重复。
+
+    **有实际推送动作**时创建任务记录（source=`chatgpt2api_sync`）——
+    「任务运行」页可见、日志可回看（用户要求 2026-10-07）；纯空转 /
+    远端读取失败（下一轮会重试）不建记录。
     """
-    log_fn = log or (lambda msg: print(f"[chatgpt2api 维护] {msg}"))
     push_fn = push or _default_chatgpt2api_push
+    base_log = log or (lambda msg: print(f"[chatgpt2api 维护] {msg}"))
 
     # push 本身抛异常（外网抖动、认证失败路径意外抛出）不得把调度线程带崩
     # —— 记日志返回空结果，下一周期自然重试（复审建议 S5）。
     try:
         summary = push_fn() or {}
     except Exception as exc:  # noqa: BLE001
-        log_fn(f"同步异常（本轮跳过）: {type(exc).__name__}: {exc}")
+        base_log(f"同步异常（本轮跳过）: {type(exc).__name__}: {exc}")
         return {"panel": "chatgpt2api", "total": 0, "pushed": 0, "failed": 0, "skipped": 0, "items": [], "remote_error": f"{type(exc).__name__}: {exc}"}
 
     remote_error = str(summary.get("remote_error") or "")
     if remote_error:
-        log_fn(f"远端读取失败，本轮跳过: {remote_error}")
+        base_log(f"远端读取失败，本轮跳过: {remote_error}")
         return summary
+
+    pushed = _safe_int(summary.get("pushed"))
+    failed = _safe_int(summary.get("failed"))
+    deleted = _safe_int(summary.get("deleted"))
+    skipped = _safe_int(summary.get("skipped"))
+
+    # 只有真正发生了动作（推成功/失败/清理）才建记录。
+    has_action = bool(pushed or failed or deleted)
+    task_id: Optional[str] = None
+    if has_action:
+        task_id, _control = _open_auto_task(
+            source=CHATGPT2API_SYNC_SOURCE,
+            platform="chatgpt",
+            total=pushed + failed,
+            meta={"pushed": pushed, "failed": failed, "deleted": deleted, "skipped": skipped},
+        )
+    log_fn = _make_logger(task_id, log, "[chatgpt2api 维护]")
 
     log_fn(
         "推送 {pushed}，跳过 {skipped}，失败 {failed}，清理旧记录 {deleted}".format(
-            pushed=_safe_int(summary.get("pushed")),
-            skipped=_safe_int(summary.get("skipped")),
-            failed=_safe_int(summary.get("failed")),
-            deleted=_safe_int(summary.get("deleted")),
+            pushed=pushed,
+            skipped=skipped,
+            failed=failed,
+            deleted=deleted,
         )
+    )
+    # 逐账号结果进日志（方便排查「哪个号没推上去」）。
+    raw_items = summary.get("items")
+    items: list = raw_items if isinstance(raw_items, list) else []
+    for item in items:
+        if not isinstance(item, dict) or not item.get("push"):
+            continue
+        email = str(item.get("email") or "-")
+        if item.get("pushed"):
+            log_fn(f"  [OK] {email} 已推送")
+        else:
+            log_fn(f"  [FAIL] {email}: {str(item.get('message') or '推送失败')}")
+
+    errors: list[str] = []
+    for item in items:
+        if isinstance(item, dict) and item.get("push") and not item.get("pushed"):
+            errors.append(f"{item.get('email') or '-'}: {str(item.get('message') or '推送失败')}")
+    _close_auto_task(
+        task_id,
+        status="done",
+        success=pushed,
+        registered=pushed + failed,
+        skipped=skipped,
+        errors=errors,
     )
     return summary
 

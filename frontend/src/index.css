@@ -15,6 +15,10 @@
   --accent-text: #54aaff;
   --purple: #c9a6ff;
   --purple-soft: rgba(201, 166, 255, 0.15);
+  --cyan: #64d2ff;
+  --cyan-soft: rgba(100, 210, 255, 0.15);
+  --magenta: #ff9ecf;
+  --magenta-soft: rgba(255, 158, 207, 0.15);
   --success: #30d158;
   --success-soft: rgba(48, 209, 88, 0.15);
   --warning: #ff9f0a;
@@ -334,6 +338,19 @@ body {
   background: var(--purple-soft);
   border-color: var(--purple-soft);
   color: var(--purple);
+}
+/* 任务类型标签的青色/品红（「自动刷新」「凭证同步」）：preset 固定色板
+   在亮色下 4.11:1 / 4.62:1（cyan 不过 AA），与 green/purple 同因同解 ——
+   钉到主题变量，两套主题各自取过线的值。 */
+.ant-tag.ant-tag-cyan {
+  background: var(--cyan-soft);
+  border-color: var(--cyan-soft);
+  color: var(--cyan);
+}
+.ant-tag.ant-tag-magenta {
+  background: var(--magenta-soft);
+  border-color: var(--magenta-soft);
+  color: var(--magenta);
 }
 /* `processing` 标签（对比面板的「远端较新」、任务状态等）。antd 从 colorPrimary
    派生，dark 下得到 #2683dc —— 压在它自己混出的底上只有 4.29:1。钉到

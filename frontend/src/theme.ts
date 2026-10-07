@@ -46,6 +46,12 @@ interface Palette {
   /** 紫色（2FA 已绑这类标记）。preset 的派生值不过 AA，见 index.css 的钉法。 */
   purple: string
   purpleSoft: string
+  /** 青色（任务类型「自动刷新」标签）。同上，preset 派生值不过 AA。 */
+  cyan: string
+  cyanSoft: string
+  /** 品红（任务类型「凭证同步」标签）。 */
+  magenta: string
+  magentaSoft: string
   success: string
   successSoft: string
   warning: string
@@ -100,6 +106,13 @@ const darkPalette: Palette = {
   accentText: '#54aaff',
   purple: '#c9a6ff',
   purpleSoft: 'rgba(201,166,255,0.15)',
+  /* 青色：任务类型「自动刷新」标签。卡片底 #1c1c1e 上 9.89:1、
+     soft 合成底上 7.15:1。 */
+  cyan: '#64d2ff',
+  cyanSoft: 'rgba(100,210,255,0.15)',
+  /* 品红：任务类型「凭证同步」标签。卡片底 8.95:1、soft 底 6.55:1。 */
+  magenta: '#ff9ecf',
+  magentaSoft: 'rgba(255,158,207,0.15)',
   success: '#30d158',
   successSoft: 'rgba(48,209,88,0.15)',
   warning: '#ff9f0a',
@@ -157,6 +170,13 @@ const lightPalette: Palette = {
   accentText: '#005bb5',
   purple: '#6b21a8',
   purpleSoft: 'rgba(107,33,168,0.1)',
+  /* 青色：任务类型「自动刷新」标签。白底 6.00:1、soft 合成底 5.18:1、
+     soft 压页面底 4.77:1。 */
+  cyan: '#006b8f',
+  cyanSoft: 'rgba(0,107,143,0.1)',
+  /* 品红：任务类型「凭证同步」标签。白底 7.28:1、soft 底 6.11:1。 */
+  magenta: '#a30b7a',
+  magentaSoft: 'rgba(163,11,122,0.1)',
   success: '#17742c',
   successSoft: 'rgba(52,199,89,0.12)',
   /* 亮色警告色。antd 的 Tag 会把该色与白底混合当作徽章底色，
@@ -394,6 +414,10 @@ const CSS_VAR_NAMES: Record<keyof Palette, string> = {
   accentText: '--accent-text',
   purple: '--purple',
   purpleSoft: '--purple-soft',
+  cyan: '--cyan',
+  cyanSoft: '--cyan-soft',
+  magenta: '--magenta',
+  magentaSoft: '--magenta-soft',
   success: '--success',
   successSoft: '--success-soft',
   warning: '--warning',

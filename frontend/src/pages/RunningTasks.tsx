@@ -21,6 +21,7 @@ import {
   ReloadOutlined,
 } from '@ant-design/icons'
 import { getPlatformTagColor, getPlatformLabel } from '@/lib/platforms'
+import { taskKindMeta } from '@/lib/taskKinds'
 import { apiFetch } from '@/lib/utils'
 import { TaskLogPanel } from '@/components/TaskLogPanel'
 import type { TaskKind } from '@/components/TaskLogPanel'
@@ -42,15 +43,6 @@ interface TaskSnapshot {
   created_at: number | string | null
   updated_at: number | string | null
   control: { stop_requested: boolean }
-}
-
-const SOURCE_LABELS: Record<string, string> = {
-  manual: '手动',
-  api: 'API',
-  schedule: '调度',
-  backfill_rt: '补 RT',
-  bind_2fa: '绑 2FA',
-  refresh_token: '刷新 Token',
 }
 
 const STATUS_CONFIG: Record<string, { color: string; label: string; icon?: React.ReactNode }> = {
@@ -172,8 +164,8 @@ export default function RunningTasks() {
         styles={{ body: { padding: '14px 18px' } }}
       >
         <Row gutter={[12, 8]} align="middle" wrap>
-          {/* Task ID + platform */}
-          <Col flex="220px">
+          {/* Task ID + platform + kind */}
+          <Col flex="240px">
             <Space direction="vertical" size={2}>
               <Text code style={{ fontSize: 11 }}>
                 {task.id}
@@ -182,9 +174,14 @@ export default function RunningTasks() {
                 <Tag color={getPlatformTagColor(task.platform)} style={{ margin: 0 }}>
                   {getPlatformLabel(task.platform)}
                 </Tag>
-                <Text type="secondary" style={{ fontSize: 11 }}>
-                  {SOURCE_LABELS[task.source] || task.source || '-'}
-                </Text>
+                {(() => {
+                  const kind = taskKindMeta(task.source)
+                  return (
+                    <Tag color={kind.color} style={{ margin: 0 }}>
+                      {kind.label}
+                    </Tag>
+                  )
+                })()}
               </Space>
             </Space>
           </Col>

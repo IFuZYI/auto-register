@@ -318,6 +318,7 @@ register_job("my_job", interval_seconds=lambda: ..., runner=lambda: ...)
 | --- | --- |
 | `frontend/scripts/run_account_format_checks.mjs` | `lib/accountFormat.ts` 的纯函数（53 条断言，含状态标签 正常/过期/失效/禁用） |
 | `frontend/scripts/run_panel_filter_checks.mjs` | `lib/panelComparison.ts` 的筛选/计数（32 条断言） |
+| `frontend/scripts/run_task_kind_checks.mjs` | `lib/taskKinds.ts` 的任务类型标签映射（12 条断言，含颜色区分度） |
 | `tests/test_timezone_display.py` | 三个时区下编译并执行 `lib/time.ts` |
 
 新写前端纯逻辑时照这个模式：**逻辑放 `frontend/src/lib/`，配一个
@@ -340,6 +341,7 @@ register_job("my_job", interval_seconds=lambda: ..., runner=lambda: ...)
 | `test_session_fingerprint_rotation.py` | 指纹轮换（UA 与 client hints 一致性） |
 | `test_grok_turnstile_mint_chain.py` / `test_grok_upload_gaps.py` | Turnstile 兜底链、上传路径回退与 proxy_url 写入 |
 | `test_integrations_dispatch_gaps.py` | 面板上传器分发（平台×面板）、推送结果落库 |
+| `test_task_kinds_and_visibility.py` | 自动维护任务可见性（有动作才建记录、空轮不建、停止/跳过接线、逐账号日志落库）+ 任务类型标签映射（真实执行 taskKinds.ts） |
 
 ---
 
