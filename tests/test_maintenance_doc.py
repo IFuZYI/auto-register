@@ -125,7 +125,7 @@ class MaintenanceDocNumberTests(unittest.TestCase):
         )
 
     def test_collected_test_count_is_in_the_documented_ballpark(self):
-        """手册说「1500+ 用例」—— 收集数掉下去说明删多了。"""
+        """手册说「2300+ 用例」—— 收集数掉下去说明删多了。"""
         result = subprocess.run(
             ["python3", "-m", "pytest", "tests/", "--collect-only", "-q"],
             cwd=ROOT,
@@ -138,9 +138,9 @@ class MaintenanceDocNumberTests(unittest.TestCase):
             self.fail(f"解析 pytest 收集数失败:\n{result.stdout[-500:]}")
         collected = int(match.group(1))
         doc = DOC.read_text(encoding="utf-8")
-        self.assertIn("1500+", doc, "手册里的用例量级描述改了？")
+        self.assertIn("2300+", doc, "手册里的用例量级描述改了？")
         self.assertGreaterEqual(
-            collected, 1500, f"实际只收集到 {collected} 个用例 —— 删多了？"
+            collected, 2300, f"实际只收集到 {collected} 个用例 —— 删多了？"
         )
 
 

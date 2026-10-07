@@ -324,6 +324,23 @@ register_job("my_job", interval_seconds=lambda: ..., runner=lambda: ...)
 `frontend/scripts/run_*.mjs` 用 rolldown 打包后真实执行**。留在组件里的逻辑
 只能靠对源码做正则来测 —— 那种测试改了实现就可能失效，是假安全网。
 
+**单元 / 集成测试**（2026-10 全量补齐；新写测试照这些文件的模式）：
+
+| 测试文件 | 覆盖 |
+| --- | --- |
+| `test_end_to_end_flows.py` | 全流程：HTTP 提交注册任务 → 落库 → 账号 API → 导出；刷新任务全链（结果写回） |
+| `test_core_executors_and_captcha.py` | 协议执行器（curl_cffi 包装）、执行器基类、验证码基类（YesCaptcha/LocalSolver/Manual） |
+| `test_sentinel_and_account_helpers.py` | Sentinel 入口（成功透传/失败/ImportError/TLS 透传）、账号状态判定、批量选号 |
+| `test_api_proxies_and_auth.py` | 代理 CRUD（批量删除边界/切换）、面板鉴权（JWT/TOTP RFC 向量/登录端点） |
+| `test_api_mail_imports_and_contribution.py` | 邮件导入 API 错误映射、贡献 API 候选端点回退 |
+| `test_task_store_io.py` | 任务快照持久化 I/O（脏数据容忍/孤儿收尾幂等/排序） |
+| `test_sub2api_upload_and_oauth_device.py` | Sub2API payload 构造、Grok Device Flow 状态机 |
+| `test_icloud_coverage_gaps.py` / `test_shared_mail_gaps.py` | iCloud web mail 传输、免登录邮件页各分支 |
+| `test_http_client_and_solver_manager.py` | TLS 瞬断重试会话、solver 进程管理、浏览器运行时开关 |
+| `test_session_fingerprint_rotation.py` | 指纹轮换（UA 与 client hints 一致性） |
+| `test_grok_turnstile_mint_chain.py` / `test_grok_upload_gaps.py` | Turnstile 兜底链、上传路径回退与 proxy_url 写入 |
+| `test_integrations_dispatch_gaps.py` | 面板上传器分发（平台×面板）、推送结果落库 |
+
 ---
 
 ## 4. 验证门禁
@@ -331,7 +348,7 @@ register_job("my_job", interval_seconds=lambda: ..., runner=lambda: ...)
 ### 4.1 改动后跑什么
 
 ```bash
-# 后端全量（约 90 秒，1500+ 用例）
+# 后端全量（约 150 秒，2300+ 用例）
 python -m pytest tests/ -q
 
 # 前端三件套
