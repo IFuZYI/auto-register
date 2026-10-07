@@ -23,6 +23,7 @@ from sqlmodel import Session, select
 
 from core.base_platform import resolve_mailbox_otp_timeout
 from core.db import AccountModel
+from platforms.chatgpt.device_id import resolve_device_id
 from platforms.chatgpt.protocol import AuthFlow, Config
 from platforms.chatgpt.protocol.two_factor import (
     TwoFactorBindResult,
@@ -108,7 +109,8 @@ def bind_account_two_factor(
 
     session_token = get_credential(extra, "session_token")
     access_token = get_credential(extra, "access_token") or token or ""
-    device_id = str(extra.get("device_id") or "")
+    # 设备标识复用：字段空时回退 cookies 里的 oai-did（存量账号的原始设备）
+    device_id = resolve_device_id(extra)
 
     result = TwoFactorBindResult(error_message="没有可用的绑定路径")
     if session_token or access_token:

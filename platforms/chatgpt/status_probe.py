@@ -237,16 +237,17 @@ def _probe_codex_usage(access_token: str, account_id: str, proxy: Optional[str])
 def _extract_oai_device_id(account: Any) -> str:
     """优先用账号自己的 oai-did，没有就按邮箱派生一个固定值。
 
-    同一个号每次检测都是同一个 device，比每次随机更像正常客户端。
+    读取优先级与登录链的 `resolve_device_id` 一致（字段 → cookies），
+    保证「探测用的设备」与「登录用的设备」是同一个；都没有时才按邮箱
+    派生固定值 —— 同一个号每次检测都是同一个 device，比每次随机更像
+    正常客户端。
     """
+    from platforms.chatgpt.device_id import resolve_device_id
+
     extra = getattr(account, "extra", {}) or {}
-    cookies = str(extra.get("cookies") or getattr(account, "cookies", "") or "")
-    for part in cookies.split(";"):
-        part = part.strip()
-        if part.startswith("oai-did="):
-            value = part[len("oai-did=") :].strip()
-            if value:
-                return value
+    resolved = resolve_device_id(extra)
+    if resolved:
+        return resolved
     email = str(getattr(account, "email", "") or "").strip().lower()
     if not email:
         return ""

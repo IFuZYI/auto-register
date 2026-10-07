@@ -15,6 +15,7 @@ from typing import Any, Callable, Iterable, Optional
 from sqlmodel import Session
 
 from core.db import AccountModel
+from platforms.chatgpt.device_id import resolve_device_id
 from platforms.chatgpt.rt_backfill import BackfillResult, RefreshTokenBackfiller
 from services.chatgpt_account_selection import select_chatgpt_accounts
 
@@ -106,7 +107,9 @@ def backfill_account_data(
         password=password,
         session_token=get_credential(extra, "session_token"),
         access_token=get_credential(extra, "access_token") or token or "",
-        device_id=str(extra.get("device_id") or ""),
+        # 设备标识复用：字段空时回退 cookies 里的 oai-did（存量账号的
+        # 原始设备就在那）
+        device_id=resolve_device_id(extra),
         totp_secret=str(extra.get("totp_secret") or ""),
         proxy=proxy,
         extra_config=config,

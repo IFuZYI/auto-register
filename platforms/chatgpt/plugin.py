@@ -11,6 +11,7 @@ from platforms.chatgpt.chatgpt_registration_mode_adapter import (
     ChatGPTRegistrationContext,
     build_chatgpt_registration_mode_adapter,
 )
+from platforms.chatgpt.device_id import resolve_device_id
 from platforms.chatgpt.registration_engine import generate_password
 
 logger = logging.getLogger(__name__)
@@ -263,8 +264,10 @@ class ChatGPTPlatform(BasePlatform):
             mail_provider=mail_provider,
             mail_unavailable_reason=mail_reason,
             log_fn=log,
-            # 设备标识复用：沿用注册时落库的 oai-did，别让登录链换「新设备」
-            device_id=str(extra.get("device_id") or ""),
+            # 设备标识复用：沿用注册时落库的 oai-did（字段空时回退
+            # cookies 里的值 —— 存量账号的原始设备就在那），别让登录链
+            # 换「新设备」
+            device_id=resolve_device_id(extra),
         ).run()
 
         if login_result.success:

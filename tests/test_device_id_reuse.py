@@ -259,6 +259,72 @@ class ConvergenceTests(unittest.TestCase):
     不到一台「稳定设备」。
     """
 
+    def test_resolve_device_id_prefers_the_field(self):
+        from platforms.chatgpt.device_id import resolve_device_id
+
+        extra = {
+            "device_id": "field-value",
+            "cookies": "a=1; oai-did=cookie-value; b=2",
+        }
+        self.assertEqual(resolve_device_id(extra), "field-value")
+
+    def test_resolve_device_id_falls_back_to_cookie(self):
+        """存量账号：字段没写但 cookies 里有 —— 用 cookie 里的原始设备值。"""
+        from platforms.chatgpt.device_id import resolve_device_id
+
+        extra = {"cookies": "a=1; oai-did=cookie-value; b=2"}
+        self.assertEqual(resolve_device_id(extra), "cookie-value")
+
+    def test_resolve_device_id_empty_when_absent(self):
+        from platforms.chatgpt.device_id import resolve_device_id
+
+        self.assertEqual(resolve_device_id({}), "")
+        self.assertEqual(resolve_device_id({"cookies": "a=1; b=2"}), "")
+        self.assertEqual(resolve_device_id({"device_id": "  "}), "")
+
+    def test_plugin_uses_cookie_fallback_for_login_refresh(self):
+        """刷新 Token 的登录兜底：字段空、cookie 有 → 用 cookie 值预置。"""
+        from platforms.chatgpt.login_refresh import LoginRefreshResult
+        from platforms.chatgpt.token_refresh import TokenRefreshResult
+        from unittest.mock import patch
+
+        result = TokenRefreshResult(
+            success=True, verified=True, refreshed=False, access_token="same-at",
+            strategy="session",
+        )
+        login_result = LoginRefreshResult(
+            success=True, access_token="fresh-at", strategy="password_2fa",
+        )
+        with patch(
+            "services.chatgpt_otp_mailbox.resolve_otp_mail_provider",
+            return_value=(None, "不在号池里"),
+        ), patch(
+            "platforms.chatgpt.login_refresh.LoginAccessTokenRefresher"
+        ) as refresher_cls, patch(
+            "platforms.chatgpt.token_refresh.TokenRefreshManager"
+        ) as verifier_cls:
+            refresher_cls.return_value.run.return_value = login_result
+            verifier_cls.return_value.verify_access_token.return_value = (True, "")
+
+            from core.base_platform import RegisterConfig
+            from platforms.chatgpt.plugin import ChatGPTPlatform
+
+            platform = ChatGPTPlatform(config=RegisterConfig())
+
+            class _Account:
+                email = "user@example.com"
+                password = "pw"
+                extra = {"cookies": "x=1; oai-did=from-cookie; y=2"}
+
+            platform._refresh_via_login(_Account(), result)
+
+        refresher_cls.assert_called_once()
+        self.assertEqual(
+            refresher_cls.call_args.kwargs.get("device_id"),
+            "from-cookie",
+            "字段为空时应从 cookies 里回退提取 oai-did",
+        )
+
     def test_login_refresh_result_absorbs_flow_device_id(self):
         from platforms.chatgpt.login_refresh import (
             LoginAccessTokenRefresher,
