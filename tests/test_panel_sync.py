@@ -313,5 +313,61 @@ class PlanSyncCredentialTimeTests(unittest.TestCase):
         self.assertEqual(outcome.reason, "unknown_time")
 
 
+class BannedLocalAccountTests(unittest.TestCase):
+    """用户要求（2026-10-07）：「禁用的不参与同步」—— 拉回方向同样跳过。
+
+    禁用账号的凭证已死，远端持有的同样是死凭证；拉回来只会把本地行
+    touch 一遍，还可能覆盖掉排查线索（chatgpt_token_refresh 的失败原因）。
+    """
+
+    def test_banned_local_account_is_not_pulled(self):
+        from services.panel_sync import plan_sync
+
+        local = {"access_token": "at-dead"}
+        remote = RemoteAccount(
+            email="a@x.com", platform="grok",
+            updated_at=datetime(2026, 10, 4, 12, 0, tzinfo=timezone.utc),
+            credentials={"access_token": "new-at", "refresh_token": "new-rt"},
+        )
+        outcome = plan_sync(
+            local, remote,
+            local_updated=_utc(2026, 10, 4, 11, 0),
+            local_status="banned",
+        )
+        self.assertFalse(outcome.pulled, "禁用账号被拉回本地了")
+        self.assertEqual(outcome.reason, "banned")
+
+    def test_banned_row_skips_persist_in_batch(self):
+        """批量路径：status=banned 的行不能写库（远端较新也不行）。"""
+        from core.base_platform import Account, AccountStatus
+        from core.db import account_repository
+
+        row = account_repository.upsert(Account(
+            platform="grok", email="sync-banned@x.com", password="p",
+            status=AccountStatus.BANNED, extra={"access_token": "old-at"},
+        ))
+        local_rows = [{
+            "id": row.id, "email": row.email, "platform": "grok",
+            "status": "banned",
+            "updated_at": (datetime.now(timezone.utc) - timedelta(days=1)).isoformat(),
+            "extra": dict(row.get_extra()),
+        }]
+        remote = [RemoteAccount(
+            email=row.email, platform="grok",
+            updated_at=datetime.now(timezone.utc),
+            credentials={"access_token": "new-at", "refresh_token": "new-rt"},
+        )]
+        summary = sync_local_from_remote(local_rows, remote)
+        self.assertEqual(summary["pulled"], 0, "禁用账号被拉回并写库了")
+        self.assertEqual(summary["skipped"], 1)
+        self.assertEqual(summary["items"][0]["reason"], "banned")
+
+        fresh = account_repository.find_by_email("grok", row.email)
+        self.assertEqual(
+            fresh.get_extra().get("access_token"), "old-at",
+            "禁用账号的 extra 被拉回覆盖了",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

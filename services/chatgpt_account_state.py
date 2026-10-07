@@ -146,6 +146,11 @@ def classify_remote_sync_state(sync: dict[str, Any] | None) -> str:
     return ""
 
 
+def _is_banned_status(status: Any) -> bool:
+    """账号当前状态是否已是「禁用」（大小写/空白容忍）。"""
+    return _lower_text(status) == BANNED_ACCOUNT_STATUS
+
+
 def _is_banned_reason(reason: str) -> bool:
     """这个判定理由说的是「号没了」还是「凭证过期」。
 
@@ -199,7 +204,10 @@ def apply_chatgpt_status_policy(
 
     **正向恢复**：探测明确可用（`probe_confirms_usable`）或刷新成功
     （`usable=True`）时，过期/失效恢复为「正常」—— 状态跟着实际可用性走。
-    禁用不自动恢复（强判断，要人工确认）。
+    禁用不自动恢复（强判断，要人工确认）；且**禁用是粘性的**——弱信号
+    （401 / 缺凭证 / 远端失效）不得把它降级回过期/失效（用户要求
+    2026-10-07「禁用的不参与同步」的同源问题：降级会让刚发掘的封禁被
+    下一次状态同步洗掉）。
 
     这条判定必须留在这里（共享策略）而不是各个 action 的调用点：探测、同步、
     刷新三条路都会得出"号没了"的结论，只在其中一条上特判的话，另外两条仍然
@@ -215,6 +223,11 @@ def apply_chatgpt_status_policy(
     if reason:
         if banned or _is_banned_reason(reason):
             setattr(account, "status", BANNED_ACCOUNT_STATUS)
+        elif _is_banned_status(getattr(account, "status", "")) and not _is_banned_reason(reason):
+            # 禁用是**粘性**的：弱信号（401 / 缺凭证）不得把它降级回过期/失效。
+            # 封禁要人工确认才解除（同「不因一次可用探测复活」的强判断语义）；
+            # 降级会让刚发掘出的封禁被下一次状态同步洗掉、账号重新进重试队列。
+            return ""
         elif reason == "auth_missing":
             # 没有 AT 可探测 —— 需要重新登录拿凭证
             setattr(account, "status", INVALID_ACCOUNT_STATUS)

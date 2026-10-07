@@ -286,5 +286,45 @@ class PlanPushCredentialTimeTests(unittest.TestCase):
         self.assertEqual(outcome.reason, "local_newer")
 
 
+class BannedLocalAccountTests(unittest.TestCase):
+    """用户要求（2026-10-07）：「禁用的不参与同步」。
+
+    被封禁的账号凭证已死：推上去只会污染远端面板（远端会拿死凭证去刷
+    token），拉回来也救不活（远端持有的同样是死凭证）。两个方向都跳过。
+    """
+
+    def test_banned_local_account_is_not_pushed(self):
+        from services.panel_push import plan_push
+
+        outcome = plan_push(
+            {"access_token": "at-dead"},
+            None,
+            local_updated=_utc(2026, 10, 4, 11, 0),
+            local_status="banned",
+        )
+        self.assertFalse(outcome.push, "禁用账号被推送到远端了")
+        self.assertEqual(outcome.reason, "banned")
+
+    def test_banned_row_skips_upload_in_batch(self):
+        """批量路径：status=banned 的行不能调 upload（远端没有也不行）。"""
+        from services.panel_push import push_local_to_remote
+
+        rows = [{
+            "id": 1, "email": "banned@x.com", "platform": "grok",
+            "status": "banned",
+            "updated_at": datetime(2026, 10, 4, tzinfo=timezone.utc).isoformat(),
+            "extra": {"sso": "sso-dead"},
+        }]
+        uploaded: list = []
+        summary = push_local_to_remote(
+            rows, [],
+            upload=lambda row: (uploaded.append(row), (True, "ok"))[1],
+        )
+        self.assertEqual(uploaded, [], "禁用账号的 upload 被调用了")
+        self.assertEqual(summary["pushed"], 0)
+        self.assertEqual(summary["skipped"], 1)
+        self.assertEqual(summary["items"][0]["reason"], "banned")
+
+
 if __name__ == "__main__":
     unittest.main()

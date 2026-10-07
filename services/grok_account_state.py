@@ -12,7 +12,8 @@
   对齐 grok2api 的 `IsDefinitiveAccountBlockBody`）。
 
 判定优先级：禁用 > 过期 > 失效。正向确认（probe 200 / 402 无额度 / 刷新成功）
-时过期/失效恢复「正常」；禁用不自动恢复。
+时过期/失效恢复「正常」；禁用不自动恢复，且**禁用是粘性的**：弱信号（401 /
+SSO 被拒 / 远端失效）不得把它降级回失效/过期（要人工确认才解除）。
 """
 
 from __future__ import annotations
@@ -117,6 +118,13 @@ def apply_grok_status_policy(
             reason = refresh_reason
 
     if reason:
+        # 禁用是**粘性**的：弱信号（401 / SSO 被拒 / 远端失效）不得把它
+        # 降级回失效/过期。封禁要人工确认才解除（同「不因一次可用探测
+        # 复活」的强判断语义）—— 降级会让刚发掘的封禁被下一次同步洗掉、
+        # 账号重新进重试队列（与 chatgpt 侧同口径，用户要求 2026-10-07）。
+        if str(getattr(account, "status", "") or "").strip().lower() == AccountStatus.BANNED.value:
+            return ""
+
         from services.account_status import access_token_expired
 
         # 「明确需要重新登录」的判定不受 AT 过期影响：SSO 被拒 / 刷新永久

@@ -514,6 +514,8 @@ iCloud 业务错误不使用 `401`，以免被前端误判为面板登录过期�
 
 - 远端较新且远端有凭证 → 拉回（覆盖 `access_token` / `refresh_token` /
   `session_token` / `id_token` / `sso`，本地其它字段保留）；
+- **禁用（`banned`）的本地账号不参与同步**（用户要求 2026-10-07）：凭证已死，
+  远端持有的同样是死凭证 —— 拉回来只会把本地行 touch 一遍；
 - 本地较新 / 两侧时间相同（`time_synced`）/ 无法判定时间 / 远端没有凭证 → 不动
   （保守，不拿不确定的数据覆盖本地）。
 
@@ -531,7 +533,7 @@ ChatGPT 的凭证也会被一起拉回（「看到的」与「被改的」对不
 
 返回 `{panel,total,pulled,skipped,items:[{email,platform,pulled,reason,fields}],
 remote_error}`；`reason` ∈ `synced` / `local_newer` / `remote_newer` /
-`unknown_time` / `remote_missing_credential` / `no_pullable_field`。
+`unknown_time` / `remote_missing_credential` / `no_pullable_field` / `banned`。
 
 **为什么需要**：x.ai 的 RT 每次刷新都会轮换 —— 远端面板（grok2api / CPA）
 刷新过 token 后，本地存的 RT 就成了死值（实测 22 个账号全部 `invalid_grant`），
@@ -549,6 +551,8 @@ remote_error}`；`reason` ∈ `synced` / `local_newer` / `remote_newer` /
 
 - 远端没有（未上传）→ 推送（补传）；
 - 凭证不同且**本地较新** → 推送；
+- **禁用（`banned`）的本地账号不参与同步**（用户要求 2026-10-07）：凭证已死，
+  推上去只会污染远端面板（远端会拿死凭证去刷 token）；
 - 远端较新 / 两侧时间相同（`time_synced`）/ 无法判定时间 / 凭证相同 / 无法比对 → 不动
   （推上去会用本地旧凭证覆盖远端新的）。
 
@@ -566,7 +570,7 @@ remote_error}`；`reason` ∈ `synced` / `local_newer` / `remote_newer` /
 返回 `{panel,total,pushed,deleted,skipped,items:[{email,platform,push,reason,
 remote_id,pushed,deleted,message,fields}],remote_error}`；`reason` ∈
 `not_uploaded` / `local_newer` / `remote_newer` / `synced` / `unknown_time` /
-`unknown_credential` / `no_pushable_field`。
+`unknown_credential` / `no_pushable_field` / `banned`。
 
 ---
 

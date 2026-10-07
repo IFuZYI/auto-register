@@ -305,7 +305,8 @@ register_job("my_job", interval_seconds=lambda: ..., runner=lambda: ...)
 | `test_panel_time_single_side.py` | 时间判定的单侧回落：一侧有 iat、另一侧回落记录时间（`mixed` 档）仍能判方向；iat 两侧可比时优先于记录时间 | 改 `compare_credential_time` 的回落口径 |
 | `test_account_status_removal.py` | 账号状态四值（registered/expired/invalid/banned）、`AccountStatus.normalize` 读侧兜底、启动迁移归一历史行并删除 `trial_end_time` 列 | 改状态枚举或删除迁移 |
 | `test_status_semantics.py` | 状态语义分档（正常/过期/失效/禁用）：AT 过期判「过期」、被拒未过期判「失效」、封禁措辞（`deleted or deactivated`）判「禁用」、sign-in session 措辞**不判封禁**、正向恢复；前端标签映射与动作接线 | 改 `services/chatgpt_account_state.py` 的判定优先级；前端状态标签改回英文/旧文案 |
-| `test_grok_status_semantics.py` | grok 状态判定对齐 grok2api：SSO 被拒/`invalid_grant` 判「失效」、`blocked-user` 判「禁用」、402/403 无额度仍有效、正向恢复 | 改 `services/grok_account_state.py` |
+| `test_chatgpt_status_policy_banned.py` | 封禁与失效分档（deactivated 判禁用、401 判失效）、邮箱复用语义、禁用粘性（弱信号不降级） | 改 `services/chatgpt_account_state.py` 的判定优先级 |
+| `test_grok_status_semantics.py` | grok 状态判定对齐 grok2api：SSO 被拒/`invalid_grant` 判「失效」、`blocked-user` 判「禁用」、402/403 无额度仍有效、正向恢复；禁用粘性（弱信号不降级） | 改 `services/grok_account_state.py` |
 | `test_chatgpt_token_refresh_verification.py` | 刷出的 AT 真校验（`/backend-api/me`）、**只返还原本 AT（未换发）→ 走登录流程换发**、登录链兜底、封禁识别、轮换 ST 不被冲空 | 改 `platforms/chatgpt/token_refresh.py` 的校验或登录兜底 |
 | `test_environment_preflight.py` | 环境预检与错误分类：camoufox 配对探测、Node 运行时探测、任务级预检（runner 在分配邮箱前拦截）、环境错误判不可重试（dead-end 提前收手） | 改 `core/environment.py` 的判定；平台去掉 `check_environment` 钩子 |
 | `test_chatgpt_auto_maintenance.py` | ChatGPT Token 自动维护：临期窗口内随机时刻（至少提前 1h）、封禁/达失败上限不重复尝试、失败退避 1h→6h、未换发算失败、每轮限量防高并发、stale 计划清理、scheduler 注册与配置白名单、前端开关接线 | 改 `services/chatgpt_maintenance.py` 的窗口/退避/限量逻辑；去掉周期任务注册；开关漏进 CONFIG_KEYS 或前端 BOOLEAN_KEYS |
@@ -317,7 +318,7 @@ register_job("my_job", interval_seconds=lambda: ..., runner=lambda: ...)
 | 脚本 | 跑什么 |
 | --- | --- |
 | `frontend/scripts/run_account_format_checks.mjs` | `lib/accountFormat.ts` 的纯函数（53 条断言，含状态标签 正常/过期/失效/禁用） |
-| `frontend/scripts/run_panel_filter_checks.mjs` | `lib/panelComparison.ts` 的筛选/计数（32 条断言） |
+| `frontend/scripts/run_panel_filter_checks.mjs` | `lib/panelComparison.ts` 的筛选/计数（36 条断言，含禁用行不参与两个方向的同步） |
 | `frontend/scripts/run_task_kind_checks.mjs` | `lib/taskKinds.ts` 的任务类型标签映射（12 条断言，含颜色区分度） |
 | `tests/test_timezone_display.py` | 三个时区下编译并执行 `lib/time.ts` |
 
@@ -342,6 +343,7 @@ register_job("my_job", interval_seconds=lambda: ..., runner=lambda: ...)
 | `test_grok_turnstile_mint_chain.py` / `test_grok_upload_gaps.py` | Turnstile 兜底链、上传路径回退与 proxy_url 写入 |
 | `test_integrations_dispatch_gaps.py` | 面板上传器分发（平台×面板）、推送结果落库 |
 | `test_task_kinds_and_visibility.py` | 自动维护任务可见性（有动作才建记录、空轮不建、停止/跳过接线、逐账号日志落库）+ 任务类型标签映射（真实执行 taskKinds.ts） |
+| `test_banned_signal_propagation.py` | 登录链封禁信号整链传播：探测块/发码链撞上 `deleted or deactivated` 当场终止（不被回退吞掉）；`invalid_state` 不判封禁 |
 
 ---
 

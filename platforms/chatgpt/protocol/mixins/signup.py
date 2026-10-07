@@ -15,6 +15,7 @@ import uuid
 from datetime import datetime, timezone
 from urllib.parse import urlencode
 
+from platforms.chatgpt.protocol.banned_signals import looks_like_banned
 from platforms.chatgpt.protocol.response_summary import describe_error
 
 logger = logging.getLogger(__name__)
@@ -474,6 +475,12 @@ class SignupMixin:
                 self.send_otp(referer="https://auth.openai.com/email-verification")
                 return True
             except Exception as e:
+                # 封禁是终局结论：不能吞掉当普通失败 —— 吞掉后上层只会看到
+                # 无关的后续错误（实测 409 invalid_state），账号被误标「失效」
+                # 而不是「禁用」（用户报告 2026-10-07 的根因之一）。
+                if looks_like_banned(str(e)):
+                    logger.warning(f"发码链撞上封禁措辞，直接终止: {e}")
+                    raise
                 logger.warning(f"已有账号发码全 fail: {e}")
                 return False
 
@@ -486,6 +493,10 @@ class SignupMixin:
             self.send_otp()
             return True
         except Exception as e:
+            # 同已有账号分支：封禁措辞当场终止，不吞成普通失败。
+            if looks_like_banned(str(e)):
+                logger.warning(f"发码链撞上封禁措辞，直接终止: {e}")
+                raise
             logger.warning(f"send_otp 兜底失败(mode={mode_lc or 'unknown'}): {e}")
             return False
 

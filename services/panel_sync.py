@@ -50,6 +50,16 @@ logger = logging.getLogger(__name__)
 _PULLABLE_FIELDS: tuple[tuple[str, ...], ...] = sync_aliases()
 
 
+def _is_banned_status(status: Any) -> bool:
+    """本地行是否处于「禁用」（banned）状态（大小写/空白容忍）。
+
+    用户要求（2026-10-07）：「禁用的不参与同步」。判据是账号行的 `status`
+    列（与 `AccountStatus.BANNED` 同值）—— 库里的历史值可能有空白/大写，
+    归一后再比。
+    """
+    return str(status or "").strip().lower() == "banned"
+
+
 @dataclass
 class SyncOutcome:
     """单个账号的同步结果。"""
@@ -82,6 +92,7 @@ def plan_sync(
     remote: RemoteAccount,
     *,
     local_updated: Optional[str] = None,
+    local_status: str = "",
 ) -> SyncOutcome:
     """决定这个账号该不该从远端拉凭证（纯函数，不落库）。
 
@@ -89,10 +100,18 @@ def plan_sync(
     记录时间会被「同步远端状态」等操作 touch 成噪声（实测把 10 个远端较新的
     账号顶成本地较新，导致拉不回）。凭证解不出 iat 时回落记录时间，比较前
     先归一（远端时区与本地不同，`+08:00` vs UTC）。
+
+    `local_status`（用户要求 2026-10-07「禁用的不参与同步」）：`banned`
+    的账号凭证已死，远端持有的同样是死凭证 —— 拉回来只会把本地行 touch
+    一遍，还可能覆盖掉排查线索（`chatgpt_token_refresh` 的失败原因）。
     """
     email = str(remote.email or "")
     platform = str(remote.platform or "")
     outcome = SyncOutcome(email=email, platform=platform)
+
+    if _is_banned_status(local_status):
+        outcome.reason = "banned"
+        return outcome
 
     remote_creds = remote.credentials if isinstance(remote.credentials, dict) else {}
     if not remote_creds:
@@ -184,7 +203,10 @@ def sync_local_from_remote(
         summary["total"] += 1
         extra = row.get("extra") if isinstance(row.get("extra"), dict) else {}
         outcome = plan_sync(
-            extra, remote, local_updated=row.get("updated_at")
+            extra, remote, local_updated=row.get("updated_at"),
+            # 禁用的不参与同步（用户要求 2026-10-07）：在 plan 层跳过 ——
+            # 不写库、不进 pulled 计数。
+            local_status=str(row.get("status") or ""),
         )
         if not outcome.pulled:
             summary["skipped"] += 1

@@ -113,5 +113,60 @@ class EmailReuseSemanticsTests(unittest.TestCase):
         self.assertNotEqual(BANNED_ACCOUNT_STATUS, AccountStatus.INVALID.value)
 
 
+class BannedIsStickyTests(unittest.TestCase):
+    """禁用是强判断：弱信号（401 / 缺凭证）不得把它降级回过期/失效。
+
+    回归（用户报告 2026-10-07 的同源问题）：「禁用的不参与同步」—— 已
+    banned 的账号跑「同步远端状态」时，远端 401 会把状态改写成「过期」、
+    缺凭证改写成「失效」；刚发掘出的封禁被下一次同步洗掉，账号重新进
+    重试队列。禁用要人工确认才解除，任何自动信号都不该降级它。
+    """
+
+    def test_weak_remote_signal_does_not_downgrade_banned(self):
+        account = _Account("banned")
+        reason = apply_chatgpt_status_policy(
+            account,
+            remote_sync={
+                "remote_state": "access_token_invalidated",
+                "last_probe_status_code": 401,
+            },
+        )
+        self.assertEqual(account.status, "banned", "401 把禁用降级了")
+        self.assertEqual(reason, "", "状态没变就不该返回判定理由（避免误 touch）")
+
+    def test_missing_credential_does_not_downgrade_banned(self):
+        account = _Account("banned")
+        apply_chatgpt_status_policy(
+            account, local_probe={"auth": {"state": "missing_access_token"}}
+        )
+        self.assertEqual(account.status, "banned", "缺凭证把禁用降级了")
+
+    def test_banned_signal_on_banned_stays_banned(self):
+        account = _Account("banned")
+        reason = apply_chatgpt_status_policy(
+            account,
+            remote_sync={
+                "remote_state": "account_deactivated",
+                "last_probe_status_code": 403,
+                "last_probe_error_code": "account_deactivated",
+                "last_probe_message": DEACTIVATED_BODY,
+            },
+        )
+        self.assertEqual(account.status, "banned")
+        self.assertEqual(reason, "remote_deactivated")
+
+    def test_other_statuses_still_get_weak_signals_applied(self):
+        """回归保护：非 banned 的账号照常按弱信号落状态（修复不误伤）。"""
+        account = _Account("registered")
+        apply_chatgpt_status_policy(
+            account,
+            remote_sync={
+                "remote_state": "access_token_invalidated",
+                "last_probe_status_code": 401,
+            },
+        )
+        self.assertEqual(account.status, AccountStatus.INVALID.value)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -42,6 +42,16 @@ logger = logging.getLogger(__name__)
 _PUSHABLE_FIELDS: tuple[tuple[str, ...], ...] = sync_aliases()
 
 
+def _is_banned_status(status: Any) -> bool:
+    """本地行是否处于「禁用」（banned）状态（大小写/空白容忍）。
+
+    用户要求（2026-10-07）：「禁用的不参与同步」。判据是账号行的 `status`
+    列（与 `AccountStatus.BANNED` 同值）—— 库里的历史值可能有空白/大写，
+    归一后再比。
+    """
+    return str(status or "").strip().lower() == "banned"
+
+
 @dataclass
 class PushOutcome:
     """单个账号的推送决策与结果。"""
@@ -81,6 +91,7 @@ def plan_push(
     local_updated: Optional[str] = None,
     email: str = "",
     platform: str = "",
+    local_status: str = "",
 ) -> PushOutcome:
     """决定这个账号该不该把本地凭证推到远端（纯函数，不落库）。
 
@@ -91,10 +102,18 @@ def plan_push(
 
     `email` / `platform` 是本地行的标识：远端没有记录时（`remote is None`）
     结果里也要带上它，否则界面上的条目没有邮箱、无从定位是哪个账号。
+
+    `local_status`（用户要求 2026-10-07「禁用的不参与同步」）：`banned`
+    的账号凭证已死，推上去只会污染远端面板（远端会拿死凭证去刷 token）——
+    直接跳过，不进方向判定。
     """
     resolved_email = str((remote.email if remote else "") or email or "")
     resolved_platform = str((remote.platform if remote else "") or platform or "")
     outcome = PushOutcome(email=resolved_email, platform=resolved_platform)
+
+    if _is_banned_status(local_status):
+        outcome.reason = "banned"
+        return outcome
 
     pushable = {
         aliases[0]: _first_present(local_extra or {}, aliases)
@@ -184,6 +203,9 @@ def push_local_to_remote(
             extra, remote,
             local_updated=row.get("updated_at"),
             email=email, platform=platform,
+            # 禁用的不参与同步（用户要求 2026-10-07）：在 plan 层跳过 ——
+            # 这里传行上的 status，避免 upload 被调、也避免进「失败」计数。
+            local_status=str(row.get("status") or ""),
         )
         summary["total"] += 1
 

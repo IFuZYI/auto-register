@@ -135,6 +135,44 @@ class GrokRecoveryTests(unittest.TestCase):
         self.assertEqual(account.status, "invalid")
 
 
+class GrokBannedIsStickyTests(unittest.TestCase):
+    """禁用是强判断：弱信号不得把它降级回失效/过期（与 chatgpt 同口径）。
+
+    用户要求（2026-10-07）：「禁用的不参与同步」。已 banned 的账号跑探测/
+    同步/刷新时，401、SSO 被拒、远端失效这类弱信号会把状态洗成「失效」——
+    刚发掘出的封禁被下一次同步洗掉、账号重新进重试队列。封禁要人工确认
+    才解除。
+    """
+
+    def test_probe_401_does_not_downgrade_banned(self):
+        account = _Account(status="banned")
+        reason = apply_grok_status_policy(account, probe_code=401, probe_summary="unauthorized")
+        self.assertEqual(account.status, "banned", "probe 401 把禁用降级了")
+        self.assertEqual(reason, "", "状态没变就不该返回判定理由")
+
+    def test_sso_rejected_does_not_downgrade_banned(self):
+        account = _Account(status="banned")
+        apply_grok_status_policy(account, sso_rejected=True)
+        self.assertEqual(account.status, "banned", "SSO 被拒把禁用降级了")
+
+    def test_remote_invalidated_does_not_downgrade_banned(self):
+        account = _Account(status="banned")
+        apply_grok_status_policy(account, remote_state="access_token_invalidated")
+        self.assertEqual(account.status, "banned", "远端失效把禁用降级了")
+
+    def test_blocked_signal_on_banned_stays_banned(self):
+        account = _Account(status="banned")
+        reason = apply_grok_status_policy(account, probe_summary="blocked-user")
+        self.assertEqual(account.status, "banned")
+        self.assertEqual(reason, "grok_blocked")
+
+    def test_other_statuses_still_get_weak_signals_applied(self):
+        """回归保护：非 banned 的账号照常按弱信号落状态（修复不误伤）。"""
+        account = _Account()
+        apply_grok_status_policy(account, probe_code=401, probe_summary="unauthorized")
+        self.assertEqual(account.status, AccountStatus.INVALID.value)
+
+
 class GrokSsoRejectedTests(unittest.TestCase):
     """SSO 被上游明确拒绝（对齐 grok2api 的 markSSOCredentialRejected）。"""
 

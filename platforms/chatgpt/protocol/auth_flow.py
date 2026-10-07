@@ -24,6 +24,7 @@ from typing import Optional, Any
 from urllib.parse import urlparse, parse_qs, parse_qsl, urljoin, urlencode, urlunparse
 
 from platforms.chatgpt.protocol.config import Config
+from platforms.chatgpt.protocol.banned_signals import looks_like_banned
 from platforms.chatgpt.protocol.fingerprint import (
     generate_fingerprint,
     ua_for_impersonate,
@@ -735,6 +736,10 @@ class AuthFlow(
                         else:
                             raise
                     else:
+                        # 同探测块：封禁措辞必须当场终止，不能回退 reauthorize。
+                        if looks_like_banned(str(e)):
+                            logger.warning(f"about-you 创建撞上封禁措辞，直接终止: {e}")
+                            raise
                         logger.warning(f"已有账号 about-you 创建信息失败，回退 reauthorize: {e}")
                         continue_url = ""
 
@@ -937,6 +942,14 @@ class AuthFlow(
                         (continue_url or "")[:180] or "(empty)",
                     )
             except Exception as e:
+                # 封禁是终局结论，不能被当作「探测失败」回退：TOTP 提交等步骤
+                # 撞上「deleted or deactivated」时若吞掉异常，回退链会以无关的
+                # 409 invalid_state 收场 —— 封禁措辞在最终错误里消失，账号被
+                # 误标「失效」而不是「禁用」（用户报告 2026-10-07：一批账号
+                # 服务端已明确回停用措辞，状态却没变）。
+                if looks_like_banned(str(e)):
+                    logger.warning(f"探测链撞上封禁措辞，直接终止（不回退）: {e}")
+                    raise
                 logger.warning(f"login screen_hint 探测失败，回退 signup 探测: {e}")
                 continue_url = ""
                 page_type = ""

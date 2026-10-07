@@ -103,5 +103,19 @@ eq(pushIds.includes(106) === false && pullIds.includes(106) === false, true, 'sy
 eq(mod.selectPushIds([]), [], 'empty input stays empty (push)')
 eq(mod.selectPullIds([]), [], 'empty input stays empty (pull)')
 
+// ── 禁用的账号不参与同步（用户要求 2026-10-07）──
+// 凭证已死：推上去污染远端面板，拉回来也救不活。两个方向都跳过。
+const bannedRows = [
+  { email: 'banned-push@x.com', platform: 'grok', state: 'local_only', local_id: 201, local_status: 'banned' },
+  { email: 'banned-pull@x.com', platform: 'grok', state: 'credential_diff', time_relation: 'remote_newer', local_id: 202, local_status: 'banned' },
+  { email: 'banned-newer@x.com', platform: 'grok', state: 'credential_diff', time_relation: 'local_newer', local_id: 203, local_status: 'banned' },
+  { email: 'normal@x.com', platform: 'grok', state: 'local_only', local_id: 204, local_status: 'registered' },
+]
+eq(mod.selectPushIds(bannedRows), [204], 'banned rows are not push targets')
+eq(mod.selectPullIds(bannedRows), [], 'banned rows are not pull targets')
+eq(mod.selectPullIds([{ ...bannedRows[1], local_status: 'invalid' }]), [202], 'invalid rows still pull')
+// 大小写不敏感（库里历史值可能带空白/大写）
+eq(mod.selectPushIds([{ ...bannedRows[0], local_status: ' Banned ' }]), [], 'banned check is case-insensitive')
+
 console.log(JSON.stringify({ passed: failures.length === 0, checked, failures }, null, 2))
 process.exit(failures.length === 0 ? 0 : 1)

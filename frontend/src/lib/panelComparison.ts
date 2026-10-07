@@ -112,6 +112,8 @@ export interface DirectionFilterableRow extends PlatformFilterableRow {
   /** local_newer / remote_newer / time_synced / '' */
   time_relation?: string
   local_id?: number | null
+  /** 本地账号状态（registered / expired / invalid / banned）。 */
+  local_status?: string
 }
 
 /**
@@ -122,12 +124,18 @@ export interface DirectionFilterableRow extends PlatformFilterableRow {
  * 本地旧凭证覆盖远端新的（x.ai 的 RT 轮换，覆盖后远端拿到死值）。
  *
  * 同小时（`time_synced`）/ 无法判定（`''`）不动：分秒差异是噪声。
+ *
+ * 禁用（`banned`）的账号不参与同步（用户要求 2026-10-07）：凭证已死，
+ * 推上去只会污染远端面板。后端 `plan_push` 同样跳过 —— 前端这里排除是
+ * 为了让按钮上的计数与真实动作一致（「看到的」与「被改的」对不上是
+ * 这个页面反复踩过的坑）。
  */
 export function selectPushIds(rows: DirectionFilterableRow[]): number[] {
   return (Array.isArray(rows) ? rows : [])
     .filter(
       (row) =>
         row?.local_id &&
+        String(row?.local_status || '').trim().toLowerCase() !== 'banned' &&
         (row?.state === 'local_only' ||
           (row?.state === 'credential_diff' && row?.time_relation === 'local_newer')),
     )
@@ -139,6 +147,7 @@ export function selectPushIds(rows: DirectionFilterableRow[]): number[] {
  *
  * 这是**拉回方向**（远端 → 本地），与 `selectPushIds` 互斥：同一行不可能
  * 同时在两个方向的目标里（`local_newer` 与 `remote_newer` 不可能同时成立）。
+ * 禁用（`banned`）的账号不参与同步（用户要求 2026-10-07）。
  */
 export function selectPullIds(rows: DirectionFilterableRow[]): number[] {
   return (Array.isArray(rows) ? rows : [])
@@ -146,7 +155,8 @@ export function selectPullIds(rows: DirectionFilterableRow[]): number[] {
       (row) =>
         row?.state === 'credential_diff' &&
         row?.time_relation === 'remote_newer' &&
-        row?.local_id,
+        row?.local_id &&
+        String(row?.local_status || '').trim().toLowerCase() !== 'banned',
     )
     .map((row) => row.local_id as number)
 }
