@@ -17,6 +17,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from services.panel_comparison import RemoteAccount
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -281,6 +283,135 @@ class UploadFormatTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertEqual(calls["n"], 1, f"确定性错误被重试了 {calls['n']} 次")
         sleeper.assert_not_called()
+
+
+class Chatgpt2apiStatusPropagationTests(unittest.TestCase):
+    """`credential_availability` / `status_label` 的传播与消费（复审发现，2026-10-07）。
+
+    独立 reviewer 指出：消费方（`panel_status_sync.classify_remote_status`）
+    读 `extra.credential_availability` 作为「比 status_label 更权威」的信号，
+    但生产方（`fetch_chatgpt2api_remote_accounts`）从没把它写进 RemoteAccount.extra
+    —— 该分支在生产上不可达，状态回落到中文 status_label；且参考实现的
+    「限流 / 异常」两个分类（实测存在）没进 `_STATUS_MAP`，会落 unknown。
+    真实 API 实测（2026-10-07）：列表返回 `credential_availability`
+    （usable/recoverable/unavailable）与 `status_label`（正常/限流/异常/禁用）。
+    """
+
+    def test_fetcher_propagates_credential_availability(self):
+        """fetcher 必须把 credential_availability 带进 extra（否则消费方死分支）。"""
+        from services.panel_comparison import fetch_chatgpt2api_remote_accounts
+
+        payload = {
+            "items": [
+                {
+                    "id": "acct_1",
+                    "email": "a@example.com",
+                    "plan": "free",
+                    "status_label": "正常",
+                    "credential_availability": "usable",
+                    "last_used_at": 1790961719,
+                },
+                {
+                    "id": "acct_2",
+                    "email": "b@example.com",
+                    "status_label": "正常",
+                    "credential_availability": "unavailable",
+                    "last_used_at": 1790961719,
+                },
+            ],
+            "total": 2, "page": 1, "page_size": 500,
+        }
+        with mock.patch("requests.get", return_value=_FakeResponse(payload)):
+            rows = fetch_chatgpt2api_remote_accounts(api_url="http://c2a.local", api_key="k")
+
+        by_email = {r.email: r for r in rows}
+        self.assertEqual(
+            by_email["a@example.com"].extra.get("credential_availability"), "usable",
+            "fetcher 没传播 credential_availability —— 消费方的权威信号分支不可达",
+        )
+        self.assertEqual(
+            by_email["b@example.com"].extra.get("credential_availability"), "unavailable",
+        )
+
+    def test_fetcher_propagates_access_token_status(self):
+        """同源信号 `access_token_status` 一并带上（对比页/诊断用）。"""
+        from services.panel_comparison import fetch_chatgpt2api_remote_accounts
+
+        payload = {
+            "items": [
+                {
+                    "id": "acct_1",
+                    "email": "a@example.com",
+                    "status_label": "正常",
+                    "access_token_status": "expiring",
+                    "credential_availability": "usable",
+                    "last_used_at": 1790961719,
+                },
+            ],
+            "total": 1, "page": 1, "page_size": 500,
+        }
+        with mock.patch("requests.get", return_value=_FakeResponse(payload)):
+            rows = fetch_chatgpt2api_remote_accounts(api_url="http://c2a.local", api_key="k")
+
+        self.assertEqual(rows[0].extra.get("access_token_status"), "expiring")
+
+    def test_recoverable_keeps_the_label_category(self):
+        """`recoverable`（AT 失效但 RT 可救）→ 参考实现保持正常分类（面板将自动
+        刷新，无需人工干预）；异常标签仍然优先（abnormal 覆盖 recoverable）。"""
+        from services.panel_status_sync import classify_remote_status
+
+        recoverable = RemoteAccount(
+            email="a@x.com", platform="chatgpt", status="正常",
+            extra={"credential_availability": "recoverable"},
+        )
+        self.assertEqual(
+            classify_remote_status("chatgpt2api", recoverable), "active",
+            "recoverable 应落到标签分类（正常 → active），与参考实现的分类语义一致",
+        )
+
+        recoverable_abnormal = RemoteAccount(
+            email="a@x.com", platform="chatgpt", status="异常",
+            extra={"credential_availability": "recoverable"},
+        )
+        self.assertEqual(
+            classify_remote_status("chatgpt2api", recoverable_abnormal), "invalid",
+            "异常标签优先于 recoverable（参考实现：disabled/abnormal 先判）",
+        )
+
+    def test_limited_and_abnormal_labels_map(self):
+        """参考实现的两个分类（实测存在）：限流 / 异常。"""
+        from services.panel_status_sync import classify_remote_status
+
+        limited = RemoteAccount(email="a@x.com", platform="chatgpt", status="限流", extra={})
+        self.assertEqual(classify_remote_status("chatgpt2api", limited), "limited")
+
+        abnormal = RemoteAccount(email="a@x.com", platform="chatgpt", status="异常", extra={})
+        self.assertEqual(classify_remote_status("chatgpt2api", abnormal), "invalid")
+
+    def test_status_end_to_end_uses_availability(self):
+        """端到端：fetcher 输出的行喂给 classify —— unavailable 判 invalid（不再看标签）。"""
+        from services.panel_comparison import fetch_chatgpt2api_remote_accounts
+        from services.panel_status_sync import classify_remote_status
+
+        payload = {
+            "items": [
+                {
+                    "id": "acct_1",
+                    "email": "a@example.com",
+                    "status_label": "正常",  # 标签骗人：凭据其实不可用
+                    "credential_availability": "unavailable",
+                    "last_used_at": 1790961719,
+                },
+            ],
+            "total": 1, "page": 1, "page_size": 500,
+        }
+        with mock.patch("requests.get", return_value=_FakeResponse(payload)):
+            rows = fetch_chatgpt2api_remote_accounts(api_url="http://c2a.local", api_key="k")
+
+        self.assertEqual(
+            classify_remote_status("chatgpt2api", rows[0]), "invalid",
+            "credential_availability 没被消费 —— 凭据不可用的账号被判成正常",
+        )
 
 
 class AutoUploadWiringTests(unittest.TestCase):

@@ -286,6 +286,10 @@ class ChatGPTPlatform(BasePlatform):
                 result.error_message = (
                     f"登录流程拿到 AT 但未通过校验（{verify_message}）"
                 )
+                # 封禁结论对称带回（复审建议）：登录链若同时认出封禁措辞
+                # （banned-wording 异常与吸收到的 AT 并存的矛盾输入），
+                # 别在未校验分支丢掉 —— 与失败分支同口径。
+                result.banned = bool(login_result.banned)
                 if login_result.strategy:
                     result.strategy = login_result.strategy
                 log(f"[登录刷新] {result.error_message}")

@@ -1165,6 +1165,16 @@ def fetch_chatgpt2api_remote_accounts(
                         or item.get("enabled") is False
                         or str(item.get("status") or "").strip()
                         in _CHATGPT2API_DISABLED_STATUSES,
+                        # 凭据生命周期标签（yukkcat 变体实测返回，比中文
+                        # status_label 更权威）：usable / recoverable / unavailable。
+                        # 消费方 `panel_status_sync.classify_remote_status` 读它 ——
+                        # 不传播的话那个分支在生产上永远不可达（复审发现）。
+                        "credential_availability": str(
+                            item.get("credential_availability") or ""
+                        ).strip(),
+                        "access_token_status": str(
+                            item.get("access_token_status") or ""
+                        ).strip(),
                     },
                 )
             )

@@ -35,7 +35,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Mapping, Optional
 
 #: 临期判定：剩余 ≤ 24h 视为「临期」（与 `chatgpt_token_lifecycle` 的
 #: `ACCESS_TOKEN_EXPIRING_SKEW_SECONDS` 同口径）。
@@ -167,17 +167,39 @@ def plan_auto_refresh(
     return AutoRefreshPlan(action="schedule", at=next_at, state=new_state)
 
 
+def _access_token_of(extra: Mapping[str, Any], row: Any = None) -> str:
+    """读 AT 的统一口径：凭证注册表（规范名 + camelCase 别名）+ token 列兜底。
+
+    与同分支的其他消费者（`account_status.access_token_expired` /
+    `chatgpt_sync` / `panel_comparison_cache`）同源 —— 导入路径会把未知键
+    原样收进 extra（`api/accounts.py`），历史/导入的行可能以 `accessToken`
+    存 AT、或只在 `token` 列上（chatgpt 的 token 列镜像是 AT）。直接
+    `extra.get("access_token")` 会把这些行静默判成「无 exp」。
+    """
+    from core.credential_fields import get_credential, token_column_credential
+
+    token = get_credential(extra or {}, "access_token")
+    if token:
+        return token
+    if row is not None:
+        return token_column_credential(row, "chatgpt", "access_token")
+    return ""
+
+
 def record_auto_refresh_result(
     extra: dict[str, Any],
     *,
     ok: bool,
     now: int,
+    row: Any = None,
 ) -> dict[str, Any]:
     """把一次自动刷新的结果写回 extra（原地修改），返回新状态。
 
     - 成功：清掉计划 —— 下一次扫描按换发后的新 exp 重排；
     - 失败：attempts+1 + 退避（1h → 6h）；达 `MAX_ATTEMPTS` 置 `disabled`
       （同一 AT 周期内不再尝试）。
+
+    `row` 可选传入（token 列兜底读 AT 用）；不传只从 extra 读。
     """
     if ok:
         extra.pop(AUTO_REFRESH_STATE_KEY, None)
@@ -185,7 +207,7 @@ def record_auto_refresh_result(
 
     from services.chatgpt_token_lifecycle import decode_jwt_claims
 
-    claims = decode_jwt_claims(extra.get("access_token"))
+    claims = decode_jwt_claims(_access_token_of(extra, row))
     for_exp = _safe_int(claims.get("exp"))
 
     state = _state_from_extra(extra)
@@ -357,7 +379,7 @@ def run_auto_refresh_pass(
         summary["scanned"] += 1
         extra = row.get_extra()
 
-        lifecycle = project_access_token_lifecycle(extra.get("access_token"))
+        lifecycle = project_access_token_lifecycle(_access_token_of(extra, row))
         expires_at = lifecycle.get("expires_at")
 
         plan = plan_auto_refresh(
@@ -440,7 +462,7 @@ def run_auto_refresh_pass(
                 fresh_extra = fresh.get_extra()
                 fresh_status = str(fresh.status or "")
 
-            fresh_lc = project_access_token_lifecycle(fresh_extra.get("access_token"))
+            fresh_lc = project_access_token_lifecycle(_access_token_of(fresh_extra, fresh))
             fresh_plan = plan_auto_refresh(
                 fresh_extra,
                 expires_at=fresh_lc.get("expires_at"),
@@ -478,7 +500,7 @@ def run_auto_refresh_pass(
                 row = s.get(AccountModel, account_id)
                 if row is not None:
                     extra = row.get_extra()
-                    state = record_auto_refresh_result(extra, ok=ok, now=now_s)
+                    state = record_auto_refresh_result(extra, ok=ok, now=now_s, row=row)
                     row.set_extra(extra)
                     s.add(row)
                     s.commit()

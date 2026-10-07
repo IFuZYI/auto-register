@@ -40,12 +40,16 @@ def select_backfill_targets(
     email: str = "",
     status: str = "",
     plus_status: str = "",
+    created_at_start: Optional[datetime] = None,
+    created_at_end: Optional[datetime] = None,
     only_missing_rt: bool = True,
 ) -> tuple[list[AccountModel], list[int]]:
     """挑出要补 RT 的号，返回 ``(账号列表, 找不到的 id)``。
 
     ``only_missing_rt`` 是默认行为：已经有 RT 的号再跑一遍纯属给 OpenAI 送风控
     素材。想强制重拿（比如怀疑旧 RT 失效）才关掉它。
+
+    `created_at_start/end` 与列表接口的日期筛选同口径（显示与执行一致）。
     """
     return select_chatgpt_accounts(
         session,
@@ -54,6 +58,8 @@ def select_backfill_targets(
         email=email,
         status=status,
         plus_status=plus_status,
+        created_at_start=created_at_start,
+        created_at_end=created_at_end,
         keep=account_missing_rt if only_missing_rt else None,
     )
 

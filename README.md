@@ -12,7 +12,7 @@
 ## 目录
 
 - [核心功能](#核心功能)
-- [快速开始](#快速开始)
+- [部署方式](#部署方式)
 - [使用教程](#使用教程)
 - [界面导览](#界面导览)
 - [常见问题排查](#常见问题排查)
@@ -37,29 +37,106 @@
 平台专项能力（ChatGPT 注册协议与 Token 方案、Grok 浏览器路径、面板对接细节、
 导出格式清单）见 [功能详解](docs/FEATURES.md)。
 
-## 快速开始
+## 部署方式
 
-### 1. 创建并激活 Python 环境
+提供四种部署方式，按场景选择：
+
+| 方式 | 适合场景 | 需要 |
+| --- | --- | --- |
+| [Docker Compose（推荐）](#方式一docker-compose推荐) | 服务器长期运行、要持久化与自动重启 | Docker + Compose |
+| [Docker 单容器](#方式二docker-单容器) | 已有编排（1Panel / Portainer / 宝塔），或想手动控制参数 | Docker |
+| [裸机部署](#方式三裸机部署) | 本机开发、无 Docker 环境、需要改代码即跑 | Python 3.12+ / Node |
+| [开发模式](#方式四开发模式前端热更新) | 改前端代码要热更新 | 上述 + Node 18+ |
+
+> 无论哪种方式，**对外暴露前先设登录密码**（见[使用教程](#1-设置登录密码对外暴露前必做)）。
+> 完整环境变量、数据目录、反向代理要点见 [部署与配置](docs/DEPLOYMENT.md)。
+
+### 方式一：Docker Compose（推荐）
+
+```bash
+git clone https://github.com/IFuZYI/auto-register.git Register && cd Register
+cp .env.example .env              # 可选：按需改端口 / 数据目录 / 镜像源
+docker compose up -d --build      # 首次构建较慢（下载依赖 + 浏览器）
+docker compose logs -f app        # 看启动日志
+```
+
+启动后访问 <http://localhost:8000>。常用管理命令：
+
+```bash
+docker compose ps                 # 状态（含 healthcheck）
+docker compose restart            # 重启
+docker compose down               # 停止（数据保留在 ./data）
+docker compose up -d --build      # 更新代码后重建
+```
+
+要点：
+
+- **数据持久化**：所有运行数据（库 / 密钥 / 日志）在宿主机的 `./data`（由
+  `APP_RUNTIME_BIND` 可改）—— 备份/迁移就是拷这一个目录，或直接用界面里的
+  「全局配置 → 数据迁移」。
+- **端口**：`APP_PORT_BIND`（默认 `8000`）与 `SOLVER_PORT_BIND`（默认只绑本机
+  `127.0.0.1:8889`）可在 `.env` 里改，例 `APP_PORT_BIND=127.0.0.1:8000`
+  只绑本机交给反向代理。
+- **受限网络**：Docker Hub 不可达时在 `.env` 里把 `NODE_IMAGE` / `PYTHON_IMAGE`
+  换成可达镜像源再构建（模板里有示例）。
+- 面板（CPA / Sub2API / grok2api / chatgpt2api）需**自行部署在别处**，
+  本应用不安装、不启动它们。
+
+### 方式二：Docker 单容器
+
+不用 Compose、由其他编排工具管理时，直接 `docker run`：
+
+```bash
+# 1) 构建（在仓库根执行）
+docker build -t account-manager:latest .
+
+# 2) 运行
+docker run -d \
+  --name account-manager \
+  --init \
+  --restart unless-stopped \
+  -p 8000:8000 \
+  -v "$(pwd)/data:/runtime" \
+  -e DATA_DIR=/runtime \
+  -e CREDENTIAL_ENCRYPTION_KEY_FILE=/runtime/secrets/credential_key \
+  -e APP_ENABLE_SOLVER=1 \
+  -e SOLVER_BIND_HOST=0.0.0.0 \
+  -e LOCAL_SOLVER_URL=http://127.0.0.1:8889 \
+  account-manager:latest
+```
+
+- **`--init`**：容器 PID 1 需要 init 转发信号 —— 镜像 ENTRYPOINT 已用 `tini`
+  包裹，`--init` 只是双保险（compose 对应 `init: true`）。
+- **`-v ...:/runtime` 必须加**：不挂卷则每次重建容器数据全丢，且凭据加密密钥
+  重新生成会让库里已加密的凭据全部解不开。
+- 需要应用变量（`OPENAI_*` 等）时加 `--env-file .env`（文件格式与 compose 通用）。
+
+### 方式三：裸机部署
+
+#### 1. 创建并激活 Python 环境
 
 ```bash
 python -m venv .venv && . .venv/bin/activate
 # 或 conda create -n account-manager python=3.12 -y && conda activate account-manager
 ```
 
-### 2. 安装后端依赖
+#### 2. 安装后端依赖
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### 3. 安装浏览器相关依赖
+#### 3. 安装浏览器相关依赖
 
 ```bash
 python -m playwright install chromium
 python -m camoufox fetch
 ```
 
-### 4. 安装并构建前端
+> 升级过 camoufox 包（pip 装新版）之后**必须重跑一次 `python -m camoufox fetch`** ——
+> 每个 camoufox 包版本钉死配套的浏览器 build。
+
+#### 4. 安装并构建前端
 
 ```bash
 cd frontend
@@ -70,17 +147,22 @@ cd ..
 
 构建完成后，静态资源输出到 `./static`。
 
-### 5. 启动项目
+#### 5. 启动
 
 ```bash
 python main.py
 ```
 
-启动后默认访问 <http://localhost:8000>。
+启动后默认访问 <http://localhost:8000>（前端由 FastAPI 直接托管，不是 `5173`）。
 
-> 已经执行过 `npm run build` 时，前端由 FastAPI 直接托管，所以访问的是 `8000`，不是 `5173`。
+后台长跑建议用进程管理器或 systemd 单元（手工 `nohup` 也可以，但**不要**用
+`pkill -f main.py` 停服 —— 参考 [维护手册](docs/MAINTENANCE.md) 的重启约定）：
 
-### 前端开发模式
+```bash
+nohup python main.py > data/logs/server.log 2>&1 &
+```
+
+### 方式四：开发模式（前端热更新）
 
 终端 1 启动后端（`python main.py`），终端 2：
 
@@ -91,7 +173,8 @@ npm run dev
 
 访问 <http://localhost:5173>。Vite 会把 `/api` 请求代理到本地后端 `http://localhost:8000`。
 
-Docker 部署、环境变量与 Turnstile Solver 说明见 [部署与配置](docs/DEPLOYMENT.md)。
+Docker 部署细节、环境变量清单与 Turnstile Solver 说明见 [部署与配置](docs/DEPLOYMENT.md)。
+
 
 ## 使用教程
 
@@ -150,7 +233,7 @@ Docker 部署、环境变量与 Turnstile Solver 说明见 [部署与配置](doc
 
 | 一级菜单 | 二级 | 用途 |
 | --- | --- | --- |
-| **仪表盘** | — | 账号总览与分布（总数 / 正常 / 失效） |
+| **仪表盘** | — | 账号总览与分布（总账号数 / 正常 / 失效（含过期）/ 禁用四卡） |
 | **任务运行** | — | 进行中与已完成的任务，实时日志流 |
 | **平台管理** | ChatGPT / Grok | 按平台的账号列表、详情、导入导出、批量操作、注册弹窗 |
 | **邮箱服务** | iCloud 隐私邮箱（本地）/ Outlook（本地） | 各邮箱来源的号池维护 |
@@ -246,7 +329,7 @@ Sentinel PoW 走 Node 沙箱。
 | 文档 | 回答的问题 |
 | --- | --- |
 | [docs/FEATURES.md](docs/FEATURES.md) | 平台能力、邮箱服务、面板对接、导出格式的完整说明 |
-| [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | Docker 部署、环境变量、数据目录与一键迁移 |
+| [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | Docker Compose / 单容器部署、环境变量、数据目录与一键迁移 |
 | [docs/MAINTENANCE.md](docs/MAINTENANCE.md) | 改完代码要同步动哪些文件、升级步骤、验证门禁 |
 | [docs/EXTENDING.md](docs/EXTENDING.md) | 新增平台 / 注册流程 / 邮箱渠道怎么写 |
 | [docs/API_REFERENCE.md](docs/API_REFERENCE.md) | 每个接口的请求 / 响应形状 |

@@ -241,11 +241,16 @@ def _extract_oai_device_id(account: Any) -> str:
     保证「探测用的设备」与「登录用的设备」是同一个；都没有时才按邮箱
     派生固定值 —— 同一个号每次检测都是同一个 device，比每次随机更像
     正常客户端。
+
+    `getattr(account, "cookies", "")` 兜底：重构前这里就支持 duck-typed
+    对象（如 `_SyncAccount`）把 cookies 挂在对象属性上（复审发现）。
     """
     from platforms.chatgpt.device_id import resolve_device_id
 
     extra = getattr(account, "extra", {}) or {}
     resolved = resolve_device_id(extra)
+    if not resolved:
+        resolved = resolve_device_id({"cookies": getattr(account, "cookies", "")})
     if resolved:
         return resolved
     email = str(getattr(account, "email", "") or "").strip().lower()

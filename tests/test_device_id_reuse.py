@@ -476,5 +476,35 @@ class ConvergenceTests(unittest.TestCase):
         self.assertEqual(out.device_id, "did-7")
 
 
+class StatusProbeDeviceIdTests(unittest.TestCase):
+    """探测链的设备标识读取（复审发现：重构丢过 `.cookies` 属性兜底）。
+
+    重构前 `_extract_oai_device_id` 支持 duck-typed 对象把 cookies 挂在
+    对象属性上（`getattr(account, "cookies", "")`）；切到 `resolve_device_id`
+    时这层被丢掉 —— 这类对象会退到「按邮箱派生 uuid5」，探测设备与登录
+    设备不再一致（docstring 的承诺失守）。
+    """
+
+    def test_cookies_attribute_is_honoured(self):
+        from platforms.chatgpt.status_probe import _extract_oai_device_id
+
+        class _Duck:
+            email = "user@example.com"
+            extra: dict = {}
+            cookies = "a=1; oai-did=duck-device; b=2"
+
+        self.assertEqual(_extract_oai_device_id(_Duck()), "duck-device")
+
+    def test_field_still_wins_over_attribute(self):
+        from platforms.chatgpt.status_probe import _extract_oai_device_id
+
+        class _Duck:
+            email = "user@example.com"
+            extra = {"device_id": "field-device"}
+            cookies = "a=1; oai-did=duck-device"
+
+        self.assertEqual(_extract_oai_device_id(_Duck()), "field-device")
+
+
 if __name__ == "__main__":
     unittest.main()

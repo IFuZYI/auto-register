@@ -1,9 +1,10 @@
 """平台操作 API - 通用接口，各平台通过 get_platform_actions/execute_action 实现"""
+from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import Session, select
 from pydantic import BaseModel
 import json
-from typing import Any
+from typing import Any, Optional
 from core.db import AccountModel, platform_session_from_path
 from core.registry import get
 from core.base_platform import RegisterConfig
@@ -27,6 +28,9 @@ class BatchActionRequest(BaseModel):
     email: str = ""
     status: str = ""
     plus_status: str = ""
+    # 日期筛选与列表接口同口径（「处理当前筛选的 N 个账号」的 N 包含它们）。
+    created_at_start: Optional[datetime] = None
+    created_at_end: Optional[datetime] = None
     params: dict = {}
 
 
@@ -325,6 +329,10 @@ def _resolve_batch_accounts(platform: str, body: BatchActionRequest, session: Se
         query = query.where(AccountModel.status == body.status)
     if body.email:
         query = query.where(AccountModel.email.contains(body.email))
+    if body.created_at_start is not None:
+        query = query.where(AccountModel.created_at >= body.created_at_start)
+    if body.created_at_end is not None:
+        query = query.where(AccountModel.created_at <= body.created_at_end)
 
     rows = session.exec(query).all()
     if body.plus_status:

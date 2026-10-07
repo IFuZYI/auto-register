@@ -181,6 +181,34 @@ class RefreshAccountFallbackTests(unittest.TestCase):
         self.assertFalse(result.success)
         self.assertEqual(result.error_message, "invalid_grant")
 
+    def test_oauth_banned_verdict_is_not_dropped_for_session_result(self):
+        """OAuth 端点认出封禁 → 即使 session 有个未校验的 AT，封禁结论优先。
+
+        复审发现（2026-10-07）：`session_result` 存在时直接返回它，会把
+        OAuth 的 `banned=True` 丢掉 —— 账号被判成普通失败，还会再走一次
+        登录链。封禁是终局结论，必须保留。
+        """
+        manager = _manager_with_session(FakeSession(FakeResponse(401)))
+        manager.refresh_by_session_token = lambda *_: TokenRefreshResult(  # type: ignore[method-assign]
+            success=True, access_token="session-junk"
+        )
+        manager.refresh_by_oauth_token = lambda **_: TokenRefreshResult(  # type: ignore[method-assign]
+            success=False, banned=True, error_message="账号已封禁"
+        )
+        result = manager.refresh_account(
+            self._account(session_token="st", refresh_token="rt")
+        )
+        self.assertTrue(result.banned, "OAuth 的封禁结论被 session 结果吞掉了")
+        self.assertFalse(result.success)
+
+    def test_oauth_banned_without_session_still_banned(self):
+        manager = _manager_with_session(FakeSession(FakeResponse(401)))
+        manager.refresh_by_oauth_token = lambda **_: TokenRefreshResult(  # type: ignore[method-assign]
+            success=False, banned=True, error_message="账号已封禁"
+        )
+        result = manager.refresh_account(self._account(refresh_token="rt"))
+        self.assertTrue(result.banned)
+
 
 class SessionBannedDetectionTests(unittest.TestCase):
     """session 端点对已停用账号会在响应体里写明「号没了」的措辞 —— 必须读出来。
@@ -418,6 +446,38 @@ class LoginChainVerificationTests(unittest.TestCase):
         self.assertEqual(
             out.strategy, "session",
             "登录链未通过校验时把刷新链的 strategy 覆盖成空了",
+        )
+
+    def test_unverified_login_at_preserves_the_banned_verdict(self):
+        """未校验分支的封禁结论对称带回（复审发现，2026-10-07）。
+
+        矛盾输入：登录链同时给出 `banned=True`（封禁措辞异常）与一个被吸收
+        的 AT（AT 校验又不过）—— 未校验分支此前只复制 strategy，把封禁丢了，
+        账号被判普通失败、还会再进重试队列。封禁是终局结论，与失败分支同口径。
+        """
+        from platforms.chatgpt.login_refresh import LoginRefreshResult
+        from platforms.chatgpt.token_refresh import TokenRefreshResult
+
+        result = TokenRefreshResult(success=True, access_token="stale", verified=False)
+        login_result = LoginRefreshResult(
+            success=True, access_token="fresh-at", banned=True,
+            error_message="deleted or deactivated", strategy="password_2fa",
+        )
+        with patch(
+            "services.chatgpt_otp_mailbox.resolve_otp_mail_provider",
+            return_value=(None, "不在号池里"),
+        ), patch(
+            "platforms.chatgpt.login_refresh.LoginAccessTokenRefresher"
+        ) as refresher_cls, patch(
+            "platforms.chatgpt.token_refresh.TokenRefreshManager"
+        ) as verifier_cls:
+            refresher_cls.return_value.run.return_value = login_result
+            verifier_cls.return_value.verify_access_token.return_value = (False, "HTTP 401")
+            out = self._platform()._refresh_via_login(self._account(), result)
+
+        self.assertTrue(
+            out.banned,
+            "未校验分支把登录链的封禁结论丢了 —— 账号会被当成普通失败重试",
         )
 
     def test_failed_login_keeps_refresh_strategy(self):

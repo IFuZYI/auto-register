@@ -68,6 +68,23 @@ def _effective_lines(name: str) -> list[str]:
 # ── healthcheck ─────────────────────────────────────────────────────────────
 
 
+@pytest.mark.parametrize("name", DOCKERFILES)
+def test_dockerfiles_declare_healthcheck(name):
+    """镜像里也要有 HEALTHCHECK：裸 `docker run`（不走 compose）时 compose 的
+    healthcheck 不生效 —— 用户要求 README 提供单容器部署方式，那条路上没有
+    健康探测，`docker ps` 只显示 running，进程挂死（HTTP 无响应）看不出来。
+    """
+    joined = _joined(name)
+    assert re.search(r"^HEALTHCHECK\s", _text(name), re.MULTILINE), (
+        f"{name} 缺少 HEALTHCHECK —— 裸 docker run 时无法看出服务是否真的可用"
+    )
+    # 探测必须走豁免鉴权的端点（设了登录密码后 /api/config 会 401 导致永远 unhealthy）
+    assert "/api/auth/status" in joined, (
+        f"{name} 的 HEALTHCHECK 应探测豁免鉴权的 /api/auth/status，"
+        "否则设了登录密码后永远 unhealthy"
+    )
+
+
 @pytest.mark.parametrize("name", COMPOSE_FILES)
 def test_compose_declares_healthcheck(name):
     """compose 要有 healthcheck：docker ps 要能看出「服务是否真的可用」。"""

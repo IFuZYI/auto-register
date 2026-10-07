@@ -242,6 +242,22 @@ class GrokPlatform(BasePlatform):
         self.last_probe_detail = detail
         return bool(detail.get("usable"))
 
+    def apply_probe_status_policy(self, account, *, detail: dict) -> str:
+        """grok 的探测结论 → 状态落库（`BasePlatform` 钩子的 grok 实现）。
+
+        延迟 import services（platforms 允许依赖 services；core 不允许 ——
+        `core/scheduler.py` 经这个钩子调用，就不再反向依赖）。
+        """
+        from services.grok_account_state import apply_grok_status_policy
+
+        detail = detail or {}
+        return apply_grok_status_policy(
+            account,
+            probe_code=detail.get("code"),
+            probe_summary=str(detail.get("summary") or ""),
+            sso_rejected=(detail.get("sso_status") == "rejected"),
+        )
+
     def probe_account_detail(self, account: Account) -> dict:
         """探测账号并返回判定细节（不落库）。
 

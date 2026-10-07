@@ -469,7 +469,7 @@ class SignupMixin:
             if self.resend_otp("https://auth.openai.com/email-verification"):
                 return True
             # resend 失败兜底: send_otp 新建 challenge (旧 state 已坏, 不得不重启)
-            logger.warning(f"已有账号 resend 失败, 兜底 send_otp 新建 challenge (邮件 X 将失效)")
+            logger.warning("已有账号 resend 失败, 兜底 send_otp 新建 challenge (邮件 X 将失效)")
             try:
                 self.send_otp(referer="https://auth.openai.com/email-verification")
                 return True

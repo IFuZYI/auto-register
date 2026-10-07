@@ -264,6 +264,56 @@ def test_batch_upload_grok2api_rejects_unknown_account():
         assert "不存在" in (body["items"][0].get("message") or ""), body
 
 
+class BatchActionsDateFilterTests(unittest.TestCase):
+    """批量动作端点的日期筛选（`_resolve_batch_accounts`，复审发现 2026-10-07）。
+
+    同「显示与执行一致」缺陷：同步本地状态 / 检测 Plus 试用这类批量动作的
+    显示计数包含日期筛选，`all_filtered` 请求也必须按同一组条件选号 ——
+    否则设了日期范围时实际处理数大于显示数。
+    """
+
+    def setUp(self):
+        from datetime import datetime, timedelta, timezone
+
+        from sqlmodel import Session, delete
+
+        from core.db import AccountModel, engine
+
+        self.now = datetime.now(timezone.utc)
+        self.old = self.now - timedelta(days=30)
+
+        def _mk(email, created_at):
+            m = AccountModel(platform="chatgpt", email=email, password="pw", status="registered")
+            m.set_extra({"session_token": "st"})
+            m.created_at = created_at
+            return m
+
+        with Session(engine) as session:
+            session.exec(delete(AccountModel))
+            session.add_all([_mk("old@example.com", self.old), _mk("new@example.com", self.now)])
+            session.commit()
+
+    def test_batch_actions_honour_date_filter(self):
+        from datetime import timedelta
+
+        from sqlmodel import Session
+
+        from api.actions import BatchActionRequest, _resolve_batch_accounts
+        from core.db import engine
+
+        start = self.now - timedelta(days=1)
+        body = BatchActionRequest(all_filtered=True, created_at_start=start)
+        with Session(engine) as session:
+            accounts, missing = _resolve_batch_accounts("chatgpt", body, session)
+
+        emails = sorted(a.email for a in accounts)
+        self.assertEqual(
+            emails, ["new@example.com"],
+            "批量动作端点未应用日期筛选 —— 显示 1 个却会处理 2 个",
+        )
+        self.assertEqual(missing, [])
+
+
 def test_runtime_endpoint_reports_the_loaded_code_version():
     """`/api/runtime` 要报出**进程启动时加载的那版代码**。
 

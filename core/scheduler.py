@@ -197,16 +197,11 @@ class Scheduler:
                                 if fresh.status in ("expired", "invalid"):
                                     fresh.status = "registered"
                             elif fresh.platform == "grok":
-                                # 与 _do_check 同款：grok 用探测细节区分 过期/失效/禁用
-                                from services.grok_account_state import apply_grok_status_policy
-
+                                # 与 _do_check 同款：grok 用探测细节区分 过期/失效/禁用。
+                                # 走插件钩子（`apply_probe_status_policy`）——
+                                # core 不能反向 import services（docs/EXTENDING.md）。
                                 detail = getattr(plugin, "last_probe_detail", {}) or {}
-                                apply_grok_status_policy(
-                                    fresh,
-                                    probe_code=detail.get("code"),
-                                    probe_summary=str(detail.get("summary") or ""),
-                                    sso_rejected=(detail.get("sso_status") == "rejected"),
-                                )
+                                plugin.apply_probe_status_policy(fresh, detail=detail)
                             else:
                                 fresh.status = "invalid"
                         fresh.updated_at = datetime.now(timezone.utc)

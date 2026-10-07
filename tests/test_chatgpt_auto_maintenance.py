@@ -744,5 +744,123 @@ class FrontendWiringTests(unittest.TestCase):
         )
 
 
+class CredentialReadPathTests(unittest.TestCase):
+    """自动维护模块的 AT 读取必须走凭证注册表（复审发现，2026-10-07）。
+
+    注册表的读取口径是「规范名 + camelCase 别名 + token 列兜底」：
+    导入路径（api/accounts.py）会把未知键原样收进 extra，历史/导入的行可能
+    以 `accessToken`（camelCase）存 AT；同分支的其他消费者（account_status /
+    chatgpt_sync / panel_comparison_cache）都走 `get_credential`。自动维护
+    如果直接 `extra.get("access_token")`，这些行会被静默判成「无 exp」——
+    头号功能对它们永远不排计划（skip / no_expiry），且失败写回的
+    `for_exp=0` 让死计划清理也永远清不到。
+    """
+
+    NOW = 1_000_000
+
+    def _at(self, exp):
+        import base64
+        import json
+
+        payload = base64.urlsafe_b64encode(
+            json.dumps({"exp": exp}).encode()
+        ).decode().rstrip("=")
+        return f"header.{payload}.sig"
+
+    def test_access_token_resolved_from_camel_case(self):
+        """extra 只有 accessToken（camelCase）→ 也要能读出来。"""
+        from services.chatgpt_maintenance import _access_token_of
+
+        exp = self.NOW + 10 * 3600
+        token = self._at(exp)
+        self.assertEqual(
+            _access_token_of({"accessToken": token}), token,
+            "camelCase 存的 AT 读不出 —— 自动刷新对这类账号永不生效",
+        )
+
+    def test_access_token_resolved_from_token_column(self):
+        """extra 没有 AT、只在 token 列（历史/导入形态）→ 兜底读出来。"""
+        from types import SimpleNamespace
+
+        from services.chatgpt_maintenance import _access_token_of
+
+        exp = self.NOW + 10 * 3600
+        token = self._at(exp)
+        row = SimpleNamespace(token=token)
+        self.assertEqual(
+            _access_token_of({}, row), token,
+            "token 列兜底失效 —— 仅 token 列存 AT 的账号被静默跳过",
+        )
+
+    def test_plan_schedules_camel_case_account(self):
+        """端到端口径：camelCase 存 AT → 生命周期解得出 exp → 能排计划。"""
+        from services.chatgpt_maintenance import _access_token_of, plan_auto_refresh
+        from services.chatgpt_token_lifecycle import project_access_token_lifecycle
+
+        exp = self.NOW + 10 * 3600
+        extra = {"accessToken": self._at(exp)}
+        lc = project_access_token_lifecycle(_access_token_of(extra))
+        self.assertEqual(lc.get("expires_at"), exp)
+
+        plan = plan_auto_refresh(
+            extra,
+            expires_at=lc.get("expires_at"),
+            status="registered",
+            now=self.NOW,
+            rand=lambda: 0.5,
+        )
+        self.assertEqual(
+            plan.action, "schedule",
+            "camelCase 存的 AT 被当成无 exp —— 自动刷新对它永不排计划",
+        )
+
+    def test_failure_backoff_reads_camel_case_token(self):
+        """失败写回：camelCase 存的 AT 也要解出 for_exp（不是 0）。"""
+        from services.chatgpt_maintenance import record_auto_refresh_result
+
+        exp = self.NOW + 10 * 3600
+        extra = {"accessToken": self._at(exp)}
+        state = record_auto_refresh_result(extra, ok=False, now=self.NOW)
+        self.assertEqual(
+            state["for_exp"], exp,
+            "camelCase 存的 AT 解不出 exp —— for_exp=0 会让计划永不匹配当前周期",
+        )
+
+    def test_pass_executes_camel_case_account(self):
+        """扫描执行：camelCase 存 AT 的账号也要能被排上并执行。"""
+        from sqlmodel import Session, delete
+
+        from core.db import AccountModel, engine
+        from services.chatgpt_maintenance import run_auto_refresh_pass
+
+        with Session(engine) as session:
+            session.exec(delete(AccountModel))
+            session.commit()
+
+        exp = self.NOW + 10 * 3600
+        model = AccountModel(platform="chatgpt", email="camel@example.com", password="pw", status="registered")
+        model.set_extra({
+            "accessToken": self._at(exp),
+            "chatgpt_auto_refresh": {"at": self.NOW - 5, "for_exp": exp, "attempts": 0, "disabled": False},
+        })
+        with Session(engine) as session:
+            session.add(model)
+            session.commit()
+            session.refresh(model)
+        aid = int(model.id)
+
+        calls = []
+        summary = run_auto_refresh_pass(
+            now=self.NOW,
+            execute=lambda i: calls.append(i) or {"ok": True, "data": {"refreshed": True}},
+            delay_seconds=0,
+        )
+        self.assertEqual(
+            calls, [aid],
+            "camelCase 存 AT 的账号没被排上 —— 自动刷新静默跳过整类账号",
+        )
+        self.assertGreaterEqual(summary["executed"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()

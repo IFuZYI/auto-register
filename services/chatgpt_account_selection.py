@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Callable, Iterable, Optional
 
 from sqlmodel import Session, select
@@ -41,10 +42,17 @@ def select_chatgpt_accounts(
     email: str = "",
     status: str = "",
     plus_status: str = "",
+    created_at_start: Optional[datetime] = None,
+    created_at_end: Optional[datetime] = None,
     keep: Optional[Callable[[AccountModel], bool]] = None,
     max_accounts: int = MAX_BATCH_ACCOUNTS,
 ) -> tuple[list[AccountModel], list[int]]:
-    """挑出要处理的 ChatGPT 账号，返回 ``(账号列表, 找不到的 id)``。"""
+    """挑出要处理的 ChatGPT 账号，返回 ``(账号列表, 找不到的 id)``。
+
+    `created_at_start/end` 与列表接口（`/accounts`）的日期筛选同口径 ——
+    页面显示「处理当前筛选的 N 个账号」时，N 包含日期筛选，任务也必须
+    按同一组条件选号，否则实际处理数会大于显示数。
+    """
     ids = normalize_account_ids(account_ids)
     missing_ids: list[int] = []
 
@@ -71,6 +79,10 @@ def select_chatgpt_accounts(
             query = query.where(AccountModel.status == status)
         if email:
             query = query.where(AccountModel.email.contains(email))
+        if created_at_start is not None:
+            query = query.where(AccountModel.created_at >= created_at_start)
+        if created_at_end is not None:
+            query = query.where(AccountModel.created_at <= created_at_end)
         accounts = list(session.exec(query).all())
         if plus_status:
             accounts = filter_accounts_by_plus_status(accounts, plus_status)

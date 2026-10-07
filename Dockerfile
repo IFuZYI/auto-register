@@ -92,6 +92,13 @@ EXPOSE 8000 8889
 
 VOLUME ["/runtime"]
 
+# 镜像内 HEALTHCHECK：裸 `docker run`（不走 compose）时 compose 的 healthcheck
+# 不生效，`docker ps` 只会显示 running —— 进程挂死（HTTP 无响应）看不出来。
+# 探豁免鉴权的 /api/auth/status（设了登录密码后 /api/config 会 401，永远
+# unhealthy）；start-period 给建库/加载平台留时间。
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 --start-period=30s \
+    CMD curl -fsS http://127.0.0.1:8000/api/auth/status || exit 1
+
 # ENTRYPOINT 用 tini 包裹：容器 PID 1 的职责是转发信号 + 收尸，xvfb-run
 # 自己干不了这活（作 PID 1 时卡死，见上面 tini 注释）。
 ENTRYPOINT ["/usr/bin/tini", "--", "/app/docker/entrypoint.sh"]

@@ -79,6 +79,13 @@ _STATUS_MAP: dict[str, dict[str, str]] = {
         "normal": "active",
         "正常": "active",
         "可用": "active",
+        # 参考实现（yukkcat 变体）的完整分类：正常/限流/异常/禁用。
+        # 「限流」是图片额度耗尽（账号仍可用）；「异常」是远程确认登录态
+        # 已失效 —— 映射到 invalid 让界面提示去刷新，而不是猜成 unknown。
+        "限流": "limited",
+        "limited": "limited",
+        "异常": "invalid",
+        "abnormal": "invalid",
         "disabled": "disabled",
         "已禁用": "disabled",
         "inactive": "disabled",
@@ -122,6 +129,7 @@ def classify_remote_status(panel_key: str, remote: Optional[RemoteAccount]) -> s
 #: 状态 → 界面文案（与 `build_status_update` 的 message 一起用）。
 _STATE_LABELS: dict[str, str] = {
     "active": "正常",
+    "limited": "限流",
     "disabled": "已禁用",
     "invalid": "凭证失效",
     "error": "错误",

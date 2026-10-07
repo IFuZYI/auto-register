@@ -331,6 +331,13 @@ class TokenRefreshManager:
             # 一个没通过校验的 AT（success=True + verified=False），调用方正是靠
             # 这个信号去走登录兜底。丢掉它的话，两条刷新都失败 → 报「刷新失败」→
             # 登录兜底被跳过，而那是我们最后一条拿 AT 的路。
+            #
+            # 但封禁结论优先（复审发现 2026-10-07）：OAuth 端点认出「号没了」时
+            # 直接回它 —— 否则封禁会被 session 的未校验结果吞掉，账号被判成
+            # 普通失败、还会再走一次注定失败的登录链。
+            if oauth_result.banned:
+                logger.warning("OAuth 刷新被拒：账号已封禁")
+                return oauth_result
             logger.warning(
                 "OAuth 刷新失败（%s），回看 session 结果",
                 oauth_result.error_message or "未知原因",

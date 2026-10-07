@@ -673,6 +673,8 @@ export default function Accounts() {
       if (search) body.email = search
       if (filterStatus) body.status = filterStatus
       if (filterPlusStatus) body.plus_status = filterPlusStatus
+      if (createdAtStart) body.created_at_start = createdAtStart
+      if (createdAtEnd) body.created_at_end = createdAtEnd
     }
 
     setStatusSyncLoading(loadingKey)
@@ -724,6 +726,8 @@ export default function Accounts() {
       if (search) body.email = search
       if (filterStatus) body.status = filterStatus
       if (filterPlusStatus) body.plus_status = filterPlusStatus
+      if (createdAtStart) body.created_at_start = createdAtStart
+      if (createdAtEnd) body.created_at_end = createdAtEnd
     }
 
     setBackfillRtLoading(true)
@@ -765,6 +769,8 @@ export default function Accounts() {
       if (search) body.email = search
       if (filterStatus) body.status = filterStatus
       if (filterPlusStatus) body.plus_status = filterPlusStatus
+      if (createdAtStart) body.created_at_start = createdAtStart
+      if (createdAtEnd) body.created_at_end = createdAtEnd
     }
 
     setRefreshTokenLoading(true)

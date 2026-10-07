@@ -1,10 +1,10 @@
 # 部署与配置
 
-本文覆盖 Docker 部署、环境变量与数据持久化。本地直跑（venv + npm build）看
-[README 的快速开始](../README.md#快速开始)；数据目录规范看
+本文覆盖 Docker 部署（Compose 与单容器）、环境变量与数据持久化。四种部署方式
+的入口对比看 [README 的部署方式](../README.md#部署方式)；数据目录规范看
 [DATA_DIRECTORY.md](DATA_DIRECTORY.md)；升级/迁移步骤看 [MAINTENANCE.md](MAINTENANCE.md)。
 
-## Docker 部署
+## Docker Compose 部署
 
 ```bash
 cp .env.example .env              # 可选：按需改端口 / 数据目录 / 镜像源
@@ -53,6 +53,60 @@ docker compose logs -f app        # 日志
 
 - 镜像主要覆盖主应用和本地 Turnstile Solver
 - 面板（CPA / Sub2API / grok2api / chatgpt2api）需**自行部署在别处**，本应用不安装、不启动它们
+
+## Docker 单容器部署
+
+不用 Compose（由 1Panel / Portainer / 宝塔等编排工具接管，或想手动控制参数）：
+
+```bash
+# 1) 构建（在仓库根执行）
+docker build -t account-manager:latest .
+
+# 2) 运行
+docker run -d \
+  --name account-manager \
+  --init \
+  --restart unless-stopped \
+  -p 8000:8000 \
+  -v "$(pwd)/data:/runtime" \
+  -e DATA_DIR=/runtime \
+  -e CREDENTIAL_ENCRYPTION_KEY_FILE=/runtime/secrets/credential_key \
+  -e APP_ENABLE_SOLVER=1 \
+  -e SOLVER_BIND_HOST=0.0.0.0 \
+  -e LOCAL_SOLVER_URL=http://127.0.0.1:8889 \
+  account-manager:latest
+```
+
+**三个必查项**：
+
+1. **`--init`（或依赖镜像自带 tini）**：容器 PID 1 需要 init 转发信号 ——
+   镜像 ENTRYPOINT 已用 tini 包裹，`docker run` 时再加 `--init` 是双保险
+   （compose 对应 `init: true`）。不加时 `xvfb-run` 作为 PID 1 会卡死
+   （实测 Xvfb 就绪后不向 PID 1 发 USR1，`wait` 无限阻塞）。
+2. **`-v ...:/runtime`**：不挂卷则容器重建即丢数据；且凭据加密密钥会重新
+   生成，库里已加密的凭据全部解不开（decrypt 抛 InvalidTag，无补救）。
+3. **端口**：面板 `-p 8000:8000`；Solver 默认只绑容器内，容器外不需要暴露
+   （`LOCAL_SOLVER_URL` 走容器内回环）。要对外暴露 Solver 再加
+   `-p 8889:8889`（不建议，Solver 无鉴权）。
+
+应用变量（`OPENAI_*` 等）用 `--env-file .env` 注入（文件格式与 compose 通用，
+模板见仓库根 `.env.example`）。
+
+### 1Panel / Portainer / 宝塔 接入
+
+这些工具都是「填表单 → 生成等价的 docker run / compose」：
+
+- **1Panel（Compose 方式）**：容器 → 编排 → 创建编排，粘贴
+  `docker-compose.yml` 内容；或直接指向仓库目录。`.env` 变量在编排的
+  「环境变量」面板里逐项填（`APP_PORT_BIND` / `APP_RUNTIME_BIND` 等）。
+- **1Panel（容器方式）**：容器 → 创建容器 → 镜像选构建好的
+  `account-manager:latest`，按上面 `docker run` 的映射填端口 / 卷 / 环境变量。
+- **Portainer**：Stacks → Add stack → 粘贴 compose 文件（Web editor）。
+- **宝塔**：Docker → 容器 → 创建容器，等价表单填写。
+
+> 通用原则：卷映射 `${APP_RUNTIME_BIND:-./data} → /runtime`、环境变量
+> `DATA_DIR=/runtime` 与 `CREDENTIAL_ENCRYPTION_KEY_FILE=/runtime/secrets/credential_key`
+> 是最容易漏的两项 —— 漏了前者数据不留存，漏了后者加密密钥会漂。
 
 ## 环境变量
 

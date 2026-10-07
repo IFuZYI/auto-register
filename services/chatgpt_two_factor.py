@@ -52,12 +52,16 @@ def select_two_factor_targets(
     email: str = "",
     status: str = "",
     plus_status: str = "",
+    created_at_start: Optional[datetime] = None,
+    created_at_end: Optional[datetime] = None,
     only_missing_2fa: bool = True,
 ) -> tuple[list[AccountModel], list[int]]:
     """挑出要绑 2FA 的号，返回 ``(账号列表, 找不到的 id)``。
 
     ``only_missing_2fa`` 是默认行为：库里已经有密钥的号再 enroll 一遍只会把用户
     手上的验证器废掉。手动对单个号操作时可以关掉，让它把"已绑"这个结论也跑出来。
+
+    `created_at_start/end` 与列表接口的日期筛选同口径（显示与执行一致）。
     """
     return select_chatgpt_accounts(
         session,
@@ -66,6 +70,8 @@ def select_two_factor_targets(
         email=email,
         status=status,
         plus_status=plus_status,
+        created_at_start=created_at_start,
+        created_at_end=created_at_end,
         keep=account_missing_two_factor if only_missing_2fa else None,
     )
 

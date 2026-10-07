@@ -188,7 +188,7 @@ const COLUMNS: ColumnsType<ComparisonRow> = [
         <Space size={4}>
           {row.local_id ? (
             <Tooltip title={`本地账号 id=${row.local_id}，状态 ${accountStatusMeta(row.local_status).label}`}>
-              <Tag color={row.local_status === 'banned' ? 'error' : 'default'} style={{ marginInlineEnd: 0 }}>
+              <Tag color={String(row.local_status || '').trim().toLowerCase() === 'banned' ? 'error' : 'default'} style={{ marginInlineEnd: 0 }}>
                 本地
               </Tag>
             </Tooltip>

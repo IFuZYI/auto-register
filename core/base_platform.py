@@ -238,6 +238,17 @@ class BasePlatform(ABC):
         """检测账号是否有效"""
         ...
 
+    def apply_probe_status_policy(self, account, *, detail: dict) -> str:
+        """按探测细节落账号状态（平台可覆写；返回判定理由，空串 = 没判定）。
+
+        默认 no-op。`core/scheduler.py` 的批量测活通过这个钩子让平台自己
+        决定「探测结论 → 状态」的映射 —— core 不能反向 import services
+        （docs/EXTENDING.md 的依赖方向），而各平台的落状态策略在
+        services/ 里（如 grok 的 `apply_grok_status_policy`）。
+        平台侧在方法体内延迟 import services 即可（platforms 允许依赖）。
+        """
+        return ""
+
     def get_platform_actions(self) -> list:
         """
         返回平台支持的额外操作列表，每项格式:

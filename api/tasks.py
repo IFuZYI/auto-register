@@ -97,6 +97,9 @@ class BackfillRtTaskRequest(BaseModel):
     email: str = ""
     status: str = ""
     plus_status: str = ""
+    # 日期筛选与列表接口同口径（「处理当前筛选的 N 个账号」的 N 包含它们）。
+    created_at_start: Optional[datetime] = None
+    created_at_end: Optional[datetime] = None
     only_missing_rt: bool = True
     allow_login: bool = True
     concurrency: int = 1
@@ -116,6 +119,9 @@ class Bind2faTaskRequest(BaseModel):
     email: str = ""
     status: str = ""
     plus_status: str = ""
+    # 日期筛选与列表接口同口径（「处理当前筛选的 N 个账号」的 N 包含它们）。
+    created_at_start: Optional[datetime] = None
+    created_at_end: Optional[datetime] = None
     only_missing_2fa: bool = True
     allow_login: bool = True
     concurrency: int = 1
@@ -135,6 +141,9 @@ class RefreshTokenTaskRequest(BaseModel):
     email: str = ""
     status: str = ""
     plus_status: str = ""
+    # 日期筛选与列表接口同口径（「处理当前筛选的 N 个账号」的 N 包含它们）。
+    created_at_start: Optional[datetime] = None
+    created_at_end: Optional[datetime] = None
     concurrency: int = 1
     delay_seconds: float = 5
     proxy: Optional[str] = None
@@ -304,6 +313,8 @@ def create_backfill_rt_task(req: BackfillRtTaskRequest, background_tasks: Backgr
                 email=req.email,
                 status=req.status,
                 plus_status=req.plus_status,
+                created_at_start=req.created_at_start,
+                created_at_end=req.created_at_end,
                 only_missing_rt=req.only_missing_rt,
             )
         except ValueError as exc:
@@ -357,6 +368,8 @@ def create_bind_2fa_task(req: Bind2faTaskRequest, background_tasks: BackgroundTa
                 email=req.email,
                 status=req.status,
                 plus_status=req.plus_status,
+                created_at_start=req.created_at_start,
+                created_at_end=req.created_at_end,
                 only_missing_2fa=req.only_missing_2fa,
             )
         except ValueError as exc:
@@ -413,6 +426,8 @@ def create_refresh_token_task(req: RefreshTokenTaskRequest, background_tasks: Ba
                 email=req.email,
                 status=req.status,
                 plus_status=req.plus_status,
+                created_at_start=req.created_at_start,
+                created_at_end=req.created_at_end,
             )
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc

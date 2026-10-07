@@ -297,7 +297,7 @@ register_job("my_job", interval_seconds=lambda: ..., runner=lambda: ...)
 | `test_secret_config_contract.py` | 口令「输入后不可查看」的前后端约定 | 新口令字段没进打码清单 / 忘了摘 `_set` 标记 |
 | `test_panel_registry.py` | 面板注册表形状（key/url_key 唯一性、github 链接） | 面板字段改名、url_key 撞车 |
 | `test_panel_management_actions.py` | 面板动作存在性、`scope`、多平台接线 | 新面板没补 `_rows_for()`；动作漏标 scope |
-| `test_deploy_config_contract.py` | compose/Dockerfile/.env.example 的一致性 | 新增 `${VAR}` 插值却没写进 `.env.example` |
+| `test_deploy_config_contract.py` | compose/Dockerfile/.env.example 的一致性（含镜像内 `HEALTHCHECK`，裸 `docker run` 也能探活） | 新增 `${VAR}` 插值却没写进 `.env.example`；Dockerfile 漏 `HEALTHCHECK` 或探了会 401 的端点 |
 | `test_config_dedup_and_registration_modes.py` | 注册方式声明与运行时兜底一致 | 插件改了默认值没同步声明 |
 | `test_contrast_gate_contract.py` | 主题色板两套齐、preset 标签钉住 | 加新颜色没做对比度处理 |
 | `test_data_paths.py` | 数据路径默认落在 `data/` 下 | 新增路径常量写错基准 |
@@ -347,6 +347,8 @@ register_job("my_job", interval_seconds=lambda: ..., runner=lambda: ...)
 | `test_banned_upload_exclusion.py` | 上传类动作端点排除禁用账号：批量摘除并给出原因、单账号拒绝；非上传动作不受影响 |
 | `test_device_id_reuse.py` | 设备标识（oai-did）复用：三条登录链预置库里 device_id、warmup 成功后才种 cookie（失败判据不被污染）、无存量账号首次登录收敛落库 |
 | `test_annotation_resolvability.py` | `typing.get_type_hints` 可解析性：惰性注解里的未定义名（Account/Session/OutlookMailbox）会让反射工具链 NameError |
+| `test_batch_scope_consistency.py` | 批量任务「显示与执行一致」：日期筛选（created_at_start/end）从列表接口透传到选号（补 RT / 刷新 Token / 绑 2FA / 批量动作）；前端三个 all_filtered 分支带日期 |
+| `test_dependency_direction.py` | 依赖方向守卫（AST 扫描）：core 不得反向 import services（`core/registry.py` 等点名加载器除外）；平台钩子 `apply_probe_status_policy` 的存在与覆写 |
 
 ---
 

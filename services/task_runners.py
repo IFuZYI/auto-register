@@ -382,13 +382,13 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
 
 
 def _load_account_fields(account_id: int) -> Optional[dict]:
-    from api import tasks as _api  # 延迟 import：patch 打在 api.tasks 上必须被看到
     """把一行账号读成纯数据（含它注册时用的代理）。
 
     后面那几十秒网络请求期间不能占着数据库连接不放：连接池就那么几条，攥在手里
     会把面板其它请求一起拖住。代理字段也一并读出来 —— 复用账号时要优先回到
     它出生时的那个出口（见 `_run_account_batch_task` 里的代理选择）。
     """
+    from api import tasks as _api  # 延迟 import：patch 打在 api.tasks 上必须被看到
     from core.db import AccountModel, platform_session
 
     with platform_session("chatgpt") as s:
@@ -628,8 +628,8 @@ def _run_account_batch_task(
 
 
 def _run_backfill_rt(task_id: str, account_ids: list[int], req: BackfillRtTaskRequest):
-    from api import tasks as _api  # 延迟 import：patch 打在 api.tasks 上必须被看到
     """批量补 RT。逐号跑，可停可跳，进度和日志复用注册任务那套。"""
+    from api import tasks as _api  # 延迟 import：patch 打在 api.tasks 上必须被看到
     from core.config_store import config_store
     from core.db import AccountModel
     from services.chatgpt_rt_backfill import apply_backfill_result, backfill_account_data
@@ -685,13 +685,13 @@ def _run_backfill_rt(task_id: str, account_ids: list[int], req: BackfillRtTaskRe
 
 
 def _run_refresh_token(task_id: str, account_ids: list[int], req: RefreshTokenTaskRequest):
-    from api import tasks as _api  # 延迟 import：patch 打在 api.tasks 上必须被看到
     """批量刷新 Token。逐号跑，可停可跳，进度和日志复用注册任务那套。
 
     走 `refresh_token` 动作的完整链（session → OAuth → 登录兜底），
     与单账号按钮同一条路径 —— 结果落库也复用 `_apply_action_result`
     （状态策略、token 列镜像、凭证写回全在那一处）。
     """
+    from api import tasks as _api  # 延迟 import：patch 打在 api.tasks 上必须被看到
     from core.config_store import config_store
 
     base_config = config_store.get_all() or {}
@@ -763,8 +763,8 @@ def _run_refresh_token(task_id: str, account_ids: list[int], req: RefreshTokenTa
 
 
 def _run_bind_2fa(task_id: str, account_ids: list[int], req: Bind2faTaskRequest):
-    from api import tasks as _api  # 延迟 import：patch 打在 api.tasks 上必须被看到
     """批量绑 2FA。和补 RT 同一套调度，区别只在每个号跑什么。"""
+    from api import tasks as _api  # 延迟 import：patch 打在 api.tasks 上必须被看到
     from core.config_store import config_store
     from core.db import AccountModel
     from services.chatgpt_two_factor import (
