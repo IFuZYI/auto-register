@@ -151,6 +151,9 @@ def bind_account_two_factor(
             mail_provider=mail_provider,
             env_overrides={"OTP_TIMEOUT": str(_otp_timeout(config)), "WEBUI_ALLOW_LOGIN": "1"},
             on_secret=persist_secret,
+            # 设备标识复用：重登沿用库里存的 oai-did（`device_id` 在上面已
+            # 从 extra 读出，会话复用那条路也用它）。
+            device_id=device_id,
         )
 
 
@@ -163,6 +166,10 @@ def build_extra_patch(result: TwoFactorBindResult) -> dict[str, Any]:
     patch: dict[str, Any] = {}
     if result.secret:
         patch["totp_secret"] = result.secret
+    # 设备标识：慢路径重登沿用/收敛到的 oai-did，落库供后续复用
+    device_id = str(getattr(result, "device_id", "") or "").strip()
+    if device_id:
+        patch["device_id"] = device_id
     patch["chatgpt_2fa"] = {
         "bound": result.ok or result.already_bound,
         "message": result.summary(),

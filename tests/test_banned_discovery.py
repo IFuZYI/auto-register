@@ -51,6 +51,10 @@ class _FakeFlow:
         self.result = _AuthResult()
         self._login_error = login_error
         self.login_calls: list[tuple[str, str]] = []
+        self.seeded_device_ids: list[str] = []
+
+    def seed_device_id(self, device_id: str) -> None:
+        self.seeded_device_ids.append(device_id)
 
     def from_existing_credentials(self, session_token, access_token, device_id):
         if session_token or access_token:

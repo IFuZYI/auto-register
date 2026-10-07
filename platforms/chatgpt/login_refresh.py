@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any, Callable, Optional
+from typing import Callable, Optional
 
 from core.task_runtime import TaskInterruption
 from platforms.chatgpt.protocol import AuthFlow, Config, MailProvider
@@ -59,6 +59,9 @@ class LoginRefreshResult:
     banned: bool = False
     #: 走的哪条路：password_2fa / password_only / otp / unknown
     strategy: str = ""
+    #: 登录链拿到/沿用的设备标识（oai-did）。没有存量时是服务端分配的值，
+    #: 调用方应落库 —— 收敛后后续登录才有一台「稳定设备」可复用。
+    device_id: str = ""
 
     def summary(self) -> str:
         if self.success:
@@ -82,6 +85,7 @@ class LoginAccessTokenRefresher:
         mail_provider: Optional[MailProvider] = None,
         mail_unavailable_reason: str = "",
         log_fn: Optional[Callable[[str], None]] = None,
+        device_id: str = "",
     ):
         self.email = (email or "").strip()
         self.password = (password or "").strip()
@@ -93,6 +97,10 @@ class LoginAccessTokenRefresher:
         self._log_fn = log_fn
         self.log = log_fn or logger.info
         self._active_flow: Optional[AuthFlow] = None
+        # 设备标识复用（用户问题 2026-10-07「指纹能复用吗，能不能减少后续
+        # 登录封号的风险」）：沿用注册时落库的 oai-did，别让每次登录都换
+        # 一台「新设备」。空 = 库里没有，行为与之前一致。
+        self.device_id = (device_id or "").strip()
 
     # ── 主流程 ──
 
@@ -150,6 +158,9 @@ class LoginAccessTokenRefresher:
             env_overrides=self._env_overrides(),
             account_callback=self._account_callback,
         )
+        # 设备标识复用：把库里存的 oai-did 预置进 flow（seed 只记值，
+        # warmup 成功后写进 cookie）。空值时是 no-op。
+        flow.seed_device_id(self.device_id)
         if self.totp_secret:
             flow.result.totp_secret = self.totp_secret
         return flow
@@ -182,7 +193,7 @@ class LoginAccessTokenRefresher:
         if flow is None:
             return
         auth = flow.result
-        for attr in ("access_token", "session_token", "refresh_token", "id_token", "cookie_header"):
+        for attr in ("access_token", "session_token", "refresh_token", "id_token", "cookie_header", "device_id"):
             value = str(getattr(auth, attr, "") or "").strip()
             if value:
                 setattr(result, attr, value)

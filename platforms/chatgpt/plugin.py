@@ -263,6 +263,8 @@ class ChatGPTPlatform(BasePlatform):
             mail_provider=mail_provider,
             mail_unavailable_reason=mail_reason,
             log_fn=log,
+            # 设备标识复用：沿用注册时落库的 oai-did，别让登录链换「新设备」
+            device_id=str(extra.get("device_id") or ""),
         ).run()
 
         if login_result.success:
@@ -301,7 +303,7 @@ class ChatGPTPlatform(BasePlatform):
             # **只覆盖非空值**：登录链没换到 ST 时，刷新链刚轮换回来的 ST
             # 不能被冲成空串（插件按「非空才写库」落凭证，冲空 = 轮换值丢了，
             # 旧 ST 滑出窗口后账号就登不上）。
-            for attr in ("session_token", "id_token", "cookie_header"):
+            for attr in ("session_token", "id_token", "cookie_header", "device_id"):
                 value = str(getattr(login_result, attr, "") or "").strip()
                 if value:
                     setattr(result, attr, value)
@@ -314,6 +316,10 @@ class ChatGPTPlatform(BasePlatform):
         # 同样只在非空时覆盖：失败时保留刷新链的 strategy（复审建议）。
         if login_result.strategy:
             result.strategy = login_result.strategy
+        # 设备标识同样带回（失败也带）：没有存量 device_id 的账号在首次
+        # 登录时就该收敛，否则每次登录都重新拿一个服务端值。
+        if login_result.device_id:
+            result.device_id = login_result.device_id
         return result
 
     def execute_action(self, action_id: str, account: Account, params: dict) -> dict:
@@ -506,6 +512,8 @@ class ChatGPTPlatform(BasePlatform):
                 ("session_token", result.session_token),
                 ("id_token", result.id_token),
                 ("cookies", result.cookie_header),
+                # 设备标识：登录链沿用/收敛到的 oai-did 落库，后续登录复用
+                ("device_id", result.device_id),
             ):
                 text = str(value or "").strip()
                 if text:

@@ -371,6 +371,9 @@ class ChatGPTRegistrationEngine:
             mail_provider=mail_provider,
             env_overrides=self._env_overrides(),
             on_secret=self._journal_secret(flow),
+            # 设备标识复用：注册链刚用的那个 device_id（flow.result 上），
+            # 补绑重登沿用同一个，别在注册后立刻换「新设备」。
+            device_id=str(getattr(flow.result, "device_id", "") or ""),
         )
         self._record_two_factor(result)
         if result.secret:

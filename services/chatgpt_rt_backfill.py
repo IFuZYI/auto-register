@@ -130,6 +130,10 @@ def build_extra_patch(result: BackfillResult) -> dict[str, Any]:
             patch[key] = value
     if result.cookie_header:
         patch["cookies"] = result.cookie_header
+    # 设备标识：没有存量 device_id 的账号首次登录收敛到的值，落库供后续复用
+    device_id = str(getattr(result, "device_id", "") or "").strip()
+    if device_id:
+        patch["device_id"] = device_id
     if result.refresh_token:
         # 号已经有 RT 了，别再被当成 access_token_only 方案的产物
         patch["chatgpt_has_refresh_token_solution"] = True

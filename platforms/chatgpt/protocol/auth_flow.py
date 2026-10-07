@@ -128,6 +128,11 @@ class AuthFlow(
             user_agent=self._ua,
         )
         self.result = AuthResult()
+        # 设备标识复用种子（用户问题 2026-10-07「指纹能复用吗，能不能减少
+        # 后续登录封号的风险」）。登录链把库里的 device_id 经 `seed_device_id`
+        # 预置到这里；warmup 成功后写进 cookie，让整条链（ext-oai-did 参数 /
+        # auth_oauth_init 读 cookie）都用同一个设备标识。空 = 注册链，行为不变。
+        self._device_id_seed = ""
         # 可选 SMS 接码控制器（sms_provider.PhoneCallbackController 实例）
         # 命中 add-phone 时自动租手机号 + 接 SMS 验证码，否则回退到环境变量路径
         self._sms_callback = sms_callback
@@ -235,6 +240,26 @@ class AuthFlow(
 
 
 
+    def seed_device_id(self, device_id: str) -> None:
+        """预置要复用的设备标识（oai-did）——登录链专用。
+
+        用户问题（2026-10-07）：「chatgpt 是会保留指纹的吧，这个指纹能复用吗，
+        能不能减少后续登录封号的风险。」实测：服务端**保留**客户端预置的
+        oai-did（预置 A → GET chatgpt.com 返回还是 A，不覆盖）。同一个账号
+        每次登录都换一台「新设备」是要避免的风控特征，所以登录链把注册时
+        落库的 device_id 带进来。
+
+        只记值、**不种 cookie**：warmup 的判据是「cookie 到底种上没有」
+        （CF 403 只给 __cf_bm），提前种会让判据永远为真、CF 403 被误报成功、
+        重试轮换浏览器家族的逻辑失效。写进 cookie 在 warmup 成功之后
+        （见 warmup 里的 `_device_id_seed` 处理）。
+        """
+        value = (device_id or "").strip()
+        if not value:
+            return
+        self._device_id_seed = value
+        self.result.device_id = value
+
     def warmup(self) -> bool:
         """GET chatgpt.com 种全套 cookie（含 oai-did），成功返回 True。
 
@@ -326,6 +351,22 @@ class AuthFlow(
                 cookies = {}
             imp = self._fingerprint.get("impersonate", "")
             if "oai-did" in cookies:
+                # 设备标识复用：登录链预置了 device_id 时，把服务端种的
+                # （或重建会话后重种的）值改写回预置值 —— 后续 ext-oai-did
+                # 参数与 auth_oauth_init 读 cookie 都拿同一个标识，整条链
+                # 在服务端眼里始终是「同一台设备」。实测服务端保留预置值，
+                # 改写安全。注册链（无预置）原样保留服务端的值。
+                # `getattr` 兜底：测试常以 `AuthFlow.__new__` 绕过 __init__，
+                # 属性不存在时按「无预置」处理。
+                seed = getattr(self, "_device_id_seed", "")
+                if seed:
+                    try:
+                        self.session.cookies.set(
+                            "oai-did", seed, domain=".chatgpt.com"
+                        )
+                        cookies["oai-did"] = seed
+                    except Exception as exc:  # noqa: BLE001 - 改写失败不阻断 warmup
+                        logger.warning(f"设备标识改写失败（沿用服务端值）: {exc}")
                 logger.info(
                     f"chatgpt.com warmup 完成（第 {attempt + 1} 次，impersonate={imp}，"
                     f"oai-did 已种，共 {len(cookies)} 个 cookie）"

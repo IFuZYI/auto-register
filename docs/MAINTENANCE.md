@@ -345,6 +345,7 @@ register_job("my_job", interval_seconds=lambda: ..., runner=lambda: ...)
 | `test_task_kinds_and_visibility.py` | 自动维护任务可见性（有动作才建记录、空轮不建、停止/跳过接线、逐账号日志落库）+ 任务类型标签映射（真实执行 taskKinds.ts） |
 | `test_banned_signal_propagation.py` | 登录链封禁信号整链传播：探测块/发码链撞上 `deleted or deactivated` 当场终止（不被回退吞掉）；`invalid_state` 不判封禁 |
 | `test_banned_upload_exclusion.py` | 上传类动作端点排除禁用账号：批量摘除并给出原因、单账号拒绝；非上传动作不受影响 |
+| `test_device_id_reuse.py` | 设备标识（oai-did）复用：三条登录链预置库里 device_id、warmup 成功后才种 cookie（失败判据不被污染）、无存量账号首次登录收敛落库 |
 | `test_annotation_resolvability.py` | `typing.get_type_hints` 可解析性：惰性注解里的未定义名（Account/Session/OutlookMailbox）会让反射工具链 NameError |
 
 ---

@@ -61,6 +61,8 @@ class TwoFactorBindResult:
     error_message: str = ""
     #: 登录链认出「号没了」（用户要求：禁用靠登录流程发掘）。
     banned: bool = False
+    #: 设备标识（oai-did）：慢路径重登沿用/收敛到的值，落库供后续复用。
+    device_id: str = ""
 
     def summary(self) -> str:
         if self.already_bound:
@@ -120,10 +122,16 @@ def enroll_totp(
 
     activated = _activate(flow, token, code, enrollment["session_id"])
     if activated:
-        return TwoFactorBindResult(secret=secret, error_message=activated)
+        return TwoFactorBindResult(
+            secret=secret, error_message=activated,
+            device_id=str(getattr(flow.result, "device_id", "") or "").strip(),
+        )
 
     _confirm(flow, token)
-    return TwoFactorBindResult(ok=True, secret=secret, factor_id=enrollment["factor_id"])
+    return TwoFactorBindResult(
+        ok=True, secret=secret, factor_id=enrollment["factor_id"],
+        device_id=str(getattr(flow.result, "device_id", "") or "").strip(),
+    )
 
 
 def _notify_secret(on_secret: Optional[Callable[[str], None]], secret: str) -> None:
@@ -167,11 +175,15 @@ def bind_totp_via_login(
     env_overrides: Optional[dict] = None,
     sms_callback: Optional[Any] = None,
     on_secret: Optional[Callable[[str], None]] = None,
+    device_id: str = "",
 ) -> TwoFactorBindResult:
     """慢路径：新起一条 flow 重走登录正式链，拿到 access_token 再 enroll。
 
-    独立实例意味着独立 device_id + 独立指纹，批量补绑时不会几十个号共用一套
-    特征。整条链跑下来要一次 PoW，低信任新号还会被要求收一封邮件验证码。
+    独立实例意味着独立指纹；但设备标识（oai-did）要复用库里那份
+    （`device_id`）—— 同一个账号重登却换「新设备」是要避免的风控特征
+    （用户问题 2026-10-07「指纹能复用吗」）。批量补绑时指纹各异、设备标识
+    随账号，与真实用户换浏览器版本但设备不变的行为一致。
+    整条链跑下来要一次 PoW，低信任新号还会被要求收一封邮件验证码。
     """
     if not email or not password:
         return TwoFactorBindResult(error_message="缺邮箱或密码，无法重新登录绑定")
@@ -182,12 +194,22 @@ def bind_totp_via_login(
             sms_callback=sms_callback,
             env_overrides=dict(env_overrides or {}),
         )
+        flow.seed_device_id(device_id)
         access_token, error = _login_for_access_token(flow, email, password, mail_provider)
+        # 设备标识：无论成败都带回（没有存量时它是服务端收敛值，落库后
+        # 后续登录才有稳定设备可复用）。
+        flow_device_id = str(getattr(flow.result, "device_id", "") or "").strip()
         if error == _ALREADY_BOUND:
-            return TwoFactorBindResult(already_bound=True)
+            return TwoFactorBindResult(already_bound=True, device_id=flow_device_id)
         if error:
-            return TwoFactorBindResult(error_message=error, banned=looks_like_banned(error))
-        return enroll_totp(flow, access_token, on_secret=on_secret)
+            return TwoFactorBindResult(
+                error_message=error, banned=looks_like_banned(error),
+                device_id=flow_device_id,
+            )
+        result = enroll_totp(flow, access_token, on_secret=on_secret)
+        if not result.device_id:
+            result.device_id = flow_device_id
+        return result
     except Exception as exc:  # noqa: BLE001
         message = str(exc) or exc.__class__.__name__
         # 登录链在任意一步撞上「号没了」的措辞都要定性为封禁（用户要求：

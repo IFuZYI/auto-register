@@ -1,7 +1,7 @@
 import logging
 import threading
 import unittest
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta, timezone
 from unittest import mock
 
 from core.db import AccountModel
@@ -44,6 +44,10 @@ class _FakeFlow:
         self._session_error = session_error
         self.codex_calls = 0
         self.login_calls = []
+        self.seeded_device_ids: list[str] = []
+
+    def seed_device_id(self, device_id: str) -> None:
+        self.seeded_device_ids.append(device_id)
 
     def from_existing_credentials(self, session_token, access_token, device_id):
         if session_token or access_token:

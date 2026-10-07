@@ -6,9 +6,7 @@ Token 刷新模块
 from __future__ import annotations
 
 import logging
-import json
-import time
-from typing import Optional, Dict, Any, Tuple
+from typing import Optional, Any, Tuple
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
@@ -61,6 +59,9 @@ class TokenRefreshResult:
     session_token: str = ""
     id_token: str = ""
     cookie_header: str = ""
+    #: 设备标识（oai-did）：登录链沿用/收敛到的值。落库后后续登录可复用
+    #: （用户问题 2026-10-07「指纹能复用吗」）。
+    device_id: str = ""
 
 
 class TokenRefreshManager:

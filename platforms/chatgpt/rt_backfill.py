@@ -121,6 +121,8 @@ class BackfillResult:
     #: 登录链认出「号没了」（用户要求：禁用靠登录流程发掘）。
     #: 命中后不再尝试后续策略 —— 号都废了，协议重登救不回，白耗一轮风控额度。
     banned: bool = False
+    #: 设备标识（oai-did）：会话/重登沿用或收敛到的值，落库供后续复用。
+    device_id: str = ""
 
     def summary(self) -> str:
         if self.success:
@@ -245,6 +247,10 @@ class RefreshTokenBackfiller:
         self.log(f"[补RT] 会话不可用，改走协议重登: {self.email}")
         flow = self._build_flow(_LOGIN_OVERRIDES)
         self._active_flow = flow
+        # 设备标识复用：重登沿用注册时落库的 oai-did（会话复用那条路
+        # `from_existing_credentials` 已复用；这里此前没有，等于每次重登
+        # 都换一台「新设备」）。
+        flow.seed_device_id(self.device_id)
         provider = self.mail_provider or MailboxUnavailableProvider(
             self.email, self.mail_unavailable_reason
         )
@@ -314,7 +320,7 @@ class RefreshTokenBackfiller:
         才拿到 RT），谁先跑到的不该被后面的空值抹掉。
         """
         auth = flow.result
-        for attr in ("refresh_token", "access_token", "session_token", "id_token", "cookie_header"):
+        for attr in ("refresh_token", "access_token", "session_token", "id_token", "cookie_header", "device_id"):
             value = str(getattr(auth, attr, "") or "").strip()
             if value:
                 setattr(result, attr, value)

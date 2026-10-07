@@ -104,6 +104,23 @@ ChatGPT 是当前功能最完整的平台：支持注册、Token 生命周期管
 注册（蓝）、补 RT（橙）、绑 2FA（紫）、刷新 Token（绿）、自动刷新（青）、
 凭证同步（品红）。
 
+### 7. 设备标识（oai-did）复用
+
+ChatGPT 对每个浏览器会话发一个设备标识 `oai-did`（cookie + `ext-oai-did`
+参数），注册时落库到账号 `extra.device_id`。**同一账号后续登录沿用同一个
+设备标识**（用户要求 2026-10-07「指纹能复用吗，能不能减少后续登录封号的风险」）：
+
+- 三条登录链（刷新 Token 的登录兜底、补 RT 的协议重登、绑 2FA 慢路径）
+  都经 `AuthFlow.seed_device_id` 预置库里的 device_id；
+- 实测服务端**保留**客户端预置的 oai-did（预置 A → GET chatgpt.com 返回
+  还是 A）；预置后 check_proxy → warmup → get_auth_url → auth_oauth_init
+  整条链保持同一标识；
+- 没有存量 device_id 的账号（注册早于该字段落库）：首次登录拿服务端分配值
+  并**落库收敛**，此后每次登录都复用 —— 不再每次登录换一台「新设备」；
+- 预置值只在 warmup **成功后**写进 cookie（提前种会让 warmup 的「服务端是否
+  种上」判据永远为真、CF 403 被误报成功）；浏览器指纹本身（TLS/UA/CH）仍
+  逐会话随机，不跨会话复用。
+
 ## Grok 专项能力
 
 Grok 注册**只有浏览器一条路径**：x.ai 的 Cloudflare 只有 camoufox 能过，
