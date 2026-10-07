@@ -60,7 +60,6 @@ class SignupMixin:
             if resp.status_code == 403 and attempt < 2:
                 wait = (attempt + 1) * 5
                 logger.warning(f"Cloudflare 403, {wait}s 后重试 ({attempt + 1}/3)...")
-                import time
                 time.sleep(wait)
                 continue
             resp.raise_for_status()

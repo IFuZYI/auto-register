@@ -8,9 +8,7 @@ import base64
 import json
 import logging
 import re
-import time
-from typing import Optional
-from urllib.parse import parse_qs, urlencode, urljoin, urlparse, urlsplit, urlunparse
+from urllib.parse import parse_qs, urlencode, urljoin, urlparse, urlunparse
 
 from platforms.chatgpt.protocol.response_summary import describe_error
 
@@ -311,7 +309,6 @@ class RedirectMixin:
         logger.info("[9.5/10] 重新 authorize 获取 session ...")
         try:
             # 去掉 prompt=login 参数，利用已有的 auth session cookie
-            from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
             parsed = urlparse(original_auth_url)
             params = parse_qs(parsed.query, keep_blank_values=True)
             params.pop("prompt", None)
@@ -352,7 +349,6 @@ class RedirectMixin:
                             break
                         current_url = next_loc
                         if not current_url.startswith("http"):
-                            from urllib.parse import urljoin
                             current_url = urljoin(authorize_url, current_url)
                     except Exception:
                         break

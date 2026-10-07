@@ -431,16 +431,20 @@ class OutlookMailbox(BaseMailbox):
         changed = 0
         with OutlookMailbox._pop_lock:
             with mailbox_pool_session("outlook") as session:
-                rows = session.exec(
-                    select(OutlookAccountModel).where(OutlookAccountModel.id.in_(wanted))
-                ).all()
-                for row in rows:
-                    if str(getattr(row, "status", "") or "").strip().lower() != "unpooled":
-                        continue
-                    row.status = "available"
-                    row.updated_at = _utcnow()
-                    session.add(row)
-                    changed += 1
+                # SQLite 变量上限 32766：IN 查询分块（500 一批），界面全选
+                # 几千行也不会炸。与仓储层 get_many 同口径。
+                for i in range(0, len(wanted), 500):
+                    chunk = wanted[i : i + 500]
+                    rows = session.exec(
+                        select(OutlookAccountModel).where(OutlookAccountModel.id.in_(chunk))
+                    ).all()
+                    for row in rows:
+                        if str(getattr(row, "status", "") or "").strip().lower() != "unpooled":
+                            continue
+                        row.status = "available"
+                        row.updated_at = _utcnow()
+                        session.add(row)
+                        changed += 1
                 session.commit()
 
                 remaining = session.exec(

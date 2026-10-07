@@ -60,6 +60,25 @@ _UPLOAD_SYNC_WRITERS: dict[str, tuple[str, str]] = {
     "upload_chatgpt2api": ("services.chatgpt_sync", "update_account_model_chatgpt2api_sync"),
 }
 
+#: 面板凭据上传类动作 —— 禁用（banned）账号一律跳过（用户要求 2026-10-07
+#: 「禁用的不参与同步」「已封禁的没必要在面板同步凭据」）。
+#:
+#: 对比页的两个方向（`panel_push.plan_push` / `panel_sync.plan_sync`）已排除
+#: banned；动作端点（批量/单账号）是另一条路径，不排除的话直调仍会把死凭证
+#: 推给远端（远端拿死凭证刷 token、污染号池）。集合覆盖 ChatGPT 与 Grok 的
+#: 全部上传动作 —— 新增上传动作时这里要同步加。
+_UPLOAD_ACTIONS: frozenset[str] = frozenset({
+    "upload_cpa",
+    "upload_sub2api",
+    "upload_chatgpt2api",
+    "upload_grok2api",
+})
+
+
+def _is_banned_status(status: Any) -> bool:
+    """账号是否处于「禁用」状态（大小写/空白容忍）。"""
+    return str(getattr(status, "value", status) or "").strip().lower() == "banned"
+
 
 def _record_upload_sync(
     platform: str,
@@ -475,6 +494,26 @@ def execute_batch_action(
     if not accounts and not missing_ids:
         return {"total": 0, "success": 0, "failed": 0, "items": []}
 
+    # 禁用账号不参与面板凭据上传（用户要求 2026-10-07）：先摘出来，结果里
+    # 逐条给出原因（与对比页 push/sync 的 reason=banned 同口径）。
+    banned_items: list[dict[str, Any]] = []
+    if action_id in _UPLOAD_ACTIONS:
+        kept = []
+        for acc_model in accounts:
+            if _is_banned_status(acc_model.status):
+                banned_items.append(
+                    {
+                        "id": acc_model.id,
+                        "email": acc_model.email,
+                        "ok": False,
+                        "message": "账号已禁用，不参与面板凭据上传",
+                        "status": acc_model.status,
+                    }
+                )
+            else:
+                kept.append(acc_model)
+        accounts = kept
+
     if platform == "chatgpt" and action_id == "sync_cliproxyapi_status":
         batch_result = _execute_batch_cliproxy_sync(accounts, session)
         if missing_ids:
@@ -511,9 +550,9 @@ def execute_batch_action(
         session.commit()
         return batch_result
 
-    items = []
+    items = list(banned_items)
     success_count = 0
-    failed_count = 0
+    failed_count = len(banned_items)
 
     for missing_id in missing_ids:
         failed_count += 1
@@ -577,6 +616,12 @@ def execute_action(
     acc_model = session.get(AccountModel, account_id)
     if not acc_model or acc_model.platform != platform:
         raise HTTPException(404, "账号不存在")
+
+    # 禁用账号不参与面板凭据上传（用户要求 2026-10-07）——与批量端点、
+    # 对比页 push/sync 同口径。拒绝而不是静默跳过：单账号动作的调用方
+    # 需要知道这次没执行。
+    if action_id in _UPLOAD_ACTIONS and _is_banned_status(acc_model.status):
+        return {"ok": False, "error": "账号已禁用，不参与面板凭据上传"}
 
     PlatformCls = _get_platform_cls_or_404(platform)
     instance = PlatformCls(config=RegisterConfig(extra=config_store.get_all()))

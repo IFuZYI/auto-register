@@ -20,7 +20,9 @@ from platforms.chatgpt.protocol.response_summary import describe_error
 # from ..config.settings import get_settings  # removed: external dep
 # from ..database.session import get_db  # removed: external dep
 # from ..database import crud  # removed: external dep
-# from ..database.models import Account  # removed: external dep
+# 注：`Account` 曾在旧代码里从外部数据库模块 import，删除后注解里的引用
+# 变成了未定义名（惰性注解运行时不炸，但 typing.get_type_hints 会 NameError）。
+# 刷新链只依赖鸭子类型的账号对象，这里用 Any 表达「任意账号形状」。
 
 logger = logging.getLogger(__name__)
 
@@ -263,7 +265,7 @@ class TokenRefreshManager:
             logger.error(result.error_message)
             return result
 
-    def refresh_account(self, account: Account) -> TokenRefreshResult:
+    def refresh_account(self, account: Any) -> TokenRefreshResult:
         """
         刷新账号的 Token
 

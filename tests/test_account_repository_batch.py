@@ -280,3 +280,28 @@ class TestNoNPlusOne:
         account_repository.delete_many(ids)
 
         assert opened <= 2, f"打开了 {opened} 次会话，疑似 N+1"
+
+
+class TestSqlVariableLimit:
+    """SQLite 变量上限 32766：无界 IN 查询在超大 id 列表上会炸。
+
+    实测（修复前）：`export-text` 传 40000 个 id → `sqlite3.OperationalError:
+    too many SQL variables`（500）。删除接口有 1000 上限，但导出/回填接口
+    没有 —— 直接把上限压到仓储层：分块查询，调用方多大都不炸。
+    """
+
+    def test_get_many_handles_ids_beyond_sqlite_variable_limit(self, isolated_db):
+        # 33000 个 id：超过 32766 上限（其中只有 1 个真实存在）
+        existing = _add("grok", "only-one@x.ai")
+        ids = [existing] + list(range(existing + 1, existing + 33001))
+
+        rows = account_repository.get_many(ids)
+        assert [r.id for r in rows] == [existing]
+
+    def test_delete_many_handles_ids_beyond_sqlite_variable_limit(self, isolated_db):
+        existing = _add("grok", "only-one@x.ai")
+        ids = [existing] + list(range(existing + 1, existing + 33001))
+
+        deleted, not_found = account_repository.delete_many(ids)
+        assert deleted == [existing]
+        assert len(not_found) == 33000

@@ -156,3 +156,29 @@ def test_pool_summary_endpoint_exposes_unpooled(client):
 
     assert summary["unpooled"] == 1
     assert summary["total"] == 1
+
+
+def test_import_to_pool_handles_ids_beyond_sqlite_variable_limit(client):
+    """33000 个 id（超过 SQLite 变量上限 32766）不能炸。
+
+    实测（修复前）：`import_accounts_to_pool` 的 IN 查询无界 →
+    `sqlite3.OperationalError: too many SQL variables`。界面虽不会一次勾
+    33000 行，但接口不限流、脚本调用也走这条路 —— 分块后传多大都安全。
+    """
+    _import_accounts(client, "a@outlook.com----https://mailapi.icu/k?a=1\n")
+
+    from core.db import OutlookAccountModel, mailbox_pool_session
+    from core.mailboxes.channels.outlook import OutlookMailbox
+    from sqlmodel import select
+
+    with mailbox_pool_session("outlook") as session:
+        row = session.exec(select(OutlookAccountModel)).one()
+        account_id = int(row.id or 0)
+
+    # 真实 id + 33000 个不存在的 id
+    ids = [account_id] + list(range(account_id + 1, account_id + 33001))
+    result = OutlookMailbox.import_accounts_to_pool(ids)
+
+    assert result["changed"] == 1
+    assert result["skipped"] == 33000
+    assert result["remaining_unpooled"] == 0

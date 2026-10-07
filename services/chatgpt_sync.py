@@ -5,6 +5,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
+from sqlmodel import Session
+
 from core.db import AccountModel, platform_session
 from services.chatgpt_account_state import apply_chatgpt_status_policy
 

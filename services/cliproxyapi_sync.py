@@ -136,7 +136,6 @@ def _request_json(
     json_body: dict | None = None,
     params: dict[str, Any] | None = None,
 ) -> Any:
-    import requests
     import urllib3
 
     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)

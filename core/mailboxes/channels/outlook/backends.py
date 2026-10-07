@@ -12,7 +12,10 @@ class OutlookMailboxBackend(ABC):
 
     backend_name: str = ""
 
-    def __init__(self, mailbox: "OutlookMailbox"):
+    def __init__(self, mailbox: "BaseMailbox"):
+        # 注：构造时实际传的是 `OutlookMailbox`（定义在 mailbox.py，与本模块
+        # 循环引用）。注解用基类 `BaseMailbox` 表达，保证 `typing.get_type_hints`
+        # 运行时可解析（此前写 "OutlookMailbox" 未定义 → 反射工具链 NameError）。
         self.mailbox = mailbox
 
     @abstractmethod

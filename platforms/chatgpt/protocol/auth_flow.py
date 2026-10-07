@@ -10,30 +10,23 @@ authorize 链路，verifier 攥在自己手里。
 """
 import json
 import base64
-import hashlib
 import logging
 import os
 import random
 import re
-import secrets
-import subprocess
 import time
 import uuid
-from datetime import datetime
 from typing import Optional, Any
-from urllib.parse import urlparse, parse_qs, parse_qsl, urljoin, urlencode, urlunparse
 
 from platforms.chatgpt.protocol.config import Config
 from platforms.chatgpt.protocol.banned_signals import looks_like_banned
 from platforms.chatgpt.protocol.fingerprint import (
     generate_fingerprint,
-    ua_for_impersonate,
     fingerprint_for_impersonate,
     cross_family_impersonates,
-    family_impersonates,
 )
 from platforms.chatgpt.protocol.mail_provider import MailProvider
-from platforms.chatgpt.protocol.http_client import create_http_session, USER_AGENT
+from platforms.chatgpt.protocol.http_client import create_http_session
 from platforms.chatgpt.protocol.phone_flow import PhoneRegisterMixin
 from platforms.chatgpt.protocol.mixins import add_phone as __add_phone_mixin
 from platforms.chatgpt.protocol.mixins import codex as __codex_mixin
@@ -41,7 +34,6 @@ from platforms.chatgpt.protocol.mixins import redirect as __redirect_mixin
 from platforms.chatgpt.protocol.mixins import session as __session_mixin
 from platforms.chatgpt.protocol.mixins import signup as __signup_mixin
 from platforms.chatgpt.protocol.mixins import trace as __trace_mixin
-from platforms.chatgpt.protocol.response_summary import describe_error
 from platforms.chatgpt.protocol.totp import totp_now as _totp_now
 
 logger = logging.getLogger(__name__)
@@ -367,7 +359,6 @@ class AuthFlow(
                 # IP 地理联动：检测到国家码后，重新生成指纹（带时区/语言联动）
                 if country_code and country_code != self._country_code:
                     self._country_code = country_code
-                    import random
                     session_seed = id(self.session) % (2**32)
                     rng = random.Random(session_seed)
                     self._fingerprint = generate_fingerprint(rng=rng, country_code=country_code)

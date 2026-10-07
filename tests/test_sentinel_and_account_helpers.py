@@ -589,6 +589,22 @@ class SelectKeepAndLimitsTests(_SelectionCase):
     def test_default_max_is_the_module_constant(self):
         self.assertEqual(MAX_BATCH_ACCOUNTS, 1000)
 
+    def test_ids_beyond_sqlite_variable_limit_do_not_crash(self):
+        """33000 个 id（超过 SQLite 变量上限 32766）不能炸。
+
+        实测（修复前）：查询在**上限检查之前**执行 → `sqlite3.OperationalError:
+        too many SQL variables` 炸穿成 500（refresh-token 任务端点实测）。
+        修复：IN 查询分块（500 一批）。上限只统计**命中**的账号数，所以
+        33000 个 id 里只有 1 个真实账号时正常返回（不触发超限）。
+        """
+        present = self._add("only@x.ai")
+        ids = [present] + list(range(present + 1, present + 33001))
+
+        accounts, missing = self._select(account_ids=ids)
+
+        self.assertEqual([row.id for row in accounts], [present])
+        self.assertEqual(len(missing), 33000)
+
     def test_neither_ids_nor_all_filtered_raises(self):
         with self.assertRaises(ValueError) as ctx:
             self._select()

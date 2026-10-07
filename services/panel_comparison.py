@@ -961,10 +961,10 @@ def _chatgpt2api_credentials_from_item(item: dict[str, Any]) -> dict[str, Any]:
     生命周期标签），凭证得走 export 接口 —— 见 `_chatgpt2api_export_credentials`。
     """
     credentials: dict[str, Any] = {}
-    for field in ("access_token", "refresh_token", "id_token"):
-        value = str(item.get(field) or "").strip()
+    for key in ("access_token", "refresh_token", "id_token"):
+        value = str(item.get(key) or "").strip()
         if value:
-            credentials[field] = value
+            credentials[key] = value
     return credentials
 
 

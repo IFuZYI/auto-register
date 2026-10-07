@@ -1,10 +1,6 @@
 """AddPhoneMixin：ChatGPT 注册链路命中 add-phone 时的手机号兜底路径。
 
 从 3541 行的 auth_flow.py 拆出（纯搬家，方法体逐字节不变）。
-
-⚠️ `_do_sms_loop` 里保留一处**既存 bug**：`return next_url or continue_url or ""`
-中的 `continue_url` 是未定义名字（只会走 `next_url` 分支，所以从没炸过）。
-纯搬家时原样保留，不顺手修 —— 修它属于行为变更。
 """
 from __future__ import annotations
 
@@ -154,7 +150,7 @@ class AddPhoneMixin:
 
         # 用 try/finally 保证即使 for 循环抛异常，也能 release lock + 最后一次 cleanup
         try:
-            return self._do_sms_loop(ctrl)
+            return self._do_sms_loop(ctrl, continue_url=continue_url)
         finally:
             # 无论成败都释放 lock + cleanup 最后一个号（如果有）
             try:
@@ -167,8 +163,15 @@ class AddPhoneMixin:
                 pass
 
 
-    def _do_sms_loop(self, ctrl) -> str:
-        """SMS 接码循环逻辑（for 0..max_attempts）。"""
+    def _do_sms_loop(self, ctrl, *, continue_url: str = "") -> str:
+        """SMS 接码循环逻辑（for 0..max_attempts）。
+
+        `continue_url` 是进入 add-phone 分支时的当前跳转地址：validate 通过但
+        服务端响应里没给下一跳（`next_url` 为空）时作为兜底返回值。
+        此前该名字在函数里未定义 —— `return next_url or continue_url or ""`
+        一走到 `continue_url` 分支就 NameError，被 except 吞成「validate 失败」
+        （明明验证成功却通知接码平台码失败、白耗号码窗口）。
+        """
         # provider 信息（目前只支持 SmsBower）
         provider_key = (getattr(ctrl, "provider_key", "") or "").lower()
 

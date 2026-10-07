@@ -42,11 +42,19 @@ class _FacadeProxy:
     构成循环 import。模块级 `from services import sms_service` 会在包 `__init__`
     加载期炸掉，所以改用「运行时经 sys.modules 取门面」的代理 ——
     所有 provider 方法都在门面加载完成后才被调用，取到的一定是同一个模块对象。
+
+    门面尚未进 `sys.modules` 时（全新进程里直接 `import services.sms` 后
+    就调用方法，没有先 import 门面）**现场加载门面**：此时本包已完整
+    初始化，门面 body 里的 `from services.sms import ...` 不会踩到半成品。
     """
 
     @property
     def _module(self) -> ModuleType:
-        return sys.modules["services.sms_service"]
+        mod = sys.modules.get("services.sms_service")
+        if mod is None:
+            import services.sms_service as mod  # noqa: PLC0415 - 延迟加载，避免循环 import
+
+        return mod
 
     def __getattr__(self, name: str):
         return getattr(self._module, name)
@@ -60,20 +68,21 @@ _facade = _FacadeProxy()
 # 这些名字刻意不在本文件持有独立副本：
 #   * `_SMS_CACHE` 会被重新赋值 → 经 `_FacadeProxy` 动态读写门面那份。
 #   * `_cache_file` 会被测试 patch 到门面上 → 方法里改为 `_facade._cache_file()`。
-# 模块级 `__getattr__`（PEP 562）让 `providers._cache_file` / `providers._SMS_CACHE`
-# 在**读取**时也转发到门面，满足「同一对象」断言。
-_FORWARDED_TO_FACADE = frozenset({"_cache_file", "_SMS_CACHE"})
+#   * `_SMS_CACHE_LOCK` / `_SMS_VERIFY_LOCK` 同理：**不能**在模块加载期
+#     eager 读取（门面还没进 sys.modules 时 `KeyError: 'services.sms_service'`
+#     —— 实测 `import services.sms` 直接炸）。
+# 模块级 `__getattr__`（PEP 562）让 `providers._SMS_CACHE_LOCK` /
+# `providers._cache_file` / `providers._SMS_CACHE` 在**读取**时也转发到门面，
+# 满足「同一对象」断言，同时保持 import 期零依赖门面。
+_FORWARDED_TO_FACADE = frozenset(
+    {"_cache_file", "_SMS_CACHE", "_SMS_CACHE_LOCK", "_SMS_VERIFY_LOCK"}
+)
 
 
 def __getattr__(name: str):
     if name in _FORWARDED_TO_FACADE:
         return getattr(_facade, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-
-
-# 两个锁永不重新赋值 → 直接别名到门面那份即可（满足「同一对象」的测试）。
-_SMS_CACHE_LOCK = _facade._SMS_CACHE_LOCK
-_SMS_VERIFY_LOCK = _facade._SMS_VERIFY_LOCK
 
 
 @dataclass

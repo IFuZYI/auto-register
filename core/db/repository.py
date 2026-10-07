@@ -399,15 +399,24 @@ class AccountRepository:
         found: dict[int, AccountModel] = {}
         wanted_platform = platform.strip().lower()
 
+        # SQLite 变量上限 32766：id 列表超过后 IN 查询直接炸
+        # （实测 40000 个 id → OperationalError: too many SQL variables）。
+        # 分块查询，调用方传多大都安全；500 与 upsert_batch 同口径。
+        _CHUNK = 500
+
         def _collect(sess: Session, *, enforce_platform: bool) -> None:
-            q = select(AccountModel).where(AccountModel.id.in_(set(wanted)))
+            base = select(AccountModel)
             # ID 是每库自增的，同一数字在不同库里指向不同账号。指定 platform 时
             # 默认库那一步必须再按 platform 过滤，否则会取到别的平台的同 id 行。
             if enforce_platform and wanted_platform:
-                q = q.where(func.lower(AccountModel.platform) == wanted_platform)
-            for row in sess.exec(q).all():
-                # 先到先得：平台库先扫，默认库的历史行不覆盖
-                found.setdefault(int(row.id or 0), row)
+                base = base.where(func.lower(AccountModel.platform) == wanted_platform)
+            keys = sorted(set(wanted))
+            for i in range(0, len(keys), _CHUNK):
+                chunk = keys[i : i + _CHUNK]
+                q = base.where(AccountModel.id.in_(chunk))
+                for row in sess.exec(q).all():
+                    # 先到先得：平台库先扫，默认库的历史行不覆盖
+                    found.setdefault(int(row.id or 0), row)
 
         if session is not None:
             _collect(session, enforce_platform=False)
@@ -432,8 +441,9 @@ class AccountRepository:
     ) -> tuple[list[int], list[int]]:
         """按 id 批量删除，返回 `(deleted, not_found)`。
 
-        与逐个 `delete()` 的区别：每库只开一次会话、一次 IN 查询，避免
-        N+1（批量删除接口一次最多 1000 个 id）。
+        与逐个 `delete()` 的区别：每库只开一次会话、分块 IN 查询，避免
+        N+1（批量删除接口一次最多 1000 个 id；仓储层不假设调用方已限流，
+        分块到 SQLite 变量上限之下，传多大都安全）。
         """
         wanted = list(dict.fromkeys(int(v) for v in ids))
         if not wanted:
@@ -442,21 +452,31 @@ class AccountRepository:
         remaining = set(wanted)
         wanted_platform = platform.strip().lower()
 
+        # SQLite 变量上限 32766：与 get_many 同口径分块，500 一批。
+        _CHUNK = 500
+
         def _drop(sess: Session, *, enforce_platform: bool) -> None:
             if not remaining:
                 return
-            q = select(AccountModel).where(AccountModel.id.in_(remaining))
+            base = select(AccountModel)
             # 同 get_many：指定 platform 时默认库那一步要带 platform 过滤，
             # 否则 ID 撞号会删掉别的平台的账号（数据丢失，不可恢复）。
             if enforce_platform and wanted_platform:
-                q = q.where(func.lower(AccountModel.platform) == wanted_platform)
-            rows = sess.exec(q).all()
-            for row in rows:
-                remaining.discard(int(row.id or 0))
-                deleted.append(int(row.id or 0))
-                sess.delete(row)
-            if rows:
-                sess.commit()
+                base = base.where(func.lower(AccountModel.platform) == wanted_platform)
+            keys = sorted(remaining)
+            for i in range(0, len(keys), _CHUNK):
+                if not remaining:
+                    return
+                chunk = [k for k in keys[i : i + _CHUNK] if k in remaining]
+                if not chunk:
+                    continue
+                rows = sess.exec(base.where(AccountModel.id.in_(chunk))).all()
+                for row in rows:
+                    remaining.discard(int(row.id or 0))
+                    deleted.append(int(row.id or 0))
+                    sess.delete(row)
+                if rows:
+                    sess.commit()
 
         if session is not None:
             _drop(session, enforce_platform=False)

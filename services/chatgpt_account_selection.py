@@ -49,12 +49,20 @@ def select_chatgpt_accounts(
     missing_ids: list[int] = []
 
     if ids:
-        rows = session.exec(
-            select(AccountModel)
-            .where(AccountModel.platform == "chatgpt")
-            .where(AccountModel.id.in_(ids))
-        ).all()
-        row_map = {row.id: row for row in rows}
+        # SQLite 变量上限 32766：id 列表超过后 IN 查询直接炸（实测 33000 个
+        # id → OperationalError: too many SQL variables；调用方大多有 1000
+        # 上限，但上限检查在**查询之后**，先炸就轮不到它）。分块查询，
+        # 500 一批，与仓储层 get_many 同口径。
+        row_map: dict[int, AccountModel] = {}
+        for i in range(0, len(ids), 500):
+            chunk = ids[i : i + 500]
+            rows = session.exec(
+                select(AccountModel)
+                .where(AccountModel.platform == "chatgpt")
+                .where(AccountModel.id.in_(chunk))
+            ).all()
+            for row in rows:
+                row_map[int(row.id or 0)] = row
         accounts = [row_map[account_id] for account_id in ids if account_id in row_map]
         missing_ids = [account_id for account_id in ids if account_id not in row_map]
     elif all_filtered:
