@@ -11,6 +11,7 @@ from services.account_export import (
 )
 from services.chatgpt_account_state import filter_accounts_by_plus_status
 from core.credential_fields import export_names as _export_names
+from core.time_utils import UtcDatetime
 from typing import Optional
 from datetime import datetime, timezone
 import io, csv, json, logging
@@ -58,8 +59,8 @@ class ExportTextRequest(BaseModel):
     status: str = ""
     email: str = ""
     plus_status: str = ""
-    created_at_start: Optional[datetime] = None
-    created_at_end: Optional[datetime] = None
+    created_at_start: Optional[UtcDatetime] = None
+    created_at_end: Optional[UtcDatetime] = None
 
 
 def _filtered_accounts(
@@ -69,8 +70,8 @@ def _filtered_accounts(
     status: str = "",
     email: str = "",
     plus_status: str = "",
-    created_at_start: Optional[datetime] = None,
-    created_at_end: Optional[datetime] = None,
+    created_at_start: Optional[UtcDatetime] = None,
+    created_at_end: Optional[UtcDatetime] = None,
     limit: Optional[int] = None,
     offset: int = 0,
 ) -> list[AccountModel]:
@@ -113,8 +114,8 @@ def _count_accounts(
     status: str = "",
     email: str = "",
     plus_status: str = "",
-    created_at_start: Optional[datetime] = None,
-    created_at_end: Optional[datetime] = None,
+    created_at_start: Optional[UtcDatetime] = None,
+    created_at_end: Optional[UtcDatetime] = None,
 ) -> int:
     """分页用的 total（跨库）。
 
@@ -149,8 +150,8 @@ def list_accounts(
     status: Optional[str] = None,
     email: Optional[str] = None,
     plus_status: Optional[str] = None,
-    created_at_start: Optional[datetime] = None,
-    created_at_end: Optional[datetime] = None,
+    created_at_start: Optional[UtcDatetime] = None,
+    created_at_end: Optional[UtcDatetime] = None,
     page: int = 1,
     page_size: int = 20,
 ):

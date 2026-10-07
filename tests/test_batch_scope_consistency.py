@@ -227,5 +227,98 @@ class FrontendDateForwardingTests(unittest.TestCase):
         self.assertEqual(forwarded_end, occurrences, "有分支没带 created_at_end")
 
 
+class NaiveDatetimeNormalizationTests(unittest.TestCase):
+    """naive datetime 输入不得炸 500（复审发现，2026-10-07）。
+
+    `created_at_start/end` 此前接受 naive datetime 并在 SQL 比较时炸
+    `StatementError`（HTTP 500；列表接口的旧行为 + 本分支新增的三个任务端点
+    与批量动作端点）。库里的时间全部是 UTC-aware、UI 总是发
+    `Date.toISOString()`（带 Z）—— naive 输入按 UTC 归一（与存储口径一致），
+    而不是 500。
+    """
+
+    def setUp(self):
+        self.now = datetime.now(timezone.utc)
+        self.old = self.now - timedelta(days=30)
+
+        with Session(engine) as session:
+            session.exec(delete(AccountModel))
+            session.add_all(
+                [
+                    _account("old@example.com", extra={"session_token": "st"}, created_at=self.old),
+                    _account("new@example.com", extra={"session_token": "st"}, created_at=self.now),
+                ]
+            )
+            session.commit()
+
+        from api.tasks import router as tasks_router
+
+        app = FastAPI()
+        app.include_router(tasks_router)
+        self.client = TestClient(app)
+
+    def tearDown(self):
+        from api.tasks import _task_store
+
+        with _task_store._lock:
+            for task_id in [
+                tid for tid, rec in _task_store._records.items()
+                if rec.status in ("pending", "running")
+            ]:
+                _task_store._records.pop(task_id, None)
+
+    def test_refresh_token_accepts_naive_datetime(self):
+        """naive 输入按 UTC 归一（不是 500），且筛选真的生效。"""
+        from unittest import mock
+
+        naive_start = (self.now - timedelta(days=1)).replace(tzinfo=None).isoformat()
+        with mock.patch("api.tasks._run_refresh_token") as runner:
+            response = self.client.post(
+                "/tasks/refresh-token",
+                json={"all_filtered": True, "created_at_start": naive_start},
+            )
+
+        self.assertEqual(
+            response.status_code, 200,
+            f"naive datetime 炸了：{response.status_code} {response.text[:200]}",
+        )
+        self.assertEqual(response.json()["total"], 1, "naive 输入的筛选没生效")
+        _task_id, account_ids, _req = runner.call_args.args
+        self.assertEqual(len(account_ids), 1)
+
+    def test_accounts_list_accepts_naive_datetime(self):
+        from fastapi.testclient import TestClient
+
+        from api.accounts import router as accounts_router
+
+        app = FastAPI()
+        app.include_router(accounts_router)
+        client = TestClient(app)
+
+        naive_start = (self.now - timedelta(days=1)).replace(tzinfo=None).isoformat()
+        r = client.get("/accounts", params={"platform": "chatgpt", "created_at_start": naive_start})
+        self.assertEqual(r.status_code, 200, f"naive datetime 炸了：{r.text[:200]}")
+        self.assertEqual(r.json()["total"], 1)
+
+    def test_batch_actions_accept_naive_datetime(self):
+        from datetime import timedelta as _td
+
+        from api.actions import BatchActionRequest, _resolve_batch_accounts
+
+        naive_start = (self.now - _td(days=1)).replace(tzinfo=None)
+        body = BatchActionRequest(all_filtered=True, created_at_start=naive_start)
+        with Session(engine) as session:
+            accounts, _missing = _resolve_batch_accounts("chatgpt", body, session)
+        self.assertEqual(sorted(a.email for a in accounts), ["new@example.com"])
+
+    def test_aware_datetime_is_unchanged(self):
+        """aware 输入原样保留（不回归）。"""
+        from api.actions import BatchActionRequest
+
+        aware = self.now - timedelta(days=1)
+        body = BatchActionRequest(all_filtered=True, created_at_start=aware)
+        self.assertEqual(body.created_at_start, aware)
+
+
 if __name__ == "__main__":
     unittest.main()

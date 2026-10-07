@@ -4,8 +4,8 @@ from pydantic import BaseModel, Field
 from sqlmodel import Session, select
 from typing import Callable, Optional
 from copy import deepcopy
-from datetime import datetime, timezone
 from core.db import TaskLog, TaskRunModel, current_engine
+from core.time_utils import UtcDatetime
 from core.task_runtime import (
     AttemptOutcome,
     AttemptResult,
@@ -98,8 +98,8 @@ class BackfillRtTaskRequest(BaseModel):
     status: str = ""
     plus_status: str = ""
     # 日期筛选与列表接口同口径（「处理当前筛选的 N 个账号」的 N 包含它们）。
-    created_at_start: Optional[datetime] = None
-    created_at_end: Optional[datetime] = None
+    created_at_start: Optional[UtcDatetime] = None
+    created_at_end: Optional[UtcDatetime] = None
     only_missing_rt: bool = True
     allow_login: bool = True
     concurrency: int = 1
@@ -120,8 +120,8 @@ class Bind2faTaskRequest(BaseModel):
     status: str = ""
     plus_status: str = ""
     # 日期筛选与列表接口同口径（「处理当前筛选的 N 个账号」的 N 包含它们）。
-    created_at_start: Optional[datetime] = None
-    created_at_end: Optional[datetime] = None
+    created_at_start: Optional[UtcDatetime] = None
+    created_at_end: Optional[UtcDatetime] = None
     only_missing_2fa: bool = True
     allow_login: bool = True
     concurrency: int = 1
@@ -142,8 +142,8 @@ class RefreshTokenTaskRequest(BaseModel):
     status: str = ""
     plus_status: str = ""
     # 日期筛选与列表接口同口径（「处理当前筛选的 N 个账号」的 N 包含它们）。
-    created_at_start: Optional[datetime] = None
-    created_at_end: Optional[datetime] = None
+    created_at_start: Optional[UtcDatetime] = None
+    created_at_end: Optional[UtcDatetime] = None
     concurrency: int = 1
     delay_seconds: float = 5
     proxy: Optional[str] = None

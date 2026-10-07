@@ -159,6 +159,7 @@ python main.py
 `pkill -f main.py` 停服 —— 参考 [维护手册](docs/MAINTENANCE.md) 的重启约定）：
 
 ```bash
+mkdir -p data/logs   # 首次运行前建好日志目录（data/ 不进版本控制）
 nohup python main.py > data/logs/server.log 2>&1 &
 ```
 

@@ -86,6 +86,7 @@ _STATUS_MAP: dict[str, dict[str, str]] = {
         "limited": "limited",
         "异常": "invalid",
         "abnormal": "invalid",
+        "禁用": "disabled",
         "disabled": "disabled",
         "已禁用": "disabled",
         "inactive": "disabled",
@@ -112,18 +113,26 @@ def classify_remote_status(panel_key: str, remote: Optional[RemoteAccount]) -> s
     if extra.get("disabled") is True:
         return "disabled"
 
-    # chatgpt2api 的凭据可用性标签（比 status_label 更权威）
+    mapped = _STATUS_MAP.get(str(panel_key or "").strip().lower(), {})
+    raw = _lower(remote.status)
+    label_state = mapped.get(raw, "") if raw else ""
+
+    # 分类优先级对齐参考实现（`account_view._effective_status_category`）：
+    # ① 禁用/异常标签是**粘性**的，先判直接返回 —— 「异常 + usable」并存的行
+    #    不能被凭据可用性短路掩盖成 active（复审发现，2026-10-07）；
+    # ② 凭据不可用（unavailable）其次 —— 覆盖「限流」等弱分类；
+    # ③ 其余按标签映射（正常→active、限流→limited）；无标签时可用性兜底。
+    if label_state in {"disabled", "invalid"}:
+        return label_state
+
     availability = _lower(extra.get("credential_availability"))
     if availability == "unavailable":
         return "invalid"
+    if label_state:
+        return label_state
     if availability == "usable":
         return "active"
-
-    mapped = _STATUS_MAP.get(str(panel_key or "").strip().lower(), {})
-    raw = _lower(remote.status)
-    if not raw:
-        return "unknown"
-    return mapped.get(raw, "unknown")
+    return "unknown"
 
 
 #: 状态 → 界面文案（与 `build_status_update` 的 message 一起用）。

@@ -9,6 +9,7 @@ from core.db import AccountModel, platform_session_from_path
 from core.registry import get
 from core.base_platform import RegisterConfig
 from core.config_store import config_store
+from core.time_utils import UtcDatetime
 from services.chatgpt_account_state import (
     apply_chatgpt_status_policy,
     filter_accounts_by_plus_status,
@@ -29,8 +30,8 @@ class BatchActionRequest(BaseModel):
     status: str = ""
     plus_status: str = ""
     # 日期筛选与列表接口同口径（「处理当前筛选的 N 个账号」的 N 包含它们）。
-    created_at_start: Optional[datetime] = None
-    created_at_end: Optional[datetime] = None
+    created_at_start: Optional[UtcDatetime] = None
+    created_at_end: Optional[UtcDatetime] = None
     params: dict = {}
 
 

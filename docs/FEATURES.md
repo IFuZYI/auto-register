@@ -1,7 +1,7 @@
 # 功能详解
 
 本文是 README 的展开篇：平台能力、邮箱服务、面板对接与导出格式的完整说明。
-「怎么跑起来」看 [README 的快速开始](../README.md#快速开始)；
+「怎么跑起来」看 [README 的部署方式](../README.md#部署方式)；
 「改完代码还要动哪些文件」看 [MAINTENANCE.md](MAINTENANCE.md)。
 
 ## ChatGPT 专项能力

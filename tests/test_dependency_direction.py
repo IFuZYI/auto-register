@@ -62,12 +62,12 @@ class CoreNeverImportsServicesTests(unittest.TestCase):
 
     def test_the_guard_itself_can_detect_a_violation(self):
         """守卫非空转：对一个真含 services import 的文件必须报出命中。"""
-        sample = ROOT / "tests" / "_guard_selfcheck_sample.py"
-        sample.write_text("from services.grok_account_state import x\n", encoding="utf-8")
-        try:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            sample = Path(tmp) / "_guard_selfcheck_sample.py"
+            sample.write_text("from services.grok_account_state import x\n", encoding="utf-8")
             hits = _service_imports_of(sample)
-        finally:
-            sample.unlink()
         self.assertTrue(hits, "AST 扫描器失灵 —— 对已知违规文件没有报出命中")
 
 

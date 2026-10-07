@@ -297,6 +297,44 @@ class Chatgpt2apiStatusPropagationTests(unittest.TestCase):
     （usable/recoverable/unavailable）与 `status_label`（正常/限流/异常/禁用）。
     """
 
+    def test_abnormal_label_is_sticky_over_usable_availability(self):
+        """异常标签优先于 usable（对齐参考实现的分类优先级，复审发现）。
+
+        参考实现（`account_view._effective_status_category`）：`disabled` /
+        `abnormal` 分类**先判**、直接返回；`unavailable` 其次。此前实现把
+        `usable → active` 的短路放在标签映射之前，`异常 + usable` 并存的行
+        会被判成 active（reviewer 实测复现）—— 与参考实现相反。
+        """
+        from services.panel_status_sync import classify_remote_status
+
+        r = RemoteAccount(
+            email="a@x.com", platform="chatgpt", status="异常",
+            extra={"credential_availability": "usable"},
+        )
+        self.assertEqual(
+            classify_remote_status("chatgpt2api", r), "invalid",
+            "异常标签被 usable 短路掩盖 —— 参考实现里 abnormal 是粘性的",
+        )
+
+    def test_disabled_label_is_sticky_over_usable_availability(self):
+        from services.panel_status_sync import classify_remote_status
+
+        r = RemoteAccount(
+            email="a@x.com", platform="chatgpt", status="禁用",
+            extra={"credential_availability": "usable"},
+        )
+        self.assertEqual(classify_remote_status("chatgpt2api", r), "disabled")
+
+    def test_usable_still_wins_over_normal_label(self):
+        """正常标签 + usable → active（不回归：正常路径不变）。"""
+        from services.panel_status_sync import classify_remote_status
+
+        r = RemoteAccount(
+            email="a@x.com", platform="chatgpt", status="正常",
+            extra={"credential_availability": "usable"},
+        )
+        self.assertEqual(classify_remote_status("chatgpt2api", r), "active")
+
     def test_fetcher_propagates_credential_availability(self):
         """fetcher 必须把 credential_availability 带进 extra（否则消费方死分支）。"""
         from services.panel_comparison import fetch_chatgpt2api_remote_accounts
