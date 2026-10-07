@@ -242,6 +242,20 @@ JWT 默认有效期为 7 天。密码与 JWT 签名密钥存入配置存储；�
 
 批量响应为 `{total,success,failed,items}`；每个 `items` 元素包含 `id`、`email`、`ok`、`message`、`status`。当不提供 `account_ids` 时必须传 `all_filtered:true`。
 
+**上传类动作排除禁用账号**（用户要求「禁用的不参与同步」）：`upload_cpa` /
+`upload_sub2api` / `upload_chatgpt2api` / `upload_grok2api` 在批量与单账号端点
+都跳过 `banned` 账号 —— 批量结果里该行 `ok=false`、`message=账号已禁用，不参与
+面板凭据上传`；单账号端点直接返回 `{ok:false,error:...}`。与对比页
+`plan_push`/`plan_sync` 的 `reason=banned` 同口径：死凭证推给远端只会被拿去刷
+token、污染远端号池。
+
+**id 列表分块**：仓储层（`get_many`/`delete_many`）、选号层
+（`select_chatgpt_accounts`）与邮箱池（`import_accounts_to_pool`）对 id 列表
+一律 500 一批分块查询 —— SQLite 变量上限 32766，不分块时超大列表（实测
+40000 个 id）会 `too many SQL variables` 炸成 500。批量端点本身仍有
+**1000** 上限（超了整批 400）；`export-text` 等「全选导出」语义的端点不设上限，
+由分块兜底。
+
 当前内置动作（以 `GET /api/actions/{platform}` 实际返回为准）。
 
 带 `scope: "panel"` 的动作是**面板动作**：它们的目标是外部面板（CPA / Sub2API /
