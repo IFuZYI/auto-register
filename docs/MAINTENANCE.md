@@ -23,17 +23,40 @@
 
 ## 1. 升级 / 更新部署
 
-### 1.1 本地直跑（`python main.py`）
+### 1.1 本机部署（systemd + 仓库内 venv）
+
+本机（生产实例）用 systemd 单元 `account-manager.service` 管理，Python 环境是
+仓库内的 `.venv`（独立于系统 Python 与任何外部工具链）：
 
 ```bash
-git pull
-pip install -r requirements.txt          # 依赖有变动时
+cd /home/Register && git pull
+.venv/bin/pip install -r requirements.txt              # 依赖有变动时
 cd frontend && npm install && npm run build && cd ..   # 前端有变动时（产物进 static/）
-kill <旧进程 PID> && python main.py      # 必须重启：改了代码不重启还跑旧代码
+systemctl restart account-manager.service              # 必须重启：改了代码不重启还跑旧代码
+journalctl -u account-manager.service -f               # 看日志
 ```
 
-**改完代码必须重启进程。** 这个服务是手工拉起的，没有热重载（`APP_RELOAD=1`
-才有）。判断有没有生效看版本戳：
+单元文件在 `/etc/systemd/system/account-manager.service`（仓库内版本化副本：
+`deploy/account-manager.service`）：环境变量
+（`DATA_DIR` / `CREDENTIAL_ENCRYPTION_KEY_FILE` / `SOLVER_*` / `OPENAI_SENTINEL_NODE_PATH`
+等）在单元里显式声明，对齐 `docker-compose.yml` 的 `environment` 段；`xvfb-run`
+包裹启动（对齐 Docker entrypoint —— Grok 的屏外 headed mint 需要 `DISPLAY`）。
+
+> ⚠️ **别把服务跑在宿主工具链的解释器上。** 部署曾用 Hermes 工具链的 Python
+> 拉起（`/root/.hermes/tools/python-*`）：工具链升级时旧解释器被删除，进程持有的
+> `certifi` CA 路径失效，所有 curl_cffi 请求报 `curl: (77) error adding trust
+> anchors`，注册/登录链全挂（而面板看着一切正常）。独立 venv 后宿主环境变动
+> 不再影响本服务。重建环境：
+>
+> ```bash
+> python3.12 -m venv .venv && .venv/bin/pip install -r requirements.txt
+> .venv/bin/python -m camoufox fetch                      # 浏览器与包配对（升级 camoufox 后必跑）
+> .venv/bin/python -m playwright install chromium         # grok 屏外 mint 用
+> .venv/bin/python -m patchright install chromium         # solver 的 chromium 模式用
+> ```
+
+**改完代码必须重启进程**（systemd 下就是 `systemctl restart`；这个服务没有热重载，
+`APP_RELOAD=1` 才有）。判断有没有生效看版本戳：
 
 ```bash
 curl -s http://127.0.0.1:8000/api/runtime
@@ -45,7 +68,7 @@ curl -s http://127.0.0.1:8000/api/runtime
 （实测踩过：修复提交后没重启，之后三次任务全在旧代码上跑，症状与修复前一模一样）。
 
 > 别用 `pkill -f main.py` —— 开发机上会误匹配其它同名进程（Hermes 自己也有
-> 一个 `main.py`）。按 PID kill。
+> 一个 `main.py`）。systemd 下按单元操作（`systemctl restart/stop`）。
 
 ### 1.2 Docker Compose
 

@@ -1,0 +1,50 @@
+# Register 账号管理台 —— 本机（非容器）systemd 单元
+#
+# 安装：
+#   sudo cp deploy/account-manager.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now account-manager
+#
+# 前提：仓库根建好独立 venv（不要用宿主工具链的解释器，见 docs/MAINTENANCE.md §1.1）：
+#   python3.12 -m venv .venv && .venv/bin/pip install -r requirements.txt
+#   .venv/bin/python -m camoufox fetch
+#   .venv/bin/python -m playwright install chromium
+#   .venv/bin/python -m patchright install chromium
+#
+# 路径按实际部署改：WorkingDirectory / 各 Environment 里的 /home/Register。
+
+[Unit]
+Description=Register 账号管理台（本地 venv 部署）
+Documentation=file:///home/Register/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/home/Register
+# 环境变量对齐 docker-compose.yml 的 environment 段。
+# APP_CONDA_ENV=docker 只用于静默「未检测到 conda 环境」警告（main.py 语义）。
+Environment=HOST=0.0.0.0
+Environment=PORT=8000
+Environment=APP_RELOAD=0
+Environment=APP_CONDA_ENV=docker
+Environment=HOME=/root
+Environment=DATA_DIR=/home/Register/data
+Environment=CREDENTIAL_ENCRYPTION_KEY_FILE=/home/Register/data/secrets/credential_key
+Environment=APP_ENABLE_SOLVER=1
+Environment=SOLVER_PORT=8889
+Environment=SOLVER_BIND_HOST=127.0.0.1
+Environment=LOCAL_SOLVER_URL=http://127.0.0.1:8889
+Environment=SOLVER_BROWSER_TYPE=camoufox
+Environment=OPENAI_SENTINEL_NODE_PATH=/usr/bin/node
+# xvfb-run 包裹（对齐 Docker entrypoint）：Grok 的屏外 headed mint 需要 DISPLAY；
+# headless 路径不受影响。服务里 xvfb-run 不是 PID 1，USR1 握手正常。
+ExecStart=/usr/bin/xvfb-run -a -s "-screen 0 1920x1080x24" /home/Register/.venv/bin/python main.py
+Restart=always
+RestartSec=5
+KillMode=control-group
+TimeoutStopSec=30
+# 日志走 journald：journalctl -u account-manager -f
+
+[Install]
+WantedBy=multi-user.target

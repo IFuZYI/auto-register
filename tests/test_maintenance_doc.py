@@ -17,6 +17,7 @@ from __future__ import annotations
 import re
 import shutil
 import subprocess
+import sys
 import unittest
 from pathlib import Path
 
@@ -125,9 +126,15 @@ class MaintenanceDocNumberTests(unittest.TestCase):
         )
 
     def test_collected_test_count_is_in_the_documented_ballpark(self):
-        """手册说「2300+ 用例」—— 收集数掉下去说明删多了。"""
+        """手册说「2300+ 用例」—— 收集数掉下去说明删多了。
+
+        用 `sys.executable` 而不是裸 `python3`：裸名解析到 PATH 上的系统
+        Python，而依赖（pytest 等）装在运行测试的那个解释器里（venv 部署时
+        就是 `.venv/bin/python`）—— 用裸 `python3` 收集会因缺 pytest 直接失败，
+        把「环境差异」误报成「文档数字不符」。
+        """
         result = subprocess.run(
-            ["python3", "-m", "pytest", "tests/", "--collect-only", "-q"],
+            [sys.executable, "-m", "pytest", "tests/", "--collect-only", "-q"],
             cwd=ROOT,
             capture_output=True,
             text=True,

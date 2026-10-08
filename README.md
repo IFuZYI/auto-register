@@ -155,13 +155,19 @@ python main.py
 
 启动后默认访问 <http://localhost:8000>（前端由 FastAPI 直接托管，不是 `5173`）。
 
-后台长跑建议用进程管理器或 systemd 单元（手工 `nohup` 也可以，但**不要**用
-`pkill -f main.py` 停服 —— 参考 [维护手册](docs/MAINTENANCE.md) 的重启约定）：
+后台长跑建议用 systemd 单元（参考 [维护手册](docs/MAINTENANCE.md) 的
+「本机部署」一节，含完整单元示例与 venv 重建步骤；手工 `nohup` 也可以，但
+**不要**用 `pkill -f main.py` 停服）：
 
 ```bash
 mkdir -p data/logs   # 首次运行前建好日志目录（data/ 不进版本控制）
 nohup python main.py > data/logs/server.log 2>&1 &
 ```
+
+> ⚠️ **不要用宿主工具链（如 `/root/.hermes/tools/python-*`）的解释器长期运行本
+> 服务**：工具链升级会删除旧解释器，进程持有的 CA 证书路径随之失效（症状：所有
+> 请求报 `curl: (77) error adding trust anchors`，而面板看起来一切正常）。用
+> 仓库内 `.venv` 或容器内解释器。
 
 ### 方式四：开发模式（前端热更新）
 
