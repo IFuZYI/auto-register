@@ -58,6 +58,45 @@ class RemoteDatetimeNormalizationTests(unittest.TestCase):
             (2026, 10, 4, 5, 12),
         )
 
+    def test_epoch_magnitude_boundaries_have_no_gap(self):
+        """量级分档不能有缝隙：恰好 1e12 曾掉进「按秒」分支被吞成 None。
+
+        边界值全部要有确定结果（2001-09-09 附近），不能静默回落。
+        """
+        from services.icloud.remote import _parse_remote_datetime
+
+        for raw, expected_year in (
+            ("999999999999", 2001),  # 毫秒量级下沿
+            ("1000000000000", 2001),  # 恰好 1e12 —— 曾返回 None
+            ("1000000000001", 2001),  # 毫秒量级
+            ("99999999999999", 5138),  # 微秒量级下沿
+            ("100000000000000", 1973),  # 恰好 1e14（微秒）
+        ):
+            parsed = _parse_remote_datetime(raw)
+            self.assertIsNotNone(parsed, f"{raw} 解析成了 None（边界缝隙）")
+            self.assertEqual(parsed.tzinfo, timezone.utc, f"{raw} 未归一成 aware UTC")
+            self.assertEqual(parsed.year, expected_year, f"{raw} 年份不对")
+
+    def test_malformed_numeric_strings_fall_back_to_none(self):
+        """畸形 / 越界输入安全回落 None，不抛异常。"""
+        from services.icloud.remote import _parse_remote_datetime
+
+        for raw in ("²", "1.2.3", "1" * 400, "-1791090760", ""):
+            self.assertIsNone(_parse_remote_datetime(raw), f"{raw!r} 应回落 None")
+
+    def test_basic_iso_numeric_string_is_treated_as_timestamp(self):
+        """纯数字串一律按时间戳 —— 与 icloud-hme 前端同口径。
+
+        这是刻意的取舍（reviewer 建议钉住）：`"20261009"` 会被当成 epoch 秒
+        （1970-08-23），而不是 basic-ISO 的 2026-10-09。上游实测只有
+        「带分隔符的 ISO」与「epoch 毫秒」两种形态，basic-ISO 不在其中；
+        若将来真出现，按长度收窄 epoch 分支即可（9–10 位秒 / 13 位毫秒）。
+        """
+        from services.icloud.remote import _parse_remote_datetime
+
+        parsed = _parse_remote_datetime("20261009")
+        self.assertEqual(parsed.year, 1970, "纯数字串应按时间戳解析（与上游前端同口径）")
+
     def test_naive_iso_string_is_normalized_to_utc(self):
         from services.icloud.remote import _parse_remote_datetime
 

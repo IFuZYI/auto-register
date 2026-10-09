@@ -260,14 +260,22 @@ def _parse_remote_datetime(value: Any) -> Optional[datetime]:
     if not text:
         return None
 
-    # 纯数字（可带小数）＝ epoch 时间戳：10 位按秒、13 位按毫秒。
+    # 纯数字（可带小数）＝ epoch 时间戳。按量级分档而不是单一阈值：
+    # 单一阈值 `> 1e12` 在**恰好 1e12** 处有缝隙 —— `"1000000000000"`
+    # （1e12 毫秒 = 2001-09-09）会掉进「按秒」分支，fromtimestamp 因年份越界
+    # 抛 ValueError 被吞成 None，created_at 静默回落到「同步时刻」（实测）。
+    # 分档口径对齐 icloud-hme 前端：秒 / 毫秒 / 微秒。
     if text.replace(".", "", 1).isdigit():
         try:
             number = float(text)
         except ValueError:
             return None
-        if number > 1_000_000_000_000:  # 毫秒
-            number /= 1000
+        if number < 0:
+            return None
+        if number >= 1e14:  # 微秒
+            number /= 1_000_000
+        elif number >= 1e11:  # 毫秒
+            number /= 1_000
         try:
             return datetime.fromtimestamp(number, tz=timezone.utc)
         except (OverflowError, OSError, ValueError):
