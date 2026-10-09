@@ -224,11 +224,22 @@ class LogCleanupFrontendTests(unittest.TestCase):
         self.assertIn("logCleanup", src, "任务历史页没有接保留期清理")
         self.assertIn("CLEANUP_ENDPOINTS.logs", src, "清理端点没走共用定义（会与运行页分叉）")
         self.assertIn("RETENTION_OPTIONS", src, "清理入口没有保留期选项")
+        self.assertIn(
+            "retentionOptionFromKey", src, "菜单 key 反解没走共用函数（Number 会给出 NaN）"
+        )
 
     def test_running_tasks_page_wires_cleanup(self):
         src = self._src("pages/RunningTasks.tsx")
         self.assertIn("logCleanup", src, "任务运行页没有接保留期清理")
         self.assertIn("CLEANUP_ENDPOINTS.runs", src, "清理端点没走共用定义")
+        self.assertIn(
+            "retentionOptionFromKey", src, "菜单 key 反解没走共用函数（Number 会给出 NaN）"
+        )
+        self.assertNotIn(
+            "message.success",
+            src,
+            "页面仍用 antd 静态 message —— 不走 App.useApp()，主题与上下文不一致",
+        )
 
 
 if __name__ == "__main__":

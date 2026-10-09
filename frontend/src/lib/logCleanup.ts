@@ -28,3 +28,15 @@ export function retentionLabel(days: number): string {
   const hit = RETENTION_OPTIONS.find((option) => option.days === days)
   return hit ? hit.label : `${days} 天前`
 }
+
+/**
+ * 下拉菜单 key → 选项对象。
+ *
+ * 菜单 key 是 `String(days)`，但反解不能走 `Number(key)`：将来若加入非数字
+ * key，`Number` 会给出 `NaN` 并发起一次 `older_than_days: NaN` 的请求 ——
+ * 后端 422，用户看到的是「清理失败」而不知道原因。查不到就返回 undefined，
+ * 由调用方跳过。
+ */
+export function retentionOptionFromKey(key: string): RetentionOption | undefined {
+  return RETENTION_OPTIONS.find((option) => String(option.days) === key)
+}

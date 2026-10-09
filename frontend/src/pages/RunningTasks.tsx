@@ -8,7 +8,6 @@ import {
   Drawer,
   Dropdown,
   Empty,
-  message,
   Popconfirm,
   Progress,
   Row,
@@ -26,7 +25,7 @@ import {
 } from '@ant-design/icons'
 import { getPlatformTagColor, getPlatformLabel } from '@/lib/platforms'
 import { taskKindMeta } from '@/lib/taskKinds'
-import { CLEANUP_ENDPOINTS, RETENTION_OPTIONS, retentionLabel } from '@/lib/logCleanup'
+import { CLEANUP_ENDPOINTS, RETENTION_OPTIONS, retentionLabel, retentionOptionFromKey } from '@/lib/logCleanup'
 import { apiFetch } from '@/lib/utils'
 import { TaskLogPanel } from '@/components/TaskLogPanel'
 import type { TaskKind } from '@/components/TaskLogPanel'
@@ -140,10 +139,10 @@ export default function RunningTasks() {
       await apiFetch(`/tasks/${taskId}`, { method: 'DELETE' })
       if (logTaskId === taskId) setLogTaskId(null)
       setTasks((prev) => prev.filter((t) => t.id !== taskId))
-      message.success('任务已删除')
+      msg.success('任务已删除')
     } catch (error) {
       const detail = error instanceof Error ? error.message : '删除失败'
-      message.error(detail)
+      msg.error(detail)
     }
   }
 
@@ -162,12 +161,13 @@ export default function RunningTasks() {
             body: JSON.stringify({ older_than_days: days }),
           })) as { deleted: number }
           msg.success(`已清理 ${result.deleted} 条任务记录（保留 ${retentionLabel(days)}）`)
-          await load()
         } catch (error) {
           msg.error(error instanceof Error ? error.message : '清理失败')
         } finally {
           setCleaning(false)
         }
+        // 刷新放在 try 之外：清理已经成功（上面已提示），刷新失败不该再报「清理失败」。
+        await load().catch(() => {})
       },
     })
   }
@@ -313,7 +313,10 @@ export default function RunningTasks() {
                   key: String(option.days),
                   label: `清理 ${option.label}`,
                 })),
-                onClick: ({ key }) => handleCleanup(Number(key)),
+                onClick: ({ key }) => {
+                  const option = retentionOptionFromKey(key)
+                  if (option) handleCleanup(option.days)
+                },
               }}
             >
               <Button icon={<ClearOutlined />} loading={cleaning}>

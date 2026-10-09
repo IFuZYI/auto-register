@@ -49,5 +49,11 @@ eq(mod.retentionLabel(7), '1 周前', 'label(7)')
 eq(mod.retentionLabel(30), '1 个月前', 'label(30)')
 eq(mod.retentionLabel(3), '3 天前', 'label(未知值)')
 
+// ── 菜单 key → 选项：找不到就返回 undefined，绝不回退成 NaN 天请求 ──
+eq(mod.retentionOptionFromKey('7'), { days: 7, label: '1 周前' }, 'key(7)')
+eq(mod.retentionOptionFromKey('30'), { days: 30, label: '1 个月前' }, 'key(30)')
+eq(mod.retentionOptionFromKey('bogus'), undefined, 'key(未知)')
+eq(mod.retentionOptionFromKey(''), undefined, 'key(空)')
+
 console.log(JSON.stringify({ passed: failures.length === 0, checked, failures }, null, 2))
 process.exit(failures.length === 0 ? 0 : 1)

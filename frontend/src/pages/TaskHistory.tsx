@@ -7,7 +7,7 @@ import {
   getPlatformTagColor,
   getPlatformLabel,
 } from '@/lib/platforms'
-import { CLEANUP_ENDPOINTS, RETENTION_OPTIONS, retentionLabel } from '@/lib/logCleanup'
+import { CLEANUP_ENDPOINTS, RETENTION_OPTIONS, retentionLabel, retentionOptionFromKey } from '@/lib/logCleanup'
 import { apiFetch } from '@/lib/utils'
 import { PageHeader } from '@/components/PageHeader'
 
@@ -85,7 +85,7 @@ export default function TaskHistory() {
   const handleCleanup = (days: number) => {
     modal.confirm({
       title: `确认清理 ${retentionLabel(days)}的任务历史？`,
-      content: '保留期内的记录不受影响；清理后无法恢复。',
+      content: `保留期内的记录不受影响；清理覆盖全部平台（不受当前平台筛选限制）；清理后无法恢复。`,
       okText: '清理',
       cancelText: '取消',
       okButtonProps: { danger: true },
@@ -98,12 +98,13 @@ export default function TaskHistory() {
           })) as LogCleanupResponse
           msg.success(`已清理 ${result.deleted} 条任务历史（保留 ${retentionLabel(days)}）`)
           setSelectedRowKeys([])
-          await load()
         } catch (error) {
           msg.error(error instanceof Error ? error.message : '清理失败')
         } finally {
           setCleaning(false)
         }
+        // 刷新放在 try 之外：清理已经成功（上面已提示），刷新失败不该再报「清理失败」。
+        await load().catch(() => {})
       },
     })
   }
@@ -189,7 +190,10 @@ export default function TaskHistory() {
                   key: String(option.days),
                   label: `清理 ${option.label}`,
                 })),
-                onClick: ({ key }) => handleCleanup(Number(key)),
+                onClick: ({ key }) => {
+                  const option = retentionOptionFromKey(key)
+                  if (option) handleCleanup(option.days)
+                },
               }}
             >
               <Button icon={<ClearOutlined />} loading={cleaning}>
