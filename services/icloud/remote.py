@@ -244,16 +244,35 @@ def _remote_status(item: dict[str, Any]) -> str:
 def _parse_remote_datetime(value: Any) -> Optional[datetime]:
     """解析远端时间串，**naive 值按 UTC 归一**。
 
-    远端（icloud-hme）的 `createdAt` 在 spec 里带 `Z`，但真实上游透传的是
-    Apple 的原始串，可能不带时区。原样解析出的 naive datetime 写进 aware 时间列
-    会让 SQLModel 在绑定时抛
-    `ValueError: Datetime values must have timezone information` ——
-    整个同步接口 500（实测：`POST /api/icloud/accounts/{id}/sync`）。
-    归一放在解析处：调用方拿到的一定是可安全写库的 aware 值。
+    远端（icloud-hme）的时间字段有两种形态，实测都出现过：
+
+    1. ISO 串（spec 里带 `Z`，但真实上游透传 Apple 原始串时可能不带时区）；
+    2. **epoch 毫秒/秒的纯数字字符串** —— 生产账号 227 条里有 3 条是
+       `"1791090760837"` 这种。`fromisoformat` 会把纯数字串按「日期+时间」
+       硬解成 1791 年（既不报错也不抛异常），写库后时间全错。
+
+    纯数字先按时间戳解析；其余按 ISO 解析。naive 结果一律按 UTC 归一 ——
+    原样写进 aware 时间列会让 SQLModel 抛
+    `ValueError: Datetime values must have timezone information`，整个同步
+    接口 500（实测：`POST /api/icloud/accounts/{id}/sync`）。
     """
     text = str(value or "").strip()
     if not text:
         return None
+
+    # 纯数字（可带小数）＝ epoch 时间戳：10 位按秒、13 位按毫秒。
+    if text.replace(".", "", 1).isdigit():
+        try:
+            number = float(text)
+        except ValueError:
+            return None
+        if number > 1_000_000_000_000:  # 毫秒
+            number /= 1000
+        try:
+            return datetime.fromtimestamp(number, tz=timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            return None
+
     try:
         parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
     except ValueError:

@@ -31,6 +31,33 @@ ROOT = Path(__file__).resolve().parents[1]
 class RemoteDatetimeNormalizationTests(unittest.TestCase):
     """缺陷 1：远端时间串必须归一成 aware UTC，否则写库 500。"""
 
+    def test_epoch_milliseconds_string_is_parsed_as_timestamp(self):
+        """远端有的别名给的是**epoch 毫秒字符串**（不是 ISO）。
+
+        实测（生产账号 3，227 条里 3 条）：`createdAt: "1791090760837"`。
+        `fromisoformat` 会把这种纯数字串按「日期+时间」硬解成 1791 年 ——
+        既写错了时间，naive 值还会让写库 500（这正是用户报的那个错误的成因之一）。
+        """
+        from services.icloud.remote import _parse_remote_datetime
+
+        parsed = _parse_remote_datetime("1791090760837")
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed.tzinfo, timezone.utc, "epoch 值必须归一成 aware UTC")
+        # 1791090760837 ms = 2026-10-04 05:12:40 UTC（不是 1791-09-07）
+        self.assertEqual(
+            (parsed.year, parsed.month, parsed.day, parsed.hour, parsed.minute),
+            (2026, 10, 4, 5, 12),
+        )
+
+    def test_epoch_seconds_string_is_parsed_as_timestamp(self):
+        from services.icloud.remote import _parse_remote_datetime
+
+        parsed = _parse_remote_datetime("1791090760")
+        self.assertEqual(
+            (parsed.year, parsed.month, parsed.day, parsed.hour, parsed.minute),
+            (2026, 10, 4, 5, 12),
+        )
+
     def test_naive_iso_string_is_normalized_to_utc(self):
         from services.icloud.remote import _parse_remote_datetime
 
