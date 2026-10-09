@@ -55,6 +55,9 @@ def _alias_to_dict(
         "label": row.label,
         "note": row.note,
         "status": row.status,
+        # 来源：local（本机直连 Apple）/ remote（远程 icloud-hme 仓库）。
+        # 界面按它显示「本地 / 远程」标签并做来源筛选。
+        "source": getattr(row, "source", "") or "local",
         # 老库（pool_status 列补上之前）没有这个字段，按「未入池」处理最保守：
         # 当作可用会把一批从没被用户确认过的地址直接送进注册取号池。
         "pool_status": getattr(row, "pool_status", "") or POOL_STATUS_UNPOOLED,
@@ -412,11 +415,20 @@ def pool_summary(account_id: Optional[int] = None) -> dict[str, int]:
 
 
 def generate_alias(account_id: int, *, label: str = "", note: str = "", proxy: str | None = None) -> dict[str, Any]:
-    """生成并保留一个隐私邮箱地址。"""
+    """生成并保留一个隐私邮箱地址。
+
+    远程账号（source=remote）走远程分支：让 icloud-hme 服务创建别名，
+    本机只存镜像行 —— 本机没有 Apple 凭据，不能走直连路径。
+    """
     with _facade._account_lock(account_id):
         row = get_account(account_id)
         if not row.enabled:
             raise ICloudError("account_disabled", f"iCloud 主号已停用: {row.email}")
+        if str(getattr(row, "source", "") or "") == "remote":
+            return _facade.generate_remote_alias(
+                account_id, label=label, note=note, proxy=proxy
+            )
+
         quota = alias_quota(account_id)
         if quota["remaining"] <= 0:
             raise ICloudError(
@@ -431,8 +443,14 @@ def generate_alias(account_id: int, *, label: str = "", note: str = "", proxy: s
 
 
 def sync_aliases(account_id: int, *, proxy: str | None = None) -> dict[str, Any]:
-    """从 iCloud 拉取主号名下全部历史隐私邮箱，按地址去重合并到本地。"""
+    """从 iCloud 拉取主号名下全部历史隐私邮箱，按地址去重合并到本地。
+
+    远程账号走远程分支（从 icloud-hme 服务拉，去重时本地优先）。
+    """
     row = get_account(account_id)
+    if str(getattr(row, "source", "") or "") == "remote":
+        return _facade.sync_remote_account(account_id, proxy=proxy)
+
     credentials = load_credentials(row)
     try:
         with _facade.web_client(proxy=proxy) as client:
@@ -466,11 +484,16 @@ def delete_alias(alias_id: int, *, remote: bool = True, proxy: str | None = None
         snapshot = (alias.address, alias.provider_id, alias.status)
 
     if remote and account is not None:
-        credentials = load_credentials(account)
-        with _facade.web_client(proxy=proxy) as client:
-            client.delete_private_email(
-                credentials, address=snapshot[0], provider_id=snapshot[1], status=snapshot[2]
-            )
+        if str(getattr(account, "source", "") or "local") == "remote":
+            # 远程行：让 icloud-hme 服务删（anonymousId 即 provider_id）。
+            client = _facade.remote_client(account)
+            client.delete_alias(account.remote_account_id, snapshot[1])
+        else:
+            credentials = load_credentials(account)
+            with _facade.web_client(proxy=proxy) as client:
+                client.delete_private_email(
+                    credentials, address=snapshot[0], provider_id=snapshot[1], status=snapshot[2]
+                )
 
     with platform_session("icloud") as session:
         alias = session.get(ICloudAliasModel, int(alias_id))
@@ -486,6 +509,8 @@ def set_alias_active(
 
     与删除的区别：停用后地址还在 Apple 那边保留，随时能恢复；删除不可逆。
     停用还顺带挡住转发，不想再收某个站点的信但又不舍得销毁地址时用它。
+
+    远程行走远程分支：让 icloud-hme 服务停用/激活（它再对 Apple 操作）。
     """
     with platform_session("icloud") as session:
         alias = session.get(ICloudAliasModel, int(alias_id))
@@ -496,11 +521,16 @@ def set_alias_active(
 
     if account is None:
         raise ICloudError("account_not_found", "隐私邮箱所属主号不存在")
-    credentials = load_credentials(account)
-    with _facade.web_client(proxy=proxy) as client:
-        client.set_private_email_active(
-            credentials, address=address, provider_id=provider_id, active=active
-        )
+
+    if str(getattr(account, "source", "") or "local") == "remote":
+        client = _facade.remote_client(account)
+        client.set_alias_active(account.remote_account_id, provider_id, active)
+    else:
+        credentials = load_credentials(account)
+        with _facade.web_client(proxy=proxy) as client:
+            client.set_private_email_active(
+                credentials, address=address, provider_id=provider_id, active=active
+            )
 
     with platform_session("icloud") as session:
         alias = session.get(ICloudAliasModel, int(alias_id))

@@ -8,6 +8,7 @@ export const SELECT_FIELDS: Record<string, { label: string; value: string }[]> =
   mail_provider: [
     { label: 'Outlook（微软号池）', value: 'microsoft' },
     { label: 'iCloud 隐私邮箱（本地主号）', value: 'icloud_local' },
+    { label: 'iCloud 隐私邮箱（远程）', value: 'icloud_remote' },
   ],
   // default_executor 已取消：执行器改成**按平台**设置（`<platform>_executor`），
   // 在「注册设置 → 各平台」卡片里渲染。各平台支持的集合不同，一个全局值

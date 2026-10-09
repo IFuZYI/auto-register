@@ -98,6 +98,24 @@ class AccountUpdateRequest(BaseModel):
     enabled: bool
 
 
+class RemoteAccountRequest(BaseModel):
+    """接入一个远端 icloud-hme 账号（一行一个远端账号）。"""
+
+    base_url: str
+    admin_password: str
+    remote_account_id: str
+    name: str = ""
+    proxy: str = ""
+
+
+class DiscoverRemoteRequest(BaseModel):
+    """只读探针：用凭据登录远端并列出账号（不落库）。"""
+
+    base_url: str
+    admin_password: str
+    proxy: str = ""
+
+
 def _alias_label(label: str, index: int, count: int) -> str:
     """一次生成多个时给标签编号，避免 Apple 那边一串同名地址分不清。"""
     label = label.strip() or DEFAULT_ALIAS_LABEL
@@ -231,6 +249,50 @@ def import_cookie(body: CookieImportRequest):
 def update_account(account_id: int, body: AccountUpdateRequest):
     try:
         return icloud_service.set_account_enabled(account_id, body.enabled)
+    except ICloudError as error:
+        raise _http_error(error) from error
+
+
+@router.post("/remote-accounts/discover")
+def discover_remote_accounts(body: DiscoverRemoteRequest):
+    """只读探针：登录远端并列出它的账号（不落库）。
+
+    弹窗用它做「获取账号列表」：先让用户看到远端有哪些账号、再选一个接入，
+    比「先接入再发现选错了」少一轮删除。"""
+    try:
+        return {"items": icloud_service.discover_remote_accounts(
+            base_url=body.base_url,
+            admin_password=body.admin_password,
+            proxy=body.proxy,
+        )}
+    except ICloudError as error:
+        raise _http_error(error) from error
+
+
+@router.post("/remote-accounts")
+def add_remote_account(body: RemoteAccountRequest):
+    """接入远端 icloud-hme 账号：验证凭据 → 落库（密码 AES 加密，绝不回显）。"""
+    try:
+        return icloud_service.add_remote_account(
+            base_url=body.base_url,
+            admin_password=body.admin_password,
+            remote_account_id=body.remote_account_id,
+            name=body.name,
+            proxy=body.proxy,
+        )
+    except ICloudError as error:
+        raise _http_error(error) from error
+
+
+@router.post("/accounts/{account_id}/check")
+def check_account(account_id: int):
+    """探测账号登录态。
+
+    本地主号：对现有 Cookie 做低风险 validate 探活（需要 Web 客户端）。
+    远程账号：让 icloud-hme 服务执行同样的探活并回传脱敏摘要。
+    """
+    try:
+        return icloud_service.check_account(account_id)
     except ICloudError as error:
         raise _http_error(error) from error
 

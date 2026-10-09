@@ -19,7 +19,14 @@ from .constants import (
 from .credentials import ICloudCredentials
 from .errors import ICloudError
 from .login import LoginRequest, LoginState
-from .models import ImportedSession, MailMessage, PrivateEmail, SessionImportRequest, TrustedPhone
+from .models import (
+    ImportedSession,
+    MailAddress,
+    MailMessage,
+    PrivateEmail,
+    SessionImportRequest,
+    TrustedPhone,
+)
 
 __all__ = [
     "ALIAS_STATUS_ACTIVE",
@@ -39,6 +46,7 @@ __all__ = [
     "LOGIN_STATUS_VERIFICATION_REQUIRED",
     "LoginRequest",
     "LoginState",
+    "MailAddress",
     "MailMessage",
     "PrivateEmail",
     "SessionImportRequest",

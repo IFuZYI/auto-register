@@ -511,6 +511,88 @@ def _ensure_hot_query_indexes(engine: Engine | None = None) -> None:
                     pass
 
 
+def _migrate_icloud_remote_schema(engine: Engine | None = None) -> None:
+    """远程 iCloud 仓库的库结构迁移（幂等）。
+
+    1. `icloud_accounts` 补 source / base_url / remote_account_id /
+       remote_password_cipher / proxy 列，历史行回填 `local`；
+    2. `icloud_aliases` 补 source 列，历史行回填 `local`；
+    3. 去掉 `ix_icloud_accounts_email` 的**唯一**约束（重建为普通索引）——
+       同一个 Apple ID 可以同时是本地主号与远程账号（「本地优先去重」的
+       部署形态），单列唯一会让远程账号根本加不进来；
+    4. 建 (base_url, remote_account_id) 的部分唯一索引（只约束 source='remote'），
+       同一服务里的同一个远端账号只能接入一次。
+
+    必须排在**任何用 ORM 读这两张表**的迁移之前：SQLModel 的 `select()` 会把
+    新列一起写进 SELECT，列还没补上时整条语句直接抛 `no such column`。
+    """
+    engine = engine or current_engine()
+    if not _is_sqlite(engine):
+        return
+    with engine.begin() as conn:
+        tables = {
+            str(row[0])
+            for row in conn.exec_driver_sql(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        if "icloud_accounts" not in tables or "icloud_aliases" not in tables:
+            return
+
+        account_columns = {
+            str(row[1])
+            for row in conn.exec_driver_sql("PRAGMA table_info('icloud_accounts')").fetchall()
+        }
+        for column, ddl in (
+            ("source", "TEXT DEFAULT 'local'"),
+            ("base_url", "TEXT DEFAULT ''"),
+            ("remote_account_id", "TEXT DEFAULT ''"),
+            ("remote_password_cipher", "TEXT DEFAULT ''"),
+            ("proxy", "TEXT DEFAULT ''"),
+        ):
+            if column not in account_columns:
+                conn.exec_driver_sql(
+                    f"ALTER TABLE icloud_accounts ADD COLUMN {column} {ddl}"
+                )
+        conn.exec_driver_sql(
+            "UPDATE icloud_accounts SET source = 'local' "
+            "WHERE source IS NULL OR TRIM(source) = ''"
+        )
+
+        alias_columns = {
+            str(row[1])
+            for row in conn.exec_driver_sql("PRAGMA table_info('icloud_aliases')").fetchall()
+        }
+        if "source" not in alias_columns:
+            conn.exec_driver_sql(
+                "ALTER TABLE icloud_aliases ADD COLUMN source TEXT DEFAULT 'local'"
+            )
+        conn.exec_driver_sql(
+            "UPDATE icloud_aliases SET source = 'local' "
+            "WHERE source IS NULL OR TRIM(source) = ''"
+        )
+
+        # email 唯一索引 → 普通索引（允许同邮箱跨来源共存）。
+        # 只在还是 UNIQUE 时才重建，避免每次启动白跑一遍。
+        for _seq, name, unique, _origin, _partial in conn.exec_driver_sql(
+            "PRAGMA index_list('icloud_accounts')"
+        ).fetchall():
+            if str(name) == "ix_icloud_accounts_email" and int(unique):
+                conn.exec_driver_sql("DROP INDEX ix_icloud_accounts_email")
+                break
+        conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_icloud_accounts_email "
+            "ON icloud_accounts (email)"
+        )
+
+        # 远程行唯一键：(base_url, remote_account_id) 只对 source='remote' 生效。
+        conn.exec_driver_sql(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_icloud_accounts_remote "
+            "ON icloud_accounts (base_url, remote_account_id) "
+            "WHERE source = 'remote'"
+        )
+
+
 def _drop_stale_pool_tables_from_default_db(engine: Engine) -> None:
     """把默认库里遗留的空邮箱池表删掉（分库改造的收尾）。
 
@@ -670,6 +752,9 @@ def _run_one(engine: Engine) -> None:
     # 补列必须排在任何**用 ORM 读这两张表**的迁移之前：SQLModel 的
     # `select(ICloudAliasModel)` 会把新加的 `used_platforms` 一起写进 SELECT，
     # 列还没补上时整条语句直接抛 `no such column`，启动就炸。
+    # 远程仓库的 source / base_url 等列同理，排在最前（它也要在
+    # `_migrate_icloud_aliases_schema` 的 ORM 读之前完成）。
+    _migrate_icloud_remote_schema(engine)
     _migrate_used_platforms_columns(engine)
     _migrate_icloud_aliases_schema(engine)
     _sync_outlook_used_status(engine)
@@ -690,6 +775,7 @@ __all__ = [
     "_ensure_account_email_unique",
     "_ensure_hot_query_indexes",
     "_migrate_icloud_aliases_schema",
+    "_migrate_icloud_remote_schema",
     "_migrate_outlook_accounts_schema",
     "_migrate_used_platforms_columns",
     "_normalize_grok_token_column",

@@ -10,6 +10,10 @@ export interface ICloudCredentialState {
   has_web_auth_token?: boolean
   has_imap_credentials?: boolean
   credentials_unreadable?: boolean
+  /** 远程账号：是否保存了远端服务的管理员密码（密文）。 */
+  has_remote_password?: boolean
+  /** 远程账号：凭据在远端服务里（本机没有 Apple 凭据）。 */
+  remote?: boolean
 }
 
 export interface ICloudQuota {
@@ -26,6 +30,11 @@ export interface ICloudAccount {
   region: ICloudRegion
   status: string
   enabled: boolean
+  /** 来源：local（本机直连 Apple）/ remote（远程 icloud-hme 仓库）。 */
+  source?: 'local' | 'remote'
+  /** 远程账号：服务地址与远端账号 id（本地账号没有）。 */
+  base_url?: string
+  remote_account_id?: string
   alias_count: number
   sync_error: string
   last_sync_at: string | null
@@ -42,6 +51,8 @@ export interface ICloudAlias {
   label: string
   note: string
   status: string
+  /** 来源：local（本机直连 Apple 生成/同步）/ remote（远程 icloud-hme 仓库同步）。 */
+  source: 'local' | 'remote'
   /** 号池状态：unpooled（未入池）/ available（未使用）/ in_use（使用中）/ used（已使用） */
   pool_status: 'unpooled' | 'available' | 'in_use' | 'used'
   /**
@@ -176,6 +187,24 @@ export function setICloudAccountEnabled(id: number, enabled: boolean): Promise<I
   })
 }
 
+export interface ICloudRemoteAccountPayload {
+  base_url: string
+  admin_password: string
+  remote_account_id: string
+  name?: string
+  proxy?: string
+}
+
+/** 接入远端 icloud-hme 账号（密码只在提交时出现，服务端加密落库、绝不回显）。 */
+export function addICloudRemoteAccount(payload: ICloudRemoteAccountPayload): Promise<ICloudAccount> {
+  return post('/icloud/remote-accounts', payload)
+}
+
+/** 探测账号登录态（本地主号 / 远程账号都会分流到对应链路）。 */
+export function checkICloudAccount(id: number): Promise<ICloudAccount> {
+  return post(`/icloud/accounts/${id}/check`)
+}
+
 export function deleteICloudAccount(id: number): Promise<{ ok: boolean }> {
   return apiFetch(`/icloud/accounts/${id}`, { method: 'DELETE' })
 }
@@ -184,6 +213,8 @@ export function syncICloudAccount(id: number): Promise<{
   fetched: number
   created: number
   updated: number
+  /** 远程仓库同步时：因本地已有同地址而跳过的数量（本地优先去重）。 */
+  skipped_local?: number
 }> {
   return post(`/icloud/accounts/${id}/sync`)
 }

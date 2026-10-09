@@ -229,10 +229,17 @@ chatgpt2api 时漏了三处、面板页直接 404）：
    并把模块名加进 `core/mailboxes/registry.py` 的 `_OPTIONAL_PROVIDER_MODULES`。
 
 **漏了 import 的症状**：渠道文件存在但查不到，`create_mailbox()` 报
-「未知邮箱提供商」—— 失败点在注册任务的深处，看不到任何「渠道没注册」的字样。
+「未知邮箱提供商」—— 失败点发生在注册任务的深处，看不到任何「渠道没注册」的字样。
+
+**渠道的取号配置键也要同步**：新渠道若有「用哪个主号 / 标签 / 备注」这类配置，
+要加进 `api/config.py` 的 `CONFIG_KEYS`（如 `icloud_remote_account_id` /
+`icloud_remote_label` / `icloud_remote_note`），否则注册页提交的配置被静默丢弃。
 
 前端侧：邮箱服务页的分组定义在 `frontend/src/lib/mailboxSections.ts`
-（新渠道若要有自己的配置页，在那里加分组 + 在 `App.tsx` 加路由）。
+（新渠道若要有自己的配置页，在那里加分组 + 在 `App.tsx` 加路由）；
+注册页的渠道下拉在 `frontend/src/pages/RegisterTaskPage.tsx` 的
+`MAIL_PROVIDER_OPTIONS`，全局默认下拉在 `frontend/src/lib/configFields.ts` 的
+`mail_provider` 选项 —— 两处都要加，否则「全局配置能选、注册页选不到」或反之。
 
 **别名**：同一个 builder 可以挂多个 provider 名（`outlook` / `microsoft` /
 `mail_import` 是同一条渠道的三个名字 —— 见
@@ -333,7 +340,20 @@ register_job("my_job", interval_seconds=lambda: ..., runner=lambda: ...)
 | `test_chatgpt_token_refresh_verification.py` | 刷出的 AT 真校验（`/backend-api/me`）、**只返还原本 AT（未换发）→ 走登录流程换发**、登录链兜底、封禁识别、轮换 ST 不被冲空 | 改 `platforms/chatgpt/token_refresh.py` 的校验或登录兜底 |
 | `test_environment_preflight.py` | 环境预检与错误分类：camoufox 配对探测、Node 运行时探测、任务级预检（runner 在分配邮箱前拦截）、环境错误判不可重试（dead-end 提前收手） | 改 `core/environment.py` 的判定；平台去掉 `check_environment` 钩子 |
 | `test_chatgpt_auto_maintenance.py` | ChatGPT Token 自动维护：临期窗口内随机时刻（至少提前 1h）、封禁/达失败上限不重复尝试、失败退避 1h→6h、未换发算失败、每轮限量防高并发、stale 计划清理、scheduler 注册与配置白名单、前端开关接线 | 改 `services/chatgpt_maintenance.py` 的窗口/退避/限量逻辑；去掉周期任务注册；开关漏进 CONFIG_KEYS 或前端 BOOLEAN_KEYS |
+| `test_icloud_remote_columns.py` | 远程仓库的库结构：source / base_url / remote_account_id 列、老库回填 `local`、email 单列唯一被移除（同邮箱允许两边各一行）、(base_url, remote_account_id) 部分唯一索引、迁移幂等 | 改 `core/db/models_platform.py` 或 `_migrate_icloud_remote_schema` |
+| `test_icloud_remote_client.py` | 远程客户端契约：管理员密码换会话 + CSRF、会话复用与重启自动重登、错误码映射（冷却 → `provider_rate_limited`）、inbox limit 夹取 | 改 `platforms/icloud/remote_client.py` |
+| `test_icloud_remote_service.py` | 远程服务层：接入（加密落库 / 重复接入拒绝）、同步与**本地优先去重**（`skipped_local`）、远程生成/停用/删除、远程收件映射 | 改 `services/icloud/remote.py` 的去重或写路径 |
+| `test_icloud_remote_mailbox.py` | 远程邮箱渠道：工厂注册、池内复用优先于远端新建、收码与发码时间窗、池记账钩子 | 改 `modules/mail/icloud_remote.py` |
+| `test_icloud_remote_api.py` | 远程 HTTP 接口：接入/探针/探测/同步/删除的错误码映射与脱敏（不回密码） | 改 `api/icloud.py` 的远程端点 |
+| `test_icloud_remote_frontend_contract.py` | 远程功能的前端接线：注册页渠道下拉与三个配置键、来源标签列/筛选/添加远程服务入口 | 前端改了 iCloud 页或注册页的远程接线 |
 | `test_runtime_version_stamp.py` | 版本戳语义（未跟踪文件不算脏） | 改 `_read_git_version` |
+
+**测试基础设施**：`tests/remote_hme_double.py` 是 icloud-hme 服务的**真实 HTTP 双端**
+（stdlib http.server，强制校验 Cookie 会话与 CSRF）。远程链路的测试都对着它跑 ——
+不要改成 in-process mock：客户端若没把请求发到双端（比如硬编码生产地址），
+真实双端会直接连接失败，mock 不会。
+
+
 | `test_frontend_layout_contract.py::test_typescript_still_compiles` | `npx tsc -b` 0 错误 | 前端类型错误（无 node 时跳过） |
 
 **前端可执行的行为测试**（真实跑 TS 函数，不是正则）：
@@ -366,6 +386,7 @@ register_job("my_job", interval_seconds=lambda: ..., runner=lambda: ...)
 | `test_grok_turnstile_mint_chain.py` / `test_grok_upload_gaps.py` | Turnstile 兜底链、上传路径回退与 proxy_url 写入 |
 | `test_integrations_dispatch_gaps.py` | 面板上传器分发（平台×面板）、推送结果落库 |
 | `test_task_kinds_and_visibility.py` | 自动维护任务可见性（有动作才建记录、空轮不建、停止/跳过接线、逐账号日志落库）+ 任务类型标签映射（真实执行 taskKinds.ts） |
+| `test_log_cleanup.py` | 日志清理：保留期口径（`< cutoff` 边界、保留期内不动）、任务运行记录只清已结束（进行中的删不掉）、孤儿先收尾再清、保留期参数边界（0 与 10⁹ 都 422）+ 前端选项真实执行（`run_log_cleanup_checks.mjs`）与两页接线 |
 | `test_banned_signal_propagation.py` | 登录链封禁信号整链传播：探测块/发码链撞上 `deleted or deactivated` 当场终止（不被回退吞掉）；`invalid_state` 不判封禁 |
 | `test_banned_upload_exclusion.py` | 上传类动作端点排除禁用账号：批量摘除并给出原因、单账号拒绝；非上传动作不受影响 |
 | `test_device_id_reuse.py` | 设备标识（oai-did）复用：三条登录链预置库里 device_id、warmup 成功后才种 cookie（失败判据不被污染）、无存量账号首次登录收敛落库 |
@@ -427,6 +448,9 @@ git diff --stat
 | 界面永远不显示上传状态 | 动作没进 `_UPLOAD_SYNC_WRITERS` | 加一行（§2.7） |
 | 插件加了但不加载 | 不在 `SUPPORTED_PLATFORMS` | 加白名单（§2.2） |
 | 邮箱渠道「文件存在但查不到」 | 忘了 `core/mailboxes/__init__.py` 里 import | 加 import（§2.4） |
+| 注册页选不到新渠道 / 选了没效果 | 渠道名不在注册页 `MAIL_PROVIDER_OPTIONS` 或配置键不在 `CONFIG_KEYS` | 两处同步（§2.4） |
+| 远程 iCloud 渠道报「账号不是远程账号」 | 把本地主号 id 传给了远程渠道 | 远程渠道只认 `source=remote` 的行 |
+| 远程同步后别名「不见了」 | 本地优先去重跳过了同地址行（`skipped_local`） | 预期行为，见 `docs/adr/0001-icloud-remote-repo.md` |
 | 面板对比全是「未上传 + 仅远端」 | 远端行没带 `platform` | fetcher 里打上平台（§2.1） |
 | 面板页 404「未知面板」 | `FETCHERS` 没加 | 加 fetcher（§2.1） |
 | 口令保存一次就没了 | 前端提交了空口令 | 留空 = 不修改（§2.3） |

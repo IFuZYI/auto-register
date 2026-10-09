@@ -34,12 +34,13 @@ import { listICloudAccounts } from '@/api/icloud'
  * 而提示里得写出那个 provider 的中文名，所以 label 必须能按 value 反查。
  * 放在模块级而不是组件里，避免每次渲染重建。
  *
- * 只剩两个本地号池渠道（用户要求：其他邮箱都不要了）。一次性临时邮箱与远程
- * icloud-hme 已整体删除，这里不再列它们。
+ * 三个渠道：微软号池、本地 iCloud 隐私邮箱（主号在本地库）、
+ * 远程 iCloud 隐私邮箱（主号在独立的 icloud-hme 服务里）。
  */
 const MAIL_PROVIDER_OPTIONS = [
   { value: 'microsoft', label: 'Outlook（微软号池）' },
   { value: 'icloud_local', label: 'iCloud 隐私邮箱（本地主号）' },
+  { value: 'icloud_remote', label: 'iCloud 隐私邮箱（远程）' },
 ]
 
 /** value → label，用于把全局默认 provider 显示成中文名 */
@@ -75,9 +76,12 @@ export default function RegisterTaskPage() {
   const [form] = Form.useForm()
   const [task, setTask] = useState<any>(null)
   const [polling, setPolling] = useState(false)
-  // iCloud 本地主号列表：选「iCloud 隐私邮箱（本地主号）」时给个真实下拉，
+  // iCloud 主号列表：选「iCloud 隐私邮箱（本地主号）/（远程）」时给个真实下拉，
   // 而不是让人手输主号邮箱 —— 输错了要到等码超时才看得出来。
-  const [icloudAccounts, setIcloudAccounts] = useState<{ value: string; label: string }[]>([])
+  // 带 `source` 以便按渠道过滤（本地渠道只列本地主号，远程渠道只列接入的远端账号）。
+  const [icloudAccounts, setIcloudAccounts] = useState<
+    { value: string; label: string; source?: 'local' | 'remote' }[]
+  >([])
   // 全局配置里配的默认邮箱服务 —— 表单初值就来自它（见下面的 /config 加载），
   // 这里只用于给用户一句提示：不改就是用它。
   // 声明必须早于引用它的 useEffect：写在下面会让那个 effect 的依赖数组
@@ -94,6 +98,7 @@ export default function RegisterTaskPage() {
             .map((item) => ({
               value: String(item.id),
               label: `${item.email}（${item.alias_count} 个别名）`,
+              source: item.source === 'remote' ? ('remote' as const) : ('local' as const),
             })),
         )
       })
@@ -154,6 +159,10 @@ export default function RegisterTaskPage() {
         icloud_local_account_id: cfg.icloud_local_account_id || '',
         icloud_local_label: cfg.icloud_local_label || '',
         icloud_local_note: cfg.icloud_local_note || '',
+        // iCloud 隐私邮箱（远程）：主号在 icloud-hme 服务里，这里挑接入了哪个远端账号
+        icloud_remote_account_id: cfg.icloud_remote_account_id || '',
+        icloud_remote_label: cfg.icloud_remote_label || '',
+        icloud_remote_note: cfg.icloud_remote_note || '',
       })
     })
   }, [form])
@@ -175,6 +184,10 @@ export default function RegisterTaskPage() {
       icloud_local_account_id: values.icloud_local_account_id,
       icloud_local_label: values.icloud_local_label,
       icloud_local_note: values.icloud_local_note,
+      // iCloud 隐私邮箱（远程）：主号在 icloud-hme 服务里
+      icloud_remote_account_id: values.icloud_remote_account_id,
+      icloud_remote_label: values.icloud_remote_label,
+      icloud_remote_note: values.icloud_remote_note,
     }
     const chatgptRegistrationRequestAdapter =
       buildChatGPTRegistrationRequestAdapter(
@@ -412,7 +425,7 @@ export default function RegisterTaskPage() {
                 <Select
                   allowClear
                   placeholder="留空自动选第一个可用主号"
-                  options={icloudAccounts}
+                  options={icloudAccounts.filter((item) => item.source !== 'remote')}
                   notFoundContent="还没有已启用的主号，先到「邮箱服务」页登录"
                 />
               </Form.Item>
@@ -420,6 +433,30 @@ export default function RegisterTaskPage() {
                 <Input placeholder="留空则用「隐私邮箱」" />
               </Form.Item>
               <Form.Item name="icloud_local_note" label="备注（可选）">
+                <Input placeholder="写进隐私邮箱的备注" />
+              </Form.Item>
+            </>
+          )}
+          {mailProvider === 'icloud_remote' && (
+            <>
+              {/* 远程渠道的账号是「接入进来的远端账号」——只列远程行，
+                  本地主号选了会在取号时报「不是远程账号」。 */}
+              <Form.Item
+                name="icloud_remote_account_id"
+                label="远端账号"
+                extra="留空时用第一个可用的远程账号（在「邮箱服务」页接入）。"
+              >
+                <Select
+                  allowClear
+                  placeholder="留空自动选第一个可用远程账号"
+                  options={icloudAccounts.filter((item) => item.source === 'remote')}
+                  notFoundContent="还没有接入的远程账号，先到「邮箱服务」页点「添加远程服务」"
+                />
+              </Form.Item>
+              <Form.Item name="icloud_remote_label" label="别名标签（可选）">
+                <Input placeholder="留空则用「隐私邮箱」" />
+              </Form.Item>
+              <Form.Item name="icloud_remote_note" label="备注（可选）">
                 <Input placeholder="写进隐私邮箱的备注" />
               </Form.Item>
             </>

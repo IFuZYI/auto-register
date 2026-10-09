@@ -56,13 +56,24 @@ def find_account_by_email(email: str) -> Optional[ICloudAccountModel]:
     if not normalized:
         return None
     with platform_session("icloud") as session:
+        # 本地优先：同邮箱两边都有时（远程账号与本地主号同地址）取本地行。
+        row = session.exec(
+            select(ICloudAccountModel)
+            .where(ICloudAccountModel.email == normalized)
+            .where(ICloudAccountModel.source == "local")
+            .order_by(ICloudAccountModel.id)
+        ).first()
+        if row is not None:
+            return row
         return session.exec(
-            select(ICloudAccountModel).where(ICloudAccountModel.email == normalized)
+            select(ICloudAccountModel)
+            .where(ICloudAccountModel.email == normalized)
+            .order_by(ICloudAccountModel.id)
         ).first()
 
 
 def resolve_account(email: str = "") -> ICloudAccountModel:
-    """按邮箱定位主号；未指定时取第一个可用主号。"""
+    """按邮箱定位主号；未指定时取第一个可用主号（本地优先）。"""
     if str(email or "").strip():
         row = find_account_by_email(email)
         if row is None:
@@ -72,9 +83,12 @@ def resolve_account(email: str = "") -> ICloudAccountModel:
         return row
 
     with platform_session("icloud") as session:
+        # 自动挑选只考虑**本地**主号：本地链路（生成/同步/收件直连 Apple）需要
+        # 本机凭据，远程账号要走各自的远程分支。远程账号由注册渠道显式指定。
         row = session.exec(
             select(ICloudAccountModel)
             .where(ICloudAccountModel.enabled == True)  # noqa: E712 - SQLModel 需要值比较
+            .where(ICloudAccountModel.source == "local")
             .order_by(ICloudAccountModel.id)
         ).first()
     if row is None:
@@ -93,6 +107,15 @@ def list_accounts() -> list[dict[str, Any]]:
 
 
 def _account_to_dict(row: ICloudAccountModel, *, alias_count: int = 0) -> dict[str, Any]:
+    source = str(getattr(row, "source", "") or "local")
+    if source == "remote":
+        # 远程账号没有本机凭据/额度，走专用 DTO（见 services/icloud/remote.py）。
+        from services.icloud.remote import _account_public_dict
+
+        payload = _account_public_dict(row)
+        payload["alias_count"] = alias_count
+        return payload
+
     quota = alias_quota(row.id or 0)
     try:
         credential_state = load_credentials(row).public_state()
@@ -105,6 +128,7 @@ def _account_to_dict(row: ICloudAccountModel, *, alias_count: int = 0) -> dict[s
         "region": row.region,
         "status": row.status,
         "enabled": row.enabled,
+        "source": "local",
         "alias_count": alias_count,
         "sync_error": row.sync_error,
         "last_sync_at": _as_utc(row.last_sync_at).isoformat() if row.last_sync_at else None,
@@ -232,6 +256,39 @@ def import_session(
         session.commit()
         session.refresh(row)
         return _account_to_dict(row)
+
+
+def check_account(account_id: int, *, proxy: str | None = None) -> dict[str, Any]:
+    """对账号做一次低风险探活（不创建/修改任何远端资源）。
+
+    - 本地主号：对现有 Cookie 调一次 HME 列表（validate），成功即刷新
+      `last_sync_at`、清 `sync_error`；
+    - 远程账号：让 icloud-hme 服务执行它的探活（`/api/accounts/:id/check`）。
+    """
+    row = get_account(account_id)
+    if str(getattr(row, "source", "") or "") == "remote":
+        from services.icloud.remote import check_remote_account
+
+        return check_remote_account(account_id, proxy=proxy)
+
+    credentials = load_credentials(row)
+    if not credentials.has_web_session:
+        raise ICloudError("invalid_config", "账号未配置 Web 会话，无法检测登录态")
+    with _facade.web_client(proxy=proxy) as client:
+        client.list_private_emails(credentials)
+
+    with platform_session("icloud") as session:
+        fresh = session.get(ICloudAccountModel, int(account_id))
+        if fresh is not None:
+            fresh.status = "active"
+            fresh.sync_error = ""
+            fresh.last_sync_at = _utcnow()
+            fresh.updated_at = _utcnow()
+            session.add(fresh)
+            session.commit()
+            session.refresh(fresh)
+            return _account_to_dict(fresh)
+    raise ICloudError("account_not_found", "iCloud 主号不存在")
 
 
 def set_account_enabled(account_id: int, enabled: bool) -> dict[str, Any]:

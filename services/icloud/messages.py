@@ -38,13 +38,21 @@ def fetch_account_messages_detailed(
 ) -> tuple[list[MailMessage], str, str]:
     """读主号收件箱，IMAP 优先、Web API 兜底。
 
-    返回 `(messages, method, warning)`：`method` 是 `imap` 或 `web_api`，
+    返回 `(messages, method, warning)`：`method` 是 `imap` / `web_api` / `remote`，
     `warning` 只在降级时非空，说明为什么没用 IMAP。
 
     为什么要有回退：IMAP 需要用户去 appleid.apple.com 生成 App 专用密码，
     而导入 Cookie 的主号天然带 Web 会话。只有 Web 会话时不该完全读不了信。
+
+    远程账号（source=remote）走远程分支：收件由 icloud-hme 服务完成
+    （它那边也是 IMAP 优先、Web API 兜底），本机只消费结果。
     """
     row = get_account(account_id)
+    if str(getattr(row, "source", "") or "") == "remote":
+        return _facade.fetch_remote_messages(
+            row, limit=limit, recipient=recipient, proxy=proxy
+        )
+
     credentials = load_credentials(row)
 
     if credentials.has_imap:

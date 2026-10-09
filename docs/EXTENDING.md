@@ -262,14 +262,18 @@ from .channels import foo  # noqa: F401  (导入副作用：注册)
 | **自建地址** | （一次性临时邮箱渠道已整体删除，见下） | 向上游注册一个新邮箱 | 上游返回的 token |
 | **复用已有地址** | `outlook`（别名 `microsoft` / `mail_import`）、`icloud_local` | 让主号创建/取用别名 | 主号 id + 别名地址 |
 
-现存渠道只有两条，都是**复用型 / 本地号池型**：`outlook`（微软号池，挂
-`microsoft` / `mail_import` 两个别名）与 `icloud_local`（iCloud 主号开隐私邮箱）。
-参考实现：`modules/mail/icloud_local.py`。`account_id` 存成
+现存渠道都是**复用型 / 本地号池型**（或它的远程镜像）：`outlook`（微软号池，挂
+`microsoft` / `mail_import` 两个别名）、`icloud_local`（iCloud 主号开隐私邮箱，
+主号在本地库）与 `icloud_remote`（同样的取号语义，但主号在独立部署的 icloud-hme
+服务里，经 HTTP API 生成/收件）。参考实现：`modules/mail/icloud_local.py`
+（本地）与 `modules/mail/icloud_remote.py`（远程）。`account_id` 都存成
 `"<主号 id>:<别名地址>"` —— 收件要按主号取邮件、按别名过滤，两者缺一不可。
 
 > 一次性临时邮箱（Mail.tm / DuckMail / TempMail.lol / MoeMail / SkyMail /
 > CloudMail / MaliAPI / GPTMail / OpenTrashMail / CF Worker / Laoudo / Aitre）与
-> 远程服务型 `icloud_hme` 已按用户要求整体删除 —— 所以上面「自建地址」一栏没有
+> 旧版远程 `icloud_hme` 已按用户要求整体删除（`icloud_remote` 是后来按新的
+> 「远程仓库」需求重新实现的渠道，名字不同、凭据模型不同 —— 一行一个远端账号，
+> 见 `services/icloud/remote.py`）。所以上面「自建地址」一栏没有
 > 现存例子。新增这类渠道时照本节骨架写，并在
 > `core/mail_import_sources.py` 的 `_LEGACY_PROVIDER_ALIASES` 里登记旧名收敛
 > （老库里的值要能读，否则升级后报「未知邮箱提供商」）。

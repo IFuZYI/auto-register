@@ -112,6 +112,8 @@ export interface AliasFilter {
   status?: string
   /** 平台（chatgpt / grok）。选了之后号池状态按「在这个平台有没有注册」解释。 */
   platform?: string
+  /** 来源：local（本地）/ remote（远程仓库）。 */
+  source?: string
 }
 
 /**
@@ -189,7 +191,7 @@ export function aliasPlatformStatus(
 export function filterAliases<
   T extends Pick<
     ICloudAlias,
-    'address' | 'label' | 'note' | 'account_email' | 'pool_status' | 'status' | 'used_platforms' | 'registered_platforms'
+    'address' | 'label' | 'note' | 'account_email' | 'pool_status' | 'status' | 'used_platforms' | 'registered_platforms' | 'source'
   >,
 >(aliases: T[], filter: AliasFilter): T[] {
   const keyword = String(filter.keyword || '').trim().toLowerCase()
@@ -201,6 +203,7 @@ export function filterAliases<
       if (status !== filter.poolStatus) return false
     }
     if (filter.status && alias.status !== filter.status) return false
+    if (filter.source && (alias.source || 'local') !== filter.source) return false
     if (!keyword) return true
     return [alias.address, alias.label, alias.note, alias.account_email]
       .some((field) => String(field || '').toLowerCase().includes(keyword))
@@ -210,7 +213,11 @@ export function filterAliases<
 /** 是否设了任一筛选条件（用于「筛选出 N/M 个 + 清除」的显示判断）。 */
 export function hasAliasFilter(filter: AliasFilter): boolean {
   return Boolean(
-    String(filter.keyword || '').trim() || filter.poolStatus || filter.status || filter.platform,
+    String(filter.keyword || '').trim() ||
+      filter.poolStatus ||
+      filter.status ||
+      filter.platform ||
+      filter.source,
   )
 }
 

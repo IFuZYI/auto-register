@@ -572,7 +572,7 @@ def test_every_channel_module_imports_and_registers():
     # 那是渠道的权威定义（在这里再抄一份的话，删/加渠道就要改两处）
     builtin = set(builtin_channel_modules)
     # 依赖 services/ 的渠道（modules/mail/，由注册表延迟加载触发）
-    service_backed = {"icloud_local"}
+    service_backed = {"icloud_local", "icloud_remote"}
 
     missing_builtin = sorted(builtin - registered)
     missing_service = sorted(service_backed - registered)

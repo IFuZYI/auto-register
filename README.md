@@ -195,7 +195,13 @@ Docker 部署细节、环境变量清单与 Turnstile Solver 说明见 [部署�
 在「邮箱服务」里维护收件来源，注册时从号池取地址：
 
 - **iCloud 隐私邮箱（本地）**：添加 Apple ID 主号（账号密码或 Cookie 导入），再批量生成隐私邮箱别名
+- **iCloud 隐私邮箱（远程）**：接入独立部署的 icloud-hme 服务（服务地址 + 管理员密码），
+  别名由该服务生成、收件也走它 —— 主号凭据不进本机库
 - **Outlook（本地）**：导入微软号池（Outlook / Hotmail / MailAPI URL 三类）
+
+> iCloud 主号与别名都带**来源标签**（本地 / 远程），列表可按来源筛选。远程同步
+> **本地优先去重**：同一个地址本地已有就保留本地那份。详见
+> [功能详解](docs/FEATURES.md#远程-icloud-仓库)。
 
 > ⚠️ **粘贴邮箱只是存进号池，不会自动可用。** 在预览表里勾选要用的邮箱、点
 > 「导入邮箱池」（状态从「未入池」转为「可领」）之后，注册任务才能取到它们。
@@ -243,7 +249,7 @@ Docker 部署细节、环境变量清单与 Turnstile Solver 说明见 [部署�
 | **仪表盘** | — | 账号总览与分布（总账号数 / 正常 / 失效（含过期）/ 禁用四卡） |
 | **任务运行** | — | 进行中与已完成的任务，实时日志流 |
 | **平台管理** | ChatGPT / Grok | 按平台的账号列表、详情、导入导出、批量操作、注册弹窗 |
-| **邮箱服务** | iCloud 隐私邮箱（本地）/ Outlook（本地） | 各邮箱来源的号池维护 |
+| **邮箱服务** | iCloud 隐私邮箱（本地）/ Outlook（本地） | 各邮箱来源的号池维护（iCloud 页含远程仓库接入与来源标签） |
 | **面板管理** | CPA 面板 / Sub2API / grok2api / chatgpt2api | 面板入口卡片 + 本地 ↔ 远程账号对比 |
 | **代理管理** | — | 代理池增删与健康检查 |
 | **任务历史** | — | 注册任务执行记录，支持批量删除 |
@@ -342,6 +348,8 @@ Sentinel PoW 走 Node 沙箱。
 | [docs/API_REFERENCE.md](docs/API_REFERENCE.md) | 每个接口的请求 / 响应形状 |
 | [docs/DATABASE_MODULARITY.md](docs/DATABASE_MODULARITY.md) | 分库、邮箱唯一键、跨库查询 |
 | [docs/DATA_DIRECTORY.md](docs/DATA_DIRECTORY.md) | 数据目录布局与路径规则 |
+| [docs/GLOSSARY.md](docs/GLOSSARY.md) | 项目特有术语（主号 / 隐私邮箱 / 本地与远程 / 号池…） |
+| [docs/adr/](docs/adr/) | 架构决策记录（ADR） |
 
 ## 界面预览
 

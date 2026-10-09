@@ -70,6 +70,10 @@ CONFIG_KEYS = [
     "icloud_local_account_id",
     "icloud_local_label",
     "icloud_local_note",
+    # 远程 iCloud 渠道（主号在远程 icloud-hme 仓库，别名经它的 API 生成）
+    "icloud_remote_account_id",
+    "icloud_remote_label",
+    "icloud_remote_note",
     "cpa_enabled",
     "cpa_api_url",
     "cpa_api_key",

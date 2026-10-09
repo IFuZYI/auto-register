@@ -183,8 +183,10 @@ def test_every_deleted_channel_converges_to_blank():
         # 大小写变体同样要收敛（写侧会先 lower）
         assert normalize_mail_provider(name.upper()) == "", f"{name.upper()} 没有收敛"
 
-    # 存活的渠道名必须原样保留，别把收敛写成「什么都清空」
-    for name in ("microsoft", "outlook", "icloud_local"):
+    # 存活的渠道名必须原样保留，别把收敛写成「什么都清空」。
+    # `icloud_hme` 是**已删除的旧名**（收敛空串，见上）；`icloud_remote` 是
+    # 重新实现的远程渠道名（凭据模型不同：一行一个远端账号），不受收敛影响。
+    for name in ("microsoft", "outlook", "icloud_local", "icloud_remote"):
         assert normalize_mail_provider(name) == name, f"{name} 被误清空了"
 
 

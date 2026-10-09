@@ -208,6 +208,14 @@ JWT 默认有效期为 7 天。密码与 JWT 签名密钥存入配置存储；�
 | DELETE | `/api/tasks/{task_id}` | — | 删除已结束任务；运行中任务返回 `409` |
 | GET | `/api/tasks/logs` | `platform?,page=1,page_size=50` | 获取注册任务历史记录，返回 `{total,items}` |
 | POST | `/api/tasks/logs/batch-delete` | `{ids:[1,2]}` | 批量删除任务历史 |
+| POST | `/api/tasks/logs/cleanup` | `{older_than_days:7}` | 按保留期清理任务历史（`created_at < 现在-N天`），返回 `{deleted,older_than_days,cutoff}` |
+| POST | `/api/tasks/runs/cleanup` | `{older_than_days:7}` | 按保留期清理**已结束**的任务运行记录；先收尾孤儿，进行中的任务不受影响 |
+
+**保留期清理**（用户要求：「清理1天/周/月前的日志」）：`older_than_days` 取值 1–3650（越界 422）。
+两个端点共用一套口径（`services/log_cleanup.py`），前端选项与端点路径来自
+`frontend/src/lib/logCleanup.ts`（两页共用一份，避免分叉）。任务运行记录只清
+`done / failed / stopped` —— `running / pending` 的行可能正被任务线程持有，
+删掉下一次持久化又会写回来。
 
 ---
 
@@ -313,7 +321,7 @@ grok2api），操作面在界面「面板管理」页（那里有本地 ↔ 远�
 | GET | `/api/config` | — | 返回白名单中的全局配置；未设置项为 `""` |
 | PUT | `/api/config` | `{data:{"key":"value"}}` | 更新白名单内配置，返回实际更新的 `updated` 字段列表 |
 
-配置白名单覆盖邮箱提供商、验证码、CPA/Sub2API/grok2api、iCloud 隐私邮箱（本地主号 `icloud_local_*`）、SMS、贡献服务等。未知 key 会被静默忽略。敏感配置（API Key、密码等）只应通过受控客户端提交。
+配置白名单覆盖邮箱提供商、验证码、CPA/Sub2API/grok2api、iCloud 隐私邮箱（本地主号 `icloud_local_*`、远程仓库 `icloud_remote_*`）、SMS、贡献服务等。未知 key 会被静默忽略。敏感配置（API Key、密码等）只应通过受控客户端提交。
 
 > `mail_provider` 的已弃用值 `applemail`（小苹果 / AppleMail）在读写两侧都会收敛到
 > `microsoft`，`mail_import_source` 里对应的视图收敛到 `outlook`。该渠道本身已删除。
@@ -378,7 +386,11 @@ grok2api），操作面在界面「面板管理」页（那里有本地 ↔ 远�
 > **注册任务的邮箱来源**：`icloud_local`（`modules/mail/icloud_local.py`）走的就是
 > 本接口背后的 `services/icloud_service.py`，凭据在本机 `data/platforms/icloud.db`，
 > 注册页只配 `icloud_local_account_id` / `icloud_local_label` / `icloud_local_note`。
-> （历史上另有远程 `icloud_hme` 链路，已随服务删除。）
+> `icloud_remote`（`modules/mail/icloud_remote.py`）是远程仓库渠道：凭据在独立的
+> icloud-hme 服务里，本机经 `services/icloud/remote.py` 调它的 API，注册页配
+> `icloud_remote_account_id` / `icloud_remote_label` / `icloud_remote_note`。
+> （历史上另有旧版远程 `icloud_hme` 链路，已随服务删除；`icloud_remote` 是重新
+> 实现的版本，凭据模型不同：一行一个远端账号。）
 
 ### 9.1 登录会话
 
@@ -395,18 +407,21 @@ grok2api），操作面在界面「面板管理」页（那里有本地 ↔ 远�
 
 | 方法 | 路径 | 请求体 / 参数 | 说明 |
 | --- | --- | --- | --- |
-| GET | `/api/icloud/accounts` | — | 列出 iCloud 主号 |
+| GET | `/api/icloud/accounts` | — | 列出 iCloud 主号（含 `source`：`local` / `remote`） |
 | POST | `/api/icloud/accounts/import-cookie` | `{email?,display_name?,region?,cookie_header?,cookies_json?,imap_host?,imap_port?,imap_username?,imap_password?}` | 导入 iCloud Web Cookie 会话 |
-| PATCH | `/api/icloud/accounts/{account_id}` | `{enabled}` | 启用或禁用主号 |
-| DELETE | `/api/icloud/accounts/{account_id}` | — | 删除主号 |
-| POST | `/api/icloud/accounts/{account_id}/sync` | — | 从 Apple 同步隐私邮箱别名 |
-| GET | `/api/icloud/accounts/{account_id}/messages` | `limit=50,recipient?` | 拉取主号收件邮件；可按收件别名过滤 |
+| POST | `/api/icloud/remote-accounts` | `{base_url,admin_password,remote_account_id,name?,proxy?}` | 接入远端 icloud-hme 账号（一行一个远端账号）。密码 AES 加密落库、绝不回显；重复接入同一 `(base_url, remote_account_id)` 返回 400 |
+| POST | `/api/icloud/remote-accounts/discover` | `{base_url,admin_password,proxy?}` | 只读探针：登录远端并列出它的账号（不落库）。给「添加远程服务」弹窗用 |
+| PATCH | `/api/icloud/accounts/{account_id}` | `{enabled}` | 启用或禁用主号（本地 / 远程通用） |
+| POST | `/api/icloud/accounts/{account_id}/check` | — | 探测账号登录态。本地主号对现有 Cookie 做低风险 validate；远程账号让 icloud-hme 服务执行探活 |
+| DELETE | `/api/icloud/accounts/{account_id}` | — | 删除主号（同时移除本地记录的别名） |
+| POST | `/api/icloud/accounts/{account_id}/sync` | — | 同步别名。本地主号从 Apple 拉；远程账号从 icloud-hme 拉，响应含 `skipped_local`（因本地已有同地址而跳过的数量 —— 本地优先去重） |
+| GET | `/api/icloud/accounts/{account_id}/messages` | `limit=50,recipient?` | 拉取主号收件邮件；可按收件别名过滤。远程账号的 `method` 为 `remote` |
 
 ### 9.3 Hide My Email 别名
 
 | 方法 | 路径 | 请求体 / 参数 | 说明 |
 | --- | --- | --- | --- |
-| GET | `/api/icloud/aliases` | `account_id?` | 列出隐私邮箱别名。每行带 `used_platforms`（池记账）与 `registered_platforms`（`accounts` 表里的权威注册证据，跨库查出来）；界面按后者显示「已注册平台」并做平台筛选 |
+| GET | `/api/icloud/aliases` | `account_id?` | 列出隐私邮箱别名。每行带 `source`（`local` / `remote`）、`used_platforms`（池记账）与 `registered_platforms`（`accounts` 表里的权威注册证据，跨库查出来）；界面按来源/平台筛选 |
 | POST | `/api/icloud/aliases` | `{account_id?,account_email?,label?,note?,count:1}` | 生成别名；`count` 范围 1–5 |
 | POST | `/api/icloud/aliases/{alias_id}/pool-status` | `{pool_status}` | 手动改号池状态（`available` / `in_use` / `used`）。自动记账已接通（取号标 `in_use`、注册收尾记回），此端点留给人工干预。注意 `unpooled`（未入池）**不可经此设置**（会 400）—— 移出号池走 `/api/icloud/aliases/unpool` |
 | POST | `/api/icloud/aliases/import-to-pool` | `{ids}` | 把选中的别名从「未入池」导入号池（→ 未使用）。生成/同步进来的默认未入池，取号会跳过 |

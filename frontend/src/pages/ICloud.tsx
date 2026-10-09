@@ -20,6 +20,7 @@ import {
 } from 'antd'
 import {
   DeleteOutlined,
+  CloudServerOutlined,
   DownOutlined,
   DownloadOutlined,
   ImportOutlined,
@@ -36,6 +37,7 @@ import {
 } from '@ant-design/icons'
 import {
   batchDeleteICloudAliases,
+  checkICloudAccount,
   deleteICloudAccount,
   deleteICloudAlias,
   EMPTY_ALIAS_POOL,
@@ -54,6 +56,7 @@ import {
 import { ICloudLoginModal } from '@/components/icloud/ICloudLoginModal'
 import { AliasInboxDrawer } from '@/components/icloud/AliasInboxDrawer'
 import { CookieImportModal } from '@/components/icloud/CookieImportModal'
+import { AddRemoteServiceModal } from '@/components/icloud/AddRemoteServiceModal'
 import { GenerateAliasModal } from '@/components/icloud/GenerateAliasModal'
 import { PageHeader } from '@/components/PageHeader'
 import {
@@ -90,6 +93,7 @@ export default function ICloudPage() {
   const [busyKey, setBusyKey] = useState<string | null>(null)
   const [loginOpen, setLoginOpen] = useState(false)
   const [cookieOpen, setCookieOpen] = useState(false)
+  const [remoteOpen, setRemoteOpen] = useState(false)
   const [generateOpen, setGenerateOpen] = useState(false)
   const [filterAccountId, setFilterAccountId] = useState<number | undefined>()
   // 隐私邮箱列表的筛选条件。客户端过滤而非服务端：列表本来就是一次性拉全量
@@ -100,6 +104,8 @@ export default function ICloudPage() {
   const [filterAliasStatus, setFilterAliasStatus] = useState<string | undefined>()
   // 平台筛选：选了之后号池状态与顶部统计换成「该平台注册过没有」的口径。
   const [filterPlatform, setFilterPlatform] = useState<string | undefined>()
+  // 来源筛选：本地 / 远程仓库（用户要求「增加一个标签，标注是远程还是本地」）。
+  const [filterSource, setFilterSource] = useState<string | undefined>()
   const [inboxAlias, setInboxAlias] = useState<ICloudAlias | null>(null)
   const [selectedAliasIds, setSelectedAliasIds] = useState<React.Key[]>([])
   const [batchDeleting, setBatchDeleting] = useState(false)
@@ -151,10 +157,10 @@ export default function ICloudPage() {
 
   // 筛选条件变化后，原来选中的行可能已经不在可见列表里了 —— 留着会让
   // 「删除 N 个」的 N 与用户眼前看到的对不上（而且删的是看不见的行）。
-  // 主号、搜索词、号池状态、平台、启用状态任一变化都清空选择。
+  // 主号、搜索词、号池状态、平台、来源、启用状态任一变化都清空选择。
   useEffect(() => {
     setSelectedAliasIds([])
-  }, [filterAccountId, searchText, filterPoolStatus, filterAliasStatus, filterPlatform])
+  }, [filterAccountId, searchText, filterPoolStatus, filterAliasStatus, filterPlatform, filterSource])
 
   // 筛选后的别名列表 —— **表格与导出都读它**，不是原始 aliases。
   // 「导出没勾选时导出当前筛选结果」的既有口径要求这里就是筛选后的集合，
@@ -167,8 +173,9 @@ export default function ICloudPage() {
         poolStatus: filterPoolStatus,
         status: filterAliasStatus,
         platform: filterPlatform,
+        source: filterSource,
       }),
-    [aliases, searchText, filterPoolStatus, filterAliasStatus, filterPlatform],
+    [aliases, searchText, filterPoolStatus, filterAliasStatus, filterPlatform, filterSource],
   )
 
   const aliasFilterActive = hasAliasFilter({
@@ -176,6 +183,7 @@ export default function ICloudPage() {
     poolStatus: filterPoolStatus,
     status: filterAliasStatus,
     platform: filterPlatform,
+    source: filterSource,
   })
 
   // 平台口径统计（顶部统计条在选了平台时改读它）。
@@ -189,6 +197,7 @@ export default function ICloudPage() {
     setFilterPoolStatus(undefined)
     setFilterAliasStatus(undefined)
     setFilterPlatform(undefined)
+    setFilterSource(undefined)
   }
 
   // 没勾选就按当前筛选出来的全部算，跟账号页导出的口径一致
@@ -287,6 +296,21 @@ export default function ICloudPage() {
       ),
     },
     {
+      // 来源标签：本地（本机直连 Apple）/ 远程（远程 icloud-hme 仓库）。
+      // 用户要求「增加一个标签，标注是远程还是本地」。
+      title: '来源',
+      dataIndex: 'source',
+      width: 110,
+      render: (value: ICloudAccount['source'], account: ICloudAccount) =>
+        value === 'remote' ? (
+          <Tooltip title={account.base_url ? `远程仓库：${account.base_url}` : '远程仓库'}>
+            <Tag color="purple">远程</Tag>
+          </Tooltip>
+        ) : (
+          <Tag color="blue">本地</Tag>
+        ),
+    },
+    {
       title: '区域',
       dataIndex: 'region',
       width: 180,
@@ -295,37 +319,52 @@ export default function ICloudPage() {
     {
       title: '会话状态',
       width: 200,
-      render: (_: unknown, account: ICloudAccount) => (
-        <Space size={4} wrap>
-          <Tag color={account.credential_state.has_session_cookies ? 'green' : 'red'}>
-            Web Session
+      render: (_: unknown, account: ICloudAccount) =>
+        account.source === 'remote' ? (
+          // 远程账号的凭据在 icloud-hme 服务里 —— 显示「远端凭据」而不是
+          // 误报 Web Session / IMAP 缺失（本机确实没有这些凭据，但这不代表异常）。
+          <Tag color={account.credential_state.has_remote_password ? 'purple' : 'red'}>
+            远端凭据
           </Tag>
-          <Tag color={account.credential_state.has_imap_credentials ? 'green' : 'orange'}>IMAP</Tag>
-        </Space>
-      ),
+        ) : (
+          <Space size={4} wrap>
+            <Tag color={account.credential_state.has_session_cookies ? 'green' : 'red'}>
+              Web Session
+            </Tag>
+            <Tag color={account.credential_state.has_imap_credentials ? 'green' : 'orange'}>IMAP</Tag>
+          </Space>
+        ),
     },
     {
       title: '隐私邮箱',
       width: 150,
-      render: (_: unknown, account: ICloudAccount) => (
-        <Tooltip title={`本小时剩余额度 ${account.quota.remaining}/${account.quota.limit}`}>
-          <Badge
-            count={account.alias_count}
-            showZero
-            // 用主题强调色而不是硬编码的蓝：亮色主题下 #5b8db3 太灰，
-            // 且它是唯一一处绕过 token 的徽章色。
-            //
-            // 但 --accent(#2997ff) 配白字只有 3.02:1（AA 需 4.5:1）——
-            // 徽章数字正是要看清的内容，所以用同色系更深的一档。
-            // #005bb5 实测 6.64:1，且与品牌蓝同色系。
-            color="#005bb5"
-            style={{ marginRight: 8 }}
-          />
-          <Text type="secondary">
-            {account.quota.remaining}/{account.quota.limit}
-          </Text>
-        </Tooltip>
-      ),
+      render: (_: unknown, account: ICloudAccount) =>
+        // 远程账号的额度由远端服务管理，本机看不到剩余数 —— 显示「远端管理」
+        // 而不是假的 0/0（那会被读成「额度用完了」）。
+        account.source === 'remote' ? (
+          <Tooltip title="远程仓库的创建额度由 icloud-hme 服务管理（同账号 20 分钟冷却、每天 50 个上限）">
+            <Badge count={account.alias_count} showZero color="#005bb5" style={{ marginRight: 8 }} />
+            <Text type="secondary">远端管理</Text>
+          </Tooltip>
+        ) : (
+          <Tooltip title={`本小时剩余额度 ${account.quota.remaining}/${account.quota.limit}`}>
+            <Badge
+              count={account.alias_count}
+              showZero
+              // 用主题强调色而不是硬编码的蓝：亮色主题下 #5b8db3 太灰，
+              // 且它是唯一一处绕过 token 的徽章色。
+              //
+              // 但 --accent(#2997ff) 配白字只有 3.02:1（AA 需 4.5:1）——
+              // 徽章数字正是要看清的内容，所以用同色系更深的一档。
+              // #005bb5 实测 6.64:1，且与品牌蓝同色系。
+              color="#005bb5"
+              style={{ marginRight: 8 }}
+            />
+            <Text type="secondary">
+              {account.quota.remaining}/{account.quota.limit}
+            </Text>
+          </Tooltip>
+        ),
     },
     {
       title: '最近同步',
@@ -335,6 +374,10 @@ export default function ICloudPage() {
         account.sync_error ? (
           <Tooltip title={account.sync_error}>
             <Tag color="red">同步失败</Tag>
+          </Tooltip>
+        ) : account.source === 'remote' ? (
+          <Tooltip title={account.remote_account_id ? `远端账号 ${account.remote_account_id}` : '远程账号'}>
+            {formatDateTime(value)}
           </Tooltip>
         ) : (
           formatDateTime(value)
@@ -359,7 +402,7 @@ export default function ICloudPage() {
     },
     {
       title: '操作',
-      width: 180,
+      width: 220,
       // 固定到右侧：列宽合计超出容器时（实测 1240px vs 984px），操作列
       // 默认落在视口外，用户得横向滚动才能点到「同步 / 删除」——
       // 与账号页（Accounts.tsx）同款处理。
@@ -375,6 +418,17 @@ export default function ICloudPage() {
             }
           >
             同步
+          </Button>
+          {/* 检测登录态：本地主号对现有 Cookie 做一次低风险 validate；
+              远程账号让 icloud-hme 服务执行同样的探活。 */}
+          <Button
+            size="small"
+            loading={busyKey === `account:${account.id}`}
+            onClick={() =>
+              withBusy(`account:${account.id}`, () => checkICloudAccount(account.id), '登录态正常')
+            }
+          >
+            检测
           </Button>
           <Popconfirm
             title="删除主号"
@@ -394,6 +448,14 @@ export default function ICloudPage() {
       dataIndex: 'address',
       width: 260,
       render: (address: string) => <Text copyable>{address}</Text>,
+    },
+    {
+      // 来源标签：本地 / 远程仓库（用户要求「增加一个标签，标注是远程还是本地」）。
+      title: '来源',
+      dataIndex: 'source',
+      width: 100,
+      render: (value: ICloudAlias['source']) =>
+        value === 'remote' ? <Tag color="purple">远程</Tag> : <Tag color="blue">本地</Tag>,
     },
     {
       title: '邮件 URL',
@@ -561,6 +623,9 @@ export default function ICloudPage() {
               应用内登录
             </Button>
             <Button onClick={() => setCookieOpen(true)}>手工导入 Cookie</Button>
+            <Button icon={<CloudServerOutlined />} onClick={() => setRemoteOpen(true)}>
+              添加远程服务
+            </Button>
             <Button icon={<ReloadOutlined spin={loading} />} onClick={load} aria-label="刷新列表" title="刷新列表" />
           </Space>
         }
@@ -585,10 +650,10 @@ export default function ICloudPage() {
                   loading={loading}
                   columns={accountColumns}
                   dataSource={accounts}
-                  // 7 列合计 1240px，容器装不下时 antd 会等比压缩所有列 ——
+                  // 8 列合计 1390px，容器装不下时 antd 会等比压缩所有列 ——
                   // 实测「主号」列被压到 143px（设定 260），邮箱地址换行、行高 78px。
                   // 定住宽度宁可横向滚动，与别名表同款处理。
-                  scroll={{ x: 1240 }}
+                  scroll={{ x: 1390 }}
                   pagination={false}
                   locale={{
                     emptyText: (
@@ -703,6 +768,17 @@ export default function ICloudPage() {
                       { value: 'inactive', label: '已停用' },
                     ]}
                   />
+                  <Select
+                    allowClear
+                    placeholder="全部来源"
+                    style={{ width: 130 }}
+                    value={filterSource}
+                    onChange={setFilterSource}
+                    options={[
+                      { value: 'local', label: '本地' },
+                      { value: 'remote', label: '远程' },
+                    ]}
+                  />
                   {aliasFilterActive && (
                     <Text type="secondary">
                       筛选出 {visibleAliases.length} / {aliases.length} 个
@@ -777,10 +853,10 @@ export default function ICloudPage() {
                     onChange: setSelectedAliasIds,
                   }}
                   // 列多了之后窄屏会把邮箱地址挤成三行，宁可横向滚动。
-                  // 宽度要盖住所有列（含后加的「号池」「已注册平台」列，
-                  // 且平台筛选时「号池」列从 130 变 170 —— 按最大值 1830 算），
+                  // 宽度要盖住所有列（含后加的「号池」「已注册平台」「来源」列，
+                  // 且平台筛选时「号池」列从 130 变 170 —— 按最大值 1930 算），
                   // 否则最后一列被裁掉 / 被 antd 等比压缩。
-                  scroll={{ x: 1830 }}
+                  scroll={{ x: 1930 }}
                   pagination={{ pageSize: 20, showSizeChanger: false }}
                   locale={{
                     emptyText: (
@@ -814,6 +890,12 @@ export default function ICloudPage() {
         open={cookieOpen}
         onClose={() => setCookieOpen(false)}
         onImported={() => load()}
+      />
+
+      <AddRemoteServiceModal
+        open={remoteOpen}
+        onClose={() => setRemoteOpen(false)}
+        onAdded={() => load()}
       />
 
       <GenerateAliasModal

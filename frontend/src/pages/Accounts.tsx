@@ -571,6 +571,9 @@ export default function Accounts() {
         icloud_local_account_id: cfg.icloud_local_account_id,
         icloud_local_label: cfg.icloud_local_label,
         icloud_local_note: cfg.icloud_local_note,
+        icloud_remote_account_id: cfg.icloud_remote_account_id,
+        icloud_remote_label: cfg.icloud_remote_label,
+        icloud_remote_note: cfg.icloud_remote_note,
       }
       const chatgptRegistrationRequestAdapter =
         buildChatGPTRegistrationRequestAdapter(
