@@ -178,7 +178,7 @@ class TestGetEmail:
                 mailbox.get_email()
 
     def test_rate_limit_error_propagates(self):
-        """额度耗尽要原样抛出，上层据此换渠道（不能吞成空地址）。"""
+        """额度耗尽要原样抛出，让任务把该轮记成失败（不能吞成空地址）。"""
         from platforms.icloud.errors import ICloudError
 
         mailbox = ICloudLocalMailbox()
