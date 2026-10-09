@@ -6,6 +6,7 @@ from typing import Callable, Optional
 from copy import deepcopy
 from core.db import TaskLog, TaskRunModel, current_engine
 from core.time_utils import UtcDatetime
+from services.log_cleanup import MAX_RETENTION_DAYS
 from core.task_runtime import (
     AttemptOutcome,
     AttemptResult,
@@ -83,6 +84,16 @@ class RegisterTaskRequest(BaseModel):
 
 class TaskLogBatchDeleteRequest(BaseModel):
     ids: list[int]
+
+
+class LogCleanupRequest(BaseModel):
+    """按保留期清理：保留最近 N 天，更早的记录删除。
+
+    上界与清理实现同源（`services/log_cleanup.MAX_RETENTION_DAYS`），
+    两份定义会分叉。
+    """
+
+    older_than_days: int = Field(ge=1, le=MAX_RETENTION_DAYS)
 
 
 class BackfillRtTaskRequest(BaseModel):
@@ -532,6 +543,44 @@ def batch_delete_logs(body: TaskLogBatchDeleteRequest):
             s.rollback()
             logger.exception("批量删除任务历史失败")
             raise HTTPException(500, f"批量删除任务历史失败: {str(e)}")
+
+
+@router.post("/logs/cleanup")
+def cleanup_logs(body: LogCleanupRequest):
+    """按保留期清理任务历史（`task_logs`）。
+
+    用户要求：「增加日志清理功能，比如清理1天/周/月前的日志。」
+    保留期由前端给天数（1 / 7 / 30），删除界线在服务端归一为 aware UTC ——
+    UI 发的是天数，不该要求调用方自己算时间戳。
+    """
+    from services.log_cleanup import cleanup_task_logs, retention_cutoff
+
+    deleted = cleanup_task_logs(body.older_than_days)
+    logger.info("清理任务历史成功: %s 条（保留 %s 天）", deleted, body.older_than_days)
+    return {
+        "deleted": deleted,
+        "older_than_days": body.older_than_days,
+        "cutoff": retention_cutoff(body.older_than_days).isoformat(),
+    }
+
+
+@router.post("/runs/cleanup")
+def cleanup_runs(body: LogCleanupRequest):
+    """按保留期清理任务运行记录（`task_runs`）。
+
+    先收尾孤儿再清理：崩溃留下的 `running` 行在内存里没有对应记录，
+    不收尾就永远不是终态、会被「只清已结束」的规则永久略过。
+    """
+    from services.log_cleanup import cleanup_task_runs, retention_cutoff
+
+    _finalize_orphan_tasks()
+    deleted = cleanup_task_runs(body.older_than_days)
+    logger.info("清理任务运行记录成功: %s 条（保留 %s 天）", deleted, body.older_than_days)
+    return {
+        "deleted": deleted,
+        "older_than_days": body.older_than_days,
+        "cutoff": retention_cutoff(body.older_than_days).isoformat(),
+    }
 
 
 @router.get("/{task_id}/logs/stream")

@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useState } from 'react'
 import {
+  App,
   Badge,
   Button,
   Card,
   Col,
   Drawer,
+  Dropdown,
   Empty,
   message,
   Popconfirm,
@@ -19,9 +21,12 @@ import {
   FileTextOutlined,
   LoadingOutlined,
   ReloadOutlined,
+  ClearOutlined,
+  DownOutlined,
 } from '@ant-design/icons'
 import { getPlatformTagColor, getPlatformLabel } from '@/lib/platforms'
 import { taskKindMeta } from '@/lib/taskKinds'
+import { CLEANUP_ENDPOINTS, RETENTION_OPTIONS, retentionLabel } from '@/lib/logCleanup'
 import { apiFetch } from '@/lib/utils'
 import { TaskLogPanel } from '@/components/TaskLogPanel'
 import type { TaskKind } from '@/components/TaskLogPanel'
@@ -88,6 +93,8 @@ export default function RunningTasks() {
   const [loading, setLoading] = useState(false)
   const [logTaskId, setLogTaskId] = useState<string | null>(null)
   const [now, setNow] = useState(() => Date.now() / 1000)
+  const [cleaning, setCleaning] = useState(false)
+  const { modal, message: msg } = App.useApp()
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -138,6 +145,31 @@ export default function RunningTasks() {
       const detail = error instanceof Error ? error.message : '删除失败'
       message.error(detail)
     }
+  }
+
+  const handleCleanup = (days: number) => {
+    modal.confirm({
+      title: `确认清理 ${retentionLabel(days)}的任务记录？`,
+      content: '仅清理已结束的任务；进行中的任务与保留期内的记录不受影响。',
+      okText: '清理',
+      cancelText: '取消',
+      okButtonProps: { danger: true },
+      onOk: async () => {
+        setCleaning(true)
+        try {
+          const result = (await apiFetch(CLEANUP_ENDPOINTS.runs, {
+            method: 'POST',
+            body: JSON.stringify({ older_than_days: days }),
+          })) as { deleted: number }
+          msg.success(`已清理 ${result.deleted} 条任务记录（保留 ${retentionLabel(days)}）`)
+          await load()
+        } catch (error) {
+          msg.error(error instanceof Error ? error.message : '清理失败')
+        } finally {
+          setCleaning(false)
+        }
+      },
+    })
   }
 
   const renderTask = (task: TaskSnapshot) => {
@@ -273,9 +305,25 @@ export default function RunningTasks() {
             : `共 ${tasks.length} 个任务`
         }
         actions={
-          <Button icon={<ReloadOutlined />} loading={loading} onClick={load}>
-            刷新
-          </Button>
+          <>
+            <Dropdown
+              disabled={cleaning}
+              menu={{
+                items: RETENTION_OPTIONS.map((option) => ({
+                  key: String(option.days),
+                  label: `清理 ${option.label}`,
+                })),
+                onClick: ({ key }) => handleCleanup(Number(key)),
+              }}
+            >
+              <Button icon={<ClearOutlined />} loading={cleaning}>
+                清理日志 <DownOutlined />
+              </Button>
+            </Dropdown>
+            <Button icon={<ReloadOutlined />} loading={loading} onClick={load}>
+              刷新
+            </Button>
+          </>
         }
       />
 

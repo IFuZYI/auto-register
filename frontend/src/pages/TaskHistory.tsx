@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useState } from 'react'
-import { Card, Table, Select, Button, Tag, Popconfirm, Typography, message } from 'antd'
+import { App, Card, Table, Select, Button, Dropdown, Tag, Popconfirm, Typography } from 'antd'
 import type { TableColumnsType } from 'antd'
-import { ReloadOutlined, DeleteOutlined } from '@ant-design/icons'
+import { ReloadOutlined, DeleteOutlined, ClearOutlined, DownOutlined } from '@ant-design/icons'
 import {
   PLATFORM_FILTER_OPTIONS,
   getPlatformTagColor,
   getPlatformLabel,
 } from '@/lib/platforms'
+import { CLEANUP_ENDPOINTS, RETENTION_OPTIONS, retentionLabel } from '@/lib/logCleanup'
 import { apiFetch } from '@/lib/utils'
 import { PageHeader } from '@/components/PageHeader'
 
@@ -32,12 +33,20 @@ interface TaskLogBatchDeleteResponse {
   total_requested: number
 }
 
+interface LogCleanupResponse {
+  deleted: number
+  older_than_days: number
+  cutoff: string
+}
+
 export default function TaskHistory() {
+  const { modal, message: msg } = App.useApp()
   const [logs, setLogs] = useState<TaskLogItem[]>([])
   const [total, setTotal] = useState(0)
   const [platform, setPlatform] = useState('')
   const [loading, setLoading] = useState(false)
   const [selectedRowKeys, setSelectedRowKeys] = useState<number[]>([])
+  const [cleaning, setCleaning] = useState(false)
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -65,12 +74,38 @@ export default function TaskHistory() {
       body: JSON.stringify({ ids: selectedRowKeys }),
     }) as TaskLogBatchDeleteResponse
 
-    message.success(`已删除 ${result.deleted} 条任务历史`)
+    msg.success(`已删除 ${result.deleted} 条任务历史`)
     if (result.not_found.length > 0) {
-      message.warning(`${result.not_found.length} 条记录不存在或已被删除`)
+      msg.warning(`${result.not_found.length} 条记录不存在或已被删除`)
     }
     setSelectedRowKeys([])
     await load()
+  }
+
+  const handleCleanup = (days: number) => {
+    modal.confirm({
+      title: `确认清理 ${retentionLabel(days)}的任务历史？`,
+      content: '保留期内的记录不受影响；清理后无法恢复。',
+      okText: '清理',
+      cancelText: '取消',
+      okButtonProps: { danger: true },
+      onOk: async () => {
+        setCleaning(true)
+        try {
+          const result = (await apiFetch(CLEANUP_ENDPOINTS.logs, {
+            method: 'POST',
+            body: JSON.stringify({ older_than_days: days }),
+          })) as LogCleanupResponse
+          msg.success(`已清理 ${result.deleted} 条任务历史（保留 ${retentionLabel(days)}）`)
+          setSelectedRowKeys([])
+          await load()
+        } catch (error) {
+          msg.error(error instanceof Error ? error.message : '清理失败')
+        } finally {
+          setCleaning(false)
+        }
+      },
+    })
   }
 
   const columns: TableColumnsType<TaskLogItem> = [
@@ -147,6 +182,20 @@ export default function TaskHistory() {
               style={{ width: 160 }}
               options={PLATFORM_FILTER_OPTIONS}
             />
+            <Dropdown
+              disabled={cleaning}
+              menu={{
+                items: RETENTION_OPTIONS.map((option) => ({
+                  key: String(option.days),
+                  label: `清理 ${option.label}`,
+                })),
+                onClick: ({ key }) => handleCleanup(Number(key)),
+              }}
+            >
+              <Button icon={<ClearOutlined />} loading={cleaning}>
+                清理日志 <DownOutlined />
+              </Button>
+            </Dropdown>
             <Button icon={<ReloadOutlined spin={loading} />} onClick={load} loading={loading} aria-label="刷新记录" title="刷新记录" />
           </>
         }

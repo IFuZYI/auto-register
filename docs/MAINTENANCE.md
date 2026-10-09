@@ -363,6 +363,7 @@ register_job("my_job", interval_seconds=lambda: ..., runner=lambda: ...)
 | `frontend/scripts/run_account_format_checks.mjs` | `lib/accountFormat.ts` 的纯函数（53 条断言，含状态标签 正常/过期/失效/禁用） |
 | `frontend/scripts/run_panel_filter_checks.mjs` | `lib/panelComparison.ts` 的筛选/计数（36 条断言，含禁用行不参与两个方向的同步） |
 | `frontend/scripts/run_task_kind_checks.mjs` | `lib/taskKinds.ts` 的任务类型标签映射（12 条断言，含颜色区分度） |
+| `frontend/scripts/run_log_cleanup_checks.mjs` | `lib/logCleanup.ts` 的保留期选项与清理端点（8 条断言，含天数不重复/正整数） |
 | `tests/test_timezone_display.py` | 三个时区下编译并执行 `lib/time.ts` |
 
 新写前端纯逻辑时照这个模式：**逻辑放 `frontend/src/lib/`，配一个
