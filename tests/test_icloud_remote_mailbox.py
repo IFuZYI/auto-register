@@ -114,21 +114,17 @@ class TestGetEmail:
         assert remote.created_aliases == [], "池里有可领的号时不该让远端新建"
 
     def test_get_email_creates_remote_alias_when_pool_empty(self, service, remote):
+        """池空时报错 —— 注册机不许在远端新建（用户要求 2026-10-09）。
+
+        改自旧断言（旧行为：池空时让远端新建）。现在这条路必须堵死：
+        报 `invalid_config`，且远端一次创建都不许发生。
+        """
         icloud_service, account = service
         mailbox = ICloudRemoteMailbox(account_id=str(account["id"]), platform_name="chatgpt")
-        account_obj = mailbox.get_email()
-        assert account_obj.email.endswith("@icloud.com")
-        assert remote.created_aliases and remote.created_aliases[0][0] == "acc_1"
-        # account_id 存「本地账号 id : 别名地址」（收件按账号取、按别名过滤）
-        assert account_obj.account_id == f"{account['id']}:{account_obj.email}"
-
-    def test_get_email_reports_rate_limit(self, service, remote):
-        icloud_service, account = service
-        remote.create_error = {"code": "CREATION_COOLDOWN", "message": "20 分钟冷却"}
-        mailbox = ICloudRemoteMailbox(account_id=str(account["id"]))
         with pytest.raises(ICloudError) as excinfo:
             mailbox.get_email()
-        assert excinfo.value.code == "provider_rate_limited"
+        assert excinfo.value.code == "invalid_config"
+        assert remote.created_aliases == [], "池空也不该在远端创建隐私邮箱"
 
     def test_get_email_rejects_disabled_account(self, service, remote):
         icloud_service, account = service
@@ -162,7 +158,15 @@ class TestGetEmail:
 
 class TestWaitForCode:
     def _alias_account(self, service, remote) -> tuple:
+        """准备一个「已入池的远程别名」账号对象（注册机只复用，不新建）。"""
         icloud_service, account = service
+        remote.aliases["acc_1"] = [
+            {"email": "inbox@icloud.com", "anonymousId": "anon-i", "label": "x", "active": True, "createdAt": "2026-01-01T00:00:00Z"}
+        ]
+        icloud_service.sync_remote_account(account["id"])
+        alias_id = icloud_service.list_aliases(account["id"])[0]["id"]
+        icloud_service.import_aliases_to_pool([alias_id])
+
         mailbox = ICloudRemoteMailbox(account_id=str(account["id"]), platform_name="chatgpt")
         account_obj = mailbox.get_email()
         remote.inbox_messages["acc_1"] = [
@@ -205,6 +209,13 @@ class TestWaitForCode:
 class TestPoolBookkeeping:
     def test_set_account_status_marks_used(self, service, remote):
         icloud_service, account = service
+        remote.aliases["acc_1"] = [
+            {"email": "book@icloud.com", "anonymousId": "anon-b", "label": "x", "active": True, "createdAt": "2026-01-01T00:00:00Z"}
+        ]
+        icloud_service.sync_remote_account(account["id"])
+        alias_id = icloud_service.list_aliases(account["id"])[0]["id"]
+        icloud_service.import_aliases_to_pool([alias_id])
+
         mailbox = ICloudRemoteMailbox(account_id=str(account["id"]), platform_name="chatgpt")
         account_obj = mailbox.get_email()
 
@@ -215,6 +226,13 @@ class TestPoolBookkeeping:
 
     def test_set_account_status_failed_releases_claim(self, service, remote):
         icloud_service, account = service
+        remote.aliases["acc_1"] = [
+            {"email": "book2@icloud.com", "anonymousId": "anon-b2", "label": "x", "active": True, "createdAt": "2026-01-01T00:00:00Z"}
+        ]
+        icloud_service.sync_remote_account(account["id"])
+        alias_id = icloud_service.list_aliases(account["id"])[0]["id"]
+        icloud_service.import_aliases_to_pool([alias_id])
+
         mailbox = ICloudRemoteMailbox(account_id=str(account["id"]), platform_name="chatgpt")
         account_obj = mailbox.get_email()
 

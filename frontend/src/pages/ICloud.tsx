@@ -155,6 +155,13 @@ export default function ICloudPage() {
     [accounts],
   )
 
+  // 生成隐私邮箱只对**本地**账号开放（用户要求 2026-10-09：注册机不许在远端新建）。
+  // 没有本地主号时按钮直接禁用，而不是让用户点开弹窗发现没有可选项。
+  const localAccounts = useMemo(
+    () => accounts.filter((account) => account.source !== 'remote'),
+    [accounts],
+  )
+
   // 筛选条件变化后，原来选中的行可能已经不在可见列表里了 —— 留着会让
   // 「删除 N 个」的 N 与用户眼前看到的对不上（而且删的是看不见的行）。
   // 主号、搜索词、号池状态、平台、来源、启用状态任一变化都清空选择。
@@ -790,7 +797,7 @@ export default function ICloudPage() {
                   <Button
                     type="primary"
                     icon={<PlusOutlined />}
-                    disabled={accounts.length === 0}
+                    disabled={localAccounts.length === 0}
                     onClick={() => setGenerateOpen(true)}
                   >
                     生成隐私邮箱
@@ -900,8 +907,12 @@ export default function ICloudPage() {
 
       <GenerateAliasModal
         open={generateOpen}
-        accounts={accounts}
-        defaultAccountId={filterAccountId ?? accounts[0]?.id}
+        accounts={localAccounts}
+        defaultAccountId={
+          localAccounts.some((account) => account.id === filterAccountId)
+            ? filterAccountId
+            : localAccounts[0]?.id
+        }
         onClose={() => setGenerateOpen(false)}
         onGenerated={() => load()}
       />

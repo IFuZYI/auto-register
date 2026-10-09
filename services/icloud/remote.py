@@ -242,13 +242,25 @@ def _remote_status(item: dict[str, Any]) -> str:
 
 
 def _parse_remote_datetime(value: Any) -> Optional[datetime]:
+    """解析远端时间串，**naive 值按 UTC 归一**。
+
+    远端（icloud-hme）的 `createdAt` 在 spec 里带 `Z`，但真实上游透传的是
+    Apple 的原始串，可能不带时区。原样解析出的 naive datetime 写进 aware 时间列
+    会让 SQLModel 在绑定时抛
+    `ValueError: Datetime values must have timezone information` ——
+    整个同步接口 500（实测：`POST /api/icloud/accounts/{id}/sync`）。
+    归一放在解析处：调用方拿到的一定是可安全写库的 aware 值。
+    """
     text = str(value or "").strip()
     if not text:
         return None
     try:
-        return datetime.fromisoformat(text.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
     except ValueError:
         return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
 
 
 def sync_remote_account(account_id: int, *, proxy: str | None = None) -> dict[str, Any]:

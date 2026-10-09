@@ -202,24 +202,18 @@ class TestRemoteAliases:
         assert alias["source"] == "remote"
         assert alias["pool_status"] == "unpooled"
 
-    def test_generate_alias_via_remote(self, client):
-        account = _add_remote(client)
-        response = client.post(
-            "/api/icloud/aliases",
-            json={"account_id": account["id"], "label": "GitHub", "count": 1},
-        )
-        assert response.status_code == 200
-        created = response.json()["items"][0]
-        assert created["source"] == "remote"
+    def test_generate_alias_refused_for_remote(self, client):
+        """远程账号生成隐私邮箱 → 400（invalid_config）。
 
-    def test_generate_alias_cooldown_maps_to_429(self, client):
+        改自旧断言（旧行为：远程生成走远端）。用户要求：注册机不许在远端新建。
+        """
         account = _add_remote(client)
-        client.remote.create_error = {"code": "CREATION_COOLDOWN", "message": "20 分钟冷却"}
         response = client.post(
             "/api/icloud/aliases",
             json={"account_id": account["id"], "label": "GitHub", "count": 1},
         )
-        assert response.status_code == 429
+        assert response.status_code == 400
+        assert client.remote.created_aliases == []
 
     def test_deactivate_alias_via_remote(self, client):
         _account, alias = self._add_with_alias(client)

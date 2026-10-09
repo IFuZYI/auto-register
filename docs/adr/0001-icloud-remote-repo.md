@@ -23,8 +23,15 @@ iCloud 隐私邮箱支持两种部署形态：**本地主号**（凭据在本机
 ## 后果
 
 - `icloud_accounts` / `icloud_aliases` 新增 `source` 列（local / remote）；
+- **按 email / address 的查找一律要按 `source` 过滤**：单列唯一被移除后，
+  同一个 Apple ID 可以两边各一行、同一个地址可以两边各一条别名。本地链路
+  （`import_session` / `_upsert_alias`）不过滤就会写进远程行或抢走它 ——
+  见 `tests/test_icloud_source_isolation.py`（该缺陷实测存在过：本地导入把
+  凭据写进了远程行、本地同步把远程别名改归另一个本地账号）；
 - `icloud_accounts.email` 的单列唯一索引被移除（同一邮箱允许两边各有一行），
   唯一性改由「远程按 `(base_url, remote_account_id)`、本地按邮箱」的业务规则
   保证 —— 见 `core/db/migrations.py::_migrate_icloud_remote_schema`；
 - 注册渠道 `icloud_remote` 与 `icloud_local` 并列；同地址在哪个渠道取号由
-  `source` 决定，上层注册流程不需要区分。
+  `source` 决定，上层注册流程不需要区分。**注册取号只复用池里已入池的别名；
+  本机不在远端新建**（`generate_alias` 对远程账号报 `invalid_config`）——
+  远端仓库是取号来源，不是生成器（用户要求 2026-10-09）。

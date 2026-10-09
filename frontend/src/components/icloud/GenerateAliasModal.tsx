@@ -22,6 +22,11 @@ export function GenerateAliasModal({
   const [form] = Form.useForm()
   const [busy, setBusy] = useState(false)
 
+  // 只列**本地**账号：远程账号的别名由远端仓库自己管，本注册机不许在远端新建
+  // （用户要求 2026-10-09），后端会回 400 —— 与其让用户选完再吃一个错误，
+  // 不如一开始就不给这个选项。
+  const localAccounts = accounts.filter((item) => item.source !== 'remote')
+
   useEffect(() => {
     if (open) form.setFieldsValue({ account_id: defaultAccountId, count: 1 })
   }, [open, defaultAccountId, form])
@@ -41,8 +46,8 @@ export function GenerateAliasModal({
     }
   }
 
-  const remaining = accounts.find((item) => item.id === form.getFieldValue('account_id'))?.quota
-    .remaining
+  const remaining = localAccounts.find((item) => item.id === form.getFieldValue('account_id'))
+    ?.quota.remaining
 
   return (
     <Modal
@@ -56,7 +61,10 @@ export function GenerateAliasModal({
     >
       <Form form={form} layout="vertical">
         <Form.Item name="account_id" label="主号" rules={[{ required: true, message: '请选择主号' }]}>
-          <Select options={accounts.map((item) => ({ value: item.id, label: item.email }))} />
+          <Select
+            options={localAccounts.map((item) => ({ value: item.id, label: item.email }))}
+            notFoundContent="没有本地主号 —— 远程账号不支持生成隐私邮箱"
+          />
         </Form.Item>
         <Form.Item
           name="count"

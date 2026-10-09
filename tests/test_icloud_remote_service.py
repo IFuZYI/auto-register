@@ -228,21 +228,17 @@ class TestRemoteAliasOperations:
             base_url=remote.base_url, admin_password=ADMIN_PASSWORD, remote_account_id="acc_1"
         )
 
-    def test_generate_alias_calls_remote_create(self, service, remote):
-        account = self._add(service, remote)
-        created = service.generate_alias(account["id"], label="GitHub")
-        assert created["source"] == "remote"
-        assert created["address"].endswith("@icloud.com")
-        assert remote.last_create_label == "GitHub"
-        # 匿名 id 从远端别名列表解析并落库（删除/停用要用）
-        assert created["provider_id"] == "anon-1"
+    def test_generate_alias_refuses_remote_account(self, service, remote):
+        """远程账号不再支持生成 —— 注册机不许在远端新建（用户要求 2026-10-09）。
 
-    def test_generate_alias_reports_rate_limit(self, service, remote):
+        改自旧断言（旧行为：远程账号调 generate_alias 会让远端创建）。
+        """
         account = self._add(service, remote)
-        remote.create_error = {"code": "CREATION_COOLDOWN", "message": "20 分钟冷却"}
         with pytest.raises(ICloudError) as excinfo:
             service.generate_alias(account["id"], label="GitHub")
-        assert excinfo.value.code == "provider_rate_limited"
+        assert excinfo.value.code == "invalid_config"
+        assert remote.created_aliases == [], "不该向远端创建"
+        assert not remote.last_create_label, "不该向远端创建"
 
     def test_set_alias_active_calls_remote(self, service, remote):
         account = self._add(service, remote)

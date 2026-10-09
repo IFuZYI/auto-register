@@ -342,10 +342,12 @@ register_job("my_job", interval_seconds=lambda: ..., runner=lambda: ...)
 | `test_chatgpt_auto_maintenance.py` | ChatGPT Token 自动维护：临期窗口内随机时刻（至少提前 1h）、封禁/达失败上限不重复尝试、失败退避 1h→6h、未换发算失败、每轮限量防高并发、stale 计划清理、scheduler 注册与配置白名单、前端开关接线 | 改 `services/chatgpt_maintenance.py` 的窗口/退避/限量逻辑；去掉周期任务注册；开关漏进 CONFIG_KEYS 或前端 BOOLEAN_KEYS |
 | `test_icloud_remote_columns.py` | 远程仓库的库结构：source / base_url / remote_account_id 列、老库回填 `local`、email 单列唯一被移除（同邮箱允许两边各一行）、(base_url, remote_account_id) 部分唯一索引、迁移幂等 | 改 `core/db/models_platform.py` 或 `_migrate_icloud_remote_schema` |
 | `test_icloud_remote_client.py` | 远程客户端契约：管理员密码换会话 + CSRF、会话复用与重启自动重登、错误码映射（冷却 → `provider_rate_limited`）、inbox limit 夹取 | 改 `platforms/icloud/remote_client.py` |
-| `test_icloud_remote_service.py` | 远程服务层：接入（加密落库 / 重复接入拒绝）、同步与**本地优先去重**（`skipped_local`）、远程生成/停用/删除、远程收件映射 | 改 `services/icloud/remote.py` 的去重或写路径 |
-| `test_icloud_remote_mailbox.py` | 远程邮箱渠道：工厂注册、池内复用优先于远端新建、收码与发码时间窗、池记账钩子 | 改 `modules/mail/icloud_remote.py` |
+| `test_icloud_remote_service.py` | 远程服务层：接入（加密落库 / 重复接入拒绝）、同步与**本地优先去重**（`skipped_local`）、**远程账号拒绝生成隐私邮箱**（`invalid_config`）、远程停用/删除、远程收件映射 | 改 `services/icloud/remote.py` 的去重或写路径 |
+| `test_icloud_remote_fixes.py` | 远程仓库的两个修复：远端时间串 naive → UTC 归一（否则同步 500）、远程账号禁止生成隐私邮箱（只允许本地账号）、生成弹窗只列本地主号 | 改 `_parse_remote_datetime`、`generate_alias` 的远程分支、`GenerateAliasModal` |
+| `test_icloud_remote_mailbox.py` | 远程邮箱渠道：工厂注册、**只复用池内已入池别名（池空报错，不在远端新建）**、收码与发码时间窗、池记账钩子 | 改 `modules/mail/icloud_remote.py` |
 | `test_icloud_remote_api.py` | 远程 HTTP 接口：接入/探针/探测/同步/删除的错误码映射与脱敏（不回密码） | 改 `api/icloud.py` 的远程端点 |
 | `test_icloud_remote_frontend_contract.py` | 远程功能的前端接线：注册页渠道下拉与三个配置键、来源标签列/筛选/添加远程服务入口 | 前端改了 iCloud 页或注册页的远程接线 |
+| `test_icloud_source_isolation.py` | 来源隔离：本地导入（`import_session`）不得写进同邮箱远程行；本地同步（`_upsert_alias`）不得抢走同地址远程行；远程账号自己的同步仍正常更新 | 改 `services/icloud/accounts.py` 的按邮箱查找或 `aliases.py::_upsert_alias` 的按地址查找（两处都必须按 `source` 过滤） |
 | `test_runtime_version_stamp.py` | 版本戳语义（未跟踪文件不算脏） | 改 `_read_git_version` |
 
 **测试基础设施**：`tests/remote_hme_double.py` 是 icloud-hme 服务的**真实 HTTP 双端**

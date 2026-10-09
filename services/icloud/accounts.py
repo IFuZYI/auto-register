@@ -235,8 +235,16 @@ def import_session(
         raise ICloudError("invalid_config", "无法确定主号邮箱，请手工填写 Apple ID")
 
     with platform_session("icloud") as session:
+        # 只找**本地行**：同一个 Apple ID 可以同时有远程行（icloud-hme 仓库账号），
+        # 而这里写入的是本机直连 Apple 的凭据（credentials_cipher）。命中远程行
+        # 会把它原地改成本地语义（凭据与远端密码混在一行，source 还留在 remote），
+        # 用户以为加了本地主号、实际改的是仓库账号 —— 见
+        # tests/test_icloud_source_isolation.py。
         row = session.exec(
-            select(ICloudAccountModel).where(ICloudAccountModel.email == resolved_email)
+            select(ICloudAccountModel)
+            .where(ICloudAccountModel.email == resolved_email)
+            .where(ICloudAccountModel.source == "local")
+            .order_by(ICloudAccountModel.id)
         ).first()
         credentials = imported.credentials
         if row is None:

@@ -417,16 +417,22 @@ def pool_summary(account_id: Optional[int] = None) -> dict[str, int]:
 def generate_alias(account_id: int, *, label: str = "", note: str = "", proxy: str | None = None) -> dict[str, Any]:
     """生成并保留一个隐私邮箱地址。
 
-    远程账号（source=remote）走远程分支：让 icloud-hme 服务创建别名，
-    本机只存镜像行 —— 本机没有 Apple 凭据，不能走直连路径。
+    **只支持本地账号**（用户要求 2026-10-09：「本注册机不应该在远端创建隐私邮箱，
+    只有本地账号才行」）。远程账号在这里明确拒绝，不再落到远端创建 ——
+    远端仓库只作为**取号来源**（同步/复用已有别名），不在远端新增。
+
+    远程账号的报错用 `invalid_config`（HTTP 400）：这是「这个账号不能这么用」
+    的配置问题，不是上游故障，用 502 会让用户以为是 icloud-hme 挂了。
     """
     with _facade._account_lock(account_id):
         row = get_account(account_id)
         if not row.enabled:
             raise ICloudError("account_disabled", f"iCloud 主号已停用: {row.email}")
         if str(getattr(row, "source", "") or "") == "remote":
-            return _facade.generate_remote_alias(
-                account_id, label=label, note=note, proxy=proxy
+            raise ICloudError(
+                "invalid_config",
+                "远程账号不支持生成隐私邮箱 —— 本注册机只允许本地账号生成。"
+                "请在 iCloud 隐私邮箱页选择本地主号生成，或先同步/导入远程已有别名。",
             )
 
         quota = alias_quota(account_id)
@@ -594,6 +600,20 @@ def _upsert_alias(
             # 已存在的行不动它的 pool_status —— 用户可能已经把它标成 used 或
             # 正在 in_use，一次同步不该把记账打回。
             row.pool_status = POOL_STATUS_UNPOOLED
+        elif str(getattr(row, "source", "") or "") == "remote":
+            # 同地址已有**远程行**：本地同步跳过它（ADR-0001「反向同理跳过，
+            # 不把远程行改成本地」）。抢走它的 account_id 会让这条远程行归到
+            # 另一个本地账号名下，而 source 仍是 remote —— 之后删除/停用会按
+            # 远程分支去调远端服务，账实不符。返回既有行、不改任何字段。
+            #
+            # 只在「归属不同账号」时跳过：远程账号自己同步（remote.py）也走
+            # 这里，它的 account_id 与行上一致，需要继续走更新分支。
+            #
+            # 用字面量而不是 `SOURCE_REMOTE`：那常量在 remote.py，而 remote.py
+            # 反向 import 本模块（循环）。本文件其它 source 比较也用字面量。
+            if int(getattr(row, "account_id", 0) or 0) != int(account_id):
+                result = _alias_to_dict(row, account_email)
+                return (result, False) if return_flag else result
         row.account_id = int(account_id)
         row.label = str(payload.get("label") or "") or row.label
         row.note = str(payload.get("note") or "") or row.note
