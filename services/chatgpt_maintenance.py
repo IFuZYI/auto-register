@@ -7,9 +7,19 @@
    在临期窗口内**随机**一个时刻刷新 —— 不设固定更新时刻（用户要求：
    「不要设定固定值来更新，应该在临期时间段内随机一个时间更新」），
    且至少提前 1 小时（「尽量不要拖到过期，比如至少在过期前 1 小时」）。
+   **失效（`invalid`）/ 过期（`expired`）状态的账号也进重试队列**
+   （用户要求 2026-10-10：「定期尝试自动刷新 gpt 失效的账号」）——
+   这类账号不管 AT 是否临期、能否解出 exp，都尽快 + 抖动排一次刷新
+   （刷新链会先试 session/OAuth，再走登录兜底，可能把它们救回来）。
    封禁的、连续失败达上限的不重复尝试（「封禁/无法更新 token 的不要
    重复尝试」）。刷新走 `refresh_token` 动作的完整链（session → OAuth →
    登录兜底），与手动批量刷新同一条路径。
+
+   **检出封禁 → 标注 + 移出队列**（用户要求 2026-10-10：「若检测出账号
+   被封禁，就标注为封禁账号」）：刷新链认出「号没了」措辞时，执行器把
+   状态落成 `banned`（共享状态策略），维护侧清掉该账号的自动刷新计划
+   —— 封禁是终局结论，不再占用重试名额。封禁账号不参与后续的自动刷新、
+   凭据同步与对比。
 
 2. **chatgpt2api 凭证自动维护**（`chatgpt2api_auto_sync_enabled`）：
    定期对比本地与 chatgpt2api 远端凭证，本地较新时自动推送更新
@@ -52,6 +62,12 @@ _RETRY_BACKOFF_SECONDS = (60 * 60, 6 * 60 * 60)
 
 #: 连续失败上限 —— 达到后同一 AT 周期内不再自动尝试。
 MAX_ATTEMPTS = 3
+
+#: 「失效/过期」状态：不管 AT 是否临期都进重试队列（用户要求 2026-10-10
+#: 「定期尝试自动刷新 gpt 失效的账号」）。这类账号的 AT 要么被吊销、要么
+#: 解不出 exp —— 按临期窗口判定会把它们永远挡在队列外，而刷新链（session →
+#: OAuth → 登录兜底）正是可能把它们救回来的路。
+RETRY_STATUSES = frozenset({"expired", "invalid"})
 
 #: extra 里的状态键。
 AUTO_REFRESH_STATE_KEY = "chatgpt_auto_refresh"
@@ -132,13 +148,42 @@ def plan_auto_refresh(
     """决定这个账号现在该不该（以及何时）自动刷新。
 
     规则（纯函数，不落库）：
-    - `banned` / 无 exp / 未临期 → skip；
+    - `banned` → skip；
+    - 失效/过期状态（`RETRY_STATUSES`）→ **不看临期窗口**，尽快 + 抖动排
+      一次刷新（用户要求 2026-10-10「定期尝试自动刷新失效账号」）；
+    - 其余（正常等）：无 exp / 未临期 → skip；
     - 有计划且 `for_exp == 当前 exp`：`disabled` → skip；
       未到点 → wait；到点 → due；
     - 无计划或 `for_exp` 变了（AT 已换发）→ 重排（清 attempts/disabled）。
     """
-    if str(status or "").strip().lower() == "banned":
+    status_text = str(status or "").strip().lower()
+    if status_text == "banned":
         return AutoRefreshPlan(action="skip", reason="banned")
+
+    state = _state_from_extra(extra)
+    same_cycle = _safe_int(state.get("for_exp")) == _safe_int(expires_at)
+
+    if status_text in RETRY_STATUSES:
+        # 失效/过期账号：不受临期窗口限制 —— 能解出 exp 也不等（凭证被吊销
+        # 的账号拖着只会更难救）；解不出 exp 同样排（刷新链的登录兜底可能
+        # 把它救回来）。排计划与到点执行复用同一套状态机（退避/上限）。
+        if state and same_cycle:
+            if state.get("disabled"):
+                return AutoRefreshPlan(action="skip", reason="disabled")
+            at = _safe_int(state.get("at"))
+            if at > now:
+                return AutoRefreshPlan(action="wait", at=at)
+            return AutoRefreshPlan(action="due", at=at)
+
+        r = min(max(float(rand()), 0.0), 1.0)
+        at = int(now + URGENT_JITTER_SECONDS * r)
+        new_state = {
+            "at": at,
+            "for_exp": _safe_int(expires_at),
+            "attempts": 0,
+            "disabled": False,
+        }
+        return AutoRefreshPlan(action="schedule", at=at, state=new_state)
 
     if expires_at is None:
         return AutoRefreshPlan(action="skip", reason="no_expiry")
@@ -147,8 +192,6 @@ def plan_auto_refresh(
     if next_at is None:
         return AutoRefreshPlan(action="skip", reason="not_expiring")
 
-    state = _state_from_extra(extra)
-    same_cycle = _safe_int(state.get("for_exp")) == _safe_int(expires_at)
     if state and same_cycle:
         if state.get("disabled"):
             return AutoRefreshPlan(action="skip", reason="disabled")
@@ -397,9 +440,17 @@ def run_auto_refresh_pass(
             due_ids.append(int(row.id))
         else:
             summary["skipped"] += 1
+            if plan.reason == "banned":
+                # 封禁账号移出队列：清掉遗留计划（手动置封禁、或上一次执行
+                # 刚标上的场景都适用）。封禁是终局结论 —— 不留任何待办状态，
+                # 避免日后人工解封时被旧的 disabled/attempts 卡住重试。
+                state = _state_from_extra(extra)
+                if state:
+                    extra.pop(AUTO_REFRESH_STATE_KEY, None)
+                    _write_extra(int(row.id), extra)
             # 清掉「针对旧 AT」的死计划：AT 被手动刷新后 exp 变了，旧计划
             # 已无意义 —— 保持「extra 里只有当前 AT 周期的计划」这一不变量。
-            if plan.reason == "not_expiring":
+            elif plan.reason == "not_expiring":
                 state = _state_from_extra(extra)
                 if state and _safe_int(state.get("for_exp")) != _safe_int(expires_at):
                     extra.pop(AUTO_REFRESH_STATE_KEY, None)
@@ -492,6 +543,11 @@ def run_auto_refresh_pass(
         # 成功 = ok 且 AT 真换发（未换发视为「无法更新」的一次失败，
         # 与批量刷新任务的如实报告同一口径）。
         ok = bool(result.get("ok")) and bool(data.get("refreshed"))
+        # 封禁是终局结论（用户要求 2026-10-10「检测出封禁就标注」）：
+        # 执行器已把状态落成 banned（`_default_execute` → 共享状态策略），
+        # 这里把该账号移出自动刷新队列 —— 清计划而不是记一次退避失败，
+        # 封禁账号不该保留任何待办状态。
+        banned_detected = bool(data.get("banned"))
         # `state` 先给默认值：账号可能在执行期间被删（写回落空）——
         # 失败路径引用它时不能是未绑定变量（复审 E1，已复现 UnboundLocalError）。
         state: dict[str, Any] = {}
@@ -500,13 +556,21 @@ def run_auto_refresh_pass(
                 row = s.get(AccountModel, account_id)
                 if row is not None:
                     extra = row.get_extra()
-                    state = record_auto_refresh_result(extra, ok=ok, now=now_s, row=row)
+                    if banned_detected:
+                        extra.pop(AUTO_REFRESH_STATE_KEY, None)
+                    else:
+                        state = record_auto_refresh_result(extra, ok=ok, now=now_s, row=row)
                     row.set_extra(extra)
                     s.add(row)
                     s.commit()
         except Exception as exc:  # noqa: BLE001 - 写回失败只记账，不毁整轮
             log_fn(f"账号 #{account_id} 结果写回失败（忽略）: {type(exc).__name__}: {exc}")
-        if ok:
+        if banned_detected:
+            summary["failed"] += 1
+            reason = str(result.get("error") or "").strip() or "账号已封禁"
+            exec_errors.append(f"账号 #{account_id}: 账号已封禁（已标注）")
+            log_fn(f"账号 #{account_id} 检测出封禁，已标注为封禁账号并移出自动刷新队列: {reason}")
+        elif ok:
             summary["ok"] += 1
             log_fn(f"账号 #{account_id} Token 已自动刷新（AT 已换发）")
         else:
@@ -743,6 +807,7 @@ __all__ = [
     "EXPIRING_SKEW_SECONDS",
     "MAX_ATTEMPTS",
     "MIN_LEAD_SECONDS",
+    "RETRY_STATUSES",
     "AutoRefreshPlan",
     "compute_next_attempt_at",
     "get_auto_refresh_interval_seconds",

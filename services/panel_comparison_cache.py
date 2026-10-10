@@ -281,9 +281,26 @@ def fetch_panel_raw(panel_key: str) -> tuple[list[dict[str, Any]], list, str]:
 
 def _rebuild_panel_comparison(key: str) -> dict[str, Any]:
     """真正去拉一次数据并写缓存（调用方需已持有该面板的重建锁）。"""
+    from services.panel_comparison import banned_local_keys, _match_key
+
     local_rows, remote_accounts, remote_error = fetch_panel_raw(key)
 
     rows = build_comparison(local_rows, remote_accounts)
+    # 计数与可见行同口径（用户要求 2026-10-10「封禁账号不参与对比」）：
+    # 禁用账号的两侧都不进对比表，`本地 N / 远端 M` 也要把它们排除 ——
+    # 否则数字与行数对不上（「本地 5」却只有 4 行），正是这个页面反复
+    # 踩过的「看到的与被改的对不上」一类。
+    banned = banned_local_keys(local_rows)
+    local_count = sum(
+        1
+        for row in local_rows
+        if _match_key(str(row.get("platform") or ""), str(row.get("email") or "")) not in banned
+    )
+    remote_count = sum(
+        1
+        for item in remote_accounts
+        if _match_key(getattr(item, "platform", ""), item.email) not in banned
+    )
     payload = {
         "panel": key,
         "fetched_at": _utcnow_iso(),
@@ -294,8 +311,8 @@ def _rebuild_panel_comparison(key: str) -> dict[str, Any]:
         "labels": dict(STATE_LABELS),
         "rows": [row.to_dict() for row in rows],
         "remote_error": remote_error,
-        "local_count": len(local_rows),
-        "remote_count": len(remote_accounts),
+        "local_count": local_count,
+        "remote_count": remote_count,
     }
 
     with _lock:

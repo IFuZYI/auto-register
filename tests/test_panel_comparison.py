@@ -403,6 +403,65 @@ class BuildComparisonTests(unittest.TestCase):
         rows = build_comparison(local, [])
         self.assertEqual(len(rows), 1)
 
+    def test_banned_local_row_is_excluded(self):
+        """禁用账号不参与对比（用户要求 2026-10-10）。
+
+        禁用账号的凭证已死，「未上传 / 凭证不同」对它没有意义 —— 两个同步
+        方向也都跳过它。留在对比表里只会给出错误的待办提示。
+        """
+        rows = build_comparison([self._local(status="banned")], [])
+        self.assertEqual(rows, [], "禁用账号仍出现在对比表里")
+
+    def test_banned_local_row_excludes_its_remote_record(self):
+        """禁用账号对应的远端记录一并排除（否则变成误导性的「仅远端」行）。"""
+        rows = build_comparison(
+            [self._local(status="banned")],
+            [self._remote()],
+        )
+        self.assertEqual(rows, [], "禁用账号的远端记录被显示成了「仅远端」")
+
+    def test_banned_on_one_platform_does_not_hide_the_other(self):
+        """同邮箱双平台：chatgpt 侧禁用不影响 grok 侧正常参与对比。"""
+        local = [
+            self._local(id=1, email="same@x.com", platform="chatgpt", status="banned"),
+            self._local(id=2, email="same@x.com", platform="grok", status="registered"),
+        ]
+        remote = [
+            self._remote(email="same@x.com", platform="chatgpt"),
+            self._remote(email="same@x.com", platform="grok"),
+        ]
+        rows = build_comparison(local, remote)
+        self.assertEqual(len(rows), 1, f"禁用一侧的排除误伤了另一平台，实得 {len(rows)} 行")
+        self.assertEqual(rows[0].platform, "grok")
+
+    def test_banned_status_is_case_and_space_tolerant(self):
+        rows = build_comparison([self._local(status=" BANNED ")], [])
+        self.assertEqual(rows, [])
+
+    def test_non_banned_rows_are_unaffected(self):
+        """修复不误伤：过期/失效等其它状态照常参与对比。"""
+        local = [
+            self._local(id=1, email="expired@x.com", status="expired"),
+            self._local(id=2, email="invalid@x.com", status="invalid"),
+            self._local(id=3, email="ok@x.com", status="registered"),
+        ]
+        rows = build_comparison(local, [])
+        self.assertEqual(sorted(row.email for row in rows), [
+            "expired@x.com", "invalid@x.com", "ok@x.com",
+        ])
+
+    def test_banned_local_keys_helper_matches_build_comparison(self):
+        """`banned_local_keys` 是计数与排除共用的口径 —— 单测钉住它。"""
+        from services.panel_comparison import banned_local_keys
+
+        local = [
+            self._local(id=1, email="b1@x.com", platform="chatgpt", status="banned"),
+            self._local(id=2, email="b2@x.com", platform="grok", status="banned"),
+            self._local(id=3, email="ok@x.com", status="registered"),
+        ]
+        keys = banned_local_keys(local)
+        self.assertEqual(keys, {"chatgpt|b1@x.com", "grok|b2@x.com"})
+
 
 class DiffFieldsTests(unittest.TestCase):
     def test_plan_mismatch_is_reported(self):
@@ -491,6 +550,46 @@ class ComparisonCacheTests(unittest.TestCase):
         # 面板地址没配 → 远端拉不到，但本地清单照常返回
         self.assertEqual(payload["local_count"], 1)
         self.assertIn("未配置", payload["remote_error"])
+
+    def test_counts_exclude_banned_accounts(self):
+        """`本地 N / 远端 M` 与可见行同口径（禁用账号不参与对比）。
+
+        禁用账号的两侧都不进对比表，计数也要排除 —— 否则数字与行数对不上
+        （「本地 2」却只有 1 行），正是这个页面反复踩过的「看到的与被测的
+        对不上」一类。
+        """
+        rows = [
+            {"id": 1, "email": "ok@example.com", "platform": "chatgpt", "status": "registered",
+             "updated_at": datetime.now(timezone.utc), "extra": {}},
+            {"id": 2, "email": "dead@example.com", "platform": "chatgpt", "status": "banned",
+             "updated_at": datetime.now(timezone.utc), "extra": {}},
+        ]
+        remote = [
+            RemoteAccount(email="ok@example.com", platform="chatgpt"),
+            RemoteAccount(email="dead@example.com", platform="chatgpt"),
+            RemoteAccount(email="ghost@example.com", platform="chatgpt"),
+        ]
+        with mock.patch(
+            "services.panel_comparison_cache._local_accounts_for_panel",
+            return_value=rows,
+        ):
+            with mock.patch(
+                "services.panel_comparison_cache._panel_credentials",
+                return_value={"api_url": "http://cpa.local", "api_key": "k"},
+            ):
+                with mock.patch(
+                    "services.panel_comparison_cache.FETCHERS",
+                    {"cpa": mock.Mock(return_value=remote)},
+                ):
+                    payload = get_panel_comparison("cpa")
+
+        self.assertEqual(payload["local_count"], 1, "禁用账号仍被计进本地数")
+        # 远端：ok（匹配）+ ghost（仅远端）参与；dead 的远端记录一并排除
+        self.assertEqual(payload["remote_count"], 2, "禁用账号的远端记录仍被计进远端数")
+        self.assertEqual(
+            sorted(row["email"] for row in payload["rows"]),
+            ["ghost@example.com", "ok@example.com"],
+        )
 
     def test_payload_carries_the_state_labels(self):
         """状态标签由后端下发，前端不再抄一份（抄两份会漏改、UI 显示旧文案）。"""

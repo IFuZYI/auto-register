@@ -436,6 +436,43 @@ def _match_key(platform: str, email: str) -> str:
     return f"{plat}|{key}" if plat else key
 
 
+def _is_banned_status(status: Any) -> bool:
+    """本地行是否处于「禁用」（banned）状态（大小写/空白容忍）。
+
+    与 `panel_push._is_banned_status` / `panel_sync._is_banned_status` /
+    `api/actions._is_banned_status` 同一口径（各处一份的仓库惯例）。
+    """
+    return str(status or "").strip().lower() == "banned"
+
+
+def banned_local_keys(local_accounts: list[dict[str, Any]]) -> set[str]:
+    """本地账号里处于「禁用」的 (平台, 邮箱) 匹配键集合。
+
+    用户要求（2026-10-10）：「封禁账号不参与凭据同步与对比」。
+    禁用账号的凭证已死 —— 对比里显示「未上传 / 凭证不同」只会给出错误的
+    待办提示（推送/拉回两个方向都会跳过它们），所以对比时**两侧一起排除**：
+
+    - 本地行不出现在对比结果里；
+    - 远端对应记录一并排除 —— 只排本地的话那条远端记录会变成「仅远端」
+      行，看起来像别人传的号，同样误导。
+
+    同步（`panel_push.plan_push` / `panel_sync.plan_sync`）各自在 plan 层
+    跳过禁用账号（`reason=banned`），与此处互为防线。
+    """
+    keys: set[str] = set()
+    for account in local_accounts or []:
+        if not isinstance(account, dict):
+            continue
+        if not _is_banned_status(account.get("status")):
+            continue
+        key = _match_key(
+            str(account.get("platform") or ""), str(account.get("email") or "")
+        )
+        if key:
+            keys.add(key)
+    return keys
+
+
 def build_comparison(
     local_accounts: list[dict[str, Any]],
     remote_accounts: list[RemoteAccount],
@@ -446,7 +483,13 @@ def build_comparison(
     匹配键是 (平台, 邮箱)：邮箱按小写归一（两边大小写都可能不一致），
     平台参与匹配是因为 CPA 上同一个邮箱可能同时有 ChatGPT 与 Grok 两条凭据。
     平台为空的老数据退化成只按邮箱（单平台面板与历史调用方不受影响）。
+
+    **禁用（banned）账号不参与对比**（用户要求 2026-10-10）：本地禁用行与
+    对应的远端记录都不出现在结果里（理由见 `banned_local_keys`）——「未上传 /
+    凭证不同」这类状态对死凭证没有意义，两个同步方向也都会跳过它们。
     """
+    banned_keys = banned_local_keys(local_accounts)
+
     remote_by_key: dict[str, RemoteAccount] = {}
     for item in remote_accounts:
         key = _match_key(getattr(item, "platform", ""), item.email)
@@ -460,7 +503,7 @@ def build_comparison(
         email = str(account.get("email") or "").strip()
         platform = str(account.get("platform") or "").strip()
         key = _match_key(platform, email)
-        if not key or key in seen:
+        if not key or key in banned_keys or key in seen:
             continue
         seen.add(key)
 
@@ -518,8 +561,12 @@ def build_comparison(
             row.time_basis = "record"
         rows.append(row)
 
-    # 远端多出来的（本地没有）
+    # 远端多出来的（本地没有）—— 禁用账号对应的远端记录也排除：
+    # 本地行被排除时没有 pop 它的远端记录，不过滤就会显示成误导性的
+    # 「仅远端」行（看起来像别人传的号，实际是本地禁用号的死凭证）。
     for key, remote in sorted(remote_by_key.items()):
+        if key in banned_keys:
+            continue
         rows.append(
             ComparisonRow(
                 email=remote.email,
@@ -1227,6 +1274,7 @@ __all__ = [
     "STATE_UNKNOWN_CREDENTIAL",
     "STATE_UNKNOWN_TIME",
     "build_comparison",
+    "banned_local_keys",
     "compare_by_hour",
     "compare_credential_time",
     "compare_credentials",

@@ -1,11 +1,15 @@
-"""ChatGPT Token 自动维护（用户要求 2026-10-06）。
+"""ChatGPT Token 自动维护（用户要求 2026-10-06；失效账号重试 + 封禁标注
+2026-10-10）。
 
 两条功能：
 
-1. **自动刷新临期/过期 Token**：后台定期扫描 ChatGPT 账号，对 AT 临期
+1. **自动刷新临期/过期/失效 Token**：后台定期扫描 ChatGPT 账号，对 AT 临期
    （剩余 ≤ 24h）或已过期的账号，在「临期时间段内随机一个时刻」刷新 ——
    不设固定更新时刻（避免可预测、避免同一时刻集中刷新），且不拖到过期
-   （随机窗口上限 = 到期前 1 小时）。封禁的、无法更新的不重复尝试。
+   （随机窗口上限 = 到期前 1 小时）。**失效（invalid）/ 过期（expired）
+   状态的账号也进重试队列**（用户要求 2026-10-10「定期尝试自动刷新 gpt
+   失效的账号，刷新 token」）：不看临期窗口，尽快 + 抖动排一次。封禁的、
+   无法更新的不重复尝试；**检测出封禁 → 标注为封禁账号并移出队列**。
 2. **chatgpt2api 凭证自动维护**：定期对比本地与 chatgpt2api 远端凭证，
    本地较新时自动推送更新，使远端始终持有最新凭证。
 
@@ -17,6 +21,7 @@ from __future__ import annotations
 
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -193,6 +198,110 @@ class PlanAutoRefreshTests(unittest.TestCase):
         self.assertEqual(plan.state["for_exp"], expires_at)
         self.assertFalse(plan.state["disabled"])
         self.assertEqual(plan.state["attempts"], 0)
+
+
+class RetryFailedStatusTests(unittest.TestCase):
+    """失效/过期账号进重试队列（用户要求 2026-10-10「定期尝试自动刷新
+    gpt 失效的账号，刷新 token」）。
+
+    背景：旧规则只按 AT 临期窗口排计划 —— `invalid`（凭证被吊销）的账号
+    不管 AT 是否临期都不排；AT 解不出 exp（缺 AT）的连 `no_expiry` 都直接
+    跳过。这类账号永远进不了刷新队列，而刷新链（session → OAuth → 登录
+    兜底）正是可能把它们救回来的路。新规则：`invalid` / `expired` 状态
+    不看临期窗口，尽快 + 抖动排一次；排计划/退避/上限复用同一套状态机。
+    """
+
+    def _plan(self, extra, *, expires_at, status, now=1_000_000, rand=None):
+        from services.chatgpt_maintenance import plan_auto_refresh
+
+        return plan_auto_refresh(
+            extra,
+            expires_at=expires_at,
+            status=status,
+            now=now,
+            rand=rand or (lambda: 0.5),
+        )
+
+    def test_invalid_without_expiry_is_scheduled(self):
+        """失效且解不出 exp（缺 AT）→ 也要排计划（旧实现 skip/no_expiry）。"""
+        plan = self._plan({}, expires_at=None, status="invalid", rand=lambda: 0.0)
+        self.assertEqual(
+            plan.action, "schedule",
+            "失效账号被 no_expiry 挡在队列外 —— 永远不会被自动尝试刷新",
+        )
+        self.assertEqual(plan.state["for_exp"], 0)
+        self.assertGreaterEqual(plan.state["at"], 1_000_000)
+        self.assertLessEqual(plan.state["at"], 1_000_000 + 300, "尽快 + 抖动上限 5 分钟")
+
+    def test_invalid_far_from_expiry_is_scheduled(self):
+        """失效但 AT 离到期还远（被吊销）→ 不等窗口，直接排。"""
+        expires_at = 1_000_000 + 48 * 3600
+        plan = self._plan({}, expires_at=expires_at, status="invalid", rand=lambda: 0.0)
+        self.assertEqual(
+            plan.action, "schedule",
+            "凭证已吊销的账号按临期窗口排 —— 会白等几十小时才尝试一次",
+        )
+        self.assertEqual(plan.state["for_exp"], expires_at)
+
+    def test_expired_without_expiry_is_scheduled(self):
+        """过期且解不出 exp → 同样进重试队列（登录兜底可能救回）。"""
+        plan = self._plan({}, expires_at=None, status="expired", rand=lambda: 0.0)
+        self.assertEqual(plan.action, "schedule")
+
+    def test_invalid_with_due_state_is_due(self):
+        """已有计划且到点 → due（复用同一套状态机）。"""
+        extra = {
+            "chatgpt_auto_refresh": {
+                "at": 1_000_000 - 5, "for_exp": 0, "attempts": 1, "disabled": False,
+            }
+        }
+        plan = self._plan(extra, expires_at=None, status="invalid")
+        self.assertEqual(plan.action, "due")
+
+    def test_invalid_with_future_state_waits(self):
+        extra = {
+            "chatgpt_auto_refresh": {
+                "at": 1_000_000 + 3600, "for_exp": 0, "attempts": 1, "disabled": False,
+            }
+        }
+        plan = self._plan(extra, expires_at=None, status="invalid")
+        self.assertEqual(plan.action, "wait")
+        self.assertEqual(plan.at, 1_000_000 + 3600)
+
+    def test_invalid_disabled_state_is_skipped(self):
+        """连续失败达上限 → 同一周期不再尝试（不重复尝试的既有语义）。"""
+        extra = {
+            "chatgpt_auto_refresh": {
+                "at": 1_000_000 + 24 * 3600, "for_exp": 0, "attempts": 3, "disabled": True,
+            }
+        }
+        plan = self._plan(extra, expires_at=None, status="invalid")
+        self.assertEqual(plan.action, "skip")
+        self.assertEqual(plan.reason, "disabled")
+
+    def test_invalid_state_for_other_exp_is_replanned(self):
+        """失效账号的 AT 被换发（exp 变了）→ 旧计划作废重排（复位 disabled）。"""
+        expires_at = 1_000_000 + 10 * 3600
+        extra = {
+            "chatgpt_auto_refresh": {
+                "at": 1_000_000 + 24 * 3600, "for_exp": 123, "attempts": 3, "disabled": True,
+            }
+        }
+        plan = self._plan(extra, expires_at=expires_at, status="invalid", rand=lambda: 0.5)
+        self.assertEqual(plan.action, "schedule")
+        self.assertEqual(plan.state["for_exp"], expires_at)
+        self.assertFalse(plan.state["disabled"])
+
+    def test_registered_far_from_expiry_is_still_skipped(self):
+        """修复不误伤：正常账号仍按临期窗口（未临期不排）。"""
+        plan = self._plan({}, expires_at=1_000_000 + 48 * 3600, status="registered")
+        self.assertEqual(plan.action, "skip")
+        self.assertEqual(plan.reason, "not_expiring")
+
+    def test_banned_is_still_skipped(self):
+        plan = self._plan({}, expires_at=1_000_000 + 3600, status="banned")
+        self.assertEqual(plan.action, "skip")
+        self.assertEqual(plan.reason, "banned")
 
 
 class RecordAutoRefreshResultTests(unittest.TestCase):
@@ -382,6 +491,135 @@ class RunAutoRefreshPassTests(unittest.TestCase):
         self.assertEqual(calls, [], "封禁账号不得执行（用户要求不重复尝试）")
         self.assertGreaterEqual(summary["skipped"], 1)
 
+    def test_banned_account_leftover_plan_is_cleared(self):
+        """封禁账号的遗留计划要清掉（封禁是终局结论，不留待办状态）。
+
+        手动把账号置为 banned、或上一次执行刚标上 banned 时，extra 里可能
+        还躺着计划 —— 不清的话，日后人工解封会被旧的 disabled/attempts 卡住。
+        """
+        exp = self._now + 10 * 3600
+        state = self._due_state(exp)
+        state["attempts"] = 3
+        state["disabled"] = True
+        aid = self._insert(
+            "banned-leftover@example.com",
+            extra={"access_token": self._at(exp), "chatgpt_auto_refresh": state},
+            status="banned",
+        )
+
+        self._run(execute=lambda _aid: {"ok": True})
+        self.assertNotIn(
+            "chatgpt_auto_refresh", self._extra_of(aid),
+            "封禁账号的遗留计划没清 —— 人工解封后会被旧状态卡住",
+        )
+
+    def test_invalid_account_is_executed(self):
+        """失效账号进重试队列：排计划 → 到点执行（用户要求 2026-10-10）。"""
+        # 失效且解不出 exp：旧实现 skip/no_expiry，永远不执行。
+        aid = self._insert("invalid@example.com", extra={"access_token": "not-a-jwt"}, status="invalid")
+        calls = []
+
+        def fake_execute(account_id):
+            calls.append(account_id)
+            return {"ok": True, "data": {"refreshed": True}}
+
+        # 第一次扫描：只排计划（尽快 + 抖动，到点前不执行）
+        summary = self._run(execute=fake_execute)
+        self.assertEqual(summary["scheduled"], 1, "失效账号没有被排进重试队列")
+        state = self._extra_of(aid)["chatgpt_auto_refresh"]
+
+        # 把计划顶到到点，再跑一轮 → 执行
+        state["at"] = self._now - 1
+        self._write_state(aid, state)
+        calls.clear()
+        summary = self._run(execute=fake_execute)
+        self.assertEqual(calls, [aid], "失效账号到点后没有被执行刷新")
+        self.assertEqual(summary["ok"], 1)
+        self.assertNotIn("chatgpt_auto_refresh", self._extra_of(aid), "成功后计划要清掉")
+
+    def test_invalid_account_failure_records_backoff(self):
+        """失效账号刷新失败 → 同样的退避（1h → 6h → 上限禁用）。"""
+        aid = self._insert(
+            "invalid-fail@example.com",
+            extra={
+                "access_token": "not-a-jwt",
+                "chatgpt_auto_refresh": {"at": self._now - 5, "for_exp": 0, "attempts": 0, "disabled": False},
+            },
+            status="invalid",
+        )
+
+        summary = self._run(execute=lambda _aid: {"ok": False, "error": "网络错误"})
+        self.assertEqual(summary["failed"], 1)
+        state = self._extra_of(aid)["chatgpt_auto_refresh"]
+        self.assertEqual(state["attempts"], 1)
+        self.assertGreaterEqual(state["at"], self._now + 3600 - 1)
+
+    def test_banned_detected_during_execution_clears_plan(self):
+        """执行中检测出封禁 → 标注日志 + 清计划（用户要求 2026-10-10）。
+
+        状态由执行器落成 banned（`_default_execute` → 共享状态策略，另见
+        `DefaultExecuteBannedTests`）；维护侧负责把账号移出重试队列 ——
+        清计划而不是记一次退避失败。
+        """
+        exp = self._now + 10 * 3600
+        aid = self._insert(
+            "ban-during@example.com",
+            extra={"access_token": self._at(exp), "chatgpt_auto_refresh": self._due_state(exp)},
+        )
+        logs: list[str] = []
+
+        summary = self._run(
+            execute=lambda _aid: {"ok": False, "error": "账号已封禁", "data": {"banned": True}},
+            log=logs.append,
+        )
+        self.assertEqual(summary["failed"], 1)
+        self.assertNotIn(
+            "chatgpt_auto_refresh", self._extra_of(aid),
+            "检测出封禁后计划没清 —— 封禁账号不该保留待办状态",
+        )
+        joined = "\n".join(logs)
+        self.assertIn("封禁", joined)
+        self.assertIn("移出自动刷新队列", joined)
+
+    def test_banned_detected_is_not_retried_next_pass(self):
+        """封禁标注后（状态已落 banned）→ 下一轮不再执行。"""
+        exp = self._now + 10 * 3600
+        aid = self._insert(
+            "ban-then-skip@example.com",
+            extra={"access_token": self._at(exp), "chatgpt_auto_refresh": self._due_state(exp)},
+        )
+        self._run(execute=lambda _aid: {"ok": False, "error": "账号已封禁", "data": {"banned": True}})
+        # 模拟执行器已把状态落成 banned（生产链由 _default_execute 完成）
+        self._set_status(aid, "banned")
+
+        calls = []
+        self._run(execute=lambda i: calls.append(i) or {"ok": True})
+        self.assertEqual(calls, [], "封禁标注后仍被自动刷新重试")
+
+    def _write_state(self, account_id, state):
+        from sqlmodel import Session
+
+        from core.db import AccountModel, engine
+
+        with Session(engine) as session:
+            row = session.get(AccountModel, account_id)
+            extra = row.get_extra()
+            extra["chatgpt_auto_refresh"] = state
+            row.set_extra(extra)
+            session.add(row)
+            session.commit()
+
+    def _set_status(self, account_id, status):
+        from sqlmodel import Session
+
+        from core.db import AccountModel, engine
+
+        with Session(engine) as session:
+            row = session.get(AccountModel, account_id)
+            row.status = status
+            session.add(row)
+            session.commit()
+
     def test_disabled_state_is_not_executed(self):
         exp = self._now + 10 * 3600
         state = self._due_state(exp)
@@ -521,6 +759,93 @@ class RunAutoRefreshPassTests(unittest.TestCase):
         self.assertGreaterEqual(summary["scheduled"], 1, "for_exp 损坏应按重排恢复")
         for aid in (aid_at, aid_exp, aid_attempts):
             self.assertIsInstance(self._extra_of(aid), dict)
+
+
+class DefaultExecuteBannedTests(unittest.TestCase):
+    """自动维护的生产执行器：刷新链检测出封禁 → 账号状态落 `banned`。
+
+    用户要求 2026-10-10：「若检测出账号被封禁，就标注为封禁账号」。
+    生产链是 `run_auto_refresh_pass` → `_default_execute` → 平台
+    `execute_action("refresh_token")`（完整链：session → OAuth → 登录
+    兜底）→ `_apply_action_result`（共享状态策略）。本测试钉住**自动维护
+    这条路径**上封禁真的落成 `banned`（此前只有手动动作路径有覆盖）。
+    """
+
+    def setUp(self):
+        from sqlmodel import Session, delete
+
+        from core.db import AccountModel, engine
+
+        with Session(engine) as session:
+            session.exec(delete(AccountModel))
+            session.commit()
+
+    def _insert(self, email):
+        from sqlmodel import Session
+
+        from core.db import AccountModel, engine
+
+        model = AccountModel(platform="chatgpt", email=email, password="pw", status="registered")
+        model.set_extra({"access_token": "at-x", "session_token": "st-x"})
+        with Session(engine) as session:
+            session.add(model)
+            session.commit()
+            session.refresh(model)
+        return int(model.id)
+
+    def test_refresh_banned_result_marks_account_banned(self):
+        from services.chatgpt_maintenance import _default_execute
+
+        aid = self._insert("auto-ban@example.com")
+        banned_result = {
+            "ok": False,
+            "error": "账号已封禁（session 端点拒绝: HTTP 401）",
+            "data": {"banned": True, "message": "账号已封禁（session 端点拒绝: HTTP 401）"},
+            "account_extra_patch": {"chatgpt_token_refresh": {"ok": False, "refreshed": False}},
+        }
+
+        with mock.patch(
+            "platforms.chatgpt.plugin.ChatGPTPlatform.execute_action",
+            return_value=banned_result,
+        ):
+            result = _default_execute(aid)
+
+        self.assertFalse(result.get("ok"))
+        from sqlmodel import Session
+
+        from core.db import AccountModel, engine
+
+        with Session(engine) as session:
+            row = session.get(AccountModel, aid)
+            self.assertEqual(
+                row.status, "banned",
+                "自动维护的刷新链检测出封禁，但账号状态没落成 banned",
+            )
+
+    def test_ordinary_refresh_failure_does_not_mark_banned(self):
+        """修复不误伤：普通失败（网络错误）不得把账号标成封禁。"""
+        from services.chatgpt_maintenance import _default_execute
+
+        aid = self._insert("auto-fail@example.com")
+        fail_result = {
+            "ok": False,
+            "error": "Session token 刷新异常: connection reset",
+            "data": {"banned": False, "message": "Session token 刷新异常: connection reset"},
+        }
+
+        with mock.patch(
+            "platforms.chatgpt.plugin.ChatGPTPlatform.execute_action",
+            return_value=fail_result,
+        ):
+            _default_execute(aid)
+
+        from sqlmodel import Session
+
+        from core.db import AccountModel, engine
+
+        with Session(engine) as session:
+            row = session.get(AccountModel, aid)
+            self.assertEqual(row.status, "registered", "普通失败被误标成封禁")
 
 
 class Chatgpt2apiAutoSyncTests(unittest.TestCase):

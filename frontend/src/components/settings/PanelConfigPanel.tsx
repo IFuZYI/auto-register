@@ -126,10 +126,10 @@ const PANEL_SECTIONS: PanelSection[] = [
     section: {
       title: 'ChatGPT Token 自动维护',
       desc:
-        '定时扫描 ChatGPT 账号：AT 临期（剩余 ≤ 24h）或已过期时，在到期前随机一个时刻自动刷新（至少提前 1 小时，不设固定更新时刻）；' +
-        '失败自动退避重试，连续失败 3 次或已封禁的账号不再自动尝试。手动刷新 Token 与注册任务不受影响。',
+        '定时扫描 ChatGPT 账号：AT 临期（剩余 ≤ 24h）、已过期或已失效时自动刷新 Token —— 临期账号在到期前随机一个时刻刷新（至少提前 1 小时，不设固定更新时刻），失效/过期账号尽快尝试；' +
+        '失败自动退避重试，连续失败 3 次或已封禁的账号不再自动尝试。检测出封禁的账号会标注为「禁用」，且不参与凭据同步与对比。手动刷新 Token 与注册任务不受影响。',
       fields: [
-        { key: 'chatgpt_auto_refresh_enabled', label: '自动刷新临期/过期 Token', type: 'boolean' },
+        { key: 'chatgpt_auto_refresh_enabled', label: '自动刷新临期/过期/失效 Token', type: 'boolean' },
       ],
     },
   },
