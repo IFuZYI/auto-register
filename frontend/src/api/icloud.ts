@@ -53,7 +53,8 @@ export interface ICloudAlias {
   status: string
   /** 来源：local（本机直连 Apple 生成/同步）/ remote（远程 icloud-hme 仓库同步）。 */
   source: 'local' | 'remote'
-  /** 号池状态：unpooled（未入池）/ available（未使用）/ in_use（使用中）/ used（已使用） */
+  /** 号池状态（存储层四态；界面展示折叠为三态：未入池 / 已入池 / 使用中）：
+   *  unpooled（未入池）/ available（已入池，可领取）/ in_use（使用中）/ used（已入池，已被领用过） */
   pool_status: 'unpooled' | 'available' | 'in_use' | 'used'
   /**
    * 这个别名被**哪些平台**消耗过（`,grok,chatgpt,` 形式，空串 = 没有）。
@@ -266,14 +267,14 @@ export function setICloudAliasPoolStatus(
   return post(`/icloud/aliases/${id}/pool-status`, { pool_status: poolStatus })
 }
 
-/** 把选中的隐私邮箱导入号池（未入池 → 未使用），注册取号才会领到它们。 */
+/** 把选中的隐私邮箱导入号池（未入池 → 已入池可领取），注册取号才会领到它们。 */
 export function importICloudAliasesToPool(
   ids: number[],
 ): Promise<ICloudAliasPoolChangeResult> {
   return post<ICloudAliasPoolChangeResult>('/icloud/aliases/import-to-pool', { ids })
 }
 
-/** 把选中的隐私邮箱移出号池（未使用 → 未入池）。导入的反向操作。 */
+/** 把选中的隐私邮箱移出号池（已入池可领取 → 未入池）。导入的反向操作。 */
 export function unpoolICloudAliases(ids: number[]): Promise<ICloudAliasPoolChangeResult> {
   return post<ICloudAliasPoolChangeResult>('/icloud/aliases/unpool', { ids })
 }

@@ -95,7 +95,7 @@ def test_claim_prefers_an_available_alias_over_generating(icloud_db):
 
     def _fail_if_called(*args, **kwargs):
         generated.append("called")
-        raise AssertionError("池里有未使用的地址，不该去调 Apple 生成")
+        raise AssertionError("池里有已入池的地址，不该去调 Apple 生成")
 
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(icloud_service, "generate_alias", _fail_if_called)
@@ -304,7 +304,7 @@ def test_release_stale_claims_does_not_overwrite_a_concurrent_status_change(iclo
     """回收必须是条件 UPDATE —— 不能把并发改过的状态静默覆盖回 available。
 
     场景：某条 `in_use` 已经超时，但就在回收读出来之后、写回之前，有人
-    （池页面点「已使用」，或注册流程刚把它标成 `used`）改了它的状态。
+    （池页面手动改状态，或注册流程刚把它标成 `used`）改了它的状态。
     早先的「SELECT 出行 → 改 ORM 对象 → commit」实现会把对方的结果整个
     覆盖掉（把刚标好的 `used` 又打回 `available`）；换成带
     `WHERE pool_status = 'in_use'` 的条件 UPDATE 后，数据库层保证这类
@@ -466,7 +466,7 @@ def test_unpool_returns_available_aliases_to_unpooled(icloud_db):
 def test_pool_summary_separates_unpooled_from_available(icloud_db):
     """`unpooled` 必须单独计数，不能并进 available。
 
-    并进去的话界面会显示「未使用 N」而注册一个都取不到 —— 用户完全无法
+    并进去的话界面会显示「已入池 N」而注册一个都取不到 —— 用户完全无法
     理解为什么池子里有闲号却报「没有可用邮箱」。
     """
     from services import icloud_service

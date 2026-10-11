@@ -582,7 +582,7 @@ class RegisteredRuleCrossPlatformTests(unittest.TestCase):
 class SnapshotPlatformEvidenceTests(unittest.TestCase):
     """预览快照要带「这个地址注册过哪些平台」的证据。
 
-    用户诉求：一个邮箱可以被多个平台使用，只显示「已使用」区分不出是哪个平台
+    用户诉求：一个邮箱可以被多个平台使用，只显示池状态区分不出是哪个平台
     用过 —— 预览表要能按平台筛、也要能一眼看出已注册平台。证据在 `accounts`
     表（跨库），池里的 `used_platforms` 只是记账、可能缺项。
     """

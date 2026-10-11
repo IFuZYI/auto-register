@@ -1,4 +1,5 @@
 import type { ICloudAlias, ICloudRegion } from '@/api/icloud'
+import { poolDisplayStatus } from './poolStatus'
 
 export const DEFAULT_ICLOUD_IMAP_HOST = 'imap.mail.me.com'
 export const DEFAULT_ICLOUD_IMAP_PORT = 993
@@ -106,7 +107,10 @@ export function formatRelativeTime(value?: string | null): string {
 export interface AliasFilter {
   /** 关键词，匹配地址 / 标签 / 备注 / 所属主号（大小写不敏感） */
   keyword?: string
-  /** 号池状态。未选平台时按池口径匹配，选了平台按 `aliasPlatformStatus` 的平台口径。 */
+  /**
+   * 号池状态。未选平台时按三态展示口径（未入池 / 已入池 / 使用中）匹配，
+   * 选了平台按 `aliasPlatformStatus` 的平台口径。
+   */
   poolStatus?: string
   /** 启用状态：active / inactive */
   status?: string
@@ -161,8 +165,8 @@ export function aliasRegisteredPlatforms(
 }
 
 /**
- * 按平台口径算一行别名的状态。`platform` 为空时原样返回池状态
- * （不筛选 = 显示有没有入池）。
+ * 按平台口径算一行别名的状态（选了平台筛选时用；不筛选的展示口径在
+ * `poolDisplayStatus`）。`platform` 为空时原样返回池状态。
  */
 export function aliasPlatformStatus(
   alias: Pick<ICloudAlias, 'pool_status' | 'used_platforms' | 'registered_platforms'>,
@@ -186,7 +190,9 @@ export function aliasPlatformStatus(
  * 关键词覆盖四个字段：用户找某个别名时，记得的可能是邮箱本身，也可能是
  * 当初填的备注或它在哪个主号下 —— 只搜地址会让人以为"搜不到"。
  *
- * `platform` 给定后 `poolStatus` 按平台口径匹配（`aliasPlatformStatus`）。
+ * `platform` 给定后 `poolStatus` 按平台口径匹配（`aliasPlatformStatus`）；
+ * 未选平台时按三态展示口径匹配（`poolDisplayStatus`）—— `available` 与
+ * `used` 都算「已入池」，「是否使用」看「已注册平台」列。
  */
 export function filterAliases<
   T extends Pick<
@@ -199,7 +205,7 @@ export function filterAliases<
     if (filter.poolStatus) {
       const status = filter.platform
         ? aliasPlatformStatus(alias, filter.platform)
-        : alias.pool_status
+        : poolDisplayStatus(alias.pool_status)
       if (status !== filter.poolStatus) return false
     }
     if (filter.status && alias.status !== filter.status) return false

@@ -5,10 +5,13 @@
 **复刻同一套规则**，用同样的用例钉住行为：
 
 - 关键词匹配地址 / 标签 / 备注 / 所属主号，大小写不敏感
-- 号池状态、启用状态精确匹配
+- 号池状态（三态展示口径）、启用状态精确匹配
 - 空条件 = 不过滤
 - **平台口径**：选了平台之后，号池状态按「在这个平台注册过没有」解释
   （一个邮箱可以被多个平台使用，只显示「已使用」区分不出是哪个平台用过）
+- **三态展示口径**（用户要求 2026-10-11）：未选平台时号池状态只有
+  未入池 / 已入池 / 使用中；存储层 `available` 与 `used` 都折叠为「已入池」，
+  「是否使用」由「已注册平台」列负责。
 
 两边行为必须一致。改前端规则时这里会红 —— 那是提醒同步，不是噪声。
 （用 python 复刻而不是给前端装测试框架：仓库当前零前端测试基建，
@@ -32,6 +35,22 @@ def alias_registered_platforms(alias):
     return sorted(names)
 
 
+def pool_display_status(value):
+    """`poolStatus.ts:poolDisplayStatus()`：存储四态折叠为展示三态。
+
+    用户要求（2026-10-11）：号池标签只有未入池 / 已入池 / 使用中；
+    available 与 used 都算「已入池」，「是否使用」由「已注册平台」列负责。
+    """
+    raw = str(value or "").strip().lower()
+    if raw == "unpooled":
+        return "unpooled"
+    if raw == "in_use":
+        return "in_use"
+    if raw == "failed":
+        return "failed"
+    return "pooled"
+
+
 def alias_platform_status(alias, platform):
     """`aliasPlatformStatus()`：平台口径状态。"""
     name = str(platform or "").strip().lower()
@@ -48,7 +67,11 @@ def alias_platform_status(alias, platform):
 
 
 def filter_aliases(aliases, *, keyword="", pool_status="", status="", platform=""):
-    """`frontend/src/lib/icloud.ts:filterAliases()` 的等价实现。"""
+    """`frontend/src/lib/icloud.ts:filterAliases()` 的等价实现。
+
+    未选平台时 `pool_status` 按三态展示口径（`pool_display_status`）匹配；
+    选了平台按平台口径（`alias_platform_status`）。
+    """
     kw = str(keyword or "").strip().lower()
     out = []
     for alias in aliases:
@@ -56,7 +79,7 @@ def filter_aliases(aliases, *, keyword="", pool_status="", status="", platform="
             value = (
                 alias_platform_status(alias, platform)
                 if platform
-                else alias.get("pool_status")
+                else pool_display_status(alias.get("pool_status"))
             )
             if value != pool_status:
                 continue
@@ -137,8 +160,25 @@ class AliasFilterTests(unittest.TestCase):
         self.assertEqual(len(got), 4)
 
     def test_pool_status_exact(self):
-        got = filter_aliases(self.rows, pool_status="used")
-        self.assertEqual([r["address"] for r in got], ["alpha@icloud.com"])
+        """三态展示口径精确匹配：'pooled' 命中 available 与 used 两类行。"""
+        got = filter_aliases(self.rows, pool_status="pooled")
+        self.assertEqual(
+            [r["address"] for r in got],
+            ["alpha@icloud.com", "gamma@icloud.com"],
+        )
+        got_unpooled = filter_aliases(self.rows, pool_status="unpooled")
+        self.assertEqual([r["address"] for r in got_unpooled], ["beta@icloud.com"])
+        got_busy = filter_aliases(self.rows, pool_status="in_use")
+        self.assertEqual([r["address"] for r in got_busy], ["delta@icloud.com"])
+
+    def test_legacy_pool_status_values_match_nothing(self):
+        """旧口径的 'used' / 'available' 不是展示层合法值 → 筛出空。
+
+        展示层三态化后下拉只有三个值；出现别的说明调用方传错了旧值，
+        静默返回全量会让人以为筛选没生效（与 unknown 同款处理）。
+        """
+        self.assertEqual(filter_aliases(self.rows, pool_status="used"), [])
+        self.assertEqual(filter_aliases(self.rows, pool_status="available"), [])
 
     def test_status_exact(self):
         got = filter_aliases(self.rows, status="inactive")

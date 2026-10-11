@@ -72,6 +72,7 @@ class MaintenanceDocReferenceTests(unittest.TestCase):
         "frontend/src/components/settings/PanelConfigPanel.tsx",
         "frontend/scripts/run_account_format_checks.mjs",
         "frontend/scripts/run_panel_filter_checks.mjs",
+        "frontend/scripts/run_pool_status_checks.mjs",
         "docs/EXTENDING.md",
         "docs/API_REFERENCE.md",
         "docs/DATABASE_MODULARITY.md",

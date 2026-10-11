@@ -339,7 +339,7 @@ def account_messages(account_id: int, limit: int = 50, recipient: str = ""):
 def list_aliases(account_id: Optional[int] = None):
     return {
         "items": icloud_service.list_aliases(account_id),
-        # 池页面顶部的统计条：未使用 / 使用中 / 已使用
+        # 池页面顶部的统计条：后端四态，界面折叠为三态（未入池 / 已入池 / 使用中）
         "pool": icloud_service.pool_summary(account_id),
     }
 
@@ -361,7 +361,7 @@ def generate_aliases(body: GenerateAliasRequest):
 
 @router.post("/aliases/{alias_id}/pool-status")
 def set_alias_pool_status(alias_id: int, body: PoolStatusRequest):
-    """手动改号池状态（未使用 / 使用中 / 已使用）。
+    """手动改号池状态（available / in_use / used）。
 
     自动记账已经接通：`claim_alias` 取号时标 `in_use`，注册流程收尾时
     `ICloudLocalMailbox.set_account_status` 会把结果记回（成功 → `used`，
@@ -369,7 +369,8 @@ def set_alias_pool_status(alias_id: int, body: PoolStatusRequest):
     `release_stale_claims` 兜底放回。
 
     这个端点留给「人工干预」：人工导入或同步进来的地址需要手动入池，
-    以及想手动回收某个号时。
+    以及想手动回收某个号时。界面展示层折叠为三态（未入池 / 已入池 /
+    使用中），但端点与存储层一样按四态取值。
     """
     try:
         return icloud_service.set_alias_pool_status(alias_id, body.pool_status)
@@ -379,7 +380,7 @@ def set_alias_pool_status(alias_id: int, body: PoolStatusRequest):
 
 @router.post("/aliases/import-to-pool")
 def import_aliases_to_pool(body: AliasIdsRequest):
-    """把选中的隐私邮箱导入号池（未入池 → 未使用）。
+    """把选中的隐私邮箱导入号池（未入池 → 可领取）。
 
     生成与同步下来的别名默认是「未入池」，注册取号会跳过它们 —— 必须显式
     勾选导入才进池。只处理未入池的那些，正在用/已用过的不会被顺手改动。
@@ -391,7 +392,7 @@ def import_aliases_to_pool(body: AliasIdsRequest):
 
 @router.post("/aliases/unpool")
 def unpool_aliases(body: AliasIdsRequest):
-    """把选中的隐私邮箱移出号池（未使用 → 未入池）。导入的反向操作。"""
+    """把选中的隐私邮箱移出号池（可领取 → 未入池）。导入的反向操作。"""
     if not body.ids:
         raise HTTPException(400, "请先选择要移出号池的隐私邮箱")
     return icloud_service.unpool_aliases(body.ids)

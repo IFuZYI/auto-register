@@ -170,7 +170,7 @@ class MicrosoftMailImportStrategy(BaseMailImportStrategy):
             ).all()
 
         # 「这个地址注册过哪些平台」的权威证据在 `accounts` 表（跨库）。预览表
-        # 要显示它、也要按平台筛选（一个邮箱可以被多个平台使用，只显示「已使用」
+        # 要显示它、也要按平台筛选（一个邮箱可以被多个平台使用，池状态标签
         # 区分不出是哪个平台用过）。一次批量查询，不是每行一次。
         registered: dict[str, set[str]] = {}
         try:

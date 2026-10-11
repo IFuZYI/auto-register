@@ -424,8 +424,8 @@ grok2api），操作面在界面「面板管理」页（那里有本地 ↔ 远�
 | GET | `/api/icloud/aliases` | `account_id?` | 列出隐私邮箱别名。每行带 `source`（`local` / `remote`）、`used_platforms`（池记账）与 `registered_platforms`（`accounts` 表里的权威注册证据，跨库查出来）；界面按来源/平台筛选 |
 | POST | `/api/icloud/aliases` | `{account_id?,account_email?,label?,note?,count:1}` | 生成别名；`count` 范围 1–5。**只支持本地账号**：`account_id` 指向远程账号时返回 400（`invalid_config`）—— 本注册机不在远端新建隐私邮箱 |
 | POST | `/api/icloud/aliases/{alias_id}/pool-status` | `{pool_status}` | 手动改号池状态（`available` / `in_use` / `used`）。自动记账已接通（取号标 `in_use`、注册收尾记回），此端点留给人工干预。注意 `unpooled`（未入池）**不可经此设置**（会 400）—— 移出号池走 `/api/icloud/aliases/unpool` |
-| POST | `/api/icloud/aliases/import-to-pool` | `{ids}` | 把选中的别名从「未入池」导入号池（→ 未使用）。生成/同步进来的默认未入池，取号会跳过 |
-| POST | `/api/icloud/aliases/unpool` | `{ids}` | 把选中的别名移出号池（未使用 → 未入池）。导入的反向操作 |
+| POST | `/api/icloud/aliases/import-to-pool` | `{ids}` | 把选中的别名从「未入池」导入号池（→ 已入池可领取）。生成/同步进来的默认未入池，取号会跳过 |
+| POST | `/api/icloud/aliases/unpool` | `{ids}` | 把选中的别名移出号池（已入池可领取 → 未入池）。导入的反向操作 |
 | POST | `/api/icloud/aliases/{alias_id}/deactivate` | — | 停用隐私邮箱（不删除，可逆） |
 | POST | `/api/icloud/aliases/{alias_id}/reactivate` | — | 重新激活已停用的隐私邮箱 |
 | POST | `/api/icloud/aliases/batch-delete` | `{ids,remote:true}` | 批量删除别名；`remote` 决定是否同步删除 Apple 侧资源 |

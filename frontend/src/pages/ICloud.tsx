@@ -78,7 +78,7 @@ import {
   type AliasPlatformStatus,
 } from '@/lib/icloud'
 import { PLATFORM_FILTER_OPTIONS, getPlatformLabel, getPlatformTagColor } from '@/lib/platforms'
-import { POOL_SUMMARY_ORDER, poolStatusMeta } from '@/lib/poolStatus'
+import { POOL_DISPLAY_ORDER, poolDisplaySummary, poolStatusMeta } from '@/lib/poolStatus'
 
 const { Text } = Typography
 
@@ -110,7 +110,7 @@ export default function ICloudPage() {
   const [selectedAliasIds, setSelectedAliasIds] = useState<React.Key[]>([])
   const [batchDeleting, setBatchDeleting] = useState(false)
   const [poolChanging, setPoolChanging] = useState(false)
-  // 号池计数（未使用 / 使用中 / 已使用），列表接口一起返回
+  // 号池计数（后端存储四态；展示层折叠为三态：未入池 / 已入池 / 使用中），列表接口一起返回
   const [pool, setPool] = useState<ICloudAliasPool>(EMPTY_ALIAS_POOL)
 
   const load = useCallback(async () => {
@@ -199,6 +199,10 @@ export default function ICloudPage() {
     [aliases, filterPlatform],
   )
 
+  // 号池统计条的三态计数：available 与 used 折叠为「已入池」（折叠规则在
+  // `poolDisplaySummary`，展示层单点定义）。
+  const displayPool = useMemo(() => poolDisplaySummary(pool), [pool])
+
   const clearAliasFilters = () => {
     setSearchText('')
     setFilterPoolStatus(undefined)
@@ -239,7 +243,7 @@ export default function ICloudPage() {
   /**
    * 批量入池 / 出池。
    *
-   * 后端只动「处于预期状态」的那些（入池只认未入池、出池只认未使用），
+   * 后端只动「处于预期状态」的那些（入池只认未入池、出池只认可领取的），
    * 所以这里必须把 skipped 说出来：用户勾了一批混合状态的号，闷头报「成功
    * 12 个」会让他以为全进了池，下次注册取不到号时完全摸不着头脑。
    */
@@ -259,8 +263,8 @@ export default function ICloudPage() {
         message.warning(
           `已${verb} ${result.changed.length} 个，跳过 ${result.skipped.length} 个` +
             (direction === 'import'
-              ? '（只有「未入池」的能导入；使用中/已用过的请单独处理）'
-              : '（只有「未使用」的能移出）'),
+              ? '（只有「未入池」的能导入；使用中与已入池的不会被改动）'
+              : '（使用中与已被领用过的不会被移出）'),
         )
       }
       setSelectedAliasIds([])
@@ -508,7 +512,8 @@ export default function ICloudPage() {
       ),
     },
     {
-      // 号池记账。选了平台筛选时改显示该平台口径（在这个平台注册过没有）。
+      // 号池记账。未选平台时显示三态：未入池 / 已入池 / 使用中（是否被某平台
+      // 使用看「已注册平台」列）；选了平台筛选时改显示该平台口径。
       title: filterPlatform ? `号池（${getPlatformLabel(filterPlatform)}）` : '号池',
       dataIndex: 'pool_status',
       width: filterPlatform ? 170 : 130,
@@ -581,7 +586,9 @@ export default function ICloudPage() {
           {/* 号池记账是自动的，但生成/同步进来、以及人工导入的地址需要手动
               入池，否则取号逻辑永远跳过它。`unpooled` 是「还没进池」，放回去
               才是它变成可领的唯一途径；`used` 表示这轮跑完了、地址仍可用，
-              放回去也能再领到 —— 所以不禁用，但用 tooltip 说清语义差异。 */}
+              放回去也能再领到 —— 所以不禁用，但用 tooltip 说清语义差异。
+              展示层三态（未入池 / 已入池 / 使用中）不区分 available 与 used，
+              所以按钮的可用性判断仍按存储层值来。 */}
           {alias.pool_status !== 'available' ? (
             <Tooltip
               title={
@@ -678,7 +685,7 @@ export default function ICloudPage() {
               : `隐私邮箱 (${aliases.length})`,
             children: (
               <Card>
-                {/* 号池概览：注册任务领号先捞「未使用」的，这里能一眼看出还剩多少。
+                {/* 号池概览：注册任务领号先捞「已入池」的，这里能一眼看出还剩多少。
                     「未入池」单独说明 —— 它不是池里的号，勾选导入才会变成可领的。 */}
                 <Space style={{ marginBottom: 12 }} wrap>
                   {filterPlatform && platformSummary ? (
@@ -700,16 +707,16 @@ export default function ICloudPage() {
                     </>
                   ) : (
                     <>
-                      {POOL_SUMMARY_ORDER.map((key) => {
+                      {POOL_DISPLAY_ORDER.map((key) => {
                         const item = poolStatusMeta(key)
                         return (
                           <Tag key={key} color={item.color}>
-                            {item.text} {pool[key]}
+                            {item.text} {displayPool[key]}
                           </Tag>
                         )
                       })}
-                      <Text type="secondary">共 {pool.total} 个</Text>
-                      <Tooltip title="「未入池」注册取号会跳过，勾选后点「导入邮箱池」才可领；取号优先复用「未使用」。">
+                      <Text type="secondary">共 {displayPool.total} 个</Text>
+                      <Tooltip title="「未入池」注册取号会跳过，勾选后点「导入邮箱池」才可领；是否被某平台使用看「已注册平台」列。">
                         <QuestionCircleOutlined style={{ color: 'var(--text-muted)' }} />
                       </Tooltip>
                     </>
@@ -758,7 +765,7 @@ export default function ICloudPage() {
                             value: key as string,
                             label: PLATFORM_STATUS_META[key].text,
                           }))
-                        : POOL_SUMMARY_ORDER.map((key) => ({
+                        : POOL_DISPLAY_ORDER.map((key) => ({
                             value: key as string,
                             label: poolStatusMeta(key).text,
                           }))) as { value: string; label: string }[]

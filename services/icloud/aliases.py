@@ -204,7 +204,7 @@ def claim_alias(
                 session.add(existing)
                 session.commit()
                 session.refresh(existing)
-                logger.info("iCloud 号池：复用未使用的隐私邮箱 %s", existing.address)
+                logger.info("iCloud 号池：复用已入池的隐私邮箱 %s", existing.address)
                 return _alias_to_dict(
                     existing,
                     str(row.email or ""),
@@ -422,7 +422,11 @@ def _set_pool_status_many(
 
 
 def pool_summary(account_id: Optional[int] = None) -> dict[str, int]:
-    """号池计数（未入池 / 未使用 / 使用中 / 已使用），池页面顶部的统计条用。
+    """号池计数（未入池 / 可领取 / 使用中 / 已领用），池页面顶部的统计条用。
+
+    这是**存储层四态计数**；界面展示层把 `available` 与 `used` 折叠为
+    「已入池」（用户要求 2026-10-11：号池标签只有未入池 / 已入池 / 使用中，
+    折叠规则在前端 `lib/poolStatus.ts` 的 `poolDisplaySummary`）。
 
     `unpooled` 单独计数：它不是「池子里的可用号」，而是「还没决定要不要进池」。
     前端把它和另三个分开显示，否则用户会把「未入池 168 个」误读成「有 168 个

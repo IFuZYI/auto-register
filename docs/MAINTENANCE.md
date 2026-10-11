@@ -360,6 +360,8 @@ register_job("my_job", interval_seconds=lambda: ..., runner=lambda: ...)
 | `test_icloud_remote_frontend_contract.py` | 远程功能的前端接线：注册页渠道下拉与三个配置键、来源标签列/筛选/添加远程服务入口 | 前端改了 iCloud 页或注册页的远程接线 |
 | `test_icloud_source_isolation.py` | 来源隔离：本地导入（`import_session`）不得写进同邮箱远程行；本地同步（`_upsert_alias`）不得抢走同地址远程行；远程账号自己的同步仍正常更新 | 改 `services/icloud/accounts.py` 的按邮箱查找或 `aliases.py::_upsert_alias` 的按地址查找（两处都必须按 `source` 过滤） |
 | `test_runtime_version_stamp.py` | 版本戳语义（未跟踪文件不算脏） | 改 `_read_git_version` |
+| `test_pool_status_contract.py` | 号池三态展示（真实执行 `poolStatus.ts` / `icloud.ts`）：未入池/已入池/使用中标签、`available`+`used` 合并、统计折叠、筛选折叠、旧标签「未使用/已使用」不再出现 | 改 `lib/poolStatus.ts` 的展示映射或 `filterAliases` 的折叠口径 |
+| `test_icloud_alias_filter.py` | iCloud 别名筛选规则（Python 复刻 `filterAliases`）：关键词四字段、三态展示口径（`pooled` 命中 available+used）、旧口径值筛空、平台口径、AND 组合 | 改 `lib/icloud.ts` 的 `filterAliases` 或 `poolStatus.ts` 的 `poolDisplayStatus` |
 
 **测试基础设施**：`tests/remote_hme_double.py` 是 icloud-hme 服务的**真实 HTTP 双端**
 （stdlib http.server，强制校验 Cookie 会话与 CSRF）。远程链路的测试都对着它跑 ——
@@ -374,6 +376,7 @@ register_job("my_job", interval_seconds=lambda: ..., runner=lambda: ...)
 | 脚本 | 跑什么 |
 | --- | --- |
 | `frontend/scripts/run_account_format_checks.mjs` | `lib/accountFormat.ts` 的纯函数（53 条断言，含状态标签 正常/过期/失效/禁用） |
+| `frontend/scripts/run_pool_status_checks.mjs` | `lib/poolStatus.ts` 的三态展示映射 + `lib/icloud.ts` 筛选折叠（35 条断言，含 available/used 合并为「已入池」、旧标签不再出现） |
 | `frontend/scripts/run_panel_filter_checks.mjs` | `lib/panelComparison.ts` 的筛选/计数（36 条断言，含禁用行不参与两个方向的同步） |
 | `frontend/scripts/run_task_kind_checks.mjs` | `lib/taskKinds.ts` 的任务类型标签映射（12 条断言，含颜色区分度） |
 | `frontend/scripts/run_log_cleanup_checks.mjs` | `lib/logCleanup.ts` 的保留期选项与清理端点（8 条断言，含天数不重复/正整数） |

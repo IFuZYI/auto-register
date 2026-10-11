@@ -46,7 +46,9 @@ ALIAS_STATUS_DISABLED = "disabled"
 #   - `unpooled`/`available`/`in_use`/`used` 说的是「它进没进号池、注册任务用过没有」。
 # 一个别名可以既是 active 又是 used —— 注册成功但别名仍开着继续收信。
 # Outlook 号池（`core/mailboxes/channels/outlook/`）用的是同一套语义，
-# 两边的池页面因此能显示一致的「未使用 / 使用中 / 已使用」标签。
+# 两边的池页面因此能显示一致的三态标签（未入池 / 已入池 / 使用中）。
+# 注意：这是**存储层四态**；界面展示层把 `available` 与 `used` 折叠为「已入池」
+# （用户要求 2026-10-11），「是否被某平台使用」看「已注册平台」列。
 POOL_STATUS_AVAILABLE = "available"
 POOL_STATUS_IN_USE = "in_use"
 POOL_STATUS_USED = "used"
