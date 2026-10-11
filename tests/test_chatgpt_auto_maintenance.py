@@ -360,6 +360,37 @@ class RecordAutoRefreshResultTests(unittest.TestCase):
         self.assertEqual(state["attempts"], 3)
         self.assertTrue(state["disabled"], "连续 3 次失败后不再自动尝试")
 
+    def test_non_positive_exp_normalized_like_plan_side(self):
+        """非正 exp 的归一化必须与计划侧一致（`_positive_int` 口径）。
+
+        扫描侧经 `project_access_token_lifecycle` 把非正 exp 归成 None，
+        `plan_auto_refresh` 用 `_safe_int(None) == 0` 比较。若这里把负 exp
+        原样写进 `for_exp`（-5），`same_cycle` 永远为假 —— 每一轮扫描都当
+        「AT 已换发」重排、attempts 被清零，退避与 MAX_ATTEMPTS 上限全部失效
+        （评审发现的边角）。
+        """
+        from services.chatgpt_maintenance import (
+            AUTO_REFRESH_STATE_KEY,
+            plan_auto_refresh,
+            record_auto_refresh_result,
+        )
+
+        # 负值 / 0 / 缺失三种形态都归一到计划侧口径（0）
+        for token_exp in (-5, 0):
+            extra = {"access_token": self._at(token_exp)}
+            state = record_auto_refresh_result(extra, ok=False, now=1_000_000)
+            self.assertEqual(state["for_exp"], 0, f"exp={token_exp} 应归一到 0")
+
+        extra_no_exp = {"access_token": "header.e30.sig"}  # payload = {}（无 exp）
+        state = record_auto_refresh_result(extra_no_exp, ok=False, now=1_000_000)
+        self.assertEqual(state["for_exp"], 0, "缺失 exp 应归一到 0")
+
+        # 端到端：写回后再扫描，必须被认作同一周期（wait/due 而非重排）——
+        # 重排会清 attempts，退避与上限失效（变异实测：退回负值时此处变红）。
+        extra2 = {"access_token": self._at(-5), AUTO_REFRESH_STATE_KEY: state}
+        plan = plan_auto_refresh(extra2, expires_at=None, status="invalid", now=1_000_000)
+        self.assertIn(plan.action, {"wait", "due"}, "同一周期的计划不该被重排")
+
 
 class RunAutoRefreshPassTests(unittest.TestCase):
     """扫描执行：due 的账号逐个串行执行、结果落库（真实 DB + 注入 execute）。"""

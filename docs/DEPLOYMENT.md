@@ -34,6 +34,15 @@ docker compose logs -f app        # 日志
 - **日志上限**：`json-file` 日志已限制 `10m × 3`，长跑不会撑爆磁盘。
 - **`.env` 注入**：写进 `.env` 的应用变量（`OPENAI_*` 等）会注入容器；
   `environment` 段里的键（`DATA_DIR` 等）以 compose 文件为准。
+- ⚠️ **重启 / 重建会中断正在跑的注册任务**：`docker compose restart`、
+  `up -d --build`（以及 `docker restart`）替换进程时，进行中的任务被直接终止，
+  只留启动兜底（标「任务因服务重启中断」；iCloud 别名池里持有的号由超时回收放回）。
+  操作前先确认没有 running 任务（设了登录密码时 `/api/tasks` 需要 `Authorization`
+  头，直接 curl 会被 401 拒绝 —— 下面的命令会把这种情况明确报出来；curl 无输出=服务没跑）：
+
+  ```bash
+  curl -s http://localhost:8000/api/tasks | python3 -c "import json,sys; d=json.load(sys.stdin); sys.exit('被鉴权拒绝（设了登录密码时需带 Authorization 头）') if isinstance(d,dict) and d.get('detail') else None; ts=d if isinstance(d,list) else d.get('tasks') or []; print('running:', [t['id'] for t in ts if str(t.get('status')) in ('running','pending')])"
+  ```
 
 > ⚠️ **对外暴露前必须先设登录密码。** 没设密码时鉴权中间件会直接放行所有 `/api/` 请求。
 > 这个面板管着账号、Token、接码 API Key、邮箱和代理凭据。先在「全局配置 → 安全」里

@@ -32,15 +32,16 @@
 cd /home/Register && git pull
 .venv/bin/pip install -r requirements.txt              # 依赖有变动时
 cd frontend && npm install && npm run build && cd ..   # 前端有变动时（产物进 static/）
-# 重启前先确认没有正在跑的注册任务（重启会中断它）：
-curl -s http://127.0.0.1:8000/api/tasks | python3 -c "import json,sys; d=json.load(sys.stdin); ts=d if isinstance(d,list) else d.get('tasks') or []; print('running:', [t['id'] for t in ts if str(t.get('status')) in ('running','pending')])"
+# 重启前先确认没有正在跑的注册任务（重启会中断它；设了登录密码时 /api/tasks
+# 需要 Authorization 头，下面的命令会把这种情况明确报出来；curl 无输出=服务没跑）：
+curl -s http://127.0.0.1:8000/api/tasks | python3 -c "import json,sys; d=json.load(sys.stdin); sys.exit('被鉴权拒绝（设了登录密码时需带 Authorization 头）') if isinstance(d,dict) and d.get('detail') else None; ts=d if isinstance(d,list) else d.get('tasks') or []; print('running:', [t['id'] for t in ts if str(t.get('status')) in ('running','pending')])"
 systemctl restart account-manager.service              # 必须重启：改了代码不重启还跑旧代码
 journalctl -u account-manager.service -f               # 看日志
 ```
 
 > ⚠️ **重启会中断正在跑的注册任务。** 服务重启（或进程被杀）时，进行中的注册任务
-> 直接被 SIGKILL，只剩启动兜底：任务被标「任务因服务重启中断」、它在邮箱池里持有的
-> `in_use` 租约要么等 2 小时超时回收、要么在下次取号时被 `release_stale_claims` 放回。
+> 直接被 SIGKILL，只剩启动兜底：任务被标「任务因服务重启中断」、它在 iCloud 别名池里
+> 持有的 `in_use` 租约要么等 2 小时超时回收、要么在下次取号时被 `release_stale_claims` 放回。
 > 重启前先按上面的命令确认没有 `running` 的注册任务 —— 有就先等它跑完或手动停止，
 > 否则那一轮注册直接报废（实测：一次重启打断了跑到 31/50 的注册任务）。
 

@@ -531,7 +531,9 @@ def _read_code(
                 if task_control is not None:
                     task_control.checkpoint()
                 if callable(renew):
-                    now = time.time()
+                    # 用 monotonic 而不是墙钟：NTP 回拨会推迟续约
+                    # （与两个渠道的续约时钟口径一致，评审建议统一）。
+                    now = time.monotonic()
                     if not last_renew or now - last_renew >= LEASE_RENEW_INTERVAL_SECONDS:
                         last_renew = now
                         try:

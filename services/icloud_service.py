@@ -145,6 +145,7 @@ __all__ = [
     "pool_summary",
     "release_alias_claim",
     "release_stale_claims",
+    "renew_alias_claim",
     "resend_login_code",
     "resolve_account",
     "send_login_sms",

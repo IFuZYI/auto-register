@@ -251,7 +251,11 @@ def record_auto_refresh_result(
     from services.chatgpt_token_lifecycle import decode_jwt_claims
 
     claims = decode_jwt_claims(_access_token_of(extra, row))
-    for_exp = _safe_int(claims.get("exp"))
+    # 与计划侧（`project_access_token_lifecycle` 的 `_positive_int`）同口径：
+    # 非正/缺失 exp 归一为 0。写回负值会让 `same_cycle` 永远为假 —— 每轮
+    # 扫描都当「AT 已换发」重排、attempts 清零，退避与上限全部失效。
+    raw_exp = _safe_int(claims.get("exp"))
+    for_exp = raw_exp if raw_exp > 0 else 0
 
     state = _state_from_extra(extra)
     attempts = _safe_int(state.get("attempts")) + 1
