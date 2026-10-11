@@ -366,6 +366,67 @@ class TaskInterruptionPassthroughTests(unittest.TestCase):
         self.assertTrue(logs)
 
 
+class LeaseRenewalTests(unittest.TestCase):
+    """Grok 浏览器路径的 iCloud 读码循环要给租约续约。
+
+    这条路径不走渠道的 `wait_for_code`，而是直接轮询
+    `icloud_service.fetch_alias_messages(alias_id)` —— 不续约的话，
+    等码超过回收阈值（2 小时）的长任务会被另一个取号点回收、
+    号被重复领走（用户要求：使用中不能同时使用）。
+    """
+
+    def test_read_code_renews_the_lease(self):
+        import platforms.grok.register_browser as rb
+
+        calls: list[int] = []
+
+        class FakeICloudService:
+            @staticmethod
+            def fetch_alias_messages(alias_id, limit=15):
+                return []
+
+            @staticmethod
+            def renew_alias_claim(alias_id):
+                calls.append(alias_id)
+                return 1
+
+        with patch.dict("sys.modules", {}), \
+             patch("services.icloud_service", FakeICloudService, create=True), \
+             patch.object(rb.time, "sleep", lambda *_a: None):
+            code = rb._read_code(42, 1, None)
+        self.assertEqual(code, "")
+        self.assertTrue(calls, "Grok 读码循环没有给租约续约 —— 长任务会被回收、号被重复领走")
+        self.assertEqual(calls[0], 42)
+
+    def test_read_code_renewal_failure_does_not_break_reading(self):
+        """续约失败（老服务没有这个方法 / 库锁住）只忽略，不打断读码。"""
+        import platforms.grok.register_browser as rb
+        from platforms.icloud.models import MailMessage
+
+        msg = MailMessage(
+            provider_message_id="m1",
+            mailbox="INBOX",
+            subject="xAI",
+            snippet="验证码 333-389",
+            text_body="",
+        )
+
+        class FakeICloudService:
+            @staticmethod
+            def fetch_alias_messages(alias_id, limit=15):
+                return [msg]
+
+            @staticmethod
+            def renew_alias_claim(alias_id):
+                raise RuntimeError("库锁住了")
+
+        with patch.dict("sys.modules", {}), \
+             patch("services.icloud_service", FakeICloudService, create=True), \
+             patch.object(rb.time, "sleep", lambda *_a: None):
+            code = rb._read_code(42, 5, None)
+        self.assertEqual(code, "333-389", "续约失败打断了读码")
+
+
 class CookieChainPollingTests(unittest.TestCase):
     """提交后必须**轮询**等 sso 落地，不能只等固定时长。
 

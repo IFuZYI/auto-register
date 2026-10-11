@@ -32,9 +32,17 @@
 cd /home/Register && git pull
 .venv/bin/pip install -r requirements.txt              # 依赖有变动时
 cd frontend && npm install && npm run build && cd ..   # 前端有变动时（产物进 static/）
+# 重启前先确认没有正在跑的注册任务（重启会中断它）：
+curl -s http://127.0.0.1:8000/api/tasks | python3 -c "import json,sys; d=json.load(sys.stdin); ts=d if isinstance(d,list) else d.get('tasks') or []; print('running:', [t['id'] for t in ts if str(t.get('status')) in ('running','pending')])"
 systemctl restart account-manager.service              # 必须重启：改了代码不重启还跑旧代码
 journalctl -u account-manager.service -f               # 看日志
 ```
+
+> ⚠️ **重启会中断正在跑的注册任务。** 服务重启（或进程被杀）时，进行中的注册任务
+> 直接被 SIGKILL，只剩启动兜底：任务被标「任务因服务重启中断」、它在邮箱池里持有的
+> `in_use` 租约要么等 2 小时超时回收、要么在下次取号时被 `release_stale_claims` 放回。
+> 重启前先按上面的命令确认没有 `running` 的注册任务 —— 有就先等它跑完或手动停止，
+> 否则那一轮注册直接报废（实测：一次重启打断了跑到 31/50 的注册任务）。
 
 单元文件在 `/etc/systemd/system/account-manager.service`（仓库内版本化副本：
 `deploy/account-manager.service`）：环境变量
@@ -344,7 +352,10 @@ register_job("my_job", interval_seconds=lambda: ..., runner=lambda: ...)
 | `test_icloud_remote_client.py` | 远程客户端契约：管理员密码换会话 + CSRF、会话复用与重启自动重登、错误码映射（冷却 → `provider_rate_limited`）、inbox limit 夹取 | 改 `platforms/icloud/remote_client.py` |
 | `test_icloud_remote_service.py` | 远程服务层：接入（加密落库 / 重复接入拒绝）、同步与**本地优先去重**（`skipped_local`）、**远程账号拒绝生成隐私邮箱**（`invalid_config`）、远程停用/删除、远程收件映射 | 改 `services/icloud/remote.py` 的去重或写路径 |
 | `test_icloud_remote_fixes.py` | 远程仓库的两个修复：远端时间串 naive → UTC 归一（否则同步 500）、远程账号禁止生成隐私邮箱（只允许本地账号）、生成弹窗只列本地主号 | 改 `_parse_remote_datetime`、`generate_alias` 的远程分支、`GenerateAliasModal` |
-| `test_icloud_remote_mailbox.py` | 远程邮箱渠道：工厂注册、**只复用池内已入池别名（池空报错，不在远端新建）**、收码与发码时间窗、池记账钩子 | 改 `modules/mail/icloud_remote.py` |
+| `test_icloud_remote_mailbox.py` | 远程邮箱渠道：工厂注册、**只复用池内已入池别名（池空报错，不在远端新建）**、收码与发码时间窗、池记账钩子、**等码期间租约续约** | 改 `modules/mail/icloud_remote.py` 或去掉 `wait_for_code` 里的续约 |
+| `test_icloud_alias_pool.py` | 号池语义：领取独占（第二个任务领不到同一个）、`used` 流转、超时回收只命中没续约的行、**`renew_alias_claim` 续约保活（续约过的号不被回收、非 in_use 不碰）**、入池/出池幂等、`unpooled` 不可手设 | 改 `services/icloud/aliases.py` 的取号/回收/续约逻辑 |
+| `test_icloud_local_mailbox.py` | 本地邮箱渠道：工厂注册、主号选取、取号语义（池空兜底回收失败不阻断）、收件字段名、池记账钩子、**等码期间租约续约（含无 alias_id 跳过 / 续约失败不打断）** | 改 `modules/mail/icloud_local.py` 或去掉 `wait_for_code` 里的续约 |
+| `test_grok_register_browser.py` | Grok 浏览器注册：指纹与代理、发码判定、**读码两条链路（iCloud / 通用渠道）**、控制流异常穿透、**iCloud 读码循环租约续约** | 改 `platforms/grok/register_browser.py` 的 `_read_code` 或续约接线 |
 | `test_icloud_remote_api.py` | 远程 HTTP 接口：接入/探针/探测/同步/删除的错误码映射与脱敏（不回密码） | 改 `api/icloud.py` 的远程端点 |
 | `test_icloud_remote_frontend_contract.py` | 远程功能的前端接线：注册页渠道下拉与三个配置键、来源标签列/筛选/添加远程服务入口 | 前端改了 iCloud 页或注册页的远程接线 |
 | `test_icloud_source_isolation.py` | 来源隔离：本地导入（`import_session`）不得写进同邮箱远程行；本地同步（`_upsert_alias`）不得抢走同地址远程行；远程账号自己的同步仍正常更新 | 改 `services/icloud/accounts.py` 的按邮箱查找或 `aliases.py::_upsert_alias` 的按地址查找（两处都必须按 `source` 过滤） |

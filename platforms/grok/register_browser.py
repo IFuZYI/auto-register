@@ -33,6 +33,9 @@ from .constants import CODE_RE_ANY as CODE_RE
 from .constants import SIGNUP_URL
 from .profile import generate_password
 
+#: iCloud 租约的续约间隔（秒）—— 与渠道层同一口径（modules/mail/icloud_*.py）。
+LEASE_RENEW_INTERVAL_SECONDS = 60
+
 LogFn = Optional[Callable[[str], None]]
 
 # 「该邮箱已注册」的判定模式。取值对齐 reference/grok/grok-register 的
@@ -519,9 +522,25 @@ def _read_code(
             icloud_service = None
         if icloud_service is not None:
             consecutive_errors = 0
+            # 租约续约：等码超过回收阈值（2 小时）的长任务会被另一个取号点
+            # 回收、号被重复领走（用户要求：使用中不能同时使用）。这条路径
+            # 不走渠道的 wait_for_code，续约要在这里自己做。
+            renew = getattr(icloud_service, "renew_alias_claim", None)
+            last_renew = 0.0
             while time.time() < deadline:
                 if task_control is not None:
                     task_control.checkpoint()
+                if callable(renew):
+                    now = time.time()
+                    if not last_renew or now - last_renew >= LEASE_RENEW_INTERVAL_SECONDS:
+                        last_renew = now
+                        try:
+                            renew(int(alias_id))
+                        except TaskInterruption:
+                            raise
+                        except Exception as exc:  # noqa: BLE001 - 续约失败不该影响读码
+                            if log:
+                                log(f"[Grok] iCloud 租约续约失败（忽略）: {type(exc).__name__}")
                 try:
                     msgs = icloud_service.fetch_alias_messages(int(alias_id), limit=15)
                     consecutive_errors = 0

@@ -497,3 +497,137 @@ def test_unpooled_is_not_a_manually_settable_status(icloud_db):
         icloud_service.set_alias_pool_status(alias_id, "unpooled")
 
     assert ctx.value.code == "invalid_pool_status"
+
+
+# ---------------------------------------------------------------------------
+# 「使用中」租约续约 —— 用户要求：使用中的账号不要再同时使用，避免冲突。
+#
+# 背景：`release_stale_claims` 按 `updated_at` 超时回收 `in_use`。没有续约
+# 机制时，**还活着的长任务**（等码重试等链路超过阈值）会被另一个取号点回收，
+# 号被重复领走 —— 两个任务抢同一个收件箱、验证码互相顶掉。注册链在等码
+# 轮询里定期调 `renew_alias_claim` 续约，把持有中的号保持新鲜。
+# ---------------------------------------------------------------------------
+
+
+def _age_alias(engine, alias_id: int, *, hours: int) -> None:
+    """把某条别名的 updated_at 拨回 N 小时前（模拟旧租约）。"""
+    from datetime import timedelta
+
+    from sqlmodel import select as sm_select
+
+    from core.db.models_platform import ICloudAliasModel
+    from services import icloud_service
+
+    with Session(engine) as session:
+        row = session.exec(
+            sm_select(ICloudAliasModel).where(ICloudAliasModel.id == alias_id)
+        ).first()
+        assert row is not None
+        row.updated_at = icloud_service._utcnow() - timedelta(hours=hours)
+        session.add(row)
+        session.commit()
+
+
+def test_renew_alias_claim_keeps_a_live_lease(icloud_db):
+    """长任务心跳续约后，超时回收不得再动它 —— 号不能被重复领走。
+
+    冲突场景：任务 A 领了号、还在等码（长链路），任务 B 取号时触发
+    超时回收 —— 没有续约时 A 的号被放回池子、B 领到同一个地址，
+    两个任务抢同一个收件箱。续约把 A 的租约保持新鲜，回收只该命中
+    真正崩掉（没续约）的那条。
+    """
+    from sqlmodel import select as sm_select
+
+    from core.db.models_platform import ICloudAliasModel
+    from services import icloud_service
+
+    live_id = _seed_alias(icloud_db, address="live@icloud.com", pool_status=POOL_STATUS_IN_USE)
+    dead_id = _seed_alias(icloud_db, address="dead@icloud.com", pool_status=POOL_STATUS_IN_USE)
+    _age_alias(icloud_db, live_id, hours=3)
+    _age_alias(icloud_db, dead_id, hours=3)
+
+    # 活任务的心跳：续约
+    renewed = icloud_service.renew_alias_claim(live_id)
+
+    released = icloud_service.release_stale_claims()
+
+    assert released == 1, "只有真正超时（没续约）的那条该被回收"
+    assert renewed == 1, "续约该命中 in_use 的租约"
+    with Session(icloud_db) as session:
+        live = session.exec(
+            sm_select(ICloudAliasModel).where(ICloudAliasModel.id == live_id)
+        ).first()
+        assert live is not None
+        assert live.pool_status == POOL_STATUS_IN_USE, (
+            "续约过的租约被回收了 —— 长任务的号会被重复领走，两个任务抢同一个收件箱"
+        )
+
+
+def test_renew_alias_claim_ignores_non_in_use_rows(icloud_db):
+    """续约只碰 `in_use` 的租约：available / used 不是「被持有」的状态。
+
+    available 的号没有被任何任务持有，给它刷 updated_at 会掩盖「放了多久
+    没人用」的信息；used 是落定状态，更不该被动。
+    """
+    from sqlmodel import select as sm_select
+
+    from core.db.models_platform import ICloudAliasModel
+    from services import icloud_service
+
+    avail_id = _seed_alias(icloud_db, address="idle2@icloud.com", pool_status=POOL_STATUS_AVAILABLE)
+    used_id = _seed_alias(icloud_db, address="done2@icloud.com", pool_status=POOL_STATUS_USED)
+    _age_alias(icloud_db, avail_id, hours=5)
+    _age_alias(icloud_db, used_id, hours=5)
+
+    assert icloud_service.renew_alias_claim(avail_id) == 0
+    assert icloud_service.renew_alias_claim(used_id) == 0
+
+    # updated_at 不被触碰（条件 UPDATE 不命中就是没改）
+    with Session(icloud_db) as session:
+        for alias_id in (avail_id, used_id):
+            row = session.exec(
+                sm_select(ICloudAliasModel).where(ICloudAliasModel.id == alias_id)
+            ).first()
+            assert row is not None
+            assert icloud_service._utcnow() - icloud_service._as_utc(row.updated_at) > __import__("datetime").timedelta(hours=4), (
+                "非 in_use 的行被续约碰了 updated_at"
+            )
+
+
+def test_renew_alias_claim_missing_alias_returns_zero(icloud_db):
+    """不存在的别名：返回 0，不抛 —— 心跳是尽力而为，不该打断等码。"""
+    from services import icloud_service
+
+    assert icloud_service.renew_alias_claim(999999) == 0
+
+
+def test_renewed_lease_is_not_reclaimable_by_another_task(icloud_db):
+    """端到端：续约过的「使用中」号不会被第二个任务领走。
+
+    用户要求：「使用中的账号不要再同时使用避免冲突」。复现完整链路 ——
+    任务 A 领号后长跑（租约拨旧超过回收阈值）、A 心跳续约；任务 B 走
+    与渠道相同的取号路径（先回收、再领）—— B 不能拿到 A 的号。
+    没有续约时 A 的号会被回收、B 领到同一个地址（两个任务抢同一个收件箱）。
+    """
+    from services import icloud_service
+
+    busy_id = _seed_alias(icloud_db, address="busy-live@icloud.com", pool_status=POOL_STATUS_AVAILABLE)
+
+    # 任务 A 领号
+    first = icloud_service.claim_alias(1)
+    assert first["address"] == "busy-live@icloud.com"
+
+    # A 长跑：租约被拨旧到超过回收阈值（模拟等码链路超过 2 小时）
+    _age_alias(icloud_db, busy_id, hours=3)
+    # A 的心跳
+    assert icloud_service.renew_alias_claim(busy_id) == 1
+
+    # 任务 B 取号：与渠道 get_email 相同的路径 —— 先回收、再领
+    icloud_service.release_stale_claims()
+    with pytest.MonkeyPatch.context() as mp:
+        def _raise(*args, **kwargs):
+            raise RuntimeError("池子空了（预期：A 的号还在使用中）")
+
+        mp.setattr(icloud_service, "generate_alias", _raise)
+        with pytest.raises(RuntimeError, match="池子空了"):
+            icloud_service.claim_alias(1)

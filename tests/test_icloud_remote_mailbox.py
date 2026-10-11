@@ -241,5 +241,68 @@ class TestPoolBookkeeping:
         assert aliases[0]["pool_status"] == "available"
 
 
+# ------------------------------------------------------------------ 租约续约
+
+
+class TestLeaseRenewal:
+    """等码期间给「使用中」的租约续约（与本地渠道同一套语义）。
+
+    用户要求：使用中的账号不要再同时使用，避免冲突。回收按 `updated_at`
+    超时判定，长任务在等码轮询里定期续约，避免被另一个取号点回收后
+    号被重复领走（两个任务抢同一个收件箱）。
+    """
+
+    def _alias_account(self, service, remote) -> tuple:
+        icloud_service, account = service
+        remote.aliases["acc_1"] = [
+            {"email": "lease@icloud.com", "anonymousId": "anon-l", "label": "x", "active": True, "createdAt": "2026-01-01T00:00:00Z"}
+        ]
+        icloud_service.sync_remote_account(account["id"])
+        alias_id = icloud_service.list_aliases(account["id"])[0]["id"]
+        icloud_service.import_aliases_to_pool([alias_id])
+        mailbox = ICloudRemoteMailbox(account_id=str(account["id"]), platform_name="chatgpt")
+        account_obj = mailbox.get_email()
+        return mailbox, account_obj
+
+    def test_wait_for_code_renews_the_lease(self, service, remote):
+        mailbox, account_obj = self._alias_account(service, remote)
+        calls: list[int] = []
+
+        class _Svc:
+            @staticmethod
+            def fetch_account_messages(*_a, **_k):
+                return []
+
+            @staticmethod
+            def renew_alias_claim(alias_id):
+                calls.append(alias_id)
+                return 1
+
+        mailbox._service = lambda: _Svc  # type: ignore[method-assign]
+        with pytest.raises(TimeoutError):
+            mailbox.wait_for_code(account_obj, timeout=1)
+        assert calls, "等码期间没有给租约续约 —— 长任务会被回收、号被重复领走"
+
+    def test_wait_for_code_without_alias_skips_renewal(self, service, remote):
+        mailbox, account_obj = self._alias_account(service, remote)
+        account_obj.extra.pop("icloud_alias_id", None)
+        calls: list[int] = []
+
+        class _Svc:
+            @staticmethod
+            def fetch_account_messages(*_a, **_k):
+                return []
+
+            @staticmethod
+            def renew_alias_claim(alias_id):
+                calls.append(alias_id)
+                return 1
+
+        mailbox._service = lambda: _Svc  # type: ignore[method-assign]
+        with pytest.raises(TimeoutError):
+            mailbox.wait_for_code(account_obj, timeout=1)
+        assert calls == []
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-q"])

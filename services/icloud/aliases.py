@@ -128,6 +128,8 @@ def claim_alias(
 
     过期回滚：`in_use` 但一直没被标记完成的别名会在
     `release_stale_claims()` 里放回 `available`，避免任务中途崩掉把号永久占死。
+    **活着的长任务由 `renew_alias_claim` 续约保活**（等码轮询定期调），
+    所以回收只命中真正崩掉的那些 —— 使用中的号不会被第二个任务领走。
     """
     wanted_platform = str(platform or "").strip().lower()
     with _facade._account_lock(account_id):
@@ -272,6 +274,31 @@ def release_alias_claim(alias_id: int) -> None:
         session.commit()
 
 
+def renew_alias_claim(alias_id: int) -> int:
+    """给持有中的 `in_use` 租约续期（心跳），返回是否命中。
+
+    用户要求（2026-10-10）：「使用中的账号不要再同时使用避免冲突」。
+    回收（`release_stale_claims`）按 `updated_at` 超时判定，没有续约时
+    **还活着的长任务**（等码重试等链路超过阈值）会被另一个取号点回收 ——
+    号被重复领走，两个任务抢同一个收件箱、验证码互相顶掉。
+
+    注册链在等码轮询里定期调它，把持有中的租约保持新鲜；回收只会命中
+    真正崩掉（没续约）的那些。条件 UPDATE（`WHERE pool_status='in_use'`）
+    保证不碰并发改过的行 —— 与回收同一套并发纪律。
+    """
+    result = None
+    with platform_session("icloud") as session:
+        result = session.exec(
+            update(ICloudAliasModel)
+            .where(ICloudAliasModel.id == int(alias_id))
+            .where(ICloudAliasModel.pool_status == POOL_STATUS_IN_USE)
+            .values(updated_at=_utcnow())
+        )
+        if int(result.rowcount or 0):
+            session.commit()
+    return int(getattr(result, "rowcount", 0) or 0)
+
+
 def release_stale_claims(*, older_than_minutes: int = 120) -> int:
     """把「领了但一直没落定」的 `in_use` 别名放回 `available`，返回放回数量。
 
@@ -281,6 +308,12 @@ def release_stale_claims(*, older_than_minutes: int = 120) -> int:
 
     阈值默认 2 小时：正常注册一轮远小于它，所以超过这个时长还挂着的
     一定是被放弃的领取，而不是正在跑的活。
+
+    **活着的长任务靠 `renew_alias_claim` 续约**（用户要求 2026-10-10
+    「使用中的账号不要再同时使用避免冲突」）：等码轮询每 60 秒续一次，
+    租约保持新鲜；这里只回收真正崩掉（没续约）的那些。没有续约机制时，
+    等码链路超过阈值的任务会被另一个取号点回收 —— 号被重复领走，
+    两个任务抢同一个收件箱、验证码互相顶掉。
 
     设计成**由调用方按需触发**（而不是起后台定时器）：这个模块是纯服务层，
     起线程会让它的生命周期变得难讲；需要兜底时在任务开始处调一次即可。

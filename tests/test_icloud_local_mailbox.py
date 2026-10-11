@@ -216,6 +216,62 @@ class TestGetEmail:
         service.return_value.claim_alias.assert_called_once()
 
 
+class TestLeaseRenewal:
+    """等码期间给「使用中」的租约续约（用户要求：使用中不能同时使用）。
+
+    回收（`release_stale_claims`）按 `updated_at` 超时判定。没有续约时，
+    等码超过阈值（2 小时）的长任务会被另一个取号点回收 —— 号被重复领走，
+    两个任务抢同一个收件箱、验证码互相顶掉。`wait_for_code` 的轮询里
+    定期调 `renew_alias_claim` 把租约保持新鲜。
+    """
+
+    def _account_with_alias(self, alias_id=42):
+        return MailboxAccount(
+            email="abc@icloud.com",
+            account_id="7:abc@icloud.com",
+            extra={"icloud_account_id": 7, "icloud_alias_id": alias_id},
+        )
+
+    def test_wait_for_code_renews_the_lease(self):
+        mailbox = ICloudLocalMailbox()
+        account = self._account_with_alias()
+        with patch.object(mailbox, "_service") as service:
+            service.return_value.fetch_account_messages.return_value = [
+                _message("m1", "xAI", "您的验证码是 654321"),
+            ]
+            code = mailbox.wait_for_code(account, timeout=5)
+        assert code == "654321"
+        service.return_value.renew_alias_claim.assert_any_call(42)
+
+    def test_wait_for_code_without_alias_skips_renewal(self):
+        """人工导入的地址没有租约对象，续约静默跳过。"""
+        mailbox = ICloudLocalMailbox()
+        account = MailboxAccount(
+            email="abc@icloud.com",
+            account_id="7:abc@icloud.com",
+            extra={"icloud_account_id": 7},
+        )
+        with patch.object(mailbox, "_service") as service:
+            service.return_value.fetch_account_messages.return_value = [
+                _message("m1", "xAI", "您的验证码是 654321"),
+            ]
+            code = mailbox.wait_for_code(account, timeout=5)
+        assert code == "654321"
+        service.return_value.renew_alias_claim.assert_not_called()
+
+    def test_renewal_failure_does_not_break_code_reading(self):
+        """心跳失败（库锁住等）只记日志，不打断等码。"""
+        mailbox = ICloudLocalMailbox()
+        account = self._account_with_alias()
+        with patch.object(mailbox, "_service") as service:
+            service.return_value.renew_alias_claim.side_effect = RuntimeError("库锁住了")
+            service.return_value.fetch_account_messages.return_value = [
+                _message("m1", "xAI", "您的验证码是 654321"),
+            ]
+            code = mailbox.wait_for_code(account, timeout=5)
+        assert code == "654321"
+
+
 # ---------------------------------------------------------------------- 收件
 
 

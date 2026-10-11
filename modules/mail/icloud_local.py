@@ -31,10 +31,15 @@ import `services.icloud_service`，避免模块导入期拉起 requests/IMAP 栈
 
 from __future__ import annotations
 
+import time
 from typing import Optional
 
 from core.mailboxes.base import BaseMailbox, MailboxAccount
 from core.mailboxes.registry import register_mailbox_provider
+
+#: 「使用中」租约的续约最小间隔（秒）。等码轮询每 5 秒一轮，每轮都写库
+#: 没必要；60 秒远小于回收阈值（120 分钟），不会出现漏续。
+LEASE_RENEW_INTERVAL_SECONDS = 60
 
 
 class ICloudLocalMailbox(BaseMailbox):
@@ -290,7 +295,31 @@ class ICloudLocalMailbox(BaseMailbox):
         except (TypeError, ValueError):
             cutoff = None
 
+        # 租约续约状态（本渠道实例每次注册只服务一个别名，实例级足够）。
+        lease_alias_id = self._lease_alias_id(account)
+        last_renew = 0.0
+
+        def _renew_lease() -> None:
+            """等码期间给「使用中」的租约续约（用户要求：使用中不能同时使用）。
+
+            回收按 `updated_at` 超时（默认 2 小时）。不续约的话，等码链路
+            超过阈值的活任务会被另一个取号点回收、号被重复领走 —— 两个任务
+            抢同一个收件箱。失败只记日志：心跳是尽力而为，不打断等码。
+            """
+            nonlocal last_renew
+            if lease_alias_id is None:
+                return
+            now = time.monotonic()
+            if last_renew and now - last_renew < LEASE_RENEW_INTERVAL_SECONDS:
+                return
+            last_renew = now
+            try:
+                self._service().renew_alias_claim(lease_alias_id)
+            except Exception as exc:  # noqa: BLE001 - 续约失败不该影响读码
+                self._log(f"[iCloud 本地] 租约续约失败（忽略）: {exc}")
+
         def poll_once() -> Optional[str]:
+            _renew_lease()
             messages = self._messages(account, limit=50)
             for message in messages:
                 message_id = self._message_id(message)
@@ -323,6 +352,15 @@ class ICloudLocalMailbox(BaseMailbox):
         return self._run_polling_wait(
             timeout=timeout, poll_interval=5, poll_once=poll_once
         )
+
+    @staticmethod
+    def _lease_alias_id(account: MailboxAccount) -> Optional[int]:
+        """从账号对象取出租约对应的别名 id；不是从本渠道领来的返回 None。"""
+        alias_id = (account.extra or {}).get("icloud_alias_id")
+        try:
+            return int(alias_id)
+        except (TypeError, ValueError):
+            return None
 
 
 @register_mailbox_provider("icloud_local", display_name="iCloud 隐私邮箱（本地）")
