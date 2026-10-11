@@ -631,3 +631,20 @@ def test_renewed_lease_is_not_reclaimable_by_another_task(icloud_db):
         mp.setattr(icloud_service, "generate_alias", _raise)
         with pytest.raises(RuntimeError, match="池子空了"):
             icloud_service.claim_alias(1)
+
+
+def test_pool_summary_folds_unknown_status_into_available(icloud_db):
+    """未知 pool_status 值（脏数据/跨版本残留）与行级展示折叠一致地并入 available。
+
+    否则统计条会出现「共 N 个 ≠ 三个 Tag 之和」、筛「已入池」的行数与
+    统计数对不上（前端 poolDisplayStatus 把未知值折叠为「已入池」）。
+    """
+    from services import icloud_service
+
+    _seed_alias(icloud_db, address="weird@icloud.com", pool_status="legacy_value")
+    _seed_alias(icloud_db, address="normal@icloud.com", pool_status=POOL_STATUS_AVAILABLE)
+
+    summary = icloud_service.pool_summary()
+
+    assert summary[POOL_STATUS_AVAILABLE] == 2
+    assert summary["total"] == 2

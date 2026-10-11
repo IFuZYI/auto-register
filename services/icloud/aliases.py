@@ -234,7 +234,7 @@ def claim_alias(
 
 
 def mark_alias_used(alias_id: int, *, platform: str = "") -> None:
-    """注册成功/失败落定后把别名从 `in_use` 推到 `used`。
+    """注册成功（地址已被消耗）落定后把别名从 `in_use` 推到 `used`；失败走 `release_alias_claim` 放回 `available`。
 
     别名本身不删除也不停用 —— Apple 那边还留着地址，能继续收信；这里只是
     号池记账，让**同一个平台**的下一个注册任务不再领它。`used` 对其它平台
@@ -429,7 +429,7 @@ def pool_summary(account_id: Optional[int] = None) -> dict[str, int]:
     折叠规则在前端 `lib/poolStatus.ts` 的 `poolDisplaySummary`）。
 
     `unpooled` 单独计数：它不是「池子里的可用号」，而是「还没决定要不要进池」。
-    前端把它和另三个分开显示，否则用户会把「未入池 168 个」误读成「有 168 个
+    前端把它和另两个分开显示，否则用户会把「未入池 168 个」误读成「有 168 个
     可用号」，然后奇怪为什么注册取不到号。
     """
     with platform_session("icloud") as session:
@@ -442,8 +442,12 @@ def pool_summary(account_id: Optional[int] = None) -> dict[str, int]:
     summary[POOL_STATUS_UNPOOLED] = 0
     for row in rows:
         value = getattr(row, "pool_status", "") or POOL_STATUS_AVAILABLE
-        if value in summary:
-            summary[value] += 1
+        # 未知值（脏数据/跨版本残留）并入 available：行级展示折叠（前端
+        # `poolDisplayStatus`）把未知值归「已入池」，这里不兜底的话统计条
+        # 会出现「共 N 个 ≠ 三个 Tag 之和」、筛选数与统计数对不上。
+        if value not in summary:
+            value = POOL_STATUS_AVAILABLE
+        summary[value] += 1
     summary["total"] = len(rows)
     return summary
 

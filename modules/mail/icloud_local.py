@@ -129,10 +129,7 @@ class ICloudLocalMailbox(BaseMailbox):
         if not address:
             raise RuntimeError("iCloud 主号未返回隐私邮箱地址")
 
-        self._log(
-            f"[iCloud 本地] 主号 {row.email} 取号: {address}"
-            f"（池状态 {alias.get('pool_status', '')}）"
-        )
+        self._log(f"[iCloud 本地] 主号 {row.email} 取号: {address}（已标记为「使用中」）")
         return MailboxAccount(
             email=address,
             # account_id 存「主号 id : 别名地址」：收件要按主号取、按别名过滤，

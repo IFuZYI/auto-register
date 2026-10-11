@@ -61,7 +61,7 @@ def batch_import_outlook(request: OutlookBatchImportRequest):
 
 @router.get("/pool-summary")
 def get_outlook_pool_summary():
-    """号池状态计数（含未入池 / 可用 / 使用中 / 已领用 / 失败 / 总数）。
+    """号池状态计数（含未入池 / 可领取 / 使用中 / 已领用 / 失败 / 总数）。
 
     后端四态计数；界面展示折叠为三态（未入池 / 已入池 / 使用中），
     折叠规则在前端 `lib/poolStatus.ts` 的 `poolDisplaySummary`。

@@ -372,7 +372,7 @@ class MicrosoftMailImportStrategy(BaseMailImportStrategy):
                         # 新导入的账号落 `unpooled`（未入池），不会立刻被注册任务领走。
                         # 用户明确要求「账号邮箱要选择导入才能导入邮箱池，不是全部导入」：
                         # 粘贴一屏邮箱的下一步是**在预览表里勾选**要用的那几个，而不是
-                        # 让它们全部进入可领取状态。iCloud 别名池用的是同一套三态语义。
+                        # 让它们全部进入可领取状态。iCloud 别名池用的是同一套号池状态语义（unpooled / available / in_use / used）。
                         status="unpooled",
                         created_at=_utcnow(),
                         updated_at=_utcnow(),

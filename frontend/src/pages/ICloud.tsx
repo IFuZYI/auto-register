@@ -74,16 +74,13 @@ import {
   formatDateTime,
   getICloudRegionLabel,
   hasAliasFilter,
+  PLATFORM_STATUS_ORDER,
   type AliasExportMode,
-  type AliasPlatformStatus,
 } from '@/lib/icloud'
 import { PLATFORM_FILTER_OPTIONS, getPlatformLabel, getPlatformTagColor } from '@/lib/platforms'
 import { POOL_DISPLAY_ORDER, poolDisplaySummary, poolStatusMeta } from '@/lib/poolStatus'
 
 const { Text } = Typography
-
-/** 平台口径统计条的固定顺序（与 `PLATFORM_STATUS_META` 对应）。 */
-const PLATFORM_SUMMARY_ORDER: AliasPlatformStatus[] = ['unpooled', 'available', 'in_use', 'registered']
 
 export default function ICloudPage() {
   const { message } = App.useApp()
@@ -690,7 +687,7 @@ export default function ICloudPage() {
                 <Space style={{ marginBottom: 12 }} wrap>
                   {filterPlatform && platformSummary ? (
                     <>
-                      {PLATFORM_SUMMARY_ORDER.map((key) => {
+                      {PLATFORM_STATUS_ORDER.map((key) => {
                         const item = PLATFORM_STATUS_META[key]
                         return (
                           <Tag key={key} color={item.color}>
@@ -716,7 +713,7 @@ export default function ICloudPage() {
                         )
                       })}
                       <Text type="secondary">共 {displayPool.total} 个</Text>
-                      <Tooltip title="「未入池」注册取号会跳过，勾选后点「导入邮箱池」才可领；是否被某平台使用看「已注册平台」列。">
+                      <Tooltip title="「未入池」注册取号会跳过，勾选后点「导入邮箱池」转为「已入池」；是否被某平台使用看「已注册平台」列。">
                         <QuestionCircleOutlined style={{ color: 'var(--text-muted)' }} />
                       </Tooltip>
                     </>
@@ -761,7 +758,7 @@ export default function ICloudPage() {
                     onChange={setFilterPoolStatus}
                     options={
                       (filterPlatform
-                        ? PLATFORM_SUMMARY_ORDER.map((key) => ({
+                        ? PLATFORM_STATUS_ORDER.map((key) => ({
                             value: key as string,
                             label: PLATFORM_STATUS_META[key].text,
                           }))

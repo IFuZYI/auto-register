@@ -44,7 +44,7 @@ export function poolDisplayStatus(value: string | null | undefined): PoolDisplay
   if (raw === 'unpooled') return 'unpooled'
   if (raw === 'in_use') return 'in_use'
   if (raw === 'failed') return 'failed'
-  // available / used / 老库的空值 / 未知值 → 已入池（与后端默认一致）
+  // available / used / 老库的空值 / 未知值 → 已入池（与后端 pool_summary 的兜底口径一致）
   return 'pooled'
 }
 

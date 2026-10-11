@@ -5,9 +5,10 @@
 粘贴一批邮箱 → 全部落 `unpooled`（未入池）→ 注册取号跳过它们 →
 在预览表里勾选 → 调 `/outlook/pool-status/import` → 才转 `available`。
 
-与 iCloud 别名池（`platforms/icloud` + `services/icloud_service.py`）同一套三态
-语义。这个文件守住 Outlook 这一侧，iCloud 那侧在
-`tests/test_icloud_service.py` 的 pool 相关用例里。
+与 iCloud 别名池（`platforms/icloud` + `services/icloud_service.py`）同一套号池
+状态语义（存储四态 unpooled/available/in_use/used，界面展示折叠为三态）。这个
+文件守住 Outlook 这一侧，iCloud 那侧在 `tests/test_icloud_alias_pool.py` 的
+用例里。
 """
 
 import pytest

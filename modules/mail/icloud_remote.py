@@ -119,10 +119,7 @@ class ICloudRemoteMailbox(BaseMailbox):
         if not address:
             raise RuntimeError("远程 iCloud 仓库未返回隐私邮箱地址")
 
-        self._log(
-            f"[iCloud 远程] 账号 {row.email} 取号: {address}"
-            f"（池状态 {alias.get('pool_status', '')}）"
-        )
+        self._log(f"[iCloud 远程] 账号 {row.email} 取号: {address}（已标记为「使用中」）")
         return MailboxAccount(
             email=address,
             # account_id 存「本地账号 id : 别名地址」：收件要按账号取、按别名过滤，

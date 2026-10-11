@@ -52,13 +52,14 @@ ALIAS_STATUS_DISABLED = "disabled"
 POOL_STATUS_AVAILABLE = "available"
 POOL_STATUS_IN_USE = "in_use"
 POOL_STATUS_USED = "used"
-# `unpooled`（未入池）是 iCloud 独有的**第三态**：生成/同步下来的别名默认落在这里，
-# 注册取号跳过它。必须在面板上手动勾选「导入邮箱池」才转成 available。
+# `unpooled`（未入池）：生成/同步/导入下来的别名默认落在这里，注册取号跳过它。
+# 必须在面板上手动勾选「导入邮箱池」才转成 available。Outlook 号池同样有这一态
+# （它的导入面板同样要求勾选入池），只是它不在 POOL_STATUSES 里（那个元组用于
+# 校验「可手动设置的值」，unpooled 只能经导入/移出端点流转）。
 #
 # 为什么要有它：以前生成/同步出来的别名一律直接是 available，等于「从 Apple 拉
 # 下来多少就自动全部可领」。用户要的是「账号邮箱要选择导入才能导入邮箱池，不是
-# 全部导入」——把入池动作显式化。Outlook 号池没有这一态（它的导入面板本身就是
-# 显式动作），所以它不在 POOL_STATUSES 里（那个元组用于校验「可手动设置的值」）。
+# 全部导入」——把入池动作显式化。
 POOL_STATUS_UNPOOLED = "unpooled"
 POOL_STATUSES = (POOL_STATUS_AVAILABLE, POOL_STATUS_IN_USE, POOL_STATUS_USED)
 

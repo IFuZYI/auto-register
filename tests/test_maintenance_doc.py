@@ -73,6 +73,7 @@ class MaintenanceDocReferenceTests(unittest.TestCase):
         "frontend/scripts/run_account_format_checks.mjs",
         "frontend/scripts/run_panel_filter_checks.mjs",
         "frontend/scripts/run_pool_status_checks.mjs",
+        "frontend/src/lib/poolStatus.ts",
         "docs/EXTENDING.md",
         "docs/API_REFERENCE.md",
         "docs/DATABASE_MODULARITY.md",

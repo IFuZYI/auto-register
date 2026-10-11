@@ -143,7 +143,7 @@ export function parsePlatformField(field?: string | null): string[] {
 
 /** 这个地址在该平台是否已注册（记账 ∪ accounts 表证据）。 */
 export function aliasRegisteredOn(
-  alias: Pick<ICloudAlias, 'used_platforms' | 'registered_platforms'>,
+  alias: { used_platforms?: string | null; registered_platforms?: string[] | null },
   platform: string,
 ): boolean {
   const name = String(platform || '').trim().toLowerCase()
@@ -154,7 +154,7 @@ export function aliasRegisteredOn(
 
 /** 该地址已注册过的全部平台（记账 ∪ 证据，去重排序）。 */
 export function aliasRegisteredPlatforms(
-  alias: Pick<ICloudAlias, 'used_platforms' | 'registered_platforms'>,
+  alias: { used_platforms?: string | null; registered_platforms?: string[] | null },
 ): string[] {
   const names = new Set(parsePlatformField(alias.used_platforms))
   for (const item of alias.registered_platforms || []) {
@@ -252,3 +252,9 @@ export const PLATFORM_STATUS_META: Record<AliasPlatformStatus, { color: string; 
   in_use: { color: 'processing', text: '使用中' },
   registered: { color: 'blue', text: '该平台已注册' },
 }
+
+/**
+ * 平台口径状态的固定顺序（统计条与筛选下拉共用，与 `PLATFORM_STATUS_META`
+ * 键集一致）。与映射同源定义，页面不再各写一份。
+ */
+export const PLATFORM_STATUS_ORDER: AliasPlatformStatus[] = ['unpooled', 'available', 'in_use', 'registered']

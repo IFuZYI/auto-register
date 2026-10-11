@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { App, Alert, Button, Card, Form, Input, InputNumber, Popconfirm, Select, Space, Switch, Table, Tag, Typography } from 'antd'
 import type { FormInstance } from 'antd'
 
+import { aliasRegisteredOn, aliasRegisteredPlatforms } from '@/lib/icloud'
 import { normalizeMailImportSource, useStoredMailImportSource, type MailImportSource } from '@/lib/mailImport'
 import { PLATFORM_FILTER_OPTIONS, getPlatformLabel, getPlatformTagColor } from '@/lib/platforms'
 import { poolStatusMeta } from '@/lib/poolStatus'
@@ -156,31 +157,6 @@ function matchesSelectionType(
   return true
 }
 
-/** `,chatgpt,grok,` → ['chatgpt','grok']（大小写归一）。 */
-function parsePlatformField(field?: string | null): string[] {
-  return String(field || '')
-    .split(',')
-    .map((item) => item.trim().toLowerCase())
-    .filter(Boolean)
-}
-
-/** 该地址已注册过的全部平台（池记账 ∪ `accounts` 表证据，去重排序）。 */
-function registeredPlatformsOf(item: MailImportSnapshotItem): string[] {
-  const names = new Set(parsePlatformField(item.used_platforms))
-  for (const name of item.registered_platforms || []) {
-    const value = String(name || '').trim().toLowerCase()
-    if (value) names.add(value)
-  }
-  return Array.from(names).sort()
-}
-
-/** 该地址在指定平台是否已注册（记账 ∪ 证据）。 */
-function registeredOn(item: MailImportSnapshotItem, platform: string): boolean {
-  const name = String(platform || '').trim().toLowerCase()
-  if (!name) return false
-  return registeredPlatformsOf(item).includes(name)
-}
-
 function filterSnapshotBySelection(
   snapshot: MailImportSnapshot | null,
   selectionType: MailImportSelectionType,
@@ -195,7 +171,7 @@ function filterSnapshotBySelection(
     items: snapshot.items
       .filter((item) => matchesSelectionType(selectionType, item.email, item.account_type))
       // 平台筛选：只留在这个平台注册过的地址。
-      .filter((item) => !platform || registeredOn(item, platform)),
+      .filter((item) => !platform || aliasRegisteredOn(item, platform)),
   }
 }
 
@@ -581,7 +557,7 @@ export default function MailImportPanel({ form, lockToProvider }: MailImportPane
         key: 'registered_platforms',
         width: 170,
         render: (_: unknown, item: MailImportSnapshotItem) => {
-          const names = registeredPlatformsOf(item)
+          const names = aliasRegisteredPlatforms(item)
           if (names.length === 0) return <Typography.Text type="secondary">-</Typography.Text>
           return (
             <Space size={4} wrap>
@@ -670,7 +646,7 @@ export default function MailImportPanel({ form, lockToProvider }: MailImportPane
           {selectedProvider?.description || '通过统一导入接口，将内容导入到对应邮箱账号池。'}
         </Typography.Text>
         {/* 两步流程必须写清楚：用户粘贴完一屏邮箱就以为可以开任务了，
-            结果注册报「池里没有可用账号」——那是导入成功但没入池。 */}
+            结果注册报「已导入但未入池」——那是导入成功但没勾选入池。 */}
         <Alert
           type="info"
           showIcon

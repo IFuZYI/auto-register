@@ -893,8 +893,8 @@ class GrokPlatform(BasePlatform):
         **`failed` 在两个渠道里含义不同，调用方要知道**：
           - iCloud 别名池：`failed` → `release_alias_claim` → 放回 `available`，
             地址还能再领（适合「这轮没跑成」）；
-          - Outlook 池：`failed` → 状态置 `failed`，而领取只认
-            `available`/空，等于**永久移出池子**（与 ChatGPT 引擎同一约定）。
+          - Outlook 池：`failed` → 状态置 `failed`，而领取不认 `failed`
+            （`available`/`used`/空 才可取），等于**永久移出池子**（与 ChatGPT 引擎同一约定）。
         所以「地址已被消耗」这类失败必须记 `used` 而不是 `failed` ——
         记 failed 在 iCloud 上会导致反复重领同一个死号。
         """

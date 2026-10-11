@@ -345,7 +345,7 @@ grok2api），操作面在界面「面板管理」页（那里有本地 ↔ 远�
 | 方法 | 路径 | 请求体 | 说明 |
 | --- | --- | --- | --- |
 | POST | `/api/outlook/batch-import` | `{data,enabled:true}` | 批量导入 Outlook/Hotmail 邮箱 |
-| GET | `/api/outlook/pool-summary` | — | 号池状态计数（未入池 / 可用 / 使用中 / 已使用 / 失败 / 总数） |
+| GET | `/api/outlook/pool-summary` | — | 号池状态计数（未入池 / 可领取 / 使用中 / 已领用 / 失败 / 总数）；后端四态计数，界面展示折叠为三态（未入池 / 已入池 / 使用中） |
 | POST | `/api/outlook/pool-status/import` | `{ids}` | 把勾选的账号从「未入池」转为可领取。只动 `unpooled` 的行 |
 
 `data` 每行一条，使用 `----` 分隔，支持：

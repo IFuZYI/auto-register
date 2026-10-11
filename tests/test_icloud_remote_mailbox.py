@@ -8,7 +8,7 @@
 重点验证：
 1. 工厂能建出渠道（前端选了不能报「未知邮箱提供商」）；
 2. 主号选取（指定远程账号、留空自动挑、停用的要拦）；
-3. 取号走远程仓库：优先复用池里可领的远程别名，池空才让远端新建；
+3. 取号走远程仓库：优先复用池里可领取的远程别名，池空报错（不在远端新建）；
 4. 收码走远程收件（字段名与本地链路一致），并遵守「发码时间窗」；
 5. 池记账钩子（used / failed）接上（同本地渠道）。
 """
@@ -113,7 +113,7 @@ class TestGetEmail:
         assert account_obj.email == "pooled@icloud.com"
         assert remote.created_aliases == [], "池里有可领的号时不该让远端新建"
 
-    def test_get_email_creates_remote_alias_when_pool_empty(self, service, remote):
+    def test_get_email_raises_when_pool_empty(self, service, remote):
         """池空时报错 —— 注册机不许在远端新建（用户要求 2026-10-09）。
 
         改自旧断言（旧行为：池空时让远端新建）。现在这条路必须堵死：

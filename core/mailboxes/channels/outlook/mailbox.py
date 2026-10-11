@@ -298,7 +298,7 @@ class OutlookMailbox(BaseMailbox):
             if account_type == "mailapi_url"
             else ("oauth" if client_id and refresh_token else "password")
         )
-        self._log(f"[微软邮箱] 取出账号: {email}（已从本地池移除）")
+        self._log(f"[微软邮箱] 取出账号: {email}（已标记为「使用中」，记录保留在池内）")
         self._log(
             "[微软邮箱] 账号认证信息: "
             f"has_password={bool(password)} "
