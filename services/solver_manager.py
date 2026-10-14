@@ -119,6 +119,15 @@ def stop():
 
 
 def start_async():
-    """在后台线程启动，不阻塞主进程"""
+    """在后台线程启动，不阻塞主进程。
+
+    已禁用时**不建线程**：建了也只会跑一个 print，而那个 print 是在后台线程里
+    写 stdout —— 测试期间 pytest 的捕获流被换掉/收尾后，从别的线程写它会直接
+    段错误（实测：`APP_ENABLE_SOLVER=0` 跑全量，第 24 个测试进程 SIGSEGV，
+    栈顶是 solver_manager.start 里的 print）。禁用路径不该有任何副作用。
+    """
+    if not _solver_enabled():
+        print("[Solver] 已禁用，跳过自动启动")
+        return
     t = threading.Thread(target=start, daemon=True)
     t.start()

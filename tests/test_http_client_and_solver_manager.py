@@ -301,6 +301,32 @@ class SolverLifecycleTests(unittest.TestCase):
         fake_proc.terminate.assert_called_once()
         fake_proc.wait.assert_called_once()
 
+    def test_start_async_skips_thread_when_disabled(self):
+        """禁用时不得建线程 —— 那个线程只为一个 print 而生，而它写 stdout 会让
+        测试进程段错误（实测第 24 个测试 SIGSEGV，栈顶是 solver_manager.start）。
+        """
+        from services import solver_manager
+
+        with (
+            mock.patch.dict("os.environ", {"APP_ENABLE_SOLVER": "0"}),
+            mock.patch.object(solver_manager.threading, "Thread") as fake_thread,
+        ):
+            solver_manager.start_async()
+
+        fake_thread.assert_not_called()
+
+    def test_start_async_starts_thread_when_enabled(self):
+        from services import solver_manager
+
+        with (
+            mock.patch.dict("os.environ", {}, clear=True),
+            mock.patch.object(solver_manager.threading, "Thread") as fake_thread,
+        ):
+            solver_manager.start_async()
+
+        fake_thread.assert_called_once()
+        fake_thread.return_value.start.assert_called_once()
+
     def test_stop_without_process_is_noop(self):
         from services import solver_manager
 

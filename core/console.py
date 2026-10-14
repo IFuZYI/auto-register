@@ -50,7 +50,13 @@ def safe_print(text: str) -> None:
 
 
 class _BrokenPipeTolerantStream:
-    """代理原始流，把 BrokenPipeError 变成静默丢弃。"""
+    """代理原始流，把 BrokenPipeError 变成静默丢弃。
+
+    `__slots__` 的两个属性都可能**读不到**：实例可能被 `copy`/`__reduce_ex__`
+    在半构造状态下取属性（`object.__reduce_ex__` 会探测 `__getstate__` 之类），
+    此时 `_stream` 尚未写入 slot。因此所有访问都走 `_slot()`，取不到就当成
+    「已断管」处理 —— 本模块的契约就是绝不抛异常。
+    """
 
     __slots__ = ("_stream", "_broken")
 
@@ -58,26 +64,61 @@ class _BrokenPipeTolerantStream:
         self._stream = stream
         self._broken = False
 
+    def _slot(self, name: str) -> Any:
+        """读 slot，读不到返回 None。
+
+        直接写 `self._stream` 会在 slot 未设时触发 `__getattr__`，而
+        `__getattr__` 内部又要读 `self._stream` —— 无限递归到段错误
+        （实测：solver 的启动线程写 stdout，整个 pytest 进程 SIGSEGV）。
+        走 `object.__getattribute__` 就绕开了 `__getattr__`。
+        """
+        try:
+            return object.__getattribute__(self, name)
+        except AttributeError:
+            return None
+
     def write(self, data: str) -> int:
-        if self._broken:
+        if self._slot("_broken"):
             # 已断管：直接报告「写完了」，不再碰底层流，也不再付异常开销。
             return len(data)
+        stream = self._slot("_stream")
+        if stream is None:
+            # 半构造状态：没有可写的流，按断管处理（绝不抛异常）。
+            self._mark_broken()
+            return len(data)
         try:
-            return self._stream.write(data)
+            return stream.write(data)
         except (BrokenPipeError, OSError, ValueError):
-            self._broken = True
+            self._mark_broken()
             return len(data)
 
+    def _mark_broken(self) -> None:
+        try:
+            object.__setattr__(self, "_broken", True)
+        except AttributeError:
+            pass
+
     def flush(self) -> None:
-        if self._broken:
+        if self._slot("_broken"):
+            return
+        stream = self._slot("_stream")
+        if stream is None:
+            self._mark_broken()
             return
         try:
-            self._stream.flush()
+            stream.flush()
         except (BrokenPipeError, OSError, ValueError):
-            self._broken = True
+            self._mark_broken()
 
     def __getattr__(self, name: str) -> Any:
-        return getattr(self._stream, name)
+        # 两个 slot 名绝不能透传：slot 未设时 `getattr(self._stream, ...)` 会再
+        # 触发一次 `__getattr__`，无限递归（见 `_slot` 的说明）。
+        if name in ("_stream", "_broken"):
+            raise AttributeError(name)
+        stream = self._slot("_stream")
+        if stream is None:
+            raise AttributeError(name)
+        return getattr(stream, name)
 
 
 def guard_stdout() -> None:

@@ -38,6 +38,27 @@ COLORS = {
 }
 
 
+# ── 池的空闲回收默认值 ──────────────────────────────────────────────────
+# TTL 取 5 分钟：注册任务之间的间隔远大于它，而单次解题（含重试）不会超过它，
+# 所以「池被关掉」只可能发生在真的没人用的时候。取太短会让连续任务反复重建
+# 浏览器（每次约 30s 预热），取太长则回收形同虚设。
+DEFAULT_IDLE_TTL = 300.0
+# 检查间隔：30s 是回收滞后的上界 —— 太密只是白跑协程，太疏则内存多占几分钟。
+DEFAULT_IDLE_INTERVAL = 30.0
+
+
+def _env_float(name: str, default: float) -> float:
+    """读一个浮点环境变量；缺失或非法都退回默认值（非法值不该让服务起不来）。"""
+    raw = os.getenv(name)
+    if raw is None or not str(raw).strip():
+        return default
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return default
+    return value if value >= 0 else default
+
+
 class CustomLogger(logging.Logger):
     @staticmethod
     def format_message(level, color, message):
@@ -81,6 +102,24 @@ class TurnstileAPIServer:
         self.browser_name = browser_name
         self.browser_version = browser_version
         self.console = Console()
+
+        # ── 池的空闲回收 ────────────────────────────────────────────────
+        # 池按 --thread 预热后原先永不释放：实测空转 4h43m、零连接、零 CPU
+        # 仍占 1.0 GiB（RSS+Swap），把 1.9 GiB 的机器压到 swap 用掉 1.7 GiB。
+        # 这里让池在空闲 TTL 后整体关掉，下一个 /turnstile 请求按需重建。
+        # `SOLVER_IDLE_TTL=0` 关掉回收（回到常驻行为，只在内存充裕时用）。
+        self._idle_ttl = _env_float("SOLVER_IDLE_TTL", DEFAULT_IDLE_TTL)
+        self._idle_interval = _env_float("SOLVER_IDLE_INTERVAL", DEFAULT_IDLE_INTERVAL)
+        self._active_tasks = 0
+        self._last_used_at = time.time()
+        self._idle_reaper_task: Optional[asyncio.Task] = None
+        self._pool_lock = asyncio.Lock()
+        # camoufox 每个浏览器一个 AsyncCamoufox 会话（原先所有线程共用一个实例，
+        # `__aexit__` 只关得掉最后一个 → 关服务时 playwright driver 变孤儿进程）。
+        self._camoufox_sessions: list = []
+        self._playwright = None
+        # 浏览器编号只用于日志，但要单调递增：补齐池时从 1 重新数会和已有的撞号。
+        self._next_browser_index = 1
         
         # Initialize useragent and sec_ch_ua attributes
         self.useragent = useragent
@@ -201,9 +240,28 @@ class TurnstileAPIServer:
     def _setup_routes(self) -> None:
         """Set up the application routes."""
         self.app.before_serving(self._startup)
+        self.app.after_serving(self._shutdown)
         self.app.route('/turnstile', methods=['GET'])(self.process_turnstile)
         self.app.route('/result', methods=['GET'])(self.get_result)
         self.app.route('/')(self.index)
+
+    async def _shutdown(self) -> None:
+        """服务退出：停掉回收协程并关掉池。
+
+        原先没有任何关闭钩子，`SIGTERM` 后 camoufox 的 playwright driver 会变成
+        孤儿进程（实测关掉 solver 后仍有 6 个 driver 挂着），下一次启动就多一批。
+        """
+        task, self._idle_reaper_task = self._idle_reaper_task, None
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        try:
+            await self._close_pool()
+        except Exception as e:
+            logger.warning(f"Error closing the browser pool on shutdown: {e}")
         
 
     async def _startup(self) -> None:
@@ -212,19 +270,125 @@ class TurnstileAPIServer:
         logger.info("Starting browser initialization")
         try:
             await init_db()
-            await self._initialize_browser()
+            await self._ensure_pool()
             
             # Запускаем периодическую очистку старых результатов
             asyncio.create_task(self._periodic_cleanup())
+            # 空闲回收：池没人用时整体关掉，把内存还给系统（见 __init__ 的说明）
+            self._start_idle_reaper()
             
         except Exception as e:
             logger.error(f"Failed to initialize browser: {str(e)}")
             raise
 
-    async def _initialize_browser(self) -> None:
-        """Initialize the browser and create the page pool."""
+    # ── 池的生命周期 ────────────────────────────────────────────────────
+
+    async def _ensure_pool(self) -> None:
+        """把池补齐到 `thread_count`，再返回。
+
+        两件事都靠它：
+          - 回收之后来的第一个 `/turnstile` —— 不补齐的话请求会永远阻塞在
+            `browser_pool.get()`（队列空且没人再放），表现为「回收一次服务就废了」；
+          - 浏览器崩掉后没被放回池（见 `_solve_turnstile_inner` 的 finally）——
+            缺的那只由这里补回，否则池会永久少一只且回收也不触发。
+
+        补的数量按 `thread_count - qsize - active_tasks` 算：正在被任务持有的
+        浏览器不能算缺失，否则并发任务会把池越补越大。
+        """
+        async with self._pool_lock:
+            missing = self.thread_count - self.browser_pool.qsize() - self._active_tasks
+            if missing <= 0:
+                return
+            logger.info(f"Browser pool is short by {missing}; initializing on demand")
+            await self._initialize_browser(missing)
+            self._last_used_at = time.time()
+
+    def _reap_allowed(self) -> bool:
+        """现在能不能关池。四条缺一不可（少任何一条都会误关正在用的池或空转）。"""
+        if self._idle_ttl <= 0:
+            return False  # 回收被显式关掉
+        if self._active_tasks > 0:
+            return False  # 有任务在解题，池正在被用
+        if self.browser_pool.qsize() == 0:
+            # 池已经空了（刚回收过，或启动预热失败）：没有东西可关。
+            # 不挡这一条的话，回收后 `_last_used_at` 仍是旧值，每个间隔都会
+            # 再报一次「reaped」——实测连报三次，日志被无意义刷屏。
+            return False
+        return (time.time() - self._last_used_at) >= self._idle_ttl
+
+    async def _reap_if_idle(self) -> bool:
+        """空闲超时则关掉整个池并释放内存；返回是否真的关了。
+
+        关池前在锁内**再判一次** —— 判定与关池之间可能正好来了任务，
+        只看第一次判定就会把正在解题的浏览器关掉。
+        """
+        if not self._reap_allowed():
+            return False
+        async with self._pool_lock:
+            if not self._reap_allowed():
+                return False
+            idle = time.time() - self._last_used_at
+            await self._close_pool()
+            logger.info(
+                f"Browser pool reaped after {idle:.0f}s idle "
+                f"(ttl={self._idle_ttl:.0f}s); next request will rebuild it"
+            )
+            return True
+
+    async def _close_pool(self) -> None:
+        """关掉池里所有浏览器与 camoufox 会话，并清空池。
+
+        逐个 try/except：一个浏览器已经崩了不能阻止其余释放 —— 否则回收等于没做。
+        """
+        browsers = []
+        while not self.browser_pool.empty():
+            try:
+                _index, browser, _config = self.browser_pool.get_nowait()
+                browsers.append(browser)
+            except asyncio.QueueEmpty:
+                break
+
+        for browser in browsers:
+            try:
+                await browser.close()
+            except Exception as e:
+                logger.warning(f"Error closing a pooled browser during reap: {e}")
+
+        sessions, self._camoufox_sessions = self._camoufox_sessions, []
+        for session in sessions:
+            try:
+                await session.__aexit__(None, None, None)
+            except Exception as e:
+                logger.warning(f"Error closing a camoufox session during reap: {e}")
+
+        self._playwright = None
+
+    def _start_idle_reaper(self) -> None:
+        """起后台回收协程；TTL=0（回收关闭）时不启动。"""
+        if self._idle_ttl <= 0:
+            logger.info("Idle reaping disabled (SOLVER_IDLE_TTL=0); pool stays resident")
+            return
+        self._idle_reaper_task = asyncio.create_task(self._idle_reaper())
+
+    async def _idle_reaper(self) -> None:
+        """按间隔反复检查空闲；被取消即退出（服务关闭时）。"""
+        while True:
+            try:
+                await asyncio.sleep(self._idle_interval)
+                await self._reap_if_idle()
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.error(f"Error during idle reaping: {e}")
+
+    async def _initialize_browser(self, count: Optional[int] = None) -> None:
+        """按 `count` 只（默认 `thread_count`）建浏览器并放进池。
+
+        拆分理由：回收后补齐时只需补缺的那几只，不必重建整池 —— 重建整池会
+        在并发场景下把池撑大（每只约 250 MiB）。
+        """
+        count = self.thread_count if count is None else count
         playwright = None
-        camoufox = None
 
         if self.browser_type in ['chromium', 'chrome', 'msedge']:
             if async_playwright is None:
@@ -232,15 +396,15 @@ class TurnstileAPIServer:
                     "当前浏览器模式需要 patchright，但未安装。请执行: pip install patchright"
                 )
             playwright = await async_playwright().start()
+            self._playwright = playwright
         elif self.browser_type == "camoufox":
             if AsyncCamoufox is None:
                 raise RuntimeError(
                     "当前浏览器模式需要 camoufox，但未安装。请执行: pip install camoufox && python -m camoufox fetch"
                 )
-            camoufox = AsyncCamoufox(headless=self.headless)
 
         browser_configs = []
-        for _ in range(self.thread_count):
+        for _ in range(count):
             if self.browser_type in ['chromium', 'chrome', 'msedge']:
                 if self.use_random_config:
                     browser, version, useragent, sec_ch_ua = browser_config.get_random_browser_config(self.browser_type)
@@ -272,7 +436,7 @@ class TurnstileAPIServer:
                 'sec_ch_ua': sec_ch_ua
             })
 
-        for i in range(self.thread_count):
+        for i in range(count):
             config = browser_configs[i]
             
             browser_args = [
@@ -289,11 +453,18 @@ class TurnstileAPIServer:
                     headless=self.headless,
                     args=browser_args
                 )
-            elif self.browser_type == "camoufox" and camoufox:
-                browser = await camoufox.start()
+            elif self.browser_type == "camoufox":
+                # 每个浏览器一个独立会话：共用一个 AsyncCamoufox 实例时，其
+                # `__aexit__` 只关得掉最后一个（实测关服务后 3 个 playwright
+                # driver 变孤儿进程），而且回收池时无法逐个释放。
+                session = AsyncCamoufox(headless=self.headless)
+                self._camoufox_sessions.append(session)
+                browser = await session.start()
 
             if browser:
-                await self.browser_pool.put((i+1, browser, config))
+                index = self._next_browser_index
+                self._next_browser_index += 1
+                await self.browser_pool.put((index, browser, config))
 
             if self.debug:
                 logger.info(f"Browser {i + 1} initialized successfully with {config['browser_name']} {config['browser_version']}")
@@ -681,6 +852,24 @@ class TurnstileAPIServer:
         return result
 
     async def _solve_turnstile(self, task_id: str, url: str, sitekey: str, action: Optional[str] = None, cdata: Optional[str] = None):
+        """解题入口：先把池准备好，再记「有任务在跑」，最后交给 _solve_turnstile_inner。
+
+        计数与时间戳必须包住整段：池被取空到浏览器放回之间，回收协程一旦插手
+        就会把正在解题的浏览器关掉。`finally` 保证异常路径也归还计数，
+        否则一次失败会让 `_active_tasks` 永久 > 0，回收再也不触发。
+        """
+        await self._ensure_pool()
+        self._active_tasks += 1
+        self._last_used_at = time.time()
+        try:
+            return await self._solve_turnstile_inner(
+                task_id=task_id, url=url, sitekey=sitekey, action=action, cdata=cdata
+            )
+        finally:
+            self._active_tasks -= 1
+            self._last_used_at = time.time()
+
+    async def _solve_turnstile_inner(self, task_id: str, url: str, sitekey: str, action: Optional[str] = None, cdata: Optional[str] = None):
         """Solve the Turnstile challenge."""
         proxy = None
         index, browser, browser_config = await self.browser_pool.get()

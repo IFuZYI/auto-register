@@ -293,6 +293,21 @@ curl http://localhost:8000/api/solver/status
 
 正常返回 `{"running":true}`。若 `8000` 端口都访问不到，问题在后端而不是 Solver 本身。
 
+### 1b. Solver 显示「未运行」但其实刚跑过任务 / 内存被浏览器吃满
+
+浏览器池是**按需启停**的：空闲超过 `SOLVER_IDLE_TTL`（默认 300 秒）后整池
+会被关掉，`GET :8889/` 仍然通（服务本身常驻），但那一刻池里没有浏览器。
+下一个解题请求会自动重建（约 30 秒预热），日志里是：
+
+```
+[INFO] -> Browser pool reaped after 312s idle (ttl=300s); next request will rebuild it
+[INFO] -> Browser pool is short by 4; initializing on demand
+```
+
+这是预期行为，不是故障。池按 `--thread`（默认 4）预热，每个 camoufox 约
+250 MiB，常驻不动实测占 1.0 GiB（RSS+Swap）—— 2 GiB 的机器上会把 swap 吃满，
+所以默认开启回收。要在内存充裕的机器上换回常驻行为，设 `SOLVER_IDLE_TTL=0`。
+
 ### 2. 如何确认当前 Python 是否正确
 
 ```bash
