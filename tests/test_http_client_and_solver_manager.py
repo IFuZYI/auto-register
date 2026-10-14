@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import logging
+import subprocess
 import unittest
 from unittest import mock
 
@@ -300,6 +301,47 @@ class SolverLifecycleTests(unittest.TestCase):
 
         fake_proc.terminate.assert_called_once()
         fake_proc.wait.assert_called_once()
+
+    def test_stop_escalates_to_kill_when_terminate_is_slow(self):
+        """收尾不能抛：terminate 超时即 kill。
+
+        `stop()` 被 `main.lifespan` 的收尾直接调用，抛出的 `TimeoutExpired` 会从
+        FastAPI 的 lifespan `__aexit__` 冒出来，把**任何一个**用 `TestClient(app)`
+        的测试判失败（实测：测试里起的 solver 要 30s 拉浏览器，5s 杀不掉，
+        `test_panel_sync_endpoint` 因此报错，与面板逻辑无关）。
+        """
+        from services import solver_manager
+
+        fake_proc = mock.MagicMock()
+        fake_proc.poll.return_value = None
+        fake_proc.wait.side_effect = [
+            subprocess.TimeoutExpired(cmd="solver", timeout=5),
+            None,
+        ]
+        solver_manager._proc = fake_proc
+        try:
+            solver_manager.stop()  # 不应抛
+        finally:
+            solver_manager._proc = None
+
+        fake_proc.kill.assert_called_once()
+        self.assertEqual(fake_proc.wait.call_count, 2)
+
+    def test_stop_swallows_when_even_kill_times_out(self):
+        """kill 后仍超时也要放手 —— 进程交给 init 回收，异常绝不外传。"""
+        from services import solver_manager
+
+        fake_proc = mock.MagicMock()
+        fake_proc.poll.return_value = None
+        fake_proc.wait.side_effect = subprocess.TimeoutExpired(cmd="solver", timeout=5)
+        solver_manager._proc = fake_proc
+        try:
+            solver_manager.stop()  # 不应抛
+        finally:
+            solver_manager._proc = None
+
+        fake_proc.kill.assert_called_once()
+        self.assertIsNone(solver_manager._proc)
 
     def test_start_async_skips_thread_when_disabled(self):
         """禁用时不得建线程 —— 那个线程只为一个 print 而生，而它写 stdout 会让

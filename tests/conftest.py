@@ -12,10 +12,20 @@
 建表同样放在这里：生产环境由 ``main.py`` 启动时调 ``init_db()``，测试里没人调，
 不建表的话所有落库路径都会撞上 ``no such table``。``configs`` 表定义在
 ``core.config_store`` 里，不 import 它就不会进 ``SQLModel.metadata``。
+
+**solver 也在这里关掉**：``main.lifespan`` 会调 ``solver_manager.start_async()``，
+而每个用 ``TestClient(app)`` 的测试都会跑一次 lifespan。默认开着的话，一次测试
+运行会真的去拉起浏览器池 —— 实测 7 个文件、59 个测试因此从 6 秒变成 367 秒
+（每次 lifespan 等 30 秒等浏览器就绪），而且那批浏览器会互相抢内存，把与该测试
+毫无关系的用例拖失败。测试不该起真浏览器：跑的是接线契约，不是解题能力。
 """
 
 import os
 import tempfile
+
+# solver 必须在任何测试模块 import 之前关掉（solver_manager 惰性读环境，但
+# conftest 是唯一保证先执行的入口，放这里最稳）。
+os.environ.setdefault("APP_ENABLE_SOLVER", "0")
 
 _TMP_DB_DIR = tempfile.TemporaryDirectory()
 _TMP_DATA_DIR = tempfile.TemporaryDirectory()

@@ -106,11 +106,31 @@ def start():
 
 
 def stop():
+    """停掉 solver 进程。
+
+    `wait(timeout=5)` 会抛 `TimeoutExpired`，而本函数被 `main.lifespan` 的收尾
+    直接调用 —— 异常会从 FastAPI 的 lifespan `__aexit__` 冒出来，把**任何一个**
+    正在用 `TestClient(app)` 的测试判为失败，无论它在测什么（实测：测试里
+    启动的 solver 要 30s 才拉起 4 个浏览器，5s 内杀不掉，于是
+    `test_panel_sync_endpoint` 报 `TimeoutExpired` —— 与面板逻辑毫无关系）。
+
+    收尾路径不能抛：`terminate` 后等到超时即降级 `kill`，再超时就放手 ——
+    进程会被 init 回收，绝不把异常传给调用方的 lifespan。
+    """
     global _proc, _log_file
     with _lock:
         if _proc and _proc.poll() is None:
             _proc.terminate()
-            _proc.wait(timeout=5)
+            try:
+                _proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                # 浏览器还在收尾（camoufox 启动/退出都不快）：升级到 kill。
+                _proc.kill()
+                try:
+                    _proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    # 连 kill 都没收掉：放手，不要拿这个异常去炸 lifespan。
+                    pass
             print("[Solver] 已停止")
         _proc = None
         if _log_file:
