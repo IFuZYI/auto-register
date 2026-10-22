@@ -617,7 +617,7 @@ class GrokPlatform(BasePlatform):
                 record = None
                 if log_fn:
                     log_fn(f"[Grok] 生成 CPA 记录失败: {type(exc).__name__}")
-            if record is not None:
+            if record:
                 patch["cpa_record"] = record
                 patch["cpa_auth_filename"] = cpa_auth_filename(record)
                 # 落盘/上传走与注册 opt-in 分支**同一个**收尾函数（`_maybe_write_cpa`）。
@@ -639,24 +639,26 @@ class GrokPlatform(BasePlatform):
             # 不该让刷新失败），所以「已保存」只在**确实**写了/传了时才成立。
             # 用户拿这句话当「成了」的唯一信号（终审发现）。
             cpa_notes: list[str] = []
-            # 与 `_maybe_write_cpa` 读**同一处**来源：它认配置键，也认环境变量
-            # `GROK_CPA_AUTH_DIR`（后者是文档推荐的入口）。只看配置键的话，
-            # 用环境变量且写入失败时消息仍是光秃秃的「已保存」（复审 N1 实测）。
-            wanted_dir = str(
-                settings.get("cpa_auth_dir") or os.getenv("GROK_CPA_AUTH_DIR", "")
-            ).strip()
-            if "cpa_auth_path" not in patch and wanted_dir:
-                cpa_notes.append("本地目录未写入")
-            if "cpa_uploaded" in patch and not patch.get("cpa_uploaded"):
-                cpa_notes.append("CPA 上传失败")
             if record is None:
-                # 记录都没生成 → 落盘/上传整段没跑。不报的话消息读起来像成了
-                # （终审实测：token_to_cpa_record 抛异常时三条 note 全不触发）。
+                # 记录都没生成 → 落盘/上传**整段没跑**。只说这一条：再加
+                # 「本地目录未写入」会暗示「写过但失败」，而实际一次都没尝试
+                # （复审实测：两条同时出现，读起来像两个独立故障）。
                 cpa_notes.append("CPA 记录未生成，未落盘/上传")
-            elif "cpa_uploaded" not in patch and self._cpa_upload_skipped_for_no_url():
-                # 开关开着、地址却空：`_maybe_write_cpa` 直接 return，什么都不写。
-                # 不提一句的话，消息和「没配置 CPA」一模一样，用户看不出少填了地址。
-                cpa_notes.append("未填 CPA 地址，未上传")
+            else:
+                # 与 `_maybe_write_cpa` 读同一处来源：它认配置键，也认环境变量
+                # `GROK_CPA_AUTH_DIR`（后者是文档推荐的入口）。只看配置键的话，
+                # 用环境变量且写入失败时消息仍是光秃秃的「已保存」（复审 N1 实测）。
+                wanted_dir = str(
+                    settings.get("cpa_auth_dir") or os.getenv("GROK_CPA_AUTH_DIR", "")
+                ).strip()
+                if "cpa_auth_path" not in patch and wanted_dir:
+                    cpa_notes.append("本地目录未写入")
+                if "cpa_uploaded" in patch and not patch.get("cpa_uploaded"):
+                    cpa_notes.append("CPA 上传失败")
+                if "cpa_uploaded" not in patch and self._cpa_upload_skipped_for_no_url():
+                    # 开关开着、地址却空：`_maybe_write_cpa` 直接 return，什么都不写。
+                    # 不提一句的话，消息和「没配置 CPA」一模一样，用户看不出少填了地址。
+                    cpa_notes.append("未填 CPA 地址，未上传")
             message = "Token 已刷新（登录协议），新凭证已保存"
             if cpa_notes:
                 message += f"；CPA 侧：{'、'.join(cpa_notes)}（详见任务日志）"

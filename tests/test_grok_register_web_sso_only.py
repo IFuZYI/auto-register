@@ -617,7 +617,7 @@ class RefreshMessageCoversEnvAuthDirTests(unittest.TestCase):
 class RefreshMessageMatrixTests(unittest.TestCase):
     """六种配置组合下，消息与真实行为必须一致（不误报、不漏报）。
 
-    这是 `_cpa_upload_target()` 收敛（复审 N4）之后的护栏：消息侧与
+    这是 `_cpa_upload_decision()` 收敛（复审 N4）之后的护栏：消息侧与
     `_maybe_write_cpa` 共用同一处判定，任何一边改动都会让这张表里某行红。
     """
 
@@ -730,6 +730,35 @@ class RefreshMessageCoversRecordBuildFailureTests(unittest.TestCase):
         message = str(result["data"].get("message") or "")
         self.assertIn("未生成", message,
                       f"记录没生成要在消息里说出来，实际: {message!r}")
+
+
+class RecordFailureNoteIsSingleTests(unittest.TestCase):
+    """记录没生成时只报「未生成」，不再附带「本地目录未写入」。
+
+    回归（终审复审实测）：两条同时出现时，读起来像两个独立故障，而实际
+    落盘/上传一次都没尝试 —— 「未写入」暗示「写过但失败」。
+    """
+
+    def test_only_one_note_when_record_fails(self):
+        import tempfile
+        from unittest.mock import patch as _patch
+
+        from platforms.grok.token_refresh import RefreshResult
+
+        tokens = {"access_token": "a", "refresh_token": "r", "expires_in": 3600}
+        with tempfile.TemporaryDirectory() as tmp:
+            plat = _platform({"cpa_auth_dir": tmp})
+            plat._log_fn = lambda _m: None
+            with _patch("platforms.grok.token_refresh.refresh_via_device_flow",
+                        return_value=RefreshResult(ok=True, tokens=tokens, method="device")), \
+                 _patch("platforms.grok.plugin.token_to_cpa_record",
+                        side_effect=RuntimeError("boom")):
+                result = plat.execute_action("refresh_token", _account(), {})
+
+        message = str(result["data"].get("message") or "")
+        self.assertIn("未生成", message)
+        self.assertNotIn("本地目录未写入", message,
+                         f"记录都没生成，不该报「未写入」: {message!r}")
 
 
 if __name__ == "__main__":
