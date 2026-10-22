@@ -331,10 +331,10 @@ class GrokPlatform(BasePlatform):
     def _sso_status(self, sso: str) -> str:
         """用 SSO cookie 访问 accounts.x.ai 判断 SSO 状态。
 
-        **本判定已知不可靠，只作弱信号用**（不参与「测活」的结论）：
+        **本判定已知不可靠**（「测活」动作不用它，但 `check_valid` 仍用 —— 见文末）：
 
-        - `alive`：响应看起来不是登录/注册页；
-        - `rejected`：落到 sign-in / sign-up 页；
+        - `alive`：响应看起来不是登录/注册页（受缺陷 1 影响，实际**总是**这个）；
+        - `rejected`：落到 sign-in / sign-up 页（受缺陷 1 影响，实际**不可达**）；
         - `unknown`：网络/浏览器异常。
 
         三条已知缺陷（2026-10-23 评审实测，改这里之前先读）：
@@ -348,9 +348,16 @@ class GrokPlatform(BasePlatform):
         3. 全新会话即使带有效 sso cookie 也常被判未登录而跳 sign-in ——
            `oauth_device.py:172-174` 早就因此**放弃**了这套校验（会误杀有效 SSO）。
 
-        结论：不要把它接进「测活」或自动改状态的路径（误判 rejected 会把好号
-        标成「失效」）。要判 SSO 是否还能用，走 `refresh_token`（登录协议，
-        用实际结果说话）。
+        现状与约束（读到这里的人请注意，别把这两件事搞混）：
+
+        - `probe_account_detail` / `check_valid` 仍用它（`sso_status == "rejected"`
+          → `apply_probe_status_policy` 判「失效」），这是**改动前就有**的行为，
+          本次没有改；
+        - 「测活」动作（`execute_action("probe")`）**不**用它 —— 没有 AT 时直接
+          报缺并指路「刷新 Token」，不给 SSO 结论。
+
+        已知它会误判（缺陷 3），所以**不要**把它的结论扩散到更多路径；要判 SSO
+        是否还能用，优先用 `refresh_token`（登录协议，用实际结果说话）。
         """
         try:
             from modules.execution import BrowserExecutorFactory

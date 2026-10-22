@@ -35,6 +35,26 @@ _G2A_CFG = {
 }
 
 
+def setUpModule():
+    """清掉进程级客户端缓存 —— 这些用例都靠 `from_config` 走真实配置路径。
+
+    `Grok2ApiClient._CLIENT_CACHE` 是**进程全局**的（登录 token 缓存在实例上）。
+    不清的话：本文件跑过一次后，缓存里留着 `(http://g2a.test, admin, "")` 的实例，
+    同进程里后跑的其他文件（或换个用例改配置）会拿到带旧 password 的实例 ——
+    结果取决于执行顺序（独立评审发现：跑完本文件后缓存确实被留下）。
+    """
+
+    from platforms.grok.grok2api import _CLIENT_CACHE
+
+    _CLIENT_CACHE.clear()
+
+
+def tearDownModule():
+    from platforms.grok.grok2api import _CLIENT_CACHE
+
+    _CLIENT_CACHE.clear()
+
+
 class _Resp:
     def __init__(self, status: int = 200, payload=None, text: str = ""):
         self.status_code = status
@@ -260,6 +280,25 @@ class AutoIngestReachesGrok2ApiTests(unittest.TestCase):
         self.assertEqual(
             [p for p in rec.paths if "web/import" in p], [],
             f"显式关闭后仍在传: {rec.paths}",
+        )
+
+
+class ClientCacheIsolationTests(unittest.TestCase):
+    """本模块必须清掉进程级客户端缓存（独立评审发现它此前会留下残留）。
+
+    `Grok2ApiClient._CLIENT_CACHE` 是进程全局的；不清的话，本文件跑完后同进程的
+    后续用例会拿到带旧 password 的实例 —— 结果取决于执行顺序。
+    """
+
+    def test_module_teardown_clears_the_shared_cache(self):
+        from platforms.grok import grok2api
+
+        grok2api._CLIENT_CACHE[("http://leak.test", "admin", "")] = object()
+        self.assertTrue(grok2api._CLIENT_CACHE, "前置：缓存里确实有东西")
+        tearDownModule()
+        self.assertEqual(
+            grok2api._CLIENT_CACHE, {},
+            "tearDownModule 没清缓存 —— 同进程后续用例会拿到陈旧实例",
         )
 
 
