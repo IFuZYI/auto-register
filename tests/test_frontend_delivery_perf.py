@@ -81,3 +81,73 @@ def test_index_html_is_not_cached(client):
     assert "no-cache" in cc or "no-store" in cc or "max-age=0" in cc, (
         f"index.html 不能长缓存，实际: {cc!r}"
     )
+
+
+def test_conditional_request_returns_304(client):
+    """`If-None-Match` 命中时必须 304 —— 否则每次访问都重传整个包。
+
+    实测缺陷：自定义响应手写了 ETag 但没走条件请求逻辑，客户端回传
+    `If-None-Match` 仍得到 200 + 完整内容，长缓存形同虚设。
+    """
+    name = _asset_name()
+    first = client.get(f"/assets/{name}", headers={"Accept-Encoding": "gzip"})
+    etag = first.headers.get("etag")
+    assert etag, "没有 ETag，无法做条件请求"
+    second = client.get(
+        f"/assets/{name}",
+        headers={"Accept-Encoding": "gzip", "If-None-Match": etag},
+    )
+    assert second.status_code == 304, (
+        f"If-None-Match 命中却返回 {second.status_code} —— 每次都重传整个包"
+    )
+
+
+def test_range_request_is_not_served_gzip(client):
+    """`Range` 请求不能带 gzip —— 字节区间是按**原始**文件算的。
+
+    实测缺陷：`Range: bytes=0-99` 返回 206 但内容是未压缩字节，同时头里写着
+    `content-encoding: gzip` —— 客户端会把原始字节当 gzip 解，直接报错。
+    """
+    name = _asset_name()
+    resp = client.get(
+        f"/assets/{name}",
+        headers={"Accept-Encoding": "gzip", "Range": "bytes=0-99"},
+    )
+    assert resp.status_code == 206
+    encoding = (resp.headers.get("content-encoding") or "").lower()
+    assert encoding in ("", "identity"), (
+        f"Range 请求被 gzip 了（content-encoding={encoding!r}）—— 字节区间会错位"
+    )
+
+
+@pytest.mark.parametrize("header,expect_gzip", [
+    ("gzip", True),
+    ("gzip, deflate, br", True),
+    ("deflate, gzip;q=0.5", True),
+    ("gzip;q=0", False),          # 明确拒绝
+    ("*", True),                   # 什么都行 → 含 gzip
+    ("*;q=0", False),
+    ("identity", False),
+    ("br", False),
+    ("GZIP", True),                # 大小写
+    ("", False),
+])
+def test_accept_encoding_parsing(client, header, expect_gzip):
+    """`Accept-Encoding` 必须正确解析 —— `gzip;q=0` 是「不要 gzip」，`*` 是「都行」。
+
+    朴素子串匹配（`"gzip" in header`）会把 `gzip;q=0` 判成要压缩，
+    然后给一个明确拒绝 gzip 的客户端发压缩体。
+    """
+    from main import _accepts_gzip
+
+    assert _accepts_gzip(header) is expect_gzip, (
+        f"Accept-Encoding: {header!r} 判错了"
+    )
+
+    name = _asset_name()
+    resp = client.get(f"/assets/{name}", headers={"Accept-Encoding": header})
+    assert resp.status_code == 200
+    got = (resp.headers.get("content-encoding") or "").lower() == "gzip"
+    assert got is expect_gzip, (
+        f"Accept-Encoding: {header!r} 实际下发 gzip={got}，期望 {expect_gzip}"
+    )

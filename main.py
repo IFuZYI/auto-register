@@ -262,6 +262,57 @@ def solver_restart():
 _static_dir = os.path.join(os.path.dirname(__file__), "static")
 
 
+def _accepts_gzip(header: str) -> bool:
+    """客户端是否接受 gzip（正确处理 q=0 与 `*`）。
+
+    只做 `"gzip" in header` 是不够的：`gzip;q=0` 明确表示**不要** gzip，
+    而 `*` 表示「什么都行」（含 gzip）。两者都会被朴素子串匹配判错。
+    """
+    text = str(header or "").lower()
+    if not text:
+        return False
+    gzip_q = None
+    star_q = None
+    for part in text.split(","):
+        token, _, params = part.strip().partition(";")
+        token = token.strip()
+        q = 1.0
+        for param in params.split(";"):
+            param = param.strip()
+            if param.startswith("q="):
+                try:
+                    q = float(param[2:])
+                except ValueError:
+                    q = 1.0
+        if token == "gzip":
+            gzip_q = q
+        elif token == "*":
+            star_q = q
+    if gzip_q is not None:
+        return gzip_q > 0
+    if star_q is not None:
+        return star_q > 0
+    return False
+
+
+def _etag_matches(headers_in, etag: str) -> bool:
+    """`If-None-Match` 是否命中（支持逗号分隔与 `W/` 弱比较）。"""
+    def _norm(value: str) -> str:
+        return str(value or "").strip().removeprefix("W/").strip('"')
+
+    target = _norm(etag)
+    for key, value in headers_in:
+        if key.lower() != b"if-none-match":
+            continue
+        for candidate in value.decode("latin-1").split(","):
+            cand = candidate.strip()
+            if cand == "*":
+                return True
+            if _norm(cand) == target:
+                return True
+    return False
+
+
 class _GzipStatic(StaticFiles):
     """给静态资源加 gzip + 长缓存。
 
@@ -307,6 +358,18 @@ class _GzipStatic(StaticFiles):
 
         # 带内容哈希 → 可以永久缓存。
         resp.headers["cache-control"] = "public, max-age=31536000, immutable"
+        resp.headers["vary"] = "Accept-Encoding"
+
+        # `Range` / `HEAD` / 条件请求交给 `StaticFiles` 自己处理（它支持 206、
+        # 304、`If-Range`）。我们**只在完整 GET 且客户端要 gzip 时才替换响应**：
+        # 字节区间是按原始文件算的，压过的 body 与 `content-range` 对不上，
+        # 客户端会解压失败（实测：`Range: bytes=0-99` 返回 206 + 原始字节 +
+        # `content-encoding: gzip`）。
+        if scope.get("method") not in ("GET", None):
+            return resp
+        headers_in = scope.get("headers") or []
+        if any(k.lower() == b"range" for k, _ in headers_in):
+            return resp
 
         name = os.path.basename(path)
         compressed = self._gzip_cache.get(name)
@@ -315,16 +378,29 @@ class _GzipStatic(StaticFiles):
             return resp
 
         accept = ""
-        for key, value in scope.get("headers") or []:
-            if key == b"accept-encoding":
+        for key, value in headers_in:
+            if key.lower() == b"accept-encoding":
                 accept = value.decode("latin-1")
                 break
-        if "gzip" not in accept.lower():
+        if not _accepts_gzip(accept):
             return resp
 
         # 直接用压缩体构造响应：`FileResponse` 是流式的，拿不到 `body`，
         # 在它上面改头改不了实际传输内容（实测：加了 content-encoding 但
         # content-length 仍是原长，客户端会解析失败）。
+        #
+        # ETag 必须按**变体**区分（gzip / 原始），否则共享缓存可能把 gzip 体
+        # 发给只支持 identity 的客户端。
+        etag = f'W/"{name}-gzip"'
+        if _etag_matches(headers_in, etag):
+            return Response(
+                status_code=304,
+                headers={
+                    "cache-control": "public, max-age=31536000, immutable",
+                    "vary": "Accept-Encoding",
+                    "etag": etag,
+                },
+            )
         return Response(
             content=compressed,
             status_code=200,
@@ -332,7 +408,7 @@ class _GzipStatic(StaticFiles):
                 "cache-control": "public, max-age=31536000, immutable",
                 "content-encoding": "gzip",
                 "vary": "Accept-Encoding",
-                "etag": f'W/"{name}-gzip"',
+                "etag": etag,
             },
             media_type=resp.media_type,
         )
