@@ -110,6 +110,23 @@ def test_running_task_logs_are_kept(client):
         assert row is not None
         assert row.get("logs"), "运行中的任务日志被吞了 —— 实时面板会空着"
     finally:
+        # **不能**用 DELETE：运行中的任务会被 409 拒绝，行会一直留在库里，
+        # 污染同进程的后续测试（复审实测）。先把内存 store 里的状态改掉，
+        # 让它不再是「运行中」，再走正常删除。
+        from api import tasks as _api  # noqa: PLC0415
+        from services.task_store_io import _upsert_task_run  # noqa: PLC0415
+
+        try:
+            _api._task_store.finish(tid, status="stopped", success=0, skipped=0, errors=[])
+        except Exception:
+            pass
+        try:
+            _upsert_task_run({**{"id": tid}, "status": "stopped", "platform": "grok",
+                              "source": "test", "total": 1, "logs": [],
+                              "created_at": "2026-01-01T00:00:00+00:00",
+                              "updated_at": "2026-01-01T00:00:00+00:00"})
+        except Exception:
+            pass
         client.delete(f"/api/tasks/{tid}")
 
 

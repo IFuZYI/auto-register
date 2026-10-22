@@ -7,7 +7,7 @@ from fastapi import FastAPI, Request
 from fastapi import HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from core.db import init_db
 from core.registry import load_all
 from api.accounts import router as accounts_router
@@ -330,33 +330,67 @@ class _GzipStatic(StaticFiles):
     #: 小于这个尺寸不值得压（压了反而多一次解码）。
     MIN_SIZE = 1024
 
+    #: 预压的总字节上限。启动时**串行**压 level-9，不设上限的话一个
+    #: sourcemap 很多的构建会让 import 变成秒级停顿（且每个 worker 各付一次）。
+    #: 超出的文件在首次请求时按需压（那时只压一个，代价可接受）。
+    MAX_PRECOMPRESS_BYTES = 8 * 1024 * 1024
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._gzip_cache: dict[str, bytes] = {}
         self._precompress()
 
+    #: 不值得再压的格式（已经压缩过，再压只烧 CPU 与内存）。
+    _SKIP_EXT = frozenset({
+        ".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif", ".ico",
+        ".woff", ".woff2", ".zip", ".gz", ".br", ".mp4", ".webm", ".pdf",
+    })
+
     def _precompress(self) -> None:
         import gzip
 
         root = str(self.directory)
-        for name in os.listdir(root):
-            path = os.path.join(root, name)
-            if not os.path.isfile(path) or os.path.getsize(path) < self.MIN_SIZE:
-                continue
-            try:
-                with open(path, "rb") as fh:
-                    self._gzip_cache[name] = gzip.compress(fh.read(), 9)
-            except OSError:
-                continue
+        budget = self.MAX_PRECOMPRESS_BYTES
+        # 递归：`assets/` 今天是平的，但 Vite 完全可能产出子目录
+        # （字体、图片分目录）。只扫一层会让子目录里的文件永远不被压缩。
+        for dirpath, _dirnames, filenames in os.walk(root):
+            if budget <= 0:
+                break
+            for name in filenames:
+                path = os.path.join(dirpath, name)
+                if os.path.splitext(name)[1].lower() in self._SKIP_EXT:
+                    continue
+                try:
+                    if os.path.getsize(path) < self.MIN_SIZE:
+                        continue
+                    with open(path, "rb") as fh:
+                        data = fh.read()
+                except OSError:
+                    continue
+                # **按相对路径做 key**：只用 basename 的话，
+                # `assets/x.js` 与 `assets/sub/x.js` 会互相串味
+                # （复审实测：两个不同文件返回了同一份字节）。
+                rel = os.path.relpath(path, root).replace(os.sep, "/")
+                self._gzip_cache[rel] = gzip.compress(data, 9)
+                budget -= len(data)
 
     async def get_response(self, path: str, scope):  # noqa: D102 - Starlette 钩子
         from starlette.responses import Response
 
         resp = await super().get_response(path, scope)
+        if resp.status_code == 304:
+            # Starlette 的 `NotModifiedResponse` 只复制固定几个头 ——
+            # 这里补回缓存策略与变体标记，否则共享缓存无法区分
+            # 「gzip 体」与「原始体」（复审实测：304 只带 `vary: Origin`）。
+            resp.headers["cache-control"] = "public, max-age=31536000, immutable"
+            resp.headers["vary"] = "Accept-Encoding"
+            return resp
         if resp.status_code != 200:
             return resp
 
         # 带内容哈希 → 可以永久缓存。
+        # `Vary` 必须**两个变体都带**：只标在 gzip 分支上的话，先被缓存住的
+        # identity 体可能被发给支持 gzip 的客户端（反之亦然）。
         resp.headers["cache-control"] = "public, max-age=31536000, immutable"
         resp.headers["vary"] = "Accept-Encoding"
 
@@ -371,8 +405,8 @@ class _GzipStatic(StaticFiles):
         if any(k.lower() == b"range" for k, _ in headers_in):
             return resp
 
-        name = os.path.basename(path)
-        compressed = self._gzip_cache.get(name)
+        rel = str(path).replace(os.sep, "/").lstrip("/")
+        compressed = self._gzip_cache.get(rel)
         if compressed is None:
             # 小文件或读不到（目录/不存在）—— 不压，保持原响应。
             return resp
@@ -391,7 +425,7 @@ class _GzipStatic(StaticFiles):
         #
         # ETag 必须按**变体**区分（gzip / 原始），否则共享缓存可能把 gzip 体
         # 发给只支持 identity 的客户端。
-        etag = f'W/"{name}-gzip"'
+        etag = f'W/"{rel}-gzip"'
         if _etag_matches(headers_in, etag):
             return Response(
                 status_code=304,
@@ -422,7 +456,7 @@ if os.path.isdir(_static_dir):
     )
 
     @app.get("/{full_path:path}", include_in_schema=False)
-    def spa_fallback(full_path: str):
+    def spa_fallback(full_path: str, request: Request):
         """SPA 兜底：前端路由（/accounts、/tasks…）刷新时要能拿到 index.html。
 
         **`/api/` 前缀必须排除**：不排除的话，任何拼错或已删除的 API 路径都会
@@ -435,10 +469,30 @@ if os.path.isdir(_static_dir):
             return JSONResponse({"detail": "Not Found"}, status_code=404)
         # 入口 HTML **不能**长缓存：它引用的资源名带哈希，缓存住就等于把用户
         # 钉在旧版本上（发版后一直白屏/报错）。`no-cache` = 每次校验 ETag。
-        return FileResponse(
-            os.path.join(_static_dir, "index.html"),
-            headers={"cache-control": "no-cache"},
-        )
+        #
+        # 这里显式处理条件请求：`FileResponse` 自己不做 `If-None-Match` 比对，
+        # 直接返回它的话 `no-cache` 会退化成「每次都传整页」（复审实测：
+        # 回传正确 ETag 仍得到 200）。
+        index_path = os.path.join(_static_dir, "index.html")
+        try:
+            stat = os.stat(index_path)
+        except OSError:
+            return JSONResponse({"detail": "Not Found"}, status_code=404)
+        etag = f'"{int(stat.st_mtime)}-{stat.st_size}"'
+        inm = ""
+        for key, value in request.headers.items():
+            if key.lower() == "if-none-match":
+                inm = value
+                break
+        if inm and any(
+            candidate.strip().removeprefix("W/").strip('"') == etag.strip('"')
+            for candidate in inm.split(",")
+        ):
+            return Response(
+                status_code=304,
+                headers={"cache-control": "no-cache", "etag": etag},
+            )
+        return FileResponse(index_path, headers={"cache-control": "no-cache", "etag": etag})
 
 
 if __name__ == "__main__":

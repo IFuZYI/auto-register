@@ -24,6 +24,7 @@ import {
   DownOutlined,
 } from '@ant-design/icons'
 import { getPlatformTagColor, getPlatformLabel } from '@/lib/platforms'
+import { visibleFinishedTasks } from '@/lib/finishedTasks'
 import { taskKindMeta } from '@/lib/taskKinds'
 import { CLEANUP_ENDPOINTS, RETENTION_OPTIONS, retentionLabel, retentionOptionFromKey } from '@/lib/logCleanup'
 import { apiFetch } from '@/lib/utils'
@@ -96,6 +97,8 @@ export default function RunningTasks() {
   // 已完成任务的渲染上限：实测 253 张卡片会生成 12830 个 DOM 节点，
   // 首屏主线程长任务达 6.3 秒（正常帧间隔 16ms）。默认只渲染最近 20 条，
   // 其余按需展开 —— 与日志一样，历史数据不该在首屏全量渲染。
+  // 可展开**也可收起**：展开后若不能收，一次点击就让每次 2.5 秒轮询都
+  // 重渲染全部卡片（实测帧间隔回到 7 秒且不再恢复）。
   const [showAllFinished, setShowAllFinished] = useState(false)
   const { modal, message: msg } = App.useApp()
 
@@ -136,10 +139,10 @@ export default function RunningTasks() {
   const isActive = (t: TaskSnapshot) => t.status === 'running' || t.status === 'pending'
   const activeTasks = tasks.filter(isActive)
   const finishedTasks = tasks.filter((t) => !isActive(t))
-  const FINISHED_PAGE_SIZE = 20
-  const visibleFinished = showAllFinished
-    ? finishedTasks
-    : finishedTasks.slice(0, FINISHED_PAGE_SIZE)
+  // 折叠规则放在 `lib/finishedTasks.ts` 里（真实执行、有测试）：
+  // 直接 `slice(0, 20)` 会把**刚失败**的任务挤到后面藏起来 ——
+  // 后端排序是「先状态档位再时间」，failed 永远排在 done 之后。
+  const visibleFinished = visibleFinishedTasks(finishedTasks, showAllFinished)
   const logTask = logTaskId ? tasks.find((task) => task.id === logTaskId) : null
 
   const handleDelete = async (taskId: string) => {
@@ -366,9 +369,11 @@ export default function RunningTasks() {
               block
               type="dashed"
               style={{ marginTop: 8 }}
-              onClick={() => setShowAllFinished(true)}
+              onClick={() => setShowAllFinished((prev) => !prev)}
             >
-              展开其余 {finishedTasks.length - visibleFinished.length} 条已完成任务
+              {showAllFinished
+                ? '收起'
+                : `展开其余 ${finishedTasks.length - visibleFinished.length} 条已完成任务`}
             </Button>
           )}
         </div>

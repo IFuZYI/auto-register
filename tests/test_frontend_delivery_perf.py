@@ -23,9 +23,19 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ASSETS = os.path.join(ROOT, "static", "assets")
 
 
+#: `static/` 是构建产物、被 gitignore（`.gitignore` 的 `static/` 行）。
+#: 全新 clone 上没跑过 `npm run build` 时这些用例没有前提 —— **跳过**，
+#: 而不是报 FileNotFoundError 让 CI/新人以为代码坏了（与
+#: `tests/test_api_integration.py` 的 SPA 兜底用例同一口径）。
+if not os.path.isdir(ASSETS):
+    pytest.skip("static/assets 未构建（先 npm run build），跳过交付性能用例",
+                allow_module_level=True)
+
+
 def _asset_name() -> str:
     names = sorted(n for n in os.listdir(ASSETS) if n.endswith(".js"))
-    assert names, f"static/assets 里没有 js 产物: {ASSETS}"
+    if not names:
+        pytest.skip(f"static/assets 里没有 js 产物: {ASSETS}")
     return names[0]
 
 
@@ -151,3 +161,55 @@ def test_accept_encoding_parsing(client, header, expect_gzip):
     assert got is expect_gzip, (
         f"Accept-Encoding: {header!r} 实际下发 gzip={got}，期望 {expect_gzip}"
     )
+
+
+def test_both_variants_advertise_vary(client):
+    """`Vary: Accept-Encoding` 必须两个变体都带。
+
+    实测缺陷：只标在 gzip 分支上，而 identity 分支（curl、健康检查、
+    不支持 gzip 的客户端都会命中）没有变体标记 —— 共享缓存可能把原始体
+    发给支持 gzip 的客户端，反之亦然。
+    """
+    name = _asset_name()
+    for enc in ("gzip", "identity"):
+        resp = client.get(f"/assets/{name}", headers={"Accept-Encoding": enc})
+        vary = (resp.headers.get("vary") or "").lower()
+        assert "accept-encoding" in vary, (
+            f"{enc} 变体缺 Vary: Accept-Encoding（实际 {vary!r}）"
+        )
+
+
+def test_index_html_supports_conditional_get(client):
+    """入口 HTML 要能 304 —— 否则 `no-cache` 退化成每次都传整页。"""
+    first = client.get("/")
+    etag = first.headers.get("etag")
+    assert etag, "index.html 没有 ETag"
+    for path in ("/", "/accounts"):
+        resp = client.get(path, headers={"If-None-Match": etag})
+        assert resp.status_code == 304, (
+            f"{path} 回传正确 ETag 却得到 {resp.status_code}"
+        )
+
+
+def test_already_compressed_formats_are_skipped(tmp_path):
+    """png/woff2 这类不该再压 —— 只烧 CPU 与内存。"""
+    import gzip
+    import main as main_mod
+
+    src = tmp_path / "a.png"
+    src.write_bytes(b"\x89PNG\r\n\x1a\n" + b"x" * 5000)
+    js = tmp_path / "a.js"
+    js.write_bytes(b"var x=1;\n" * 500)
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    (sub / "b.js").write_bytes(b"var y=2;\n" * 500)
+
+    store = main_mod._GzipStatic(directory=str(tmp_path))
+    assert "a.png" not in store._gzip_cache, "png 不该被 gzip"
+    assert "a.js" in store._gzip_cache
+    # 子目录也要压（只扫一层会漏掉）
+    assert "sub/b.js" in store._gzip_cache, (
+        f"子目录文件没被压缩，cache keys={list(store._gzip_cache)}"
+    )
+    # key 是相对路径 —— basename 会让 assets/x.js 与 assets/sub/x.js 串味
+    assert gzip.decompress(store._gzip_cache["sub/b.js"]).startswith(b"var y=2;")
