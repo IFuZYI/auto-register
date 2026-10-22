@@ -761,5 +761,44 @@ class RecordFailureNoteIsSingleTests(unittest.TestCase):
                          f"记录都没生成，不该报「未写入」: {message!r}")
 
 
+class RefreshRejectsEmptyTokensTests(unittest.TestCase):
+    """device flow 返回 ok 但 token 为空时，不能报成功、不能写空凭证。
+
+    实测（本次多面检测发现）：`RefreshResult(ok=True, tokens={})` 会让动作
+    返回 `ok=True` + 「新凭证已保存」，同时 patch 里 `access_token` 是空串、
+    `probe_status` 被写成 `refresh_ok`、还生成一个 `access_token` 为空的
+    `cpa_record`。上游偶发返回空 body 时，账号会被记成「刚刷新过、凭证正常」，
+    而实际什么都没有 —— 这正是本分支反复在修的那类「消息说成了、实际没做」。
+    """
+
+    def _run(self, tokens):
+        from unittest.mock import patch as _patch
+
+        from platforms.grok.token_refresh import RefreshResult
+
+        plat = _platform({})
+        plat._log_fn = lambda _m: None
+        with _patch("platforms.grok.token_refresh.refresh_via_device_flow",
+                    return_value=RefreshResult(ok=True, tokens=tokens, method="device")):
+            return plat.execute_action("refresh_token", _account(), {})
+
+    def test_empty_tokens_is_not_success(self):
+        result = self._run({})
+        self.assertFalse(result["ok"], f"空 token 不能算成功: {result}")
+        self.assertIn("token", str(result.get("error") or "").lower())
+
+    def test_empty_tokens_writes_no_credentials(self):
+        result = self._run({})
+        patch = result.get("account_extra_patch") or {}
+        self.assertNotIn("access_token", patch, "空 AT 不该写进 patch")
+        self.assertNotIn("cpa_record", patch, "空凭证不该生成 cpa_record")
+        self.assertNotEqual(patch.get("probe_status"), "refresh_ok",
+                            "没有新凭证却标成 refresh_ok")
+
+    def test_missing_access_token_but_rt_present_is_not_success(self):
+        """只有 RT、没有 AT 也算没换到 —— 下游全都要 AT。"""
+        result = self._run({"refresh_token": "rt-only"})
+        self.assertFalse(result["ok"], f"缺 AT 不能算成功: {result}")
+
 if __name__ == "__main__":
     unittest.main()

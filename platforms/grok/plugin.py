@@ -597,7 +597,20 @@ class GrokPlatform(BasePlatform):
                     "data": {"method": result.method, "kind": result.kind},
                     "error": result.error or "登录协议刷新失败",
                 }
-            tokens = result.tokens
+            tokens = result.tokens or {}
+            # `ok=True` 不等于「换到了东西」：上游偶发返回空 body 时，
+            # `refresh_via_device_flow` 仍可能带着空 token 回来。不拦的话会
+            # 写出空 AT、把 `probe_status` 标成 `refresh_ok`、还生成一个空凭证的
+            # cpa_record —— 账号被记成「刚刷新过、凭证正常」（多面检测发现）。
+            if not str(tokens.get("access_token") or "").strip():
+                return {
+                    "ok": False,
+                    "data": {"method": result.method, "kind": result.kind},
+                    "error": (
+                        "登录协议返回里没有 access_token（上游可能只回了空 body）"
+                        "—— 没有写入任何凭证，可稍后重试"
+                    ),
+                }
             patch = {
                 "access_token": tokens.get("access_token", ""),
                 "refresh_token": tokens.get("refresh_token", ""),
