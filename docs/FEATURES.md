@@ -143,8 +143,19 @@ Grok 注册**只有浏览器一条路径**：x.ai 的 Cloudflare 只有 camoufox
 **注册只产 Web SSO**（用户要求 2026-10-23）：注册末尾那次 OAuth device flow
 （换 AT/RT，也就是 CPA / Build 凭据）**默认关闭**。实测这段每次都白烧约 4 分钟
 （`授权未确认 → token 轮询失败: ` → `OAuth 未成功（SSO 仍可用）`），而 build 侧
-一次都没成功过；真正有产物的是 Web SSO（grok2api 上传）。需要 build 凭据时
-显式给 `grok_oauth_exchange=1`，或注册后用账号页的「刷新 Token（登录协议）」补。
+一次都没成功过；真正有产物的是 Web SSO（grok2api 上传）。
+
+要 build 凭据时有两条路：
+
+| 做法 | 作用范围 | 入口 |
+| --- | --- | --- |
+| 注册时就换 | 之后所有任务 | 「注册设置 → 各平台设置 → Grok → 换取 build 凭据」= `grok_oauth_exchange=1` |
+| 事后按号补 | 单个账号 | 账号页「刷新 Token（登录协议）」 |
+
+**注意 CPA 的连带影响**：新注册的账号没有 AT/RT，所以 `cpa_auth_dir` 本地写入与
+`cpa_upload_grok_enabled` 自动上传对它们**不会触发** —— 要先走上面任一条路拿到
+AT/RT，或直接用面板管理页的手动「上传 CPA」。老账号（改动前注册的，extra 里已有
+`access_token`）不受影响。
 
 **发码节流**（`grok_send_code_min_interval`）：x.ai 对同一 IP 的取码有频率限制，太密会把
 出口打进长冷却。界面在「注册设置 → 各平台设置 → Grok」卡片里渲染。
@@ -283,7 +294,9 @@ Grok 的 `xai` 两类凭据）；主判据是**凭证本体是否相同**（AT/R
 时间（优先凭证签发时间 JWT `iat`，两侧可比时秒级；回落记录时间时小时档）降为辅助信息。
 
 **上传开关按平台分开**：CPA 的 ChatGPT 与 Grok 各自控制（`cpa_upload_chatgpt_enabled` /
-`cpa_upload_grok_enabled`）；其余面板各有自己的 `*_enabled` 开关。
+`cpa_upload_grok_enabled`）；其余面板各有自己的 `*_enabled` 开关。Grok 侧这两个开关
+只对**有 AT/RT 的账号**有意义 —— 注册默认不产 build 凭据（见「Grok 专项能力 →
+注册只产 Web SSO」）。
 
 > **chatgpt2api 有两个同名项目**：`yukkcat/chatgpt2api`（v3.2.3）与
 > `basketikun/chatgpt2api`（v1.8.0），上传器同一份代码两边都能用，但**读回账号状态

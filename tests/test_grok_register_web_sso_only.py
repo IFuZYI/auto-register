@@ -123,3 +123,105 @@ class RegisterSkipsBuildByDefaultTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BuildCredentialReachabilityTests(unittest.TestCase):
+    """注册不再产 build 后，补 build 的两条路必须真的能落盘/上传。
+
+    回归（独立评审发现）：`_maybe_write_cpa` 唯一的调用点在注册的 opt-in 分支里，
+    「刷新 Token（登录协议）」只把 cpa_record 塞进 patch、从不调用它 —— 于是
+    新号想补本地 `cpa_auth_dir` 写入或自动传 CPA，按钮点了也没反应，而文档把
+    那条路写成「可用」。
+    """
+
+    def _account(self, **extra):
+        from core.base_platform import Account, AccountStatus
+
+        data = {"sso": "sso-1", "refresh_token": "old-rt"}
+        data.update(extra)
+        return Account(
+            platform="grok", email="a@b.com", password="p",
+            status=AccountStatus.REGISTERED, extra=data,
+        )
+
+    def test_refresh_token_action_writes_cpa_record_to_local_dir(self):
+        """刷新 Token 成功后要把 CPA 记录写进 cpa_auth_dir（否则这条路是死的）。"""
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch as _patch
+
+        from platforms.grok.token_refresh import RefreshResult
+
+        tokens = {"access_token": "fresh-at", "refresh_token": "fresh-rt",
+                  "expires_in": 21600, "token_type": "Bearer"}
+        with tempfile.TemporaryDirectory() as tmp:
+            plat = _platform({"cpa_auth_dir": tmp})
+            plat._log_fn = lambda _m: None
+            with _patch("platforms.grok.token_refresh.refresh_via_device_flow",
+                        return_value=RefreshResult(ok=True, tokens=tokens, method="device")):
+                result = plat.execute_action("refresh_token", self._account(), {})
+            self.assertTrue(result["ok"], result)
+            written = list(Path(tmp).glob("*.json"))
+            self.assertEqual(len(written), 1, f"cpa_auth_dir 里没有落盘文件: {list(Path(tmp).iterdir())}")
+
+    def test_refresh_token_action_uploads_to_cpa_when_enabled(self):
+        """开着 `cpa_upload_grok_enabled` 时，刷新 Token 也要真的推到远端 CPA。"""
+        from unittest.mock import patch as _patch
+
+        from platforms.grok.token_refresh import RefreshResult
+
+        tokens = {"access_token": "fresh-at", "refresh_token": "fresh-rt",
+                  "expires_in": 21600, "token_type": "Bearer"}
+        plat = _platform({})
+        plat._log_fn = lambda _m: None
+        cfg = {"cpa_upload_grok_enabled": "1", "cpa_api_url": "http://cpa.test",
+               "cpa_api_key": "k"}
+        with _patch("platforms.grok.token_refresh.refresh_via_device_flow",
+                    return_value=RefreshResult(ok=True, tokens=tokens, method="device")), \
+             _patch("core.config_store.config_store.get",
+                    side_effect=lambda k, d="": cfg.get(k, d)), \
+             _patch("platforms.grok.upload.upload_to_cpa",
+                    return_value=(True, "uploaded")) as up:
+            result = plat.execute_action("refresh_token", self._account(), {})
+        self.assertTrue(result["ok"], result)
+        up.assert_called_once()
+        self.assertTrue(result["account_extra_patch"].get("cpa_uploaded"))
+
+    def test_probe_action_without_at_uses_sso_instead_of_hard_error(self):
+        """没有 AT（新号的常态）时「测活」不能直接报缺 AT —— SSO 探活能用。"""
+        plat = _platform({})
+        plat._log_fn = lambda _m: None
+        result = plat.execute_action("probe", self._account(access_token=""), {})
+        self.assertTrue(result["ok"], f"无 AT 时应回落 SSO 探活，实际: {result}")
+        self.assertIn("SSO", str(result["data"].get("summary") or ""))
+
+
+class OptInIsReachableFromSettingsTests(unittest.TestCase):
+    """`grok_oauth_exchange` 必须能从「注册设置」里设 —— 否则文档写的入口是假的。
+
+    回归（独立评审发现）：文档让用户「显式给 grok_oauth_exchange=1」，但这个键
+    不在 `CONFIG_KEYS` 里 → `PUT /api/config` 直接丢进 ignored，注册页也从不提交它。
+    能改的只有原始任务 extra（`POST /tasks/register`），对面板用户等于不存在。
+    """
+
+    def test_key_is_in_config_whitelist(self):
+        from api.config import CONFIG_KEYS
+
+        self.assertIn(
+            "grok_oauth_exchange", CONFIG_KEYS,
+            "不在白名单 → 面板保存被静默丢弃（返回 ignored），文档说的入口不可达",
+        )
+
+    def test_platform_declares_it_as_a_registration_setting(self):
+        """要能在「注册设置 → 各平台设置 → Grok」卡片里看到并改。"""
+        from platforms.grok.plugin import GrokPlatform
+
+        keys = {item["key"] for item in GrokPlatform.registration_modes}
+        self.assertIn("grok_oauth_exchange", keys)
+
+    def test_saved_setting_actually_reaches_the_register_path(self):
+        """存进配置后，注册链路必须读到它（`RegistrationContextBuilder` 合并）。"""
+        from modules.config.context import RegistrationContextBuilder
+
+        ctx = RegistrationContextBuilder({"grok_oauth_exchange": "1"}).build(None)
+        self.assertEqual(ctx.settings.get("grok_oauth_exchange"), "1")

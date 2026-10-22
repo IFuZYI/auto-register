@@ -120,6 +120,25 @@ class GrokPlatform(BasePlatform):
             "default": 0,
             "desc": "x.ai 对同一 IP 的取码有频率限制，太密会把出口打进长冷却",
         },
+        # 换 build 凭据（OAuth device flow）：默认关。
+        # 必须挂在这里而不是只写进文档 —— 这个键不在 `CONFIG_KEYS` 里时，
+        # 面板保存会被 `PUT /api/config` 静默丢进 ignored，注册页也从不提交它，
+        # 于是「想要 build 就打开这个开关」对面板用户等于不存在（独立评审发现）。
+        {
+            "key": "grok_oauth_exchange",
+            "label": "换取 build 凭据（AT/RT）",
+            "default": "0",
+            "desc": (
+                "默认关：注册只产 Web SSO（上传 grok2api 用）。打开后注册末尾会走"
+                "浏览器 OAuth device flow 换 AT/RT（CPA / Build 凭据），实测每次都"
+                "要白等约 4 分钟且经常授权未确认 —— 需要时用账号页的"
+                "「刷新 Token（登录协议）」按号补更划算"
+            ),
+            "options": [
+                {"value": "0", "label": "不换（默认，只产 Web SSO）"},
+                {"value": "1", "label": "换（产 AT/RT，供 CPA / Build）"},
+            ],
+        },
     ]
 
     def __init__(self, config: RegisterConfig = None, mailbox: BaseMailbox = None):
@@ -410,7 +429,22 @@ class GrokPlatform(BasePlatform):
 
             access = get_credential(extra, "access_token")
             if not access:
-                return {"ok": False, "error": "账号没有 access_token"}
+                # 没有 AT 是**新号的常态**（注册默认不再换 OAuth，只产 Web SSO）：
+                # 直接报「缺少 access_token」会让「测活」按钮对每个新号都失败，
+                # 而账号本身好好的。这里回落 SSO 探活 —— 与 `check_valid` /
+                # `probe_account_detail` 同一套判定，别让同一个号在按钮和
+                # 有效性检查里给出相反结论（历史上正是这种分叉被当成 bug 报过）。
+                detail = self.probe_account_detail(account)
+                usable = bool(detail.get("usable"))
+                summary = str(detail.get("summary") or "")
+                return {
+                    "ok": usable,
+                    "data": {"status": detail.get("code"), "summary": summary},
+                    "error": "" if usable else (summary or "SSO 探活失败"),
+                    "account_extra_patch": {
+                        "probe_summary": summary[:200],
+                    },
+                }
             code, summary = probe_token(
                 access,
                 email=account.email,
@@ -547,12 +581,24 @@ class GrokPlatform(BasePlatform):
                 "probe_status": "refresh_ok",
                 "probe_summary": "登录协议刷新成功",
             }
+            log_fn = getattr(self, "_log_fn", None)
             try:
                 record = token_to_cpa_record(tokens, email=account.email, sso=sso)
                 patch["cpa_record"] = record
                 patch["cpa_auth_filename"] = cpa_auth_filename(record)
+                # 落盘/上传走与注册 opt-in 分支**同一个**收尾函数（`_maybe_write_cpa`）。
+                # 之前这里只把记录塞进 patch、从不调用它 —— 而注册默认不再换
+                # OAuth 之后，这个动作就是新号补 build 凭据的**唯一**入口，不落盘
+                # 等于 `cpa_auth_dir` 与 `cpa_upload_grok_enabled` 双双变成死开关
+                # （独立评审发现）。写回 patch 的 `cpa_auth_path` / `cpa_uploaded`
+                # 由调用方合并进账号 extra，与注册路径的落库字段一致。
+                #
+                # 设置来源：`cpa_auth_dir` 是**任务/全局**设置，不在账号 extra 上
+                # （注册路径传的就是配置 extra）。这里把配置 extra 合进来，账号
+                # extra 只在配置没给时兜底 —— 只传账号 extra 的话这个开关永远读空。
+                settings = {**extra, **dict(self.config.extra or {})}
+                self._maybe_write_cpa(patch, settings, log_fn or (lambda _m: None))
             except Exception as exc:  # noqa: BLE001
-                log_fn = getattr(self, "_log_fn", None)
                 if log_fn:
                     log_fn(f"[Grok] 生成 CPA 记录失败: {type(exc).__name__}")
             return {

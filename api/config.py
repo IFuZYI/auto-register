@@ -115,6 +115,10 @@ CONFIG_KEYS = [
     # `grok_send_code_mode` / `grok_send_code_timeout` 已随协议路径删除：
     # 它们只被那条路读取，留着会让用户以为能调（实际无人读）。
     "grok_send_code_min_interval",
+    # 注册时是否换 build 凭据（OAuth device flow → AT/RT）。默认关：注册只产
+    # Web SSO。面板在「注册设置 → 各平台设置 → Grok」渲染（见
+    # `GrokPlatform.registration_modes`）；不在白名单里的话面板保存会被静默丢弃。
+    "grok_oauth_exchange",
     # ChatGPT 的注册方式全局默认值（原先只在任务页 localStorage 里选，
     # 换机器就丢）。见 platforms/chatgpt/plugin.py 的 registration_modes。
     "chatgpt_registration_mode",

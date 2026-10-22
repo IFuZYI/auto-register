@@ -216,12 +216,20 @@ class RegistrationModesDeclarationTests(unittest.TestCase):
 
         grok = next(p for p in list_platforms() if p["name"] == "grok")
         keys = {m["key"] for m in grok["registration_modes"]}
-        # 只剩发码节流一个数值旋钮：
+        # 两个旋钮：
+        # - `grok_send_code_min_interval`：发码节流（数值）；
+        # - `grok_oauth_exchange`：注册时是否换 build 凭据（下拉，默认不换）。
+        #   必须挂在这里 —— 只写进文档的话面板用户改不到（它不在
+        #   `CONFIG_KEYS` 里时保存会被静默丢弃，见 `test_grok_register_web_sso_only`）。
+        #
+        # 已删除的不再回来：
         # - 注册方式（browser/protocol）已并入「执行器」—— 那是「怎么访问目标站」，
         #   与执行器是同一个问题；
         # - `grok_send_code_mode` / `grok_send_code_timeout` 随协议路径删除 ——
         #   它们只被那条路读取（浏览器路径自己在页面发码），留着就是死旋钮。
-        self.assertEqual(keys, {"grok_send_code_min_interval"})
+        self.assertEqual(
+            keys, {"grok_send_code_min_interval", "grok_oauth_exchange"}
+        )
 
     def test_grok_executor_carries_the_register_mode(self):
         """注册方式并入执行器；协议路径删除后只剩 browser 一个取值。"""
