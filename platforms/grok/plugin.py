@@ -1,11 +1,13 @@
 """Grok (x.ai) 平台插件。
 
 支持：
-- 纯协议注册（grpc-web 发码/验码 + RSC Server Action）
-- 多种邮箱渠道（复用本项目 core.base_mailbox 的 18 家 provider）
+- 浏览器注册（camoufox 过 CF，唯一路径 —— 协议路径已删除）
+- 多种邮箱渠道（复用本项目 core.base_mailbox 的各家 provider）
 - 代理池（由任务层注入，插件只用 config.proxy）
 - 多种 Turnstile 方案（captcha solver / 屏外 Chrome / 外部 Solver）
-- OAuth Device Flow 换 token
+- 产物：Web SSO（grok2api 上传）。**注册默认不换 OAuth**（不产 build 凭据，
+  见 `_register_via_browser` 里的说明）；需要时可用账号页的「刷新 Token」
+  走登录协议补 AT/RT，或给 `grok_oauth_exchange=1` 让注册时就换
 - CPA / Grok2API / Sub2API 产物与上传
 - 账号池操作：测活、刷新 token、导出、上传
 
@@ -801,12 +803,21 @@ class GrokPlatform(BasePlatform):
         sso = str(result.get("sso") or "")
         final_password = str(result.get("password") or "")
 
-        # 可选：换 OAuth（协议版会被 CF 403，走浏览器兜底）
+        # 换 OAuth（AT/RT = CPA / Build 凭据）**默认关**（用户要求 2026-10-23）：
+        # 「注册 grok 时不需要注册 build 了，只要 websso（上传 grok2api）那个。」
+        #
+        # 依据（线上日志 task_1792682142255 / task_1792679012174）：这段 device
+        # flow 每次都是 `点击授权按钮 → 授权未确认，仍尝试取 token →
+        # token 轮询失败: ` → `OAuth 未成功（SSO 仍可用）`，白烧 4 分钟/号；
+        # 随后 grok2api 接入（Web SSO）成功。也就是说 build 侧一次都没成功过，
+        # 真正有产物的是 Web SSO 那一段。
+        #
+        # 保留开关：显式 `grok_oauth_exchange=1` 仍可换取（手动要 build 的入口）。
         account_extra: dict[str, Any] = {
             "sso": sso,
             "register_mode": "browser",
         }
-        if _truthy(extra.get("grok_oauth_exchange"), default=True):
+        if _truthy(extra.get("grok_oauth_exchange"), default=False):
             from .register_browser import exchange_oauth_via_browser
 
             tokens = exchange_oauth_via_browser(sso, proxy=proxy or "", log=log)
@@ -827,6 +838,10 @@ class GrokPlatform(BasePlatform):
                     log(f"[Grok] 生成 CPA 记录失败: {type(exc).__name__}")
             else:
                 log("[Grok] OAuth 未成功（SSO 仍可用）")
+        else:
+            # 留痕：不换 build 凭据是**有意的默认**，不是失败。不写日志的话，
+            # 用户看到账号没有 AT/RT 会以为链路坏了（与「OAuth 未成功」混为一谈）。
+            log("[Grok] 跳过 build 凭据（OAuth 换取已默认关闭，只产出 Web SSO）")
 
         # grok2api 接入（开关：`grok2api_enabled`，留空按「已配置就开」处理）
         if _truthy(extra.get("grok2api_enabled"), default=True) and _truthy(

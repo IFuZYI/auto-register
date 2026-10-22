@@ -357,6 +357,7 @@ register_job("my_job", interval_seconds=lambda: ..., runner=lambda: ...)
 | `test_icloud_alias_pool.py` | 号池语义：领取独占（第二个任务领不到同一个）、`used` 流转、超时回收只命中没续约的行、**`renew_alias_claim` 续约保活（续约过的号不被回收、非 in_use 不碰）**、入池/出池幂等、`unpooled` 不可手设 | 改 `services/icloud/aliases.py` 的取号/回收/续约逻辑 |
 | `test_icloud_local_mailbox.py` | 本地邮箱渠道：工厂注册、主号选取、取号语义（池空兜底回收失败不阻断）、收件字段名、池记账钩子、**等码期间租约续约（含无 alias_id 跳过 / 续约失败不打断）** | 改 `modules/mail/icloud_local.py` 或去掉 `wait_for_code` 里的续约 |
 | `test_grok_register_browser.py` | Grok 浏览器注册：指纹与代理、发码判定、**读码两条链路（iCloud / 通用渠道）**、控制流异常穿透、**iCloud 读码循环租约续约** | 改 `platforms/grok/register_browser.py` 的 `_read_code` 或续约接线 |
+| `test_grok_register_web_sso_only.py` | Grok 注册只产 Web SSO：默认不换 OAuth（即不「注册 build」）、账号上不落 AT/RT/cpa_record、grok2api 的 SSO 上传照旧、显式 `grok_oauth_exchange=1` 仍可换 | 改 `plugin.py::_register_via_browser` 的 `grok_oauth_exchange` 默认值或那段换取块 |
 | `test_icloud_remote_api.py` | 远程 HTTP 接口：接入/探针/探测/同步/删除的错误码映射与脱敏（不回密码） | 改 `api/icloud.py` 的远程端点 |
 | `test_icloud_remote_frontend_contract.py` | 远程功能的前端接线：注册页渠道下拉与三个配置键、来源标签列/筛选/添加远程服务入口 | 前端改了 iCloud 页或注册页的远程接线 |
 | `test_icloud_source_isolation.py` | 来源隔离：本地导入（`import_session`）不得写进同邮箱远程行；本地同步（`_upsert_alias`）不得抢走同地址远程行；远程账号自己的同步仍正常更新 | 改 `services/icloud/accounts.py` 的按邮箱查找或 `aliases.py::_upsert_alias` 的按地址查找（两处都必须按 `source` 过滤） |

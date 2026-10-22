@@ -138,17 +138,23 @@ Grok 注册**只有浏览器一条路径**：x.ai 的 Cloudflare 只有 camoufox
 | 域名 | x.ai 接受主流域（@icloud.com 实测通过）；拒绝小域名 |
 | 验证码 | 页面会自动格式化（`955-995` → `955995`），用键盘逐字输入才稳 |
 | 提交按钮 | 是 `type=submit` 且**无文本**，按 Enter 最可靠 |
-| OAuth | 协议 device flow 的 approve 被 CF 403，**必须走浏览器兜底** |
+| OAuth | 协议 device flow 的 approve 被 CF 403，**必须走浏览器兜底**（但注册默认不做，见下） |
+
+**注册只产 Web SSO**（用户要求 2026-10-23）：注册末尾那次 OAuth device flow
+（换 AT/RT，也就是 CPA / Build 凭据）**默认关闭**。实测这段每次都白烧约 4 分钟
+（`授权未确认 → token 轮询失败: ` → `OAuth 未成功（SSO 仍可用）`），而 build 侧
+一次都没成功过；真正有产物的是 Web SSO（grok2api 上传）。需要 build 凭据时
+显式给 `grok_oauth_exchange=1`，或注册后用账号页的「刷新 Token（登录协议）」补。
 
 **发码节流**（`grok_send_code_min_interval`）：x.ai 对同一 IP 的取码有频率限制，太密会把
 出口打进长冷却。界面在「注册设置 → 各平台设置 → Grok」卡片里渲染。
 
-**账号操作**：测活（CLI Proxy）、重换 OAuth、导出 CPA JSON；面板动作同 ChatGPT
-（上传 CPA / 同步 CPA 状态 / 上传 Sub2API / 上传 grok2api）。
+**账号操作**：测活（CLI Proxy）、刷新 Token（登录协议，需要时补 build 凭据）、导出 CPA JSON；
+面板动作同 ChatGPT（上传 CPA / 同步 CPA 状态 / 上传 Sub2API / 上传 grok2api）。
 
 **grok2api 接入**（`platforms/grok/grok2api.py`）：上传 SSO（Web）→ 开启 NSFW。
-只调 grok2api 现成的管理 API。Console / Build 两类凭据**不在这里派生** ——
-用户自己在 grok2api 里手动转换。几个关键点：
+只调 grok2api 现成的管理 API。Console / Build 两类凭据**不在这里派生**（注册也
+不再产 build）—— 用户自己在 grok2api 里手动转换。几个关键点：
 
 - 上传文件名**必须是** `grok-web-sso-tokens.txt`（grok2api 靠文件名识别 token 类型）
 - 账号级动作（条款/生日/NSFW）只对 Web 账号有效，必须先按邮箱找到 `provider=grok_web` 那条
