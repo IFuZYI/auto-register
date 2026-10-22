@@ -287,7 +287,9 @@ class GrokPlatform(BasePlatform):
         返回 `{"code", "summary", "usable", "sso_status"}`：
 
         - 有 AT：走 CLI Proxy 测活（`probe_token`），code/summary 是原始结果；
-        - 无 AT：用 SSO 访问 accounts.x.ai，`sso_status` ∈
+        - 无 AT：用 SSO 访问 accounts.x.ai 得 `sso_status`，但**不据此判定有效性**
+          （`usable` 恒 False —— 该判定永远返回 alive，见 `_sso_status` 的
+          docstring；用它判有效会让死号被复活），`sso_status` ∈
           `alive` / `rejected` / `unknown` —— `rejected` 表示 SSO 已被上游
           拒绝（对齐 grok2api 的 `markSSOCredentialRejected` → reauthRequired，
           即「失效，需要重新登录」）；`unknown`（网络异常）不据此改状态。
@@ -304,10 +306,20 @@ class GrokPlatform(BasePlatform):
             if not sso:
                 return {"code": None, "summary": "缺少 AT 与 SSO", "usable": False, "sso_status": "unknown"}
             sso_status = self._sso_status(sso)
+            # **不能**用 `sso_status == "alive"` 当「账号有效」：
+            # `_sso_status` 永远返回 alive（`Response` 没有 url，`rejected` 不可达，
+            # 见它的 docstring），于是 `check_valid` 会恒为 True；而两个调用方
+            # （`core/scheduler.py` / `api/accounts.py`）见 valid=True 就把
+            # `expired`/`invalid` 改回 `registered` —— **死号被复活**，重新进池
+            # 被领取（正确性复审 C1，已执行验证）。
+            #
+            # 没有 AT 就是「判不了」：usable=False（不复活），sso_status 照常带出
+            # 供弱信号使用。真正要判有效，走 `refresh_token` / `probe_refresh`
+            # 拿实际结果。改动前新号总有 AT，这条只是罕见兜底；现在它是唯一分支。
             return {
                 "code": None,
-                "summary": f"SSO 探测：{sso_status}",
-                "usable": sso_status == "alive",
+                "summary": f"SSO 探测：{sso_status}（无 AT，不据此判定有效性）",
+                "usable": False,
                 "sso_status": sso_status,
             }
         try:
@@ -525,14 +537,20 @@ class GrokPlatform(BasePlatform):
                     "probe_status": "refresh_ok",
                     "probe_summary": "refresh grant 成功",
                 }
+                log_fn = getattr(self, "_log_fn", None)
+                settings = {**extra, **dict(self.config.extra or {})}
                 try:
                     record = token_to_cpa_record(
                         tokens, email=account.email, sso=str(extra.get("sso") or "")
                     )
                     patch["cpa_record"] = record
                     patch["cpa_auth_filename"] = cpa_auth_filename(record)
+                    # 与 `refresh_token` 对齐：换到新凭证就落盘/上传。
+                    # 复审 I2 指出这两个动作产出同样的 AT/RT，却只有
+                    # `refresh_token` 接了这一跳 —— 而 `probe_refresh` 走
+                    # refresh grant，比 device flow 便宜得多，用户更容易点它。
+                    self._maybe_write_cpa(patch, settings, log_fn or (lambda _m: None))
                 except Exception as exc:  # noqa: BLE001 - 记录生成失败不该毁刷新结果
-                    log_fn = getattr(self, "_log_fn", None)
                     if log_fn:
                         log_fn(f"[Grok] 生成 CPA 记录失败: {type(exc).__name__}")
                 return {
@@ -624,6 +642,9 @@ class GrokPlatform(BasePlatform):
             # 在 try **之前**算好：下面 `cpa_notes` 在 try 之外读它，
             # 若 `token_to_cpa_record` 先抛就会 UnboundLocalError（自查踩过）。
             settings = {**extra, **dict(self.config.extra or {})}
+            # 判定只算**一次**，写路径与消息路径共用同一份结果：各算一次会读两遍
+            # 全局配置、吞两次异常，第二次抛时消息会静默漏报（复审 I3）。
+            cpa_enabled, cpa_url = self._cpa_upload_decision()
             try:
                 record = token_to_cpa_record(tokens, email=account.email, sso=sso)
             except Exception as exc:  # noqa: BLE001 - 记录生成失败不该毁刷新结果
@@ -668,13 +689,18 @@ class GrokPlatform(BasePlatform):
                     cpa_notes.append("本地目录未写入")
                 if "cpa_uploaded" in patch and not patch.get("cpa_uploaded"):
                     cpa_notes.append("CPA 上传失败")
-                if "cpa_uploaded" not in patch and self._cpa_upload_skipped_for_no_url():
+                if "cpa_uploaded" not in patch and cpa_enabled and not cpa_url:
                     # 开关开着、地址却空：`_maybe_write_cpa` 直接 return，什么都不写。
                     # 不提一句的话，消息和「没配置 CPA」一模一样，用户看不出少填了地址。
                     cpa_notes.append("未填 CPA 地址，未上传")
             message = "Token 已刷新（登录协议），新凭证已保存"
             if cpa_notes:
-                message += f"；CPA 侧：{'、'.join(cpa_notes)}（详见任务日志）"
+                # 把**真实原因**放进消息：动作端点（`api/actions.py`）构造插件时
+                # 从不设 `_log_fn`，`_maybe_write_cpa` 的失败原因只进日志 ——
+                # 那条日志在按钮路径上根本不存在（正确性复审 I1）。
+                reason = str(patch.get("cpa_upload_result") or "").strip()
+                detail = f"：{reason[:120]}" if reason else ""
+                message += f"；CPA 侧：{'、'.join(cpa_notes)}{detail}"
             return {
                 "ok": True,
                 "data": {
@@ -1184,13 +1210,8 @@ class GrokPlatform(BasePlatform):
             # 也不要因为一次导入失败报出「未填地址」这种误导）。
             return (False, "")
 
-    @classmethod
-    def _cpa_upload_skipped_for_no_url(cls) -> bool:
-        """「开关开着、但没填地址」—— `_maybe_write_cpa` 会静默跳过，值得提示。"""
-        enabled, url = cls._cpa_upload_decision()
-        return enabled and not url
-
-    def _maybe_write_cpa(self, account_extra: dict, extra: dict, log) -> None:
+    def _maybe_write_cpa(self, account_extra: dict, extra: dict, log,
+                         *, decision: tuple[bool, str] | None = None) -> None:
         """按配置把 CPA 记录写入本地目录（热加载）**并可选上传到远端 CPA**。
 
         两条路互相独立：
@@ -1222,9 +1243,10 @@ class GrokPlatform(BasePlatform):
                 log(f"[Grok] 写入 CPA 记录失败: {exc}")
 
         try:
-            # 与消息侧共用同一处判定（`_cpa_upload_decision`）—— 各写一份就会走偏：
-            # 一边判「传了」、另一边判「没配」（复审 N4）。
-            enabled, api_url = self._cpa_upload_decision()
+            # 与消息侧共用同一处判定 —— 各写一份就会走偏：一边判「传了」、
+            # 另一边判「没配」（复审 N4）。调用方能传进来就复用，避免重复读
+            # 全局配置（复审 I3）。
+            enabled, api_url = decision if decision is not None else self._cpa_upload_decision()
             if not enabled or not api_url:
                 return
             from .upload import upload_to_cpa

@@ -911,5 +911,133 @@ class EmptySettingMeansNoExchangeTests(unittest.TestCase):
         self.assertNotIn("access_token", account.extra)
 
 
+class NoAtAccountIsNotDeclaredValidTests(unittest.TestCase):
+    """没有 AT 的账号，`check_valid` 不能判「有效」。
+
+    正确性复审 C1（带执行验证）：`probe_account_detail` 在没有 AT 时回落
+    `_sso_status`，而那个判定**永远**返回 `alive`（`Response` 没有 url，
+    `rejected` 不可达）—— 于是 `check_valid` 恒为 True。调用方
+    （`core/scheduler.py` / `api/accounts.py`）见 `valid=True` 就把
+    `invalid` 改回 `registered`：**死号被复活**，重新进池、重新被领取。
+
+    改动前新号总有 AT，这条只是罕见兜底；现在它是唯一分支，等于每个新号都走。
+    """
+
+    def _platform(self):
+        plat = _platform({})
+        plat._log_fn = lambda _m: None
+        return plat
+
+    def _account(self, status):
+        from core.base_platform import Account, AccountStatus
+
+        return Account(platform="grok", email="dead@b.com", password="p",
+                       token="sso-dead", status=status, extra={"sso": "sso-dead"})
+
+    def test_check_valid_is_false_without_access_token(self):
+        plat = self._platform()
+        account = self._account("invalid")
+        with mock_patch_status(plat, "alive"):
+            self.assertFalse(plat.check_valid(account),
+                             "无 AT 时不能仅凭 SSO 判定就说账号有效")
+
+    def test_invalid_stays_invalid_after_check(self):
+        """端到端：invalid 账号过一遍「检测」后不能变成 registered。"""
+        from core.db.models_account import AccountModel
+
+        plat = self._platform()
+        account = self._account("invalid")
+        with mock_patch_status(plat, "alive"):
+            valid = plat.check_valid(account)
+            detail = plat.last_probe_detail
+        model = AccountModel(platform="grok", email="dead@b.com", password="p",
+                             status="invalid")
+        # 复刻两个调用方的判定（scheduler / accounts 同一套）
+        if valid and model.status in ("expired", "invalid"):
+            model.status = "registered"
+        elif not valid:
+            plat.apply_probe_status_policy(model, detail=detail)
+        self.assertEqual(model.status, "invalid",
+                         "死号被复活了 —— 它会重新进池被领取")
+
+    def test_at_present_still_uses_probe_code(self):
+        """有 AT 时行为不变：200 判有效（别把正向路径也改坏）。"""
+        plat = self._platform()
+        account = self._account("registered")
+        account.extra["access_token"] = "at"
+        with mock_patch_probe(plat, (200, "{}")):
+            self.assertTrue(plat.check_valid(account))
+
+
+def mock_patch_status(plat, status):
+    from unittest.mock import patch as _patch
+
+    return _patch.object(plat, "_sso_status", return_value=status)
+
+
+def mock_patch_probe(plat, ret):
+    from unittest.mock import patch as _patch
+
+    return _patch("platforms.grok.plugin.probe_token", return_value=ret)
+
+
+class MessageCarriesTheRealReasonTests(unittest.TestCase):
+    """消息里要给出**真实原因**，不能只指「详见任务日志」。
+
+    正确性复审 I1：动作端点（`api/actions.py`）构造插件时从不设 `_log_fn`，
+    `_maybe_write_cpa` 的失败原因只进日志 —— 而那条日志在按钮路径上不存在。
+    用户看到「CPA 上传失败（详见任务日志）」却无处可看。
+    """
+
+    def test_upload_failure_message_contains_the_reason(self):
+        from unittest.mock import patch as _patch
+
+        from platforms.grok.token_refresh import RefreshResult
+
+        tokens = {"access_token": "a", "refresh_token": "r", "expires_in": 3600}
+        plat = _platform({"cpa_upload_grok_enabled": "1"})
+        plat._log_fn = None  # 与动作端点一致：没有日志接收方
+        cfg = {"cpa_upload_grok_enabled": "1", "cpa_api_url": "http://x", "cpa_api_key": "k"}
+        with _patch("platforms.grok.token_refresh.refresh_via_device_flow",
+                    return_value=RefreshResult(ok=True, tokens=tokens, method="device")), \
+             _patch("core.config_store.config_store.get",
+                    side_effect=lambda k, d="": cfg.get(k, d)), \
+             _patch("platforms.grok.upload.upload_to_cpa",
+                    return_value=(False, "HTTP 401 unauthorized")):
+            result = plat.execute_action("refresh_token", _account(), {})
+
+        message = str(result["data"].get("message") or "")
+        self.assertIn("401", message,
+                      f"消息里要有真实原因（日志在动作路径上不存在）: {message!r}")
+
+
+class ProbeRefreshAlsoWritesCpaTests(unittest.TestCase):
+    """`probe_refresh` 换到新凭证后也要落盘/上传 —— 与 `refresh_token` 对齐。
+
+    正确性复审 I2：两个动作都从 `token_to_cpa_record` 产出 AT/RT，但只有
+    `refresh_token` 调了 `_maybe_write_cpa`。`probe_refresh` 走的是 refresh
+    grant（比 device flow 便宜得多），用户更容易点它 —— 却不落盘。
+    """
+
+    def test_probe_refresh_writes_record(self):
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch as _patch
+
+        from platforms.grok.token_refresh import RefreshResult
+
+        tokens = {"access_token": "fresh-at", "refresh_token": "fresh-rt",
+                  "expires_in": 3600, "token_type": "Bearer"}
+        with tempfile.TemporaryDirectory() as tmp:
+            plat = _platform({"cpa_auth_dir": tmp})
+            plat._log_fn = None
+            with _patch("platforms.grok.token_refresh.refresh_via_grant",
+                        return_value=RefreshResult(ok=True, tokens=tokens, method="grant")):
+                result = plat.execute_action("probe_refresh", _account(refresh_token="old-rt"), {})
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(len(list(Path(tmp).glob("*.json"))), 1,
+                             "probe_refresh 换到凭证却没落盘")
+
+
 if __name__ == "__main__":
     unittest.main()
