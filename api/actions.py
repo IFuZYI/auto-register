@@ -184,10 +184,19 @@ def _apply_action_result(
         status_reason = ""
         if action_id == "probe":
             code = data.get("status")
+            # SSO 探活（无 AT 的账号走这条）没有 HTTP code，结论在 sso_status 上。
+            # 不传这个标志的话，被拒的 SSO 会 ok=False 却不落任何状态 —— 账号
+            # 停在「正常」，与 `check_valid` 的结论相反（独立评审发现）。
+            sso_status = str(
+                (result.get("account_extra_patch") or {}).get("sso_status")
+                or data.get("sso_status")
+                or ""
+            )
             status_reason = apply_grok_status_policy(
                 acc_model,
                 probe_code=int(code) if code is not None else None,
                 probe_summary=str(data.get("summary") or ""),
+                sso_rejected=(sso_status == "rejected"),
             )
         elif action_id == "probe_refresh":
             status_reason = apply_grok_status_policy(

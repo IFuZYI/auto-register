@@ -328,16 +328,35 @@ class GrokPlatform(BasePlatform):
         ok, _reason = self._probe_verdict(code, summary)
         return {"code": code, "summary": str(summary or ""), "usable": ok, "sso_status": ""}
 
+    #: 登录页特征：被判 `rejected` 的响应里会出现其中之一。
+    #:
+    #: 为什么看**响应内容**而不是最终 URL：`core.base_executor.Response`
+    #: 只有 `status_code` / `text` / `headers` / `cookies`，**没有 url 字段**
+    #: （见 `core/base_executor.py`）—— 原实现读 `getattr(r, "url", "")`，
+    #: 永远拿到空串，于是任何 SSO（包括乱填的）都判 `alive`，失效判定形同虚设。
+    #: 独立评审发现并实测：乱填 cookie 也返回 alive。
+    _SSO_REJECT_MARKERS = (
+        "sign-in",
+        "sign-up",
+        "sign in to",
+        "create your account",
+        "登录",
+        "注册",
+    )
+
     def _sso_status(self, sso: str) -> str:
         """用 SSO cookie 访问 accounts.x.ai 判断 SSO 状态。
 
         返回三态（对齐 grok2api 的判定语义）：
 
-        - `alive`：能正常打开（未被重定向到登录页）；
-        - `rejected`：被重定向到 sign-in / sign-up —— SSO 已被上游拒绝
+        - `alive`：能正常打开（响应不是登录/注册页）；
+        - `rejected`：落到 sign-in / sign-up 页 —— SSO 已被上游拒绝
           （grok2api 的 `markSSOCredentialRejected` → reauthRequired 同款）；
         - `unknown`：网络/浏览器异常 —— **不据此改状态**（grok2api 也只在
           上游明确 401 时才标失效，网络错误不算）。
+
+        判定依据是**响应体**：执行器的 `Response` 不带最终 URL（见
+        `_SSO_REJECT_MARKERS` 的说明），只能看页面内容里有没有登录页特征。
         """
         try:
             from modules.execution import BrowserExecutorFactory
@@ -349,8 +368,14 @@ class GrokPlatform(BasePlatform):
                 cookies["sso"] = sso
                 executor.set_cookies(cookies)
                 r = executor.get("https://accounts.x.ai/", headers={"User-Agent": DEFAULT_UA})
-                final = str(getattr(r, "url", "") or "")
+                # 先看执行器**如果**提供了 url（浏览器执行器可能带），再回落内容判定。
+                final = str(getattr(r, "url", "") or "").lower()
                 if "sign-in" in final or "sign-up" in final:
+                    return "rejected"
+                body = str(getattr(r, "text", "") or "").lower()
+                if not body:
+                    return "unknown"
+                if any(marker in body for marker in self._SSO_REJECT_MARKERS):
                     return "rejected"
                 return "alive"
             finally:
@@ -437,12 +462,18 @@ class GrokPlatform(BasePlatform):
                 detail = self.probe_account_detail(account)
                 usable = bool(detail.get("usable"))
                 summary = str(detail.get("summary") or "")
+                sso_status = str(detail.get("sso_status") or "")
                 return {
                     "ok": usable,
                     "data": {"status": detail.get("code"), "summary": summary},
                     "error": "" if usable else (summary or "SSO 探活失败"),
                     "account_extra_patch": {
                         "probe_summary": summary[:200],
+                        # `sso_status` 必须带上：`api/actions.py` 的落状态逻辑靠它
+                        # 判 `sso_rejected`（与 `check_valid` 的 detail 同字段）。
+                        # 只写 summary 的话，被拒的 SSO 会 ok=False 却**不落任何状态**
+                        # —— 账号停在「正常」，与有效性检查的结论相反（评审发现）。
+                        "sso_status": sso_status,
                     },
                 }
             code, summary = probe_token(
@@ -917,7 +948,11 @@ class GrokPlatform(BasePlatform):
         # 于是浏览器注册的账号永远没有 probe_status/probe_summary）
         if _truthy(extra.get("grok_probe_after_register"), default=False):
             access = account_extra.get("access_token", "")
-            if access:
+            if not access:
+                # 默认路径不换 OAuth，所以这里**必然**没有 AT —— 不解释一句的话，
+                # 用户打开开关后看不到任何 probe_status，会以为测活坏了。
+                log("[Grok] 跳过注册后测活：没有 AT（注册默认不换 build 凭据）")
+            else:
                 try:
                     code_http, summary = probe_token(
                         access,
