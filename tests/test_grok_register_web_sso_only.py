@@ -989,6 +989,9 @@ class MessageCarriesTheRealReasonTests(unittest.TestCase):
     用户看到「CPA 上传失败（详见任务日志）」却无处可看。
     """
 
+    def setUp(self):
+        _isolate_cpa_env(self)
+
     def test_upload_failure_message_contains_the_reason(self):
         from unittest.mock import patch as _patch
 
