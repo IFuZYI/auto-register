@@ -132,7 +132,7 @@ class GrokPlatform(BasePlatform):
                 "默认关：注册只产 Web SSO（上传 grok2api 用）。打开后注册末尾会走"
                 "浏览器 OAuth device flow 换 AT/RT（CPA / Build 凭据），实测每次要"
                 "白等约 4 分钟且经常停在「授权未确认」。"
-                "注意：账号页的「刷新 Token（登录协议）」是**同一个** device flow"
+                "注意：账号页的「刷新 Token（登录协议）」走的是同一个 device flow"
                 "（同一个失败面），换条路不会更容易成功 —— 要 build 凭据前先想清楚"
                 "这条链目前基本不通"
             ),
@@ -358,8 +358,12 @@ class GrokPlatform(BasePlatform):
         - 「测活」动作（`execute_action("probe")`）**不**用它 —— 没有 AT 时直接
           报缺并指路「刷新 Token」，不给 SSO 结论。
 
-        已知它会误判（缺陷 3），所以**不要**把它的结论扩散到更多路径；要判 SSO
-        是否还能用，优先用 `refresh_token`（登录协议，用实际结果说话）。
+        已知它会误判（缺陷 3），所以不要把这个结论扩散到更多路径。
+
+        也没有可靠的替代判据：`refresh_token`（登录协议）失败时返回
+        `kind="retryable"`，而 `apply_grok_status_policy` 对 retryable 不动状态
+        —— 所以它只在**真的换到 token**（正向）或明确 `sso_rejected` 时才有信息量，
+        不能拿来当「SSO 还能不能用」的判据（终审 Minor 4）。
         """
         try:
             from modules.execution import BrowserExecutorFactory
@@ -463,7 +467,7 @@ class GrokPlatform(BasePlatform):
                     "error": (
                         "账号没有 access_token（注册默认不产 build 凭据）—— "
                         "要测活需先拿到 AT/RT，但「刷新 Token（登录协议）」走的是"
-                        "与注册末尾**同一个** device flow（实测常停在「授权未确认」），"
+                        "与注册末尾同一个 device flow（实测常停在「授权未确认」），"
                         "不一定能拿到"
                     ),
                 }
@@ -645,7 +649,11 @@ class GrokPlatform(BasePlatform):
                 cpa_notes.append("本地目录未写入")
             if "cpa_uploaded" in patch and not patch.get("cpa_uploaded"):
                 cpa_notes.append("CPA 上传失败")
-            if "cpa_uploaded" not in patch and self._cpa_upload_enabled_without_url():
+            if record is None:
+                # 记录都没生成 → 落盘/上传整段没跑。不报的话消息读起来像成了
+                # （终审实测：token_to_cpa_record 抛异常时三条 note 全不触发）。
+                cpa_notes.append("CPA 记录未生成，未落盘/上传")
+            elif "cpa_uploaded" not in patch and self._cpa_upload_skipped_for_no_url():
                 # 开关开着、地址却空：`_maybe_write_cpa` 直接 return，什么都不写。
                 # 不提一句的话，消息和「没配置 CPA」一模一样，用户看不出少填了地址。
                 cpa_notes.append("未填 CPA 地址，未上传")
@@ -1133,36 +1141,39 @@ class GrokPlatform(BasePlatform):
         }
 
     @staticmethod
-    def _cpa_upload_target() -> str:
-        """Grok 自动上传是否启用，以及要传到哪 —— **唯一**的判定处。
+    def _cpa_upload_decision() -> tuple[bool, str]:
+        """Grok 自动上传是否启用、要传到哪 —— **唯一**的判定处。
 
-        返回空串 = 不传（开关关着 / 没填地址）；否则返回 CPA 地址。
+        返回 `(是否启用, 地址)`：
 
-        为什么收敛成一个函数：这个判断原本在 `_maybe_write_cpa` 里一份、
-        `refresh_token` 的消息侧又抄一份，两处一旦走偏，就会出现「实际传了但
-        消息说没配」或反过来（复审 N4）。开关口径仍由
-        `services.external_sync.cpa_upload_enabled_for` 统一（平台键 → 老开关
-        → 填了地址就传）。
+        - `(False, "")`：开关关着（不传，也不必解释）；
+        - `(True, "")`：开关开着但没填地址（要告诉用户「少填了地址」）；
+        - `(True, url)`：正常上传。
+
+        为什么把「启用」和「地址」一起返回：原本它们是两次独立调用
+        （`cpa_upload_enabled_for` 被算两遍），且消息侧无法区分「没开」与
+        「开了没填地址」—— 前者不该提示、后者必须提示（复审 Minor 3）。
+
+        开关口径仍由 `services.external_sync.cpa_upload_enabled_for` 统一
+        （平台键 → 老开关 → 填了地址就传）。
         """
         try:
             from core.config_store import config_store
             from services.external_sync import cpa_upload_enabled_for
 
             if not cpa_upload_enabled_for("grok"):
-                return ""
-            return str(config_store.get("cpa_api_url", "") or "").strip()
+                return (False, "")
+            return (True, str(config_store.get("cpa_api_url", "") or "").strip())
         except Exception:
-            return ""
+            # 判定本身出错 → 当作「不传」，不据此给用户任何提示（宁可沉默，
+            # 也不要因为一次导入失败报出「未填地址」这种误导）。
+            return (False, "")
 
     @classmethod
-    def _cpa_upload_enabled_without_url(cls) -> bool:
-        """「开了自动上传、但没填地址」—— `_maybe_write_cpa` 会静默跳过。"""
-        try:
-            from services.external_sync import cpa_upload_enabled_for
-
-            return cpa_upload_enabled_for("grok") and not cls._cpa_upload_target()
-        except Exception:
-            return False
+    def _cpa_upload_skipped_for_no_url(cls) -> bool:
+        """「开关开着、但没填地址」—— `_maybe_write_cpa` 会静默跳过，值得提示。"""
+        enabled, url = cls._cpa_upload_decision()
+        return enabled and not url
 
     def _maybe_write_cpa(self, account_extra: dict, extra: dict, log) -> None:
         """按配置把 CPA 记录写入本地目录（热加载）**并可选上传到远端 CPA**。
@@ -1196,10 +1207,10 @@ class GrokPlatform(BasePlatform):
                 log(f"[Grok] 写入 CPA 记录失败: {exc}")
 
         try:
-            # 与消息侧共用同一处判定（`_cpa_upload_target`）—— 各写一份就会走偏：
+            # 与消息侧共用同一处判定（`_cpa_upload_decision`）—— 各写一份就会走偏：
             # 一边判「传了」、另一边判「没配」（复审 N4）。
-            api_url = self._cpa_upload_target()
-            if not api_url:
+            enabled, api_url = self._cpa_upload_decision()
+            if not enabled or not api_url:
                 return
             from .upload import upload_to_cpa
 

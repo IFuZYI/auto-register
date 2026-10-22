@@ -253,6 +253,23 @@ class SsoStatusIsNotTrustedForProbingTests(unittest.TestCase):
         r = Response(status_code=200, text="<html>sign-in</html>")
         self.assertFalse(hasattr(r, "url"))
 
+    def test_unreachable_executor_is_unknown(self):
+        """`unknown` 也必须可达 —— 否则「永远 alive」和「健康」无法区分。
+
+        终审 Minor 5：现有实现对任何输入都返回 alive（url 恒空），所以
+        `test_healthy_page_would_be_misread_as_rejected` 在「实现整体坏掉」时也绿。
+        这条用会抛异常的 executor 把第三态钉住。
+        """
+        from unittest.mock import MagicMock
+        from unittest.mock import patch as _patch
+
+        fake = MagicMock()
+        fake.get.side_effect = RuntimeError("network down")
+        fake.get_cookies.return_value = {}
+        with _patch("modules.execution.BrowserExecutorFactory") as factory:
+            factory.return_value.create.return_value = fake
+            self.assertEqual(_platform({})._sso_status("any"), "unknown")
+
     def test_healthy_page_would_be_misread_as_rejected(self):
         """真实页面的 i18n 文案表里就带 sign-in 字样 —— 看响应体会误判。
 
@@ -397,8 +414,13 @@ class BuildCredentialsAreEffectivelyUnavailableTests(unittest.TestCase):
 
         with _patch("platforms.grok.register_browser.exchange_oauth_via_browser",
                     return_value={"access_token": "at"}) as exchange:
-            token_refresh.refresh_via_device_flow("sso-cookie")
+            token_refresh.refresh_via_device_flow("sso-cookie", proxy="socks5://p:1")
         exchange.assert_called_once()
+        # 参数也要断言：cookie 传丢（空串）同样会「调用一次」，但那是「SSO 失效」
+        # 与「链路不通」的分界，只看 call_count 抓不住（终审 Minor 6）。
+        args, kwargs = exchange.call_args
+        self.assertEqual(args[0], "sso-cookie", "SSO cookie 没传给 device flow")
+        self.assertEqual(kwargs.get("proxy"), "socks5://p:1", "代理没传下去")
 
     def test_plugin_description_does_not_call_it_cheaper(self):
         from platforms.grok.plugin import GrokPlatform
@@ -646,6 +668,68 @@ class RefreshMessageMatrixTests(unittest.TestCase):
     def test_bad_env_dir_is_reported(self):
         msg, _ = self._run({}, env={"GROK_CPA_AUTH_DIR": "/proc/nope/x"})
         self.assertIn("本地目录未写入", msg)
+
+
+class UserVisibleStringsHaveNoMarkdownTests(unittest.TestCase):
+    """用户可见的字符串里不能出现 markdown —— 前端不渲染它。
+
+    终审实测：`registration_modes` 的 desc 进 antd `Form.Item tooltip`、
+    `probe` 的 error 进 `<pre>`，两处都不渲染 markdown，用户看到的是字面量
+    `**同一个**`。这是本次改动的主要沟通面，星号是纯噪声。
+    """
+
+    def test_plugin_description_has_no_markdown(self):
+        from platforms.grok.plugin import GrokPlatform
+
+        mode = next(m for m in GrokPlatform.registration_modes
+                    if m["key"] == "grok_oauth_exchange")
+        self.assertNotIn("**", mode["desc"], f"desc 里有 markdown: {mode['desc']!r}")
+
+    def test_probe_error_has_no_markdown(self):
+        plat = _platform({})
+        plat._log_fn = lambda _m: None
+        error = plat.execute_action("probe", _account(access_token=""), {})["error"]
+        self.assertNotIn("**", error, f"报错里有 markdown: {error!r}")
+
+    def test_every_registration_mode_desc_is_plain(self):
+        from platforms.grok.plugin import GrokPlatform
+
+        for mode in GrokPlatform.registration_modes:
+            self.assertNotIn("**", str(mode.get("desc") or ""),
+                             f"{mode['key']} 的 desc 有 markdown")
+            self.assertNotIn("`", str(mode.get("desc") or ""),
+                             f"{mode['key']} 的 desc 有反引号（同样不渲染）")
+
+
+class RefreshMessageCoversRecordBuildFailureTests(unittest.TestCase):
+    """记录没生成时也要提示 —— 否则消息读起来像成了。
+
+    终审 Minor 2：`token_to_cpa_record` 抛异常 + 开关开着 + 地址已填时，
+    三条 note 全不触发（`_cpa_upload_skipped_for_no_url` 为 False，因为地址是有的），
+    于是消息是光秃秃的「新凭证已保存」，而落盘/上传一次都没跑。
+    """
+
+    def test_record_failure_is_reported(self):
+        from unittest.mock import patch as _patch
+
+        from platforms.grok.token_refresh import RefreshResult
+
+        tokens = {"access_token": "a", "refresh_token": "r", "expires_in": 3600}
+        plat = _platform({})
+        plat._log_fn = lambda _m: None
+        cfg = {"cpa_upload_grok_enabled": "1", "cpa_api_url": "http://x", "cpa_api_key": "k"}
+        with _patch("platforms.grok.token_refresh.refresh_via_device_flow",
+                    return_value=RefreshResult(ok=True, tokens=tokens, method="device")), \
+             _patch("core.config_store.config_store.get",
+                    side_effect=lambda k, d="": cfg.get(k, d)), \
+             _patch("platforms.grok.plugin.token_to_cpa_record",
+                    side_effect=RuntimeError("boom")):
+            result = plat.execute_action("refresh_token", _account(), {})
+
+        self.assertTrue(result["ok"])
+        message = str(result["data"].get("message") or "")
+        self.assertIn("未生成", message,
+                      f"记录没生成要在消息里说出来，实际: {message!r}")
 
 
 if __name__ == "__main__":
