@@ -152,10 +152,15 @@ Grok 注册**只有浏览器一条路径**：x.ai 的 Cloudflare 只有 camoufox
 | 注册时就换 | 之后所有任务 | 「注册设置 → 各平台设置 → Grok → 换取 build 凭据」= `grok_oauth_exchange=1` |
 | 事后按号补 | 单个账号 | 账号页「刷新 Token（登录协议）」 |
 
-**注意 CPA 的连带影响**：新注册的账号没有 AT/RT，所以 `cpa_auth_dir` 本地写入与
-`cpa_upload_grok_enabled` 自动上传对它们**不会触发** —— 要先走上面任一条路拿到
-AT/RT，或直接用面板管理页的手动「上传 CPA」。老账号（改动前注册的，extra 里已有
-`access_token`）不受影响。
+**注意 CPA 的连带影响**：新注册的账号没有 AT/RT，所以本地目录写入（环境变量
+`GROK_CPA_AUTH_DIR`，面板里没有这个配置项）与 `cpa_upload_grok_enabled` 自动上传
+对它们**不会触发** —— 要先走上面任一条路拿到 AT/RT，或直接用面板管理页的手动
+「上传 CPA」。老账号（改动前注册的，extra 里已有 `access_token`）不受影响。
+
+> 上表两条路是**同一条链**：`refresh_via_device_flow` 内部调的就是
+> `register_browser.exchange_oauth_via_browser`，与注册末尾那次是同一个 device
+> flow。本仓实测它每次都停在「授权未确认 → token 轮询失败」，所以「按号补」不会
+> 比「注册时就换」更容易成功 —— 目前 build 凭据对新号实际上拿不到。
 
 **没有 AT 时「测活」会明确报缺**，而不是给一个 SSO 探活的结论。原因：唯一现成的
 SSO 判定是「访问 accounts.x.ai 看是否跳登录页」，本仓实测它不可靠 —— 执行器的

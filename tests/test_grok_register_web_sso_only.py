@@ -375,5 +375,128 @@ class OptInPlusIngestTogetherTests(unittest.TestCase):
         self.assertTrue(account.extra.get("grok2api_ingested"))
 
 
+class BuildCredentialsAreEffectivelyUnavailableTests(unittest.TestCase):
+    """两条「补 build」的路其实是同一条，而这条实测从不成功 —— 文案不能吹。
+
+    终审（2026-10-23）发现：`refresh_via_device_flow` 调的就是
+    `register_browser.exchange_oauth_via_browser`（token_refresh.py:226-228），
+    与注册末尾那次失败 100% 的 device flow 是**同一个函数**。而插件描述、
+    测活报错、文档三处都把它当作「更划算的替代」推荐 —— 等于让用户再白等
+    4 分钟走一条本仓日志证明走不通的路。
+    """
+
+    def test_refresh_path_uses_the_same_device_flow(self):
+        """先钉住事实：两条路同源（谁改成不同实现，这里的断言会提醒他改文案）。"""
+        import inspect
+
+        from platforms.grok import token_refresh
+
+        src = inspect.getsource(token_refresh.refresh_via_device_flow)
+        self.assertIn("exchange_oauth_via_browser", src,
+                      "refresh 路径不再复用 device flow 的话，文档里的「同一条路」"
+                      "说法要跟着改")
+
+    def test_plugin_description_does_not_call_it_cheaper(self):
+        from platforms.grok.plugin import GrokPlatform
+
+        mode = next(m for m in GrokPlatform.registration_modes
+                    if m["key"] == "grok_oauth_exchange")
+        desc = mode["desc"]
+        self.assertNotIn("划算", desc,
+                         "两条路同源且实测失败，不能说「按号补更划算」")
+        self.assertIn("同一个", desc,
+                      "要说清两条路是同一个 device flow，否则用户以为换条路就能成")
+
+    def test_probe_error_does_not_promise_it_will_work(self):
+        plat = _platform({})
+        plat._log_fn = lambda _m: None
+        result = plat.execute_action("probe", _account(access_token=""), {})
+        self.assertNotIn("划算", result["error"])
+        self.assertIn("同一个", result["error"],
+                      "报错里要说明它走的是同一条 device flow")
+
+
+class RefreshMessageDoesNotOverclaimTests(unittest.TestCase):
+    """`refresh_token` 落盘/上传失败时，消息不能无条件说「已保存」。
+
+    终审发现：`_maybe_write_cpa` 内部把失败吞成日志，动作却一律返回
+    「Token 已刷新（登录协议），新凭证已保存」—— 用户拿这句话当「成了」的
+    唯一信号，而 CPA 落盘/上传可能一个都没发生。
+    """
+
+    def test_message_flags_cpa_failure(self):
+        from unittest.mock import patch as _patch
+
+        from platforms.grok.token_refresh import RefreshResult
+
+        tokens = {"access_token": "at", "refresh_token": "rt", "expires_in": 3600}
+        plat = _platform({"cpa_auth_dir": "/proc/definitely/not/writable"})
+        plat._log_fn = lambda _m: None
+        with _patch("platforms.grok.token_refresh.refresh_via_device_flow",
+                    return_value=RefreshResult(ok=True, tokens=tokens, method="device")):
+            result = plat.execute_action("refresh_token", _account(), {})
+        self.assertTrue(result["ok"], "凭证确实刷新了，ok 仍应为真")
+        message = str(result["data"].get("message") or "")
+        self.assertIn("CPA", message,
+                      f"CPA 落盘失败要在消息里说出来，实际: {message!r}")
+
+
+class CpaAuthDirIsReachableTests(unittest.TestCase):
+    """`cpa_auth_dir` 必须在文档里给出**真能设**的入口。
+
+    终审发现：文档把它当作一条「写本地目录」的路，但 `cpa_auth_dir` 不在
+    `CONFIG_KEYS`（`PUT /api/config` 会丢进 ignored）、没有 registration_mode、
+    注册页也不提交它 —— 唯一能用的入口是环境变量 `GROK_CPA_AUTH_DIR`。
+    这与上一个提交刚给 `grok_oauth_exchange` 修的问题一模一样。
+    """
+
+    def test_docs_name_the_env_var_not_the_config_key(self):
+        from pathlib import Path
+
+        doc = Path("docs/FEATURES.md").read_text(encoding="utf-8")
+        section = doc.split("注意 CPA 的连带影响", 1)[1].split("没有 AT 时", 1)[0]
+        self.assertIn("GROK_CPA_AUTH_DIR", section,
+                      "文档要给出真能设的入口（环境变量），不能只写配置键名")
+
+
+class StaleActionNameInErrorsTests(unittest.TestCase):
+    """缺 CPA 记录的报错不能把用户支去「重换 OAuth」—— 那个 id 已弃用。
+
+    终审 Minor：`refresh_oauth` 的 label 是「已弃用」（plugin.py 的动作声明），
+    文档也已改称「刷新 Token（登录协议）」。新号默认没有 cpa_record，所以这两条
+    报错是它们最常看到的话。
+    """
+
+    def test_upload_errors_name_the_current_action(self):
+        import inspect
+
+        from platforms.grok import plugin as plugin_mod
+
+        src = inspect.getsource(plugin_mod.GrokPlatform.execute_action)
+        self.assertNotIn("请先重换 OAuth", src,
+                         "refresh_oauth 已弃用，报错应指向「刷新 Token（登录协议）」")
+        self.assertIn("刷新 Token", src)
+
+
+class DeclaredDefaultMatchesRuntimeTests(unittest.TestCase):
+    """界面声明的默认值必须与运行时的兜底一致（否则「界面说 X、运行时做 Y」）。
+
+    终审 Minor：`grok_oauth_exchange` 的 registration_modes 声明 `default: "0"`，
+    运行时兜底在 `_truthy(..., default=False)` —— 此前没有任何断言把它们绑在一起。
+    """
+
+    def test_declared_default_maps_to_runtime_fallback(self):
+        from platforms.grok.plugin import GrokPlatform, _truthy
+
+        mode = next(m for m in GrokPlatform.registration_modes
+                    if m["key"] == "grok_oauth_exchange")
+        self.assertEqual(mode["default"], "0")
+        # 声明 "0" ⇔ 运行时 default=False
+        self.assertFalse(_truthy(mode["default"], default=False),
+                         "声明值是「关」，运行时兜底却当成「开」")
+        self.assertFalse(_truthy(None, default=False),
+                         "缺省时必须与声明一致：不换")
+
+
 if __name__ == "__main__":
     unittest.main()

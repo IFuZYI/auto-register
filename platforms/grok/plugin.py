@@ -130,9 +130,11 @@ class GrokPlatform(BasePlatform):
             "default": "0",
             "desc": (
                 "默认关：注册只产 Web SSO（上传 grok2api 用）。打开后注册末尾会走"
-                "浏览器 OAuth device flow 换 AT/RT（CPA / Build 凭据），实测每次都"
-                "要白等约 4 分钟且经常授权未确认 —— 需要时用账号页的"
-                "「刷新 Token（登录协议）」按号补更划算"
+                "浏览器 OAuth device flow 换 AT/RT（CPA / Build 凭据），实测每次要"
+                "白等约 4 分钟且经常停在「授权未确认」。"
+                "注意：账号页的「刷新 Token（登录协议）」是**同一个** device flow"
+                "（同一个失败面），换条路不会更容易成功 —— 要 build 凭据前先想清楚"
+                "这条链目前基本不通"
             ),
             "options": [
                 {"value": "0", "label": "不换（默认，只产 Web SSO）"},
@@ -460,7 +462,9 @@ class GrokPlatform(BasePlatform):
                     "ok": False,
                     "error": (
                         "账号没有 access_token（注册默认不产 build 凭据）—— "
-                        "先执行「刷新 Token（登录协议）」拿到 AT/RT 再测活"
+                        "要测活需先拿到 AT/RT，但「刷新 Token（登录协议）」走的是"
+                        "与注册末尾**同一个** device flow（实测常停在「授权未确认」），"
+                        "不一定能拿到"
                     ),
                 }
             code, summary = probe_token(
@@ -619,10 +623,21 @@ class GrokPlatform(BasePlatform):
             except Exception as exc:  # noqa: BLE001
                 if log_fn:
                     log_fn(f"[Grok] 生成 CPA 记录失败: {type(exc).__name__}")
+            # 消息不能说满：`_maybe_write_cpa` 把落盘/上传失败吞成日志（它自己
+            # 不该让刷新失败），所以「已保存」只在**确实**写了/传了时才成立。
+            # 用户拿这句话当「成了」的唯一信号（终审发现）。
+            cpa_notes: list[str] = []
+            if "cpa_auth_path" not in patch and settings.get("cpa_auth_dir"):
+                cpa_notes.append("本地目录未写入")
+            if "cpa_uploaded" in patch and not patch.get("cpa_uploaded"):
+                cpa_notes.append("CPA 上传失败")
+            message = "Token 已刷新（登录协议），新凭证已保存"
+            if cpa_notes:
+                message += f"；CPA 侧：{'、'.join(cpa_notes)}（详见任务日志）"
             return {
                 "ok": True,
                 "data": {
-                    "message": "Token 已刷新（登录协议），新凭证已保存",
+                    "message": message,
                     "method": result.method,
                     "expires_in": tokens.get("expires_in"),
                 },
@@ -661,7 +676,7 @@ class GrokPlatform(BasePlatform):
         if action_id == "upload_cpa":
             record = extra.get("cpa_record")
             if not record:
-                return {"ok": False, "error": "账号没有 CPA 记录，请先重换 OAuth"}
+                return {"ok": False, "error": "账号没有 CPA 记录，请先执行「刷新 Token（登录协议）」"}
             from .upload import upload_to_cpa
 
             # 地址/口令留空时回落到全局配置（「全局配置 → 面板配置 → CPA 面板」）。
@@ -711,7 +726,7 @@ class GrokPlatform(BasePlatform):
         if action_id == "upload_sub2api":
             record = extra.get("cpa_record")
             if not record:
-                return {"ok": False, "error": "账号没有 CPA 记录，请先重换 OAuth"}
+                return {"ok": False, "error": "账号没有 CPA 记录，请先执行「刷新 Token（登录协议）」"}
             from .upload import upload_to_sub2api
 
             # 同 upload_cpa：留空回落到全局配置（面板页批量动作不带 params）
