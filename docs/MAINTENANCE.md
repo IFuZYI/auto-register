@@ -32,6 +32,10 @@
 cd /home/Register && git pull
 .venv/bin/pip install -r requirements.txt              # 依赖有变动时
 cd frontend && npm install && npm run build && cd ..   # 前端有变动时（产物进 static/）
+# 产物是**按路由拆分**的多个 chunk（不是单个大包）：`static/assets/` 下会有
+# 十几个 `页面-<hash>.js`，这是懒加载的正常结果，别手动合并回去。
+# 服务端对 `assets/*` 做 gzip + `immutable` 长缓存（`main.py` 的 `_GzipStatic`），
+# `index.html` 则 `no-cache` —— 发版后用户能立刻拿到新资源名。
 # 重启前先确认没有正在跑的注册任务（重启会中断它；设了登录密码时 /api/tasks
 # 需要 Authorization 头，下面的命令会把这种情况明确报出来；curl 无输出=服务没跑）：
 curl -s http://127.0.0.1:8000/api/tasks | python3 -c "import json,sys; d=json.load(sys.stdin); sys.exit('被鉴权拒绝（设了登录密码时需带 Authorization 头）') if isinstance(d,dict) and d.get('detail') else None; ts=d if isinstance(d,list) else d.get('tasks') or []; print('running:', [t['id'] for t in ts if str(t.get('status')) in ('running','pending')])"

@@ -179,10 +179,27 @@ def _get_persisted_task(task_id: str) -> Optional[dict]:
         return _task_run_to_snapshot(row)
 
 
-def _list_persisted_tasks() -> list[dict]:
+#: 这些状态的任务「还在跑」，它们的日志要随列表下发（实时日志面板依赖）。
+_LIVE_STATUSES = ("pending", "running")
+
+
+def _list_persisted_tasks(*, include_logs: bool = False) -> list[dict]:
+    """列出所有任务快照。
+
+    `include_logs=False`（默认）时，**已结束**任务的日志不下发 —— 实测
+    `/api/tasks` 一次返回 253 个任务、415 KB，其中 52% 是历史日志，而前端
+    每 2.5 秒轮询一次，主线程被拖到帧间隔 4–8 秒（正常 16ms）。
+    历史任务的日志点开单条时再取（`GET /api/tasks/{id}` 仍带全量）。
+
+    仍在跑/等待的任务**保留**日志：那是实时面板要用的，裁掉就没得看了。
+    """
     with Session(current_engine()) as s:
         rows = s.exec(select(TaskRunModel)).all()
     snapshots = [_task_run_to_snapshot(row) for row in rows]
+    if not include_logs:
+        for snap in snapshots:
+            if str(snap.get("status") or "") not in _LIVE_STATUSES:
+                snap["logs"] = []
     snapshots.sort(
         key=lambda item: (
             {"running": 0, "pending": 1, "done": 2, "failed": 3, "stopped": 4}.get(

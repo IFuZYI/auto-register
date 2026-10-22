@@ -260,8 +260,90 @@ def solver_restart():
 
 
 _static_dir = os.path.join(os.path.dirname(__file__), "static")
+
+
+class _GzipStatic(StaticFiles):
+    """给静态资源加 gzip + 长缓存。
+
+    **为什么不用 `GZipMiddleware`**：那个中间件按响应体大小决定是否压缩，
+    对 1.5 MB 的包确实会压，但它压完仍标 `content-length` 为原长（Starlette
+    的实现会丢掉长度），而且不区分「带哈希的 assets」与「入口 HTML」——
+    后者绝不能长缓存（发版后用户会一直拿到旧资源名）。
+    这里直接按请求的 `Accept-Encoding` 决定，并给 `assets/*` 打长缓存：
+    文件名带内容哈希，内容变了 URL 就变，可以放心 `immutable`。
+
+    **压缩只在启动时做一次**（`_precompress`），不在每个请求上压 —— 1.5 MB
+    的 gzip 要几十毫秒，每次请求都算等于把 CPU 白送出去。
+    """
+
+    #: 小于这个尺寸不值得压（压了反而多一次解码）。
+    MIN_SIZE = 1024
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._gzip_cache: dict[str, bytes] = {}
+        self._precompress()
+
+    def _precompress(self) -> None:
+        import gzip
+
+        root = str(self.directory)
+        for name in os.listdir(root):
+            path = os.path.join(root, name)
+            if not os.path.isfile(path) or os.path.getsize(path) < self.MIN_SIZE:
+                continue
+            try:
+                with open(path, "rb") as fh:
+                    self._gzip_cache[name] = gzip.compress(fh.read(), 9)
+            except OSError:
+                continue
+
+    async def get_response(self, path: str, scope):  # noqa: D102 - Starlette 钩子
+        from starlette.responses import Response
+
+        resp = await super().get_response(path, scope)
+        if resp.status_code != 200:
+            return resp
+
+        # 带内容哈希 → 可以永久缓存。
+        resp.headers["cache-control"] = "public, max-age=31536000, immutable"
+
+        name = os.path.basename(path)
+        compressed = self._gzip_cache.get(name)
+        if compressed is None:
+            # 小文件或读不到（目录/不存在）—— 不压，保持原响应。
+            return resp
+
+        accept = ""
+        for key, value in scope.get("headers") or []:
+            if key == b"accept-encoding":
+                accept = value.decode("latin-1")
+                break
+        if "gzip" not in accept.lower():
+            return resp
+
+        # 直接用压缩体构造响应：`FileResponse` 是流式的，拿不到 `body`，
+        # 在它上面改头改不了实际传输内容（实测：加了 content-encoding 但
+        # content-length 仍是原长，客户端会解析失败）。
+        return Response(
+            content=compressed,
+            status_code=200,
+            headers={
+                "cache-control": "public, max-age=31536000, immutable",
+                "content-encoding": "gzip",
+                "vary": "Accept-Encoding",
+                "etag": f'W/"{name}-gzip"',
+            },
+            media_type=resp.media_type,
+        )
+
+
 if os.path.isdir(_static_dir):
-    app.mount("/assets", StaticFiles(directory=os.path.join(_static_dir, "assets")), name="assets")
+    app.mount(
+        "/assets",
+        _GzipStatic(directory=os.path.join(_static_dir, "assets")),
+        name="assets",
+    )
 
     @app.get("/{full_path:path}", include_in_schema=False)
     def spa_fallback(full_path: str):
@@ -275,7 +357,12 @@ if os.path.isdir(_static_dir):
         """
         if full_path == "api" or full_path.startswith("api/"):
             return JSONResponse({"detail": "Not Found"}, status_code=404)
-        return FileResponse(os.path.join(_static_dir, "index.html"))
+        # 入口 HTML **不能**长缓存：它引用的资源名带哈希，缓存住就等于把用户
+        # 钉在旧版本上（发版后一直白屏/报错）。`no-cache` = 每次校验 ETag。
+        return FileResponse(
+            os.path.join(_static_dir, "index.html"),
+            headers={"cache-control": "no-cache"},
+        )
 
 
 if __name__ == "__main__":

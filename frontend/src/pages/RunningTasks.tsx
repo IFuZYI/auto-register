@@ -93,6 +93,10 @@ export default function RunningTasks() {
   const [logTaskId, setLogTaskId] = useState<string | null>(null)
   const [now, setNow] = useState(() => Date.now() / 1000)
   const [cleaning, setCleaning] = useState(false)
+  // 已完成任务的渲染上限：实测 253 张卡片会生成 12830 个 DOM 节点，
+  // 首屏主线程长任务达 6.3 秒（正常帧间隔 16ms）。默认只渲染最近 20 条，
+  // 其余按需展开 —— 与日志一样，历史数据不该在首屏全量渲染。
+  const [showAllFinished, setShowAllFinished] = useState(false)
   const { modal, message: msg } = App.useApp()
 
   const load = useCallback(async () => {
@@ -132,6 +136,10 @@ export default function RunningTasks() {
   const isActive = (t: TaskSnapshot) => t.status === 'running' || t.status === 'pending'
   const activeTasks = tasks.filter(isActive)
   const finishedTasks = tasks.filter((t) => !isActive(t))
+  const FINISHED_PAGE_SIZE = 20
+  const visibleFinished = showAllFinished
+    ? finishedTasks
+    : finishedTasks.slice(0, FINISHED_PAGE_SIZE)
   const logTask = logTaskId ? tasks.find((task) => task.id === logTaskId) : null
 
   const handleDelete = async (taskId: string) => {
@@ -352,7 +360,17 @@ export default function RunningTasks() {
           >
             已完成 ({finishedTasks.length})
           </Text>
-          {finishedTasks.map(renderTask)}
+          {visibleFinished.map(renderTask)}
+          {finishedTasks.length > visibleFinished.length && (
+            <Button
+              block
+              type="dashed"
+              style={{ marginTop: 8 }}
+              onClick={() => setShowAllFinished(true)}
+            >
+              展开其余 {finishedTasks.length - visibleFinished.length} 条已完成任务
+            </Button>
+          )}
         </div>
       )}
 

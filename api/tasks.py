@@ -635,10 +635,16 @@ def get_task(task_id: str):
 
 
 @router.get("")
-def list_tasks():
+def list_tasks(include_logs: bool = False):
+    """任务列表。
+
+    **默认不返回已结束任务的日志**（`?include_logs=1` 可要全量）：列表被前端
+    每 2.5 秒轮询一次，历史日志占了一半以上负载，且会让页面卡顿。历史任务的
+    日志走 `GET /tasks/{id}`。
+    """
     _finalize_orphan_tasks()
     # 以 DB 为主返回，避免进程重启导致列表丢失
-    return _list_persisted_tasks()
+    return _list_persisted_tasks(include_logs=include_logs)
 
 
 @router.delete("/{task_id}")

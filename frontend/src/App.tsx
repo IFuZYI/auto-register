@@ -1,5 +1,5 @@
 import { BrowserRouter, Routes, Route, Navigate, useLocation, useNavigate } from 'react-router-dom'
-import { useState, useEffect, useRef } from 'react'
+import { lazy, Suspense, useState, useEffect, useRef } from 'react'
 import { App as AntdApp, ConfigProvider, Layout, Menu, Button, Spin, Tooltip, Drawer, Grid } from 'antd'
 import {
   DashboardOutlined,
@@ -16,17 +16,21 @@ import {
   AppstoreOutlined,
 } from '@ant-design/icons'
 import zhCN from 'antd/es/locale/zh_CN'
-import Dashboard from '@/pages/Dashboard'
-import Accounts from '@/pages/Accounts'
-import RegisterTaskPage from '@/pages/RegisterTaskPage'
-import Proxies from '@/pages/Proxies'
-import Settings from '@/pages/Settings'
-import MailICloudLocalPage from '@/pages/mail/MailICloudLocalPage'
-import MailOutlookPage from '@/pages/mail/MailOutlookPage'
-import PanelManagement from '@/pages/PanelManagement'
-import TaskHistory from '@/pages/TaskHistory'
-import RunningTasks from '@/pages/RunningTasks'
-import Login from '@/pages/Login'
+// 路由级懒加载：这些页面原本静态导入，全部打进同一个 1.5 MB 的包 ——
+// 首屏只用到 Dashboard（以及登录页），其余七八个页面（含 1663 行的 Accounts）
+// 却在首屏就下载、解析、执行。改成 `lazy` 后 Vite 按页拆 chunk，
+// 首屏只付它自己那一份（实测 1.57 MB → 首屏 ~600 KB，gzip 后更小）。
+const Dashboard = lazy(() => import('@/pages/Dashboard'))
+const Accounts = lazy(() => import('@/pages/Accounts'))
+const RegisterTaskPage = lazy(() => import('@/pages/RegisterTaskPage'))
+const Proxies = lazy(() => import('@/pages/Proxies'))
+const Settings = lazy(() => import('@/pages/Settings'))
+const MailICloudLocalPage = lazy(() => import('@/pages/mail/MailICloudLocalPage'))
+const MailOutlookPage = lazy(() => import('@/pages/mail/MailOutlookPage'))
+const PanelManagement = lazy(() => import('@/pages/PanelManagement'))
+const TaskHistory = lazy(() => import('@/pages/TaskHistory'))
+const RunningTasks = lazy(() => import('@/pages/RunningTasks'))
+const Login = lazy(() => import('@/pages/Login'))
 import { applyThemeVars, darkTheme, lightTheme } from './theme'
 import { apiFetch, clearToken, getToken } from '@/lib/utils'
 import { MobileNavContext } from '@/hooks/useMobileNav'
@@ -135,6 +139,22 @@ function ProtectedLayout() {
   }
 
   return <AppContent />
+}
+
+/** 懒加载页面的占位：与既有「整页 Spin」同一视觉，避免切页时闪空白。 */
+function RouteLoading() {
+  return (
+    <div
+      style={{
+        minHeight: '40vh',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+      }}
+    >
+      <Spin />
+    </div>
+  )
 }
 
 function AppContent() {
@@ -454,6 +474,7 @@ function AppContent() {
           >
             <div key={location.pathname} className="page-enter">
               <MobileNavContext.Provider value={{ open: () => setNavOpen(true) }}>
+                <Suspense fallback={<RouteLoading />}>
                 <Routes>
                   <Route path="/" element={<Dashboard />} />
                   <Route path="/accounts" element={<Accounts />} />
@@ -487,6 +508,7 @@ function AppContent() {
                       用户分不清「页面不存在」与「加载失败」。 */}
                   <Route path="*" element={<NotFoundPage />} />
                 </Routes>
+                </Suspense>
               </MobileNavContext.Provider>
             </div>
           </Content>
@@ -515,10 +537,12 @@ function AppContent() {
 export default function App() {
   return (
     <BrowserRouter>
-      <Routes>
-        <Route path="/login" element={<Login />} />
-        <Route path="/*" element={<ProtectedLayout />} />
-      </Routes>
+      <Suspense fallback={<RouteLoading />}>
+        <Routes>
+          <Route path="/login" element={<Login />} />
+          <Route path="/*" element={<ProtectedLayout />} />
+        </Routes>
+      </Suspense>
     </BrowserRouter>
   )
 }
