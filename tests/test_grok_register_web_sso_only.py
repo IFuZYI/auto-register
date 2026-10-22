@@ -386,15 +386,19 @@ class BuildCredentialsAreEffectivelyUnavailableTests(unittest.TestCase):
     """
 
     def test_refresh_path_uses_the_same_device_flow(self):
-        """先钉住事实：两条路同源（谁改成不同实现，这里的断言会提醒他改文案）。"""
-        import inspect
+        """先钉住事实：两条路同源（改成行为测试 —— 真跑一遍看它调了谁）。
+
+        用 mock 观察实际调用，而不是扫源码：源码扫描对「接线被改成死分支」
+        无感（本仓 `test_status_semantics.py` 的既定口径）。
+        """
+        from unittest.mock import patch as _patch
 
         from platforms.grok import token_refresh
 
-        src = inspect.getsource(token_refresh.refresh_via_device_flow)
-        self.assertIn("exchange_oauth_via_browser", src,
-                      "refresh 路径不再复用 device flow 的话，文档里的「同一条路」"
-                      "说法要跟着改")
+        with _patch("platforms.grok.register_browser.exchange_oauth_via_browser",
+                    return_value={"access_token": "at"}) as exchange:
+            token_refresh.refresh_via_device_flow("sso-cookie")
+        exchange.assert_called_once()
 
     def test_plugin_description_does_not_call_it_cheaper(self):
         from platforms.grok.plugin import GrokPlatform
@@ -468,14 +472,19 @@ class StaleActionNameInErrorsTests(unittest.TestCase):
     """
 
     def test_upload_errors_name_the_current_action(self):
-        import inspect
+        """真跑一次动作看报错文案 —— 不扫源码。"""
+        plat = _platform({})
+        plat._log_fn = lambda _m: None
+        account = _account(access_token="at", refresh_token="rt")  # 无 cpa_record
 
-        from platforms.grok import plugin as plugin_mod
-
-        src = inspect.getsource(plugin_mod.GrokPlatform.execute_action)
-        self.assertNotIn("请先重换 OAuth", src,
-                         "refresh_oauth 已弃用，报错应指向「刷新 Token（登录协议）」")
-        self.assertIn("刷新 Token", src)
+        for action in ("upload_cpa", "upload_sub2api"):
+            result = plat.execute_action(action, account, {})
+            self.assertFalse(result["ok"])
+            error = str(result["error"])
+            self.assertIn("刷新 Token", error,
+                          f"{action} 的报错应指向当前动作名，实际: {error!r}")
+            self.assertNotIn("重换 OAuth", error,
+                             f"{action} 的报错仍在指向已弃用的 refresh_oauth")
 
 
 class DeclaredDefaultMatchesRuntimeTests(unittest.TestCase):
@@ -552,6 +561,35 @@ class RefreshMessageCoversUnconfiguredUploadTests(unittest.TestCase):
         message = str(result["data"].get("message") or "")
         self.assertIn("CPA", message,
                       f"开了自动上传却没地址，消息要提一句，实际: {message!r}")
+
+
+class RefreshMessageCoversEnvAuthDirTests(unittest.TestCase):
+    """`GROK_CPA_AUTH_DIR` 写入失败也要在消息里说出来。
+
+    回归（终审 fix wave 复审 N1）：`_maybe_write_cpa` 认配置键**和**环境变量
+    （`extra.get("cpa_auth_dir") or os.getenv("GROK_CPA_AUTH_DIR")`），而消息侧
+    只看了配置键 —— 用环境变量（文档推荐的那条路）且写入失败时，消息仍是
+    光秃秃的「新凭证已保存」。
+    """
+
+    def test_env_auth_dir_failure_is_reported(self):
+        import os
+        from unittest.mock import patch as _patch
+
+        from platforms.grok.token_refresh import RefreshResult
+
+        tokens = {"access_token": "at", "refresh_token": "rt", "expires_in": 3600}
+        plat = _platform({})
+        plat._log_fn = lambda _m: None
+        with _patch.dict(os.environ, {"GROK_CPA_AUTH_DIR": "/proc/definitely/not/writable"}), \
+             _patch("platforms.grok.token_refresh.refresh_via_device_flow",
+                    return_value=RefreshResult(ok=True, tokens=tokens, method="device")):
+            result = plat.execute_action("refresh_token", _account(), {})
+
+        self.assertTrue(result["ok"])
+        message = str(result["data"].get("message") or "")
+        self.assertIn("CPA", message,
+                      f"环境变量那条路写入失败也要报出来，实际: {message!r}")
 
 
 if __name__ == "__main__":

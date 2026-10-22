@@ -609,6 +609,11 @@ class GrokPlatform(BasePlatform):
             settings = {**extra, **dict(self.config.extra or {})}
             try:
                 record = token_to_cpa_record(tokens, email=account.email, sso=sso)
+            except Exception as exc:  # noqa: BLE001 - 记录生成失败不该毁刷新结果
+                record = None
+                if log_fn:
+                    log_fn(f"[Grok] 生成 CPA 记录失败: {type(exc).__name__}")
+            if record is not None:
                 patch["cpa_record"] = record
                 patch["cpa_auth_filename"] = cpa_auth_filename(record)
                 # 落盘/上传走与注册 opt-in 分支**同一个**收尾函数（`_maybe_write_cpa`）。
@@ -621,19 +626,26 @@ class GrokPlatform(BasePlatform):
                 # 设置来源见上方：`cpa_auth_dir` 是**任务/全局**设置，不在账号
                 # extra 上（注册路径传的就是配置 extra）。账号 extra 只在配置没给
                 # 时兜底 —— 只传账号 extra 的话这个开关永远读空。
-                self._maybe_write_cpa(patch, settings, log_fn or (lambda _m: None))
-            except Exception as exc:  # noqa: BLE001
-                if log_fn:
-                    log_fn(f"[Grok] 生成 CPA 记录失败: {type(exc).__name__}")
+                try:
+                    self._maybe_write_cpa(patch, settings, log_fn or (lambda _m: None))
+                except Exception as exc:  # noqa: BLE001 - 落盘/上传失败不该毁刷新结果
+                    if log_fn:
+                        log_fn(f"[Grok] CPA 落盘/上传异常: {type(exc).__name__}: {str(exc)[:120]}")
             # 消息不能说满：`_maybe_write_cpa` 把落盘/上传失败吞成日志（它自己
             # 不该让刷新失败），所以「已保存」只在**确实**写了/传了时才成立。
             # 用户拿这句话当「成了」的唯一信号（终审发现）。
             cpa_notes: list[str] = []
-            if "cpa_auth_path" not in patch and settings.get("cpa_auth_dir"):
+            # 与 `_maybe_write_cpa` 读**同一处**来源：它认配置键，也认环境变量
+            # `GROK_CPA_AUTH_DIR`（后者是文档推荐的入口）。只看配置键的话，
+            # 用环境变量且写入失败时消息仍是光秃秃的「已保存」（复审 N1 实测）。
+            wanted_dir = str(
+                settings.get("cpa_auth_dir") or os.getenv("GROK_CPA_AUTH_DIR", "")
+            ).strip()
+            if "cpa_auth_path" not in patch and wanted_dir:
                 cpa_notes.append("本地目录未写入")
             if "cpa_uploaded" in patch and not patch.get("cpa_uploaded"):
                 cpa_notes.append("CPA 上传失败")
-            if "cpa_uploaded" not in patch and self._cpa_upload_wanted_but_unconfigured():
+            if "cpa_uploaded" not in patch and self._cpa_upload_enabled_without_url():
                 # 开关开着、地址却空：`_maybe_write_cpa` 直接 return，什么都不写。
                 # 不提一句的话，消息和「没配置 CPA」一模一样，用户看不出少填了地址。
                 cpa_notes.append("未填 CPA 地址，未上传")
@@ -1121,19 +1133,34 @@ class GrokPlatform(BasePlatform):
         }
 
     @staticmethod
-    def _cpa_upload_wanted_but_unconfigured() -> bool:
-        """「开了 Grok 自动上传、但没填 CPA 地址」—— `_maybe_write_cpa` 会静默跳过。
+    def _cpa_upload_target() -> str:
+        """Grok 自动上传是否启用，以及要传到哪 —— **唯一**的判定处。
 
-        抽成方法是为了让 `refresh_token` 的消息能说清「少填了地址」，
-        而不是把这段判断抄进动作分支。
+        返回空串 = 不传（开关关着 / 没填地址）；否则返回 CPA 地址。
+
+        为什么收敛成一个函数：这个判断原本在 `_maybe_write_cpa` 里一份、
+        `refresh_token` 的消息侧又抄一份，两处一旦走偏，就会出现「实际传了但
+        消息说没配」或反过来（复审 N4）。开关口径仍由
+        `services.external_sync.cpa_upload_enabled_for` 统一（平台键 → 老开关
+        → 填了地址就传）。
         """
         try:
             from core.config_store import config_store
             from services.external_sync import cpa_upload_enabled_for
 
             if not cpa_upload_enabled_for("grok"):
-                return False
-            return not str(config_store.get("cpa_api_url", "") or "").strip()
+                return ""
+            return str(config_store.get("cpa_api_url", "") or "").strip()
+        except Exception:
+            return ""
+
+    @classmethod
+    def _cpa_upload_enabled_without_url(cls) -> bool:
+        """「开了自动上传、但没填地址」—— `_maybe_write_cpa` 会静默跳过。"""
+        try:
+            from services.external_sync import cpa_upload_enabled_for
+
+            return cpa_upload_enabled_for("grok") and not cls._cpa_upload_target()
         except Exception:
             return False
 
@@ -1169,16 +1196,14 @@ class GrokPlatform(BasePlatform):
                 log(f"[Grok] 写入 CPA 记录失败: {exc}")
 
         try:
-            from services.external_sync import cpa_upload_enabled_for
-
-            if not cpa_upload_enabled_for("grok"):
-                return
-            from core.config_store import config_store
-
-            api_url = str(config_store.get("cpa_api_url", "") or "").strip()
+            # 与消息侧共用同一处判定（`_cpa_upload_target`）—— 各写一份就会走偏：
+            # 一边判「传了」、另一边判「没配」（复审 N4）。
+            api_url = self._cpa_upload_target()
             if not api_url:
                 return
             from .upload import upload_to_cpa
+
+            from core.config_store import config_store
 
             ok, msg = upload_to_cpa(
                 record,

@@ -154,13 +154,22 @@ Grok 注册**只有浏览器一条路径**：x.ai 的 Cloudflare 只有 camoufox
 
 **注意 CPA 的连带影响**：新注册的账号没有 AT/RT，所以本地目录写入（环境变量
 `GROK_CPA_AUTH_DIR`，面板里没有这个配置项）与 `cpa_upload_grok_enabled` 自动上传
-对它们**不会触发** —— 要先走上面任一条路拿到 AT/RT，或直接用面板管理页的手动
-「上传 CPA」。老账号（改动前注册的，extra 里已有 `access_token`）不受影响。
+对它们**不会触发**。老账号（改动前注册的，extra 里已有 `access_token`）不受影响。
 
 > 上表两条路是**同一条链**：`refresh_via_device_flow` 内部调的就是
 > `register_browser.exchange_oauth_via_browser`，与注册末尾那次是同一个 device
 > flow。本仓实测它每次都停在「授权未确认 → token 轮询失败」，所以「按号补」不会
-> 比「注册时就换」更容易成功 —— 目前 build 凭据对新号实际上拿不到。
+> 比「注册时就换」更容易成功 —— 对新号来说，build 凭据实际上拿不到。
+
+**那新号怎么进 CPA？** 三条可行路径（都不依赖 device flow）：
+
+1. 走 grok2api：注册时已经把 Web SSO 传上去了，在 grok2api 里用它的转换功能
+   自己转成 Build / Console（用户口径就是「手动转换」）；
+2. 面板管理页的手动「上传 CPA」—— 但它同样需要账号上已有 `cpa_record`
+   （没有就报「请先执行刷新 Token」），所以只对老号有效；
+3. 等 device flow 修好之后再用上面两条路补。
+
+换句话说：**新号目前进 CPA 的唯一现实路径是第 1 条**（grok2api 侧转换）。
 
 **没有 AT 时「测活」会明确报缺**，而不是给一个 SSO 探活的结论。原因：唯一现成的
 SSO 判定是「访问 accounts.x.ai 看是否跳登录页」，本仓实测它不可靠 —— 执行器的
