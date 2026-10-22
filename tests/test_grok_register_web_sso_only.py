@@ -592,5 +592,61 @@ class RefreshMessageCoversEnvAuthDirTests(unittest.TestCase):
                       f"环境变量那条路写入失败也要报出来，实际: {message!r}")
 
 
+class RefreshMessageMatrixTests(unittest.TestCase):
+    """六种配置组合下，消息与真实行为必须一致（不误报、不漏报）。
+
+    这是 `_cpa_upload_target()` 收敛（复审 N4）之后的护栏：消息侧与
+    `_maybe_write_cpa` 共用同一处判定，任何一边改动都会让这张表里某行红。
+    """
+
+    _TOKENS = {"access_token": "a", "refresh_token": "r", "expires_in": 3600}
+
+    def _run(self, cfg, *, extra=None, env=None, upload_ok=(True, "ok")):
+        import os
+        from unittest.mock import patch as _patch
+
+        from platforms.grok.token_refresh import RefreshResult
+
+        plat = _platform(dict(extra or {}))
+        plat._log_fn = lambda _m: None
+        with _patch.dict(os.environ, dict(env or {}), clear=False), \
+             _patch("platforms.grok.token_refresh.refresh_via_device_flow",
+                    return_value=RefreshResult(ok=True, tokens=self._TOKENS, method="device")), \
+             _patch("core.config_store.config_store.get",
+                    side_effect=lambda k, d="": cfg.get(k, d)), \
+             _patch("platforms.grok.upload.upload_to_cpa", return_value=upload_ok) as up:
+            result = plat.execute_action("refresh_token", _account(), {})
+        return result["data"]["message"], up.call_count
+
+    _ON = {"cpa_upload_grok_enabled": "1", "cpa_api_url": "http://x", "cpa_api_key": "k"}
+
+    def test_nothing_configured_says_nothing_extra(self):
+        msg, calls = self._run({})
+        self.assertEqual(calls, 0)
+        self.assertNotIn("CPA", msg, f"什么都没配时不该提 CPA: {msg!r}")
+
+    def test_upload_success_is_quiet(self):
+        msg, calls = self._run(self._ON)
+        self.assertEqual(calls, 1)
+        self.assertNotIn("CPA", msg, f"上传成功时不该报错: {msg!r}")
+
+    def test_upload_failure_is_reported(self):
+        msg, _ = self._run(self._ON, upload_ok=(False, "boom"))
+        self.assertIn("CPA 上传失败", msg)
+
+    def test_enabled_without_url_is_reported(self):
+        msg, calls = self._run({"cpa_upload_grok_enabled": "1"})
+        self.assertEqual(calls, 0)
+        self.assertIn("未填 CPA 地址", msg)
+
+    def test_bad_config_dir_is_reported(self):
+        msg, _ = self._run({}, extra={"cpa_auth_dir": "/proc/nope/x"})
+        self.assertIn("本地目录未写入", msg)
+
+    def test_bad_env_dir_is_reported(self):
+        msg, _ = self._run({}, env={"GROK_CPA_AUTH_DIR": "/proc/nope/x"})
+        self.assertIn("本地目录未写入", msg)
+
+
 if __name__ == "__main__":
     unittest.main()
