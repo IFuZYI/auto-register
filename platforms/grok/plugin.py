@@ -604,6 +604,9 @@ class GrokPlatform(BasePlatform):
                 "probe_summary": "登录协议刷新成功",
             }
             log_fn = getattr(self, "_log_fn", None)
+            # 在 try **之前**算好：下面 `cpa_notes` 在 try 之外读它，
+            # 若 `token_to_cpa_record` 先抛就会 UnboundLocalError（自查踩过）。
+            settings = {**extra, **dict(self.config.extra or {})}
             try:
                 record = token_to_cpa_record(tokens, email=account.email, sso=sso)
                 patch["cpa_record"] = record
@@ -615,10 +618,9 @@ class GrokPlatform(BasePlatform):
                 # （独立评审发现）。写回 patch 的 `cpa_auth_path` / `cpa_uploaded`
                 # 由调用方合并进账号 extra，与注册路径的落库字段一致。
                 #
-                # 设置来源：`cpa_auth_dir` 是**任务/全局**设置，不在账号 extra 上
-                # （注册路径传的就是配置 extra）。这里把配置 extra 合进来，账号
-                # extra 只在配置没给时兜底 —— 只传账号 extra 的话这个开关永远读空。
-                settings = {**extra, **dict(self.config.extra or {})}
+                # 设置来源见上方：`cpa_auth_dir` 是**任务/全局**设置，不在账号
+                # extra 上（注册路径传的就是配置 extra）。账号 extra 只在配置没给
+                # 时兜底 —— 只传账号 extra 的话这个开关永远读空。
                 self._maybe_write_cpa(patch, settings, log_fn or (lambda _m: None))
             except Exception as exc:  # noqa: BLE001
                 if log_fn:
@@ -631,6 +633,10 @@ class GrokPlatform(BasePlatform):
                 cpa_notes.append("本地目录未写入")
             if "cpa_uploaded" in patch and not patch.get("cpa_uploaded"):
                 cpa_notes.append("CPA 上传失败")
+            if "cpa_uploaded" not in patch and self._cpa_upload_wanted_but_unconfigured():
+                # 开关开着、地址却空：`_maybe_write_cpa` 直接 return，什么都不写。
+                # 不提一句的话，消息和「没配置 CPA」一模一样，用户看不出少填了地址。
+                cpa_notes.append("未填 CPA 地址，未上传")
             message = "Token 已刷新（登录协议），新凭证已保存"
             if cpa_notes:
                 message += f"；CPA 侧：{'、'.join(cpa_notes)}（详见任务日志）"
@@ -1113,6 +1119,23 @@ class GrokPlatform(BasePlatform):
                 "sync_statuses": {"grok2api": sync_state},
             },
         }
+
+    @staticmethod
+    def _cpa_upload_wanted_but_unconfigured() -> bool:
+        """「开了 Grok 自动上传、但没填 CPA 地址」—— `_maybe_write_cpa` 会静默跳过。
+
+        抽成方法是为了让 `refresh_token` 的消息能说清「少填了地址」，
+        而不是把这段判断抄进动作分支。
+        """
+        try:
+            from core.config_store import config_store
+            from services.external_sync import cpa_upload_enabled_for
+
+            if not cpa_upload_enabled_for("grok"):
+                return False
+            return not str(config_store.get("cpa_api_url", "") or "").strip()
+        except Exception:
+            return False
 
     def _maybe_write_cpa(self, account_extra: dict, extra: dict, log) -> None:
         """按配置把 CPA 记录写入本地目录（热加载）**并可选上传到远端 CPA**。

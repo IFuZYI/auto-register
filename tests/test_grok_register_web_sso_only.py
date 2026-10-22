@@ -498,5 +498,61 @@ class DeclaredDefaultMatchesRuntimeTests(unittest.TestCase):
                          "缺省时必须与声明一致：不换")
 
 
+class RefreshSurvivesRecordBuildFailureTests(unittest.TestCase):
+    """`token_to_cpa_record` 抛异常时，刷新动作仍要正常返回。
+
+    回归（自查发现，我自己在终审修复里引入）：新增的 `cpa_notes` 段在 `try`
+    之外读 `settings`，而 `settings` 是在 `try` **里面**赋值的 —— 一旦
+    `token_to_cpa_record` 先抛，外层就是 `UnboundLocalError`（未捕获），
+    用户拿到 500 而不是「凭证已刷新、CPA 记录没生成」。
+    """
+
+    def test_record_failure_does_not_raise(self):
+        from unittest.mock import patch as _patch
+
+        from platforms.grok.token_refresh import RefreshResult
+
+        tokens = {"access_token": "at", "refresh_token": "rt", "expires_in": 3600}
+        plat = _platform({"cpa_auth_dir": "/tmp/x"})
+        plat._log_fn = lambda _m: None
+        with _patch("platforms.grok.token_refresh.refresh_via_device_flow",
+                    return_value=RefreshResult(ok=True, tokens=tokens, method="device")), \
+             _patch("platforms.grok.plugin.token_to_cpa_record",
+                    side_effect=RuntimeError("boom")):
+            result = plat.execute_action("refresh_token", _account(), {})
+
+        self.assertTrue(result["ok"], "凭证确实刷新了，不该因为 CPA 记录生成失败而失败")
+        self.assertIn("access_token", result["account_extra_patch"])
+
+
+class RefreshMessageCoversUnconfiguredUploadTests(unittest.TestCase):
+    """开了自动上传却没填 CPA 地址时，消息要提一句 —— 否则用户以为传上去了。
+
+    回归（自查发现）：`_maybe_write_cpa` 在「开关开、地址空」时直接 return，
+    patch 里既没有 `cpa_uploaded` 也没有 `cpa_auth_path`，于是消息和「什么都没
+    配置」完全一样 —— 用户看不出自己少填了地址。
+    """
+
+    def test_message_mentions_missing_cpa_url(self):
+        from unittest.mock import patch as _patch
+
+        from platforms.grok.token_refresh import RefreshResult
+
+        tokens = {"access_token": "at", "refresh_token": "rt", "expires_in": 3600}
+        plat = _platform({"cpa_upload_grok_enabled": "1"})  # 开了开关，没填地址
+        plat._log_fn = lambda _m: None
+        cfg = {"cpa_upload_grok_enabled": "1", "cpa_api_url": ""}
+        with _patch("platforms.grok.token_refresh.refresh_via_device_flow",
+                    return_value=RefreshResult(ok=True, tokens=tokens, method="device")), \
+             _patch("core.config_store.config_store.get",
+                    side_effect=lambda k, d="": cfg.get(k, d)):
+            result = plat.execute_action("refresh_token", _account(), {})
+
+        self.assertTrue(result["ok"])
+        message = str(result["data"].get("message") or "")
+        self.assertIn("CPA", message,
+                      f"开了自动上传却没地址，消息要提一句，实际: {message!r}")
+
+
 if __name__ == "__main__":
     unittest.main()
