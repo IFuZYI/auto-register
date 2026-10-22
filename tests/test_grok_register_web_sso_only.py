@@ -59,6 +59,21 @@ def _account(**extra):
     )
 
 
+def _isolate_cpa_env(testcase):
+    """清掉环境里的 `GROK_CPA_AUTH_DIR`，测试结束后恢复。
+
+    `_maybe_write_cpa` 会读这个环境变量（文档推荐的唯一入口），开发机上常驻
+    有值。不清的话：默认路径的用例会误报「未写入」，还会往那个目录真写文件
+    （复审实测：`xai-a@b.com.json` 出现在外部目录里）。
+    """
+    import os
+    from unittest.mock import patch as _patch
+
+    patcher = _patch.dict(os.environ, {"GROK_CPA_AUTH_DIR": ""}, clear=False)
+    patcher.start()
+    testcase.addCleanup(patcher.stop)
+
+
 def _run(extra: dict):
     """跑一次浏览器注册路径，返回 (account, 日志, mock 句柄)。"""
     logs: list = []
@@ -138,6 +153,9 @@ class BuildCredentialReachabilityTests(unittest.TestCase):
     新号想补本地 `cpa_auth_dir` 写入或自动传 CPA，按钮点了也没反应，而文档把
     那条路写成「可用」。
     """
+
+    def setUp(self):
+        _isolate_cpa_env(self)
 
     def test_refresh_token_action_writes_cpa_record_to_local_dir(self):
         """刷新 Token 成功后要把 CPA 记录写进 cpa_auth_dir（否则这条路是死的）。"""
@@ -223,12 +241,38 @@ class OptInIsReachableFromSettingsTests(unittest.TestCase):
         keys = {item["key"] for item in GrokPlatform.registration_modes}
         self.assertIn("grok_oauth_exchange", keys)
 
-    def test_saved_setting_actually_reaches_the_register_path(self):
-        """存进配置后，注册链路必须读到它（`RegistrationContextBuilder` 合并）。"""
+    def test_saved_setting_actually_reaches_the_plugin(self):
+        """存进配置后，**插件实例**必须真的会去换 —— 端到端，不是回显。
+
+        复审指出原来的写法是恒真式：`RegistrationContextBuilder` 只是通用
+        dict merge，把键名换成任意字符串也一样通过，等于什么都没证明。
+        这里走真实链路：config_store → RegistrationContextBuilder →
+        RegisterConfig(extra=…) → 插件 → `_register_via_browser` 是否调了
+        `exchange_oauth_via_browser`。
+        """
+        from unittest.mock import patch as _patch
+
+        from core.config_store import config_store
         from modules.config.context import RegistrationContextBuilder
 
-        ctx = RegistrationContextBuilder({"grok_oauth_exchange": "1"}).build(None)
-        self.assertEqual(ctx.settings.get("grok_oauth_exchange"), "1")
+        stored = {"grok_oauth_exchange": "1", "grok_probe_after_register": "0"}
+        with _patch.object(config_store, "get_all", return_value=stored):
+            merged = RegistrationContextBuilder(config_store.get_all()).build(None).settings
+
+        plat = _platform(dict(merged))
+        plat.mailbox = _FakeMailbox()
+        plat._log_fn = lambda _m: None
+        with _patch("platforms.grok.register_browser.register_grok_via_browser",
+                    return_value={"ok": True, "sso": "sso-token", "password": "pw",
+                                  "email": "t@icloud.com", "error": ""}), \
+             _patch("platforms.grok.register_browser.exchange_oauth_via_browser",
+                    return_value={"access_token": "at", "expires_in": 1}) as exchange, \
+             _patch.object(plat, "_maybe_write_cpa", return_value=None), \
+             _patch("platforms.grok.grok2api.Grok2ApiClient") as g2a:
+            g2a.from_config.return_value.configured = False
+            plat._register_via_browser(dict(plat.config.extra), None, lambda _m: None, "")
+
+        exchange.assert_called_once()
 
 
 class SsoStatusIsNotTrustedForProbingTests(unittest.TestCase):
@@ -297,6 +341,28 @@ class SsoStatusIsNotTrustedForProbingTests(unittest.TestCase):
         self.assertEqual(verdict, "alive",
                          "健康页被判 rejected 会误杀好号 —— 若这里红了，"
                          "说明实现又开始看响应体了，请先读 _sso_status 的 docstring")
+
+    def test_probe_401_still_lands_invalid(self):
+        """正向：`probe` 的 401 必须仍然落「失效」—— 别把接线改成死分支。
+
+        复审用变异证明：把 `api/actions.py` 里整个 probe 状态策略删掉，
+        `test_actions_never_uses_sso_status_to_land_invalid` 仍然绿（它只断言
+        负面方向）。这条补上正向，删掉接线就会红。
+        """
+        from unittest import mock
+
+        from api.actions import _apply_action_result
+        from core.db.models_account import AccountModel
+
+        model = AccountModel(platform="grok", email="w@e.com", password="p",
+                             status="registered")
+        _apply_action_result(
+            "grok", "probe", model,
+            {"ok": False, "data": {"status": 401, "summary": "unauthorized"}},
+            mock.Mock(),
+        )
+        self.assertEqual(model.status, "invalid",
+                         "probe 401 没落失效 —— probe→状态的接线断了")
 
     def test_actions_never_uses_sso_status_to_land_invalid(self):
         """行为测试：SSO 判定不得让 probe 动作把账号标成「失效」。
@@ -476,13 +542,26 @@ class CpaAuthDirIsReachableTests(unittest.TestCase):
     这与上一个提交刚给 `grok_oauth_exchange` 修的问题一模一样。
     """
 
-    def test_docs_name_the_env_var_not_the_config_key(self):
-        from pathlib import Path
+    def test_env_var_really_is_the_only_surface(self):
+        """`cpa_auth_dir` 确实没有面板入口 —— 这是「文档只能写环境变量」的依据。
 
-        doc = Path("docs/FEATURES.md").read_text(encoding="utf-8")
-        section = doc.split("注意 CPA 的连带影响", 1)[1].split("没有 AT 时", 1)[0]
-        self.assertIn("GROK_CPA_AUTH_DIR", section,
-                      "文档要给出真能设的入口（环境变量），不能只写配置键名")
+        复审删掉了原来扫 `docs/FEATURES.md` 文本的写法：它依赖 CWD、改标题就
+        IndexError，而且证明不了任何行为。这里改为断言**代码事实**：
+        该键不在 CONFIG_KEYS、也不在 registration_modes，而
+        `_maybe_write_cpa` 真的会读环境变量。
+        """
+        import inspect
+
+        from api.config import CONFIG_KEYS
+        from platforms.grok.plugin import GrokPlatform
+
+        self.assertNotIn("cpa_auth_dir", CONFIG_KEYS,
+                         "若已加入白名单，文档就该改成「面板可设」")
+        mode_keys = {m["key"] for m in GrokPlatform.registration_modes}
+        self.assertNotIn("cpa_auth_dir", mode_keys)
+        src = inspect.getsource(GrokPlatform._maybe_write_cpa)
+        self.assertIn("GROK_CPA_AUTH_DIR", src,
+                      "环境变量是唯一入口 —— 代码必须真的读它")
 
 
 class StaleActionNameInErrorsTests(unittest.TestCase):
@@ -556,64 +635,6 @@ class RefreshSurvivesRecordBuildFailureTests(unittest.TestCase):
         self.assertIn("access_token", result["account_extra_patch"])
 
 
-class RefreshMessageCoversUnconfiguredUploadTests(unittest.TestCase):
-    """开了自动上传却没填 CPA 地址时，消息要提一句 —— 否则用户以为传上去了。
-
-    回归（自查发现）：`_maybe_write_cpa` 在「开关开、地址空」时直接 return，
-    patch 里既没有 `cpa_uploaded` 也没有 `cpa_auth_path`，于是消息和「什么都没
-    配置」完全一样 —— 用户看不出自己少填了地址。
-    """
-
-    def test_message_mentions_missing_cpa_url(self):
-        from unittest.mock import patch as _patch
-
-        from platforms.grok.token_refresh import RefreshResult
-
-        tokens = {"access_token": "at", "refresh_token": "rt", "expires_in": 3600}
-        plat = _platform({"cpa_upload_grok_enabled": "1"})  # 开了开关，没填地址
-        plat._log_fn = lambda _m: None
-        cfg = {"cpa_upload_grok_enabled": "1", "cpa_api_url": ""}
-        with _patch("platforms.grok.token_refresh.refresh_via_device_flow",
-                    return_value=RefreshResult(ok=True, tokens=tokens, method="device")), \
-             _patch("core.config_store.config_store.get",
-                    side_effect=lambda k, d="": cfg.get(k, d)):
-            result = plat.execute_action("refresh_token", _account(), {})
-
-        self.assertTrue(result["ok"])
-        message = str(result["data"].get("message") or "")
-        self.assertIn("CPA", message,
-                      f"开了自动上传却没地址，消息要提一句，实际: {message!r}")
-
-
-class RefreshMessageCoversEnvAuthDirTests(unittest.TestCase):
-    """`GROK_CPA_AUTH_DIR` 写入失败也要在消息里说出来。
-
-    回归（终审 fix wave 复审 N1）：`_maybe_write_cpa` 认配置键**和**环境变量
-    （`extra.get("cpa_auth_dir") or os.getenv("GROK_CPA_AUTH_DIR")`），而消息侧
-    只看了配置键 —— 用环境变量（文档推荐的那条路）且写入失败时，消息仍是
-    光秃秃的「新凭证已保存」。
-    """
-
-    def test_env_auth_dir_failure_is_reported(self):
-        import os
-        from unittest.mock import patch as _patch
-
-        from platforms.grok.token_refresh import RefreshResult
-
-        tokens = {"access_token": "at", "refresh_token": "rt", "expires_in": 3600}
-        plat = _platform({})
-        plat._log_fn = lambda _m: None
-        with _patch.dict(os.environ, {"GROK_CPA_AUTH_DIR": "/proc/definitely/not/writable"}), \
-             _patch("platforms.grok.token_refresh.refresh_via_device_flow",
-                    return_value=RefreshResult(ok=True, tokens=tokens, method="device")):
-            result = plat.execute_action("refresh_token", _account(), {})
-
-        self.assertTrue(result["ok"])
-        message = str(result["data"].get("message") or "")
-        self.assertIn("CPA", message,
-                      f"环境变量那条路写入失败也要报出来，实际: {message!r}")
-
-
 class RefreshMessageMatrixTests(unittest.TestCase):
     """六种配置组合下，消息与真实行为必须一致（不误报、不漏报）。
 
@@ -623,7 +644,7 @@ class RefreshMessageMatrixTests(unittest.TestCase):
 
     _TOKENS = {"access_token": "a", "refresh_token": "r", "expires_in": 3600}
 
-    def _run(self, cfg, *, extra=None, env=None, upload_ok=(True, "ok")):
+    def _run(self, cfg, *, extra=None, env=None, upload_ok=(True, "ok"), return_patch=False):
         import os
         from unittest.mock import patch as _patch
 
@@ -631,13 +652,22 @@ class RefreshMessageMatrixTests(unittest.TestCase):
 
         plat = _platform(dict(extra or {}))
         plat._log_fn = lambda _m: None
-        with _patch.dict(os.environ, dict(env or {}), clear=False), \
+        # 默认行必须显式清掉环境变量：`GROK_CPA_AUTH_DIR` 是文档推荐的入口，
+        # 开发机上常驻有值 —— 不清的话默认行会误报「未写入」，还会往那个
+        # 目录真写一个文件（复审实测）。
+        ambient = dict(env or {})
+        if "GROK_CPA_AUTH_DIR" not in ambient:
+            ambient["GROK_CPA_AUTH_DIR"] = ""
+        with _patch.dict(os.environ, ambient, clear=False), \
              _patch("platforms.grok.token_refresh.refresh_via_device_flow",
                     return_value=RefreshResult(ok=True, tokens=self._TOKENS, method="device")), \
              _patch("core.config_store.config_store.get",
                     side_effect=lambda k, d="": cfg.get(k, d)), \
              _patch("platforms.grok.upload.upload_to_cpa", return_value=upload_ok) as up:
             result = plat.execute_action("refresh_token", _account(), {})
+        self._last_patch = result.get("account_extra_patch") or {}
+        if return_patch:
+            return result["data"]["message"], up.call_count
         return result["data"]["message"], up.call_count
 
     _ON = {"cpa_upload_grok_enabled": "1", "cpa_api_url": "http://x", "cpa_api_key": "k"}
@@ -648,9 +678,16 @@ class RefreshMessageMatrixTests(unittest.TestCase):
         self.assertNotIn("CPA", msg, f"什么都没配时不该提 CPA: {msg!r}")
 
     def test_upload_success_is_quiet(self):
-        msg, calls = self._run(self._ON)
+        """上传成功：不报错，**且** patch 里确实记了 `cpa_uploaded=True`。
+
+        复审指出原来这行与「全空」行重复（都只断言「不提 CPA」+ calls）。
+        补正向断言后它才独立成立：静默 + 真的传了，两者缺一都不算过。
+        """
+        msg, calls = self._run(self._ON, return_patch=True)
         self.assertEqual(calls, 1)
         self.assertNotIn("CPA", msg, f"上传成功时不该报错: {msg!r}")
+        self.assertTrue(self._last_patch.get("cpa_uploaded"),
+                        "上传成功必须记 cpa_uploaded=True（否则下游读不到）")
 
     def test_upload_failure_is_reported(self):
         msg, _ = self._run(self._ON, upload_ok=(False, "boom"))
@@ -799,6 +836,80 @@ class RefreshRejectsEmptyTokensTests(unittest.TestCase):
         """只有 RT、没有 AT 也算没换到 —— 下游全都要 AT。"""
         result = self._run({"refresh_token": "rt-only"})
         self.assertFalse(result["ok"], f"缺 AT 不能算成功: {result}")
+
+class NoFalseAlarmOnSuccessfulWriteTests(unittest.TestCase):
+    """写**成功**时绝不能报「未写入」—— 误报方向此前完全没有测试。
+
+    测试质量复审用变异证明：把「写成功后记 `cpa_auth_path`」删掉、或把
+    `"cpa_auth_path" not in patch` 这半条件去掉，40 条测试全绿。而这两处
+    恰恰决定「消息是否撒谎」。本类补上正反两个方向。
+    """
+
+    def _run(self, *, writable: bool):
+        import tempfile
+        from unittest.mock import patch as _patch
+
+        from platforms.grok.token_refresh import RefreshResult
+
+        tokens = {"access_token": "a", "refresh_token": "r", "expires_in": 3600}
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        auth_dir = tmp.name if writable else "/proc/definitely/not/writable"
+        plat = _platform({"cpa_auth_dir": auth_dir})
+        plat._log_fn = lambda _m: None
+        with _patch("platforms.grok.token_refresh.refresh_via_device_flow",
+                    return_value=RefreshResult(ok=True, tokens=tokens, method="device")):
+            return plat.execute_action("refresh_token", _account(), {}), auth_dir
+
+    def test_successful_write_emits_no_note(self):
+        result, auth_dir = self._run(writable=True)
+        message = str(result["data"].get("message") or "")
+        self.assertNotIn("CPA", message,
+                         f"写成功了却报 CPA 问题（误报）: {message!r}")
+        # 正向确认：真的落盘了，且路径记进了 patch
+        from pathlib import Path
+        self.assertEqual(len(list(Path(auth_dir).glob("*.json"))), 1,
+                         "临时目录里没有落盘文件 —— 这条测试的前提不成立")
+        self.assertIn("cpa_auth_path", result["account_extra_patch"],
+                      "写成功后必须记 cpa_auth_path，否则消息侧判不出「已写」")
+
+    def test_unwritable_dir_emits_the_note(self):
+        result, _ = self._run(writable=False)
+        message = str(result["data"].get("message") or "")
+        self.assertIn("本地目录未写入", message,
+                      f"写失败却没报: {message!r}")
+
+
+class EmptySettingMeansNoExchangeTests(unittest.TestCase):
+    """配置里**没有**这个键时，注册绝不能换 —— 走真实链路验证默认值。
+
+    复审指出：只测「设为 1 会换」抓不住「默认值被翻回 True」这个变异
+    （设为 1 时 default 无关）。这里补上缺省方向的端到端断言。
+    """
+
+    def test_absent_setting_means_no_exchange(self):
+        from unittest.mock import patch as _patch
+
+        from core.config_store import config_store
+        from modules.config.context import RegistrationContextBuilder
+
+        with _patch.object(config_store, "get_all", return_value={}):
+            merged = RegistrationContextBuilder(config_store.get_all()).build(None).settings
+
+        plat = _platform(dict(merged))
+        plat.mailbox = _FakeMailbox()
+        plat._log_fn = lambda _m: None
+        with _patch("platforms.grok.register_browser.register_grok_via_browser",
+                    return_value={"ok": True, "sso": "sso-token", "password": "pw",
+                                  "email": "t@icloud.com", "error": ""}), \
+             _patch("platforms.grok.register_browser.exchange_oauth_via_browser") as exchange, \
+             _patch("platforms.grok.grok2api.Grok2ApiClient") as g2a:
+            g2a.from_config.return_value.configured = False
+            account = plat._register_via_browser(dict(plat.config.extra), None, lambda _m: None, "")
+
+        exchange.assert_not_called()
+        self.assertNotIn("access_token", account.extra)
+
 
 if __name__ == "__main__":
     unittest.main()
