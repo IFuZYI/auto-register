@@ -157,6 +157,13 @@ Grok 注册**只有浏览器一条路径**：x.ai 的 Cloudflare 只有 camoufox
 AT/RT，或直接用面板管理页的手动「上传 CPA」。老账号（改动前注册的，extra 里已有
 `access_token`）不受影响。
 
+**没有 AT 时「测活」会明确报缺**，而不是给一个 SSO 探活的结论。原因：唯一现成的
+SSO 判定是「访问 accounts.x.ai 看是否跳登录页」，本仓实测它不可靠 —— 执行器的
+响应对象不带最终 URL、accounts.x.ai 每个页面都内嵌带 `sign-in` 字样的 i18n 文案表、
+全新会话即使带有效 SSO 也会被判未登录（`platforms/grok/oauth_device.py` 里记着
+当初因此放弃这套校验）。拿它当判据会把好号标成「失效」，所以测活只认真实探测码；
+SSO 是否还有效用「刷新 Token（登录协议）」的实际结果判。
+
 **发码节流**（`grok_send_code_min_interval`）：x.ai 对同一 IP 的取码有频率限制，太密会把
 出口打进长冷却。界面在「注册设置 → 各平台设置 → Grok」卡片里渲染。
 

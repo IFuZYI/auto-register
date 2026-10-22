@@ -182,37 +182,22 @@ class BuildCredentialReachabilityTests(unittest.TestCase):
         up.assert_called_once()
         self.assertTrue(result["account_extra_patch"].get("cpa_uploaded"))
 
-    def test_probe_action_without_at_uses_sso_instead_of_hard_error(self):
-        """没有 AT（新号的常态）时「测活」不能直接报缺 AT —— 回落 SSO 探活。
+    def test_probe_action_without_at_explains_how_to_get_one(self):
+        """没有 AT（新号的常态）时「测活」要说清缺什么、怎么补 —— 不能静默失败。
 
-        SSO 探活本身要打网络，这里只钉**动作层的接线**：不硬报错、走 detail、
-        把 sso_status 带进 patch。判定逻辑由 `SsoStatusTests` 单独覆盖。
+        这里**不**回落 SSO 判定：那套「访问 accounts.x.ai 看是否跳登录页」的
+        判定已知不可靠（响应没有 url、i18n 文案表里带 sign-in 字样、全新会话会
+        把有效 SSO 判成未登录），拿它当测活结论会把好号标成「失效」。
         """
-        from unittest.mock import patch as _patch
-
         plat = _platform({})
         plat._log_fn = lambda _m: None
-        detail = {"code": None, "summary": "SSO 探测：alive", "usable": True,
-                  "sso_status": "alive"}
-        with _patch.object(plat, "probe_account_detail", return_value=detail) as detail_fn:
-            result = plat.execute_action("probe", _account(access_token=""), {})
-        detail_fn.assert_called_once()
-        self.assertTrue(result["ok"], f"无 AT 时应回落 SSO 探活，实际: {result}")
-        self.assertIn("SSO", str(result["data"].get("summary") or ""))
-        self.assertEqual(result["account_extra_patch"].get("sso_status"), "alive",
-                         "sso_status 要落进 patch，否则 api/actions 落状态时拿不到")
-
-    def test_probe_action_reports_rejected_sso_as_not_ok(self):
-        """SSO 被上游拒绝时「测活」必须是失败（不能一律 alive）。"""
-        from unittest.mock import patch as _patch
-
-        plat = _platform({})
-        plat._log_fn = lambda _m: None
-        detail = {"code": None, "summary": "SSO 探测：rejected", "usable": False,
-                  "sso_status": "rejected"}
-        with _patch.object(plat, "probe_account_detail", return_value=detail):
-            result = plat.execute_action("probe", _account(access_token=""), {})
-        self.assertFalse(result["ok"], f"rejected 不能算有效: {result}")
+        result = plat.execute_action("probe", _account(access_token=""), {})
+        self.assertFalse(result["ok"])
+        self.assertIn("access_token", result["error"])
+        self.assertIn("刷新 Token", result["error"],
+                      "只说缺 AT 不够 —— 要告诉用户怎么补（评审要求）")
+        self.assertNotIn("sso_status", result.get("account_extra_patch") or {},
+                         "不可靠的 SSO 判定不该参与测活结论")
 
 
 class OptInIsReachableFromSettingsTests(unittest.TestCase):
@@ -246,106 +231,82 @@ class OptInIsReachableFromSettingsTests(unittest.TestCase):
         self.assertEqual(ctx.settings.get("grok_oauth_exchange"), "1")
 
 
-class SsoStatusTests(unittest.TestCase):
-    """`_sso_status` 必须真的能判出 rejected。
+class SsoStatusIsNotTrustedForProbingTests(unittest.TestCase):
+    """`_sso_status` 是已知不可靠的弱信号，不能接进测活/状态判定。
 
-    回归（独立评审发现）：实现读 `getattr(r, "url", "")` 判断是否被重定向到
-    登录页，但 `core.base_executor.Response` 根本没有 `url` 字段（只有
-    status_code / text / headers / cookies）—— 于是 `final` 恒为空串，
-    **任何** SSO 都判 `alive`，包括一个乱填的。`check_valid` 与「测活」按钮
-    都建在它上面，等于失效判定永远不生效。
+    评审实测（2026-10-23）三条，逐条钉住，防止有人再把它当判据：
+
+    1. `core.base_executor.Response` 没有 `url` —— 「是否跳登录页」看不出来；
+    2. 改成看响应体也不成立：accounts.x.ai 每个页面都内嵌同一份 i18n 文案表，
+       里面有 `Unable to add sign-in method` / `Create your account`；
+    3. 全新会话即使带有效 sso cookie 也常被判未登录（`oauth_device.py:172-174`
+       早已因此放弃这套校验）。
+
+    所以：测活不回落它（`BuildCredentialReachabilityTests` 钉住），
+    `api/actions.py` 也不拿它落状态（下面第一条钉住）。
     """
 
-    def _platform(self):
-        return _platform({})
-
-    def test_response_has_no_url_so_redirect_must_be_read_elsewhere(self):
-        """钉住根因：Response 没有 url 字段（改实现的人得知道这一点）。"""
+    def test_response_has_no_url_field(self):
+        """根因：Response 没有 url（改实现的人得知道）。"""
         from core.base_executor import Response
 
         r = Response(status_code=200, text="<html>sign-in</html>")
         self.assertFalse(hasattr(r, "url"))
 
-    def test_redirect_to_sign_in_is_rejected(self):
-        """响应内容/头里出现登录页特征 → rejected。"""
+    def test_healthy_page_would_be_misread_as_rejected(self):
+        """真实页面的 i18n 文案表里就带 sign-in 字样 —— 看响应体会误判。
+
+        这条不是「期望的行为」，而是把**已知缺陷**钉成事实：任何改成看 body
+        的实现都会在这里红。修它需要先解决 i18n 文案表的干扰（且第 3 条缺陷
+        仍然存在），所以正确做法是不用它做判据。
+        """
         from unittest.mock import MagicMock
         from unittest.mock import patch as _patch
 
         from core.base_executor import Response
 
-        fake = MagicMock()
-        fake.get.return_value = Response(
-            status_code=200,
-            text='<html><body>Sign in to your account</body></html>',
+        # 真实 accounts.x.ai 页面里内嵌的文案（实测抓取，健康页也有）
+        healthy_with_catalog = (
+            "<html><title>Privacy Request | SpaceXSI Accounts</title>"
+            '<script>{"messages":{"signInMethod":"Unable to add sign-in method",'
+            '"createAccount":"Create your account"}}</script></html>'
         )
-        fake.get_cookies.return_value = {}
-        with _patch("modules.execution.BrowserExecutorFactory") as factory:
-            factory.return_value.create.return_value = fake
-            self.assertEqual(self._platform()._sso_status("garbage"), "rejected")
-
-    def test_healthy_page_is_alive(self):
-        from unittest.mock import MagicMock
-        from unittest.mock import patch as _patch
-
-        from core.base_executor import Response
-
         fake = MagicMock()
-        fake.get.return_value = Response(status_code=200, text="<html>Grok console</html>")
+        fake.get.return_value = Response(status_code=200, text=healthy_with_catalog)
         fake.get_cookies.return_value = {}
         with _patch("modules.execution.BrowserExecutorFactory") as factory:
             factory.return_value.create.return_value = fake
-            self.assertEqual(self._platform()._sso_status("good"), "alive")
+            verdict = _platform({})._sso_status("valid-sso")
+        self.assertEqual(verdict, "alive",
+                         "健康页被判 rejected 会误杀好号 —— 若这里红了，"
+                         "说明实现又开始看响应体了，请先读 _sso_status 的 docstring")
 
-    def test_network_error_is_unknown(self):
-        from unittest.mock import MagicMock
-        from unittest.mock import patch as _patch
+    def test_actions_never_uses_sso_status_to_land_invalid(self):
+        """行为测试：SSO 判定不得让 probe 动作把账号标成「失效」。
 
-        fake = MagicMock()
-        fake.get.side_effect = RuntimeError("boom")
-        fake.get_cookies.return_value = {}
-        with _patch("modules.execution.BrowserExecutorFactory") as factory:
-            factory.return_value.create.return_value = fake
-            self.assertEqual(self._platform()._sso_status("x"), "unknown")
+        用真调 `_apply_action_result` 而不是源码扫描 —— 扫描对「接线被改成
+        死分支」这类变异无感（本仓 `test_status_semantics.py` 的既定口径）。
+        """
+        from unittest import mock
 
+        from api.actions import _apply_action_result
+        from core.db.models_account import AccountModel
 
-class RejectedSsoLandsStatusTests(unittest.TestCase):
-    """被拒的 SSO 必须在账号状态上落「失效」—— 不能只报 ok=False。
-
-    回归（独立评审发现）：`api/actions.py` 的 probe 分支只把 `probe_code` /
-    `probe_summary` 交给 `apply_grok_status_policy`，而 SSO 探活的 code 是 None、
-    summary 是「SSO 探测：rejected」—— 判定函数认的是 `sso_rejected` 标志，
-    于是状态一个都不落，账号停在「正常」。
-    """
-
-    def test_actions_passes_sso_rejected_for_probe(self):
-        import inspect
-
-        from api import actions as actions_mod
-
-        src = inspect.getsource(actions_mod._apply_action_result)
-        probe_block = src.split('if action_id == "probe":', 1)[1].split('elif action_id == "probe_refresh"', 1)[0]
-        self.assertIn("sso_rejected", probe_block,
-                      "probe 分支必须把 sso_status 传给 apply_grok_status_policy，"
-                      "否则被拒的 SSO 不落状态")
-
-    def test_rejected_probe_patch_carries_sso_status_that_policy_understands(self):
-        """patch 里的 sso_status 值必须是判定函数认得的那三个之一。"""
-        from unittest.mock import patch as _patch
-
-        plat = _platform({})
-        plat._log_fn = lambda _m: None
-        detail = {"code": None, "summary": "SSO 探测：rejected", "usable": False,
-                  "sso_status": "rejected"}
-        with _patch.object(plat, "probe_account_detail", return_value=detail):
-            result = plat.execute_action("probe", _account(access_token=""), {})
-
-        status = result["account_extra_patch"]["sso_status"]
-        from services.grok_account_state import apply_grok_status_policy
-
-        account = type("A", (), {"status": "registered"})()
-        reason = apply_grok_status_policy(account, sso_rejected=(status == "rejected"))
-        self.assertEqual(reason, "sso_rejected")
-        self.assertEqual(account.status, "invalid")
+        model = AccountModel(platform="grok", email="w@e.com", password="p",
+                             status="registered")
+        _apply_action_result(
+            "grok", "probe", model,
+            {
+                "ok": False,
+                "data": {"status": None, "summary": "SSO 探测：rejected"},
+                "account_extra_patch": {"sso_status": "rejected"},
+            },
+            mock.Mock(),
+        )
+        self.assertEqual(
+            model.status, "registered",
+            "不可靠的 SSO 判定把好号标成失效了 —— 它会误杀有效账号",
+        )
 
 
 class ProbeAfterRegisterSkipIsExplainedTests(unittest.TestCase):

@@ -328,35 +328,29 @@ class GrokPlatform(BasePlatform):
         ok, _reason = self._probe_verdict(code, summary)
         return {"code": code, "summary": str(summary or ""), "usable": ok, "sso_status": ""}
 
-    #: 登录页特征：被判 `rejected` 的响应里会出现其中之一。
-    #:
-    #: 为什么看**响应内容**而不是最终 URL：`core.base_executor.Response`
-    #: 只有 `status_code` / `text` / `headers` / `cookies`，**没有 url 字段**
-    #: （见 `core/base_executor.py`）—— 原实现读 `getattr(r, "url", "")`，
-    #: 永远拿到空串，于是任何 SSO（包括乱填的）都判 `alive`，失效判定形同虚设。
-    #: 独立评审发现并实测：乱填 cookie 也返回 alive。
-    _SSO_REJECT_MARKERS = (
-        "sign-in",
-        "sign-up",
-        "sign in to",
-        "create your account",
-        "登录",
-        "注册",
-    )
-
     def _sso_status(self, sso: str) -> str:
         """用 SSO cookie 访问 accounts.x.ai 判断 SSO 状态。
 
-        返回三态（对齐 grok2api 的判定语义）：
+        **本判定已知不可靠，只作弱信号用**（不参与「测活」的结论）：
 
-        - `alive`：能正常打开（响应不是登录/注册页）；
-        - `rejected`：落到 sign-in / sign-up 页 —— SSO 已被上游拒绝
-          （grok2api 的 `markSSOCredentialRejected` → reauthRequired 同款）；
-        - `unknown`：网络/浏览器异常 —— **不据此改状态**（grok2api 也只在
-          上游明确 401 时才标失效，网络错误不算）。
+        - `alive`：响应看起来不是登录/注册页；
+        - `rejected`：落到 sign-in / sign-up 页；
+        - `unknown`：网络/浏览器异常。
 
-        判定依据是**响应体**：执行器的 `Response` 不带最终 URL（见
-        `_SSO_REJECT_MARKERS` 的说明），只能看页面内容里有没有登录页特征。
+        三条已知缺陷（2026-10-23 评审实测，改这里之前先读）：
+
+        1. `core.base_executor.Response` **没有 url 字段**（只有 status_code /
+           text / headers / cookies），所以「是否被重定向到登录页」根本看不出来
+           —— 下面的 `getattr(r, "url", "")` 恒为空串；
+        2. 就算改成看响应体也不成立：accounts.x.ai 的每个页面都内嵌同一份
+           i18n 文案表，里面有 `Unable to add sign-in method` / `Create your
+           account`，健康的页面也会被判成登录页；
+        3. 全新会话即使带有效 sso cookie 也常被判未登录而跳 sign-in ——
+           `oauth_device.py:172-174` 早就因此**放弃**了这套校验（会误杀有效 SSO）。
+
+        结论：不要把它接进「测活」或自动改状态的路径（误判 rejected 会把好号
+        标成「失效」）。要判 SSO 是否还能用，走 `refresh_token`（登录协议，
+        用实际结果说话）。
         """
         try:
             from modules.execution import BrowserExecutorFactory
@@ -368,14 +362,8 @@ class GrokPlatform(BasePlatform):
                 cookies["sso"] = sso
                 executor.set_cookies(cookies)
                 r = executor.get("https://accounts.x.ai/", headers={"User-Agent": DEFAULT_UA})
-                # 先看执行器**如果**提供了 url（浏览器执行器可能带），再回落内容判定。
-                final = str(getattr(r, "url", "") or "").lower()
+                final = str(getattr(r, "url", "") or "")
                 if "sign-in" in final or "sign-up" in final:
-                    return "rejected"
-                body = str(getattr(r, "text", "") or "").lower()
-                if not body:
-                    return "unknown"
-                if any(marker in body for marker in self._SSO_REJECT_MARKERS):
                     return "rejected"
                 return "alive"
             finally:
@@ -454,27 +442,19 @@ class GrokPlatform(BasePlatform):
 
             access = get_credential(extra, "access_token")
             if not access:
-                # 没有 AT 是**新号的常态**（注册默认不再换 OAuth，只产 Web SSO）：
-                # 直接报「缺少 access_token」会让「测活」按钮对每个新号都失败，
-                # 而账号本身好好的。这里回落 SSO 探活 —— 与 `check_valid` /
-                # `probe_account_detail` 同一套判定，别让同一个号在按钮和
-                # 有效性检查里给出相反结论（历史上正是这种分叉被当成 bug 报过）。
-                detail = self.probe_account_detail(account)
-                usable = bool(detail.get("usable"))
-                summary = str(detail.get("summary") or "")
-                sso_status = str(detail.get("sso_status") or "")
+                # 没有 AT 是**新号的常态**（注册默认不换 OAuth，只产 Web SSO）。
+                #
+                # 这里**不**回落 `_sso_status`：那套「访问 accounts.x.ai 看是否
+                # 跳登录页」的判定已知不可靠（见 `_sso_status` 的 docstring ——
+                # 响应没有 url、i18n 文案表里就带 sign-in 字样、全新会话会把有效
+                # SSO 判成未登录），拿它当测活结论会把好号标成「失效」。
+                # 明确告诉用户缺什么、怎么补，比给一个假结论有用。
                 return {
-                    "ok": usable,
-                    "data": {"status": detail.get("code"), "summary": summary},
-                    "error": "" if usable else (summary or "SSO 探活失败"),
-                    "account_extra_patch": {
-                        "probe_summary": summary[:200],
-                        # `sso_status` 必须带上：`api/actions.py` 的落状态逻辑靠它
-                        # 判 `sso_rejected`（与 `check_valid` 的 detail 同字段）。
-                        # 只写 summary 的话，被拒的 SSO 会 ok=False 却**不落任何状态**
-                        # —— 账号停在「正常」，与有效性检查的结论相反（评审发现）。
-                        "sso_status": sso_status,
-                    },
+                    "ok": False,
+                    "error": (
+                        "账号没有 access_token（注册默认不产 build 凭据）—— "
+                        "先执行「刷新 Token（登录协议）」拿到 AT/RT 再测活"
+                    ),
                 }
             code, summary = probe_token(
                 access,
