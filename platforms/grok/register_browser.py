@@ -57,6 +57,89 @@ _ALREADY_REGISTERED_PATTERNS = (
 )
 
 
+#: 发码页面的判定结果。线上实测（2026-10-23，抓包确认）：
+#: 发码请求确实发出（`POST /api/auth/send-verification-code`），x.ai 会用
+#: 三种不同文案拒绝 / 接受，含义完全不同，必须分开处置。
+SEND_CODE_SENT = "sent"
+SEND_CODE_RATE_LIMITED = "rate_limited"
+SEND_CODE_EMAIL_UNAVAILABLE = "email_unavailable"
+SEND_CODE_NO_CONFIRMATION = "no_confirmation"
+
+#: 限流文案（最明确的一类）。
+_RATE_LIMIT_MARKERS = (
+    "too many code requests",
+    "too many requests",
+    "please wait a few minutes",
+)
+#: 「邮箱注册当前不可用」—— 服务端对邮箱侧的限制。
+_EMAIL_UNAVAILABLE_MARKERS = (
+    "email sign-up isn't available",
+    "email sign-up isn’t available",
+    "email signup isn't available",
+    "sign up another way",
+)
+#: 「已经发出了」的确认文案。
+_SENT_MARKERS = (
+    "we've emailed",
+    "we’ve emailed",
+    "verify your email",
+    "check your email",
+)
+
+
+def classify_send_code_page(text: str) -> dict:
+    """判定发码提交后的页面处于哪种状态。
+
+    返回 `{"kind", "retryable", "consumes_address", "retry_after_hint", "detail"}`。
+
+    为什么必须分类而不是笼统报「未确认发信」：三种拒绝的原因不同、
+    该做的事也不同 —— 但它们有一个共同点：**这个地址在这一轮已经被用掉了**。
+    记成 `failed` 会被 iCloud 池 `release` 回 `available`，下次又被领出来
+    撞同一堵墙（线上实测同一个地址被反复领取十余次）。
+
+    `retryable` 恒为 False 对三类拒绝：重开一轮是全新的代理/会话，但
+    「这个邮箱的发码配额」与「此刻 x.ai 的邮箱注册入口」都不会因此改变。
+    """
+    blob = str(text or "")
+    low = blob.lower()
+
+    def _hit(markers) -> bool:
+        return any(m in low for m in markers)
+
+    if _hit(_SENT_MARKERS):
+        return {
+            "kind": SEND_CODE_SENT,
+            "retryable": True,
+            "consumes_address": False,
+            "retry_after_hint": "",
+            "detail": "",
+        }
+    if _hit(_RATE_LIMIT_MARKERS):
+        return {
+            "kind": SEND_CODE_RATE_LIMITED,
+            "retryable": False,
+            "consumes_address": True,
+            "retry_after_hint": "minutes",
+            "detail": "x.ai 取码限流（这个邮箱本轮已用掉，换地址或等冷却）",
+        }
+    if _hit(_EMAIL_UNAVAILABLE_MARKERS):
+        return {
+            "kind": SEND_CODE_EMAIL_UNAVAILABLE,
+            "retryable": False,
+            "consumes_address": True,
+            "retry_after_hint": "",
+            "detail": "x.ai 当前不提供邮箱注册（服务端策略，换地址也无用）",
+        }
+    # 停在表单、既没确认发信也没报错 —— 同样是被拒，只是没给理由。
+    return {
+        "kind": SEND_CODE_NO_CONFIRMATION,
+        "retryable": False,
+        "consumes_address": True,
+        "retry_after_hint": "",
+        "detail": f"x.ai 未确认发信（页面未给出理由）: {blob[:120]}",
+    }
+
+
 def _looks_already_registered(text: str) -> bool:
     """页面文本是否表明「这个邮箱已经有账号」。"""
     blob = str(text or "")
@@ -376,21 +459,27 @@ def register_grok_via_browser(
 
             txt = page.evaluate("() => document.body.innerText.slice(0,300)") or ""
             low = txt.lower()
-            if "too many" in low:
-                result["error"] = "x.ai 取码限流（稍后再试）"
-                return result
             if "invalid" in low:
                 result["error"] = f"域名被 x.ai 拒收: {email.split('@')[-1]}"
                 return result
             # 「该邮箱已有账号」也可能在**发码阶段**就出现（不等验证码环节）。
-            # 不在这里认出来的话，会走到下面的「页面未确认发信」分支，把
-            # 已消耗的别名记成 failed → 放回 available → 反复重领（评审发现）。
+            # 不在这里认出来的话，会走到下面的拒绝分支，把已消耗的别名记成
+            # failed → 放回 available → 反复重领（评审发现）。
             if _looks_already_registered(txt):
                 result["already_registered"] = True
+                result["consumes_address"] = True
                 result["error"] = "该邮箱已有 x.ai 账号（别名已消耗）"
                 return result
-            if "we've emailed" not in low and "verify your email" not in low:
-                result["error"] = f"页面未确认发信: {txt[:120]}"
+
+            # 发码被拒的统一判定（限流 / 邮箱注册不可用 / 静默无理由）。
+            # 三者**都**意味着「这个地址本轮已用掉，且重开一轮也是同样结局」——
+            # 线上实测同一个地址被反复领取十余次，全栽在这里。
+            verdict = classify_send_code_page(txt)
+            if verdict["kind"] != SEND_CODE_SENT:
+                result["consumes_address"] = True
+                result["retryable"] = verdict["retryable"]
+                result["error"] = verdict["detail"]
+                _log(log, f"[Grok] 发码被拒（{verdict['kind']}）: {verdict['detail'][:80]}")
                 return result
             _log(log, "[Grok] 页面已发信，等验证码…")
 

@@ -940,11 +940,28 @@ class GrokPlatform(BasePlatform):
             self._record_mailbox_status(mailbox, mailbox_account, "failed", log)
             raise
         if not result.get("ok"):
-            # 「已有账号」= 别名已消耗，标 used 而不是 failed：
-            # failed 会把它放回 available，下次又被领出来撞同一堵墙。
-            status = "used" if result.get("already_registered") else "failed"
-            self._record_mailbox_status(mailbox, mailbox_account, status, log)
-            raise RuntimeError(result.get("error") or "浏览器注册失败")
+            # 「地址已消耗」→ 标 used 而不是 failed：
+            # failed 在 iCloud 池里会 release 回 available，下次又被领出来
+            # 撞同一堵墙（线上实测同一地址被反复领取十余次）。
+            #
+            # `consumes_address` 覆盖两种情形：
+            #   1. `already_registered`：该邮箱在 x.ai 已有账号；
+            #   2. 发码被拒（限流 / 邮箱注册不可用 / 静默无理由）——
+            #      这个地址这一轮已经用掉了，且再试也是同样结局。
+            consumed = bool(
+                result.get("already_registered") or result.get("consumes_address")
+            )
+            self._record_mailbox_status(mailbox, mailbox_account, "used" if consumed else "failed", log)
+            message = result.get("error") or "浏览器注册失败"
+            # 默认按「不可重试」处理：`consumes_address` 为真说明地址已用掉，
+            # 重开一轮拿到的是**同一个**地址（池子就那几个），必然同样结局。
+            # 只有浏览器层明确说 `retryable=True` 时才放行重试。
+            if consumed and result.get("retryable") is not True:
+                # 明确告诉上层「重开一轮也是同样结局」，别白烧 4 分钟。
+                from core.task_runtime import NonRetryableRegisterError
+
+                raise NonRetryableRegisterError(message)
+            raise RuntimeError(message)
 
         sso = str(result.get("sso") or "")
         final_password = str(result.get("password") or "")
