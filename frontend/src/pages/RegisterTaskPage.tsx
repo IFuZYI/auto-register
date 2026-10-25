@@ -10,6 +10,7 @@ import {
   Space,
   Typography,
   Descriptions,
+  Tooltip,
 } from 'antd'
 import {
   PlayCircleOutlined,
@@ -467,11 +468,23 @@ export default function RegisterTaskPage() {
         )}
 
         {platform === 'chatgpt' && (
-          <Card title="ChatGPT 手机接码" style={{ marginBottom: 16 }}>
-            <Text type="secondary" style={{ display: 'block', marginBottom: 12 }}>
-              手机注册用它拿号；邮箱注册只在链路进入 add-phone 时用。平台与 API Key
-              在「设置 → 手机接码」配置，这里只覆盖本次任务参数。
-            </Text>
+          <Card
+            title={
+              <Space size={6}>
+                <span>ChatGPT 手机接码</span>
+                {/* 说明进 tooltip：两行常驻文字会把卡片标题和第一个字段拉开。 */}
+                <Tooltip title="手机注册用它拿号；邮箱注册只在链路进入 add-phone 时用。平台与 API Key 在「设置 → 手机接码」配置，这里只覆盖本次任务参数。">
+                  <span
+                    aria-label="说明"
+                    style={{ color: 'var(--text-muted)', cursor: 'help', fontSize: 13 }}
+                  >
+                    ⓘ
+                  </span>
+                </Tooltip>
+              </Space>
+            }
+            style={{ marginBottom: 16 }}
+          >
             <Form.Item name="sms_country" label="国家（可选）">
               <SmsCountrySelect placeholder="留空用设置里的默认国家" />
             </Form.Item>
@@ -494,12 +507,16 @@ export default function RegisterTaskPage() {
 
         {captchaSolver === 'local_solver' && (
           <Card title="本地 Solver 配置" style={{ marginBottom: 16 }}>
-            <Form.Item name="solver_url" label="Solver URL">
+            {/* 启动命令进 label 的 tooltip：它是「怎么起这个服务」的操作提示，
+                不是要一直盯着看的字段说明。用 Form.Item 自带的 tooltip，
+                悬停标签即见，不占版面。 */}
+            <Form.Item
+              name="solver_url"
+              label="Solver URL"
+              tooltip="启动命令: python services/turnstile_solver/start.py --browser_type camoufox --port 8889"
+            >
               <Input />
             </Form.Item>
-            <Text type="secondary" style={{ fontSize: 12 }}>
-              启动命令: python services/turnstile_solver/start.py --browser_type camoufox --port 8889
-            </Text>
           </Card>
         )}
 

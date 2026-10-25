@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { App, Alert, Button, Card, Form, Input, InputNumber, Popconfirm, Select, Space, Switch, Table, Tag, Typography } from 'antd'
+import { App, Alert, Button, Card, Form, Input, InputNumber, Popconfirm, Select, Space, Switch, Table, Tag, Tooltip, Typography } from 'antd'
 import type { FormInstance } from 'antd'
 
 import { aliasRegisteredOn, aliasRegisteredPlatforms } from '@/lib/icloud'
@@ -642,9 +642,24 @@ export default function MailImportPanel({ form, lockToProvider }: MailImportPane
       style={{ marginBottom: 16 }}
     >
       <Space direction="vertical" style={{ width: '100%' }} size={12}>
-        <Typography.Text type="secondary">
-          {selectedProvider?.description || '通过统一导入接口，将内容导入到对应邮箱账号池。'}
-        </Typography.Text>
+        {/* 说明进 tooltip：这两段最长 50+ 字，常驻会把下面的粘贴框顶下去。
+            下面的 Alert 是**操作步骤警告**（不勾选入池就取不到号），不是注释，
+            必须留在版面上 —— 收进 tooltip 用户就会漏看。 */}
+        <Space size={6} align="center">
+          <Typography.Text>
+            {selectedProvider?.description || '通过统一导入接口，将内容导入到对应邮箱账号池。'}
+          </Typography.Text>
+          {selectedProvider?.helper_text ? (
+            <Tooltip title={selectedProvider.helper_text}>
+              <span
+                aria-label="说明"
+                style={{ color: 'var(--text-muted)', cursor: 'help', fontSize: 13 }}
+              >
+                ⓘ
+              </span>
+            </Tooltip>
+          ) : null}
+        </Space>
         {/* 两步流程必须写清楚：用户粘贴完一屏邮箱就以为可以开任务了，
             结果注册报「已导入但未入池」——那是导入成功但没勾选入池。 */}
         <Alert
@@ -653,9 +668,6 @@ export default function MailImportPanel({ form, lockToProvider }: MailImportPane
           message="导入后还要勾选入池"
           description="粘贴只是存进号池（状态「未入池」，注册不会取用）；勾选后点「导入邮箱池」才可被领取。"
         />
-        {selectedProvider?.helper_text ? (
-          <Typography.Text type="secondary">{selectedProvider.helper_text}</Typography.Text>
-        ) : null}
 
         {supportsAliasSplit ? (
           <div

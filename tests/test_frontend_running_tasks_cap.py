@@ -45,6 +45,29 @@ def test_chatgpt_token_plan_has_three_options():
     not os.path.isdir(os.path.join(FRONTEND, "node_modules")),
     reason="frontend/node_modules 未安装，跳过真实 TS 执行",
 )
+def test_form_hints_live_in_tooltips_not_on_the_page():
+    """说明文字走 tooltip，不常驻占版面（用户要求：注释太乱，收进文字提示）。
+
+    检查脚本断言：三个 ChatGPT 控件不再渲染常驻 `<Text type="secondary">`、
+    任务页/账号页用 `Form.Item` 的 tooltip、全局配置页的 `mode.desc` 保持走
+    tooltip，以及**邮箱导入的「两步流程」警告必须留在版面**（那是操作步骤，
+    不是注释，收进 tooltip 用户会漏看）。
+    """
+    script = os.path.join(FRONTEND, "scripts", "run_form_hint_checks.mjs")
+    assert os.path.exists(script), f"缺少执行脚本: {script}"
+    proc = subprocess.run(
+        ["node", script], cwd=FRONTEND, capture_output=True, text=True, timeout=180
+    )
+    assert proc.returncode == 0, f"脚本失败: {proc.stdout[-800:]}{proc.stderr[-800:]}"
+    result = json.loads(proc.stdout.strip().splitlines()[-1])
+    assert not result["failures"], result["failures"]
+    assert result["checked"] >= 12
+
+
+@pytest.mark.skipif(
+    not os.path.isdir(os.path.join(FRONTEND, "node_modules")),
+    reason="frontend/node_modules 未安装，跳过真实 TS 执行",
+)
 def test_failed_tasks_are_not_hidden_behind_the_cap():
     """25 条 done + 1 条刚 failed → 那条 failed 必须可见。"""
     script = os.path.join(FRONTEND, "scripts", "run_finished_cap_checks.mjs")
