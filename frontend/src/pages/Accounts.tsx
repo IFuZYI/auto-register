@@ -55,12 +55,12 @@ import {
 import { AccountExportModal } from '@/components/AccountExportModal'
 import { ChatGPTBind2faSwitch } from '@/components/ChatGPTBind2faSwitch'
 import { ChatGPTRegisterFlowSelect } from '@/components/ChatGPTRegisterFlowSelect'
-import { ChatGPTRegistrationModeSwitch } from '@/components/ChatGPTRegistrationModeSwitch'
+import { ChatGPTTokenPlanSelect } from '@/components/ChatGPTTokenPlanSelect'
 import { TaskLogPanel } from '@/components/TaskLogPanel'
 import type { TaskKind } from '@/components/TaskLogPanel'
 import { usePersistentChatGPTBind2fa } from '@/hooks/usePersistentChatGPTBind2fa'
 import { usePersistentChatGPTRegisterFlow } from '@/hooks/usePersistentChatGPTRegisterFlow'
-import { usePersistentChatGPTRegistrationMode } from '@/hooks/usePersistentChatGPTRegistrationMode'
+import { usePersistentChatGPTTokenPlan } from '@/hooks/usePersistentChatGPTTokenPlan'
 import { buildChatGPTRegistrationRequestAdapter } from '@/lib/chatgptRegistrationRequestAdapter'
 import { apiFetch } from '@/lib/utils'
 import { PageHeader } from '@/components/PageHeader'
@@ -379,8 +379,8 @@ export default function Accounts() {
   const [registerForm] = Form.useForm()
   const [addForm] = Form.useForm()
   const [detailForm] = Form.useForm()
-  const { mode: chatgptRegistrationMode, setMode: setChatgptRegistrationMode } =
-    usePersistentChatGPTRegistrationMode()
+  const { plan: chatgptTokenPlan, setPlan: setChatgptTokenPlan } =
+    usePersistentChatGPTTokenPlan()
   const { registerFlow: chatgptRegisterFlow, setRegisterFlow: setChatgptRegisterFlow } =
     usePersistentChatGPTRegisterFlow()
   const { bind2fa: chatgptBind2fa, setBind2fa: setChatgptBind2fa } =
@@ -578,7 +578,7 @@ export default function Accounts() {
       const chatgptRegistrationRequestAdapter =
         buildChatGPTRegistrationRequestAdapter(
           currentPlatform,
-          chatgptRegistrationMode,
+          chatgptTokenPlan,
           chatgptRegisterFlow,
           chatgptBind2fa,
         )
@@ -1306,9 +1306,9 @@ export default function Accounts() {
                   />
                 </Form.Item>
                 <Form.Item label="ChatGPT Token 方案">
-                  <ChatGPTRegistrationModeSwitch
-                    mode={chatgptRegistrationMode}
-                    onChange={setChatgptRegistrationMode}
+                  <ChatGPTTokenPlanSelect
+                    plan={chatgptTokenPlan}
+                    onChange={setChatgptTokenPlan}
                   />
                 </Form.Item>
                 <Form.Item label="绑定 2FA">

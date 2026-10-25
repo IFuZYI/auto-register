@@ -112,6 +112,35 @@ def test_conditional_request_returns_304(client):
     )
 
 
+def test_precompression_cache_is_built_once_at_startup(tmp_path):
+    """预压缩缓存是**启动时一次构建**的：构建产物在进程运行期间被替换时，
+    缓存仍持有旧字节，新文件名则完全没有 gzip 变体。
+
+    这是**已知取舍**（不在每个请求上压是为了省 CPU），不是缺陷 —— 但它是
+    真实属性，必须写下来：实测踩到过「测试跑到一半重建前端」导致 6 条 gzip
+    用例红。DN 的部署流程是「构建 → 重启服务」，正好避开这个窗口。
+
+    这条测试钉住「缓存不会自己失效」，以免有人误以为改了文件就自动生效。
+    """
+    import main as main_mod
+
+    (tmp_path / "a.js").write_bytes(b"var a=1;\n" * 400)
+    store = main_mod._GzipStatic(directory=str(tmp_path))
+    self_initial = list(store._gzip_cache)
+    assert "a.js" in self_initial, "首次构建应缓存 a.js"
+
+    # 进程运行期间替换同名文件：缓存不会更新
+    (tmp_path / "a.js").write_bytes(b"var b=2;\n" * 400)
+    assert list(store._gzip_cache) == self_initial, (
+        "缓存应当保持不变（这是取舍，不是失效 bug）—— 若这里变了，"
+        "说明有人加了自动失效，需要同步更新文档与部署约定"
+    )
+
+    # 新文件也不会被自动收录
+    (tmp_path / "b.js").write_bytes(b"var c=3;\n" * 400)
+    assert "b.js" not in store._gzip_cache, "新增文件不会被自动预压"
+
+
 def test_range_request_is_not_served_gzip(client):
     """`Range` 请求不能带 gzip —— 字节区间是按**原始**文件算的。
 

@@ -19,12 +19,12 @@ import {
 } from '@ant-design/icons'
 import { ChatGPTBind2faSwitch } from '@/components/ChatGPTBind2faSwitch'
 import { ChatGPTRegisterFlowSelect } from '@/components/ChatGPTRegisterFlowSelect'
-import { ChatGPTRegistrationModeSwitch } from '@/components/ChatGPTRegistrationModeSwitch'
+import { ChatGPTTokenPlanSelect } from '@/components/ChatGPTTokenPlanSelect'
 import SmsCountrySelect from '@/components/SmsCountrySelect'
 import { TaskLogPanel } from '@/components/TaskLogPanel'
 import { usePersistentChatGPTBind2fa } from '@/hooks/usePersistentChatGPTBind2fa'
 import { usePersistentChatGPTRegisterFlow } from '@/hooks/usePersistentChatGPTRegisterFlow'
-import { usePersistentChatGPTRegistrationMode } from '@/hooks/usePersistentChatGPTRegistrationMode'
+import { usePersistentChatGPTTokenPlan } from '@/hooks/usePersistentChatGPTTokenPlan'
 import { listICloudAccounts } from '@/api/icloud'
 
 /**
@@ -109,8 +109,10 @@ export default function RegisterTaskPage() {
       alive = false
     }
   }, [])
-  const { mode: chatgptRegistrationMode, setMode: setChatgptRegistrationMode } =
-    usePersistentChatGPTRegistrationMode()
+  // 「Token 方案」三选一（有RT·密码登录 / 有RT·Codex / 无RT）。
+  // 它映射到后端两个键，见 lib/chatgptTokenPlan.ts。
+  const { plan: chatgptTokenPlan, setPlan: setChatgptTokenPlan } =
+    usePersistentChatGPTTokenPlan()
   const { registerFlow: chatgptRegisterFlow, setRegisterFlow: setChatgptRegisterFlow } =
     usePersistentChatGPTRegisterFlow()
   const { bind2fa: chatgptBind2fa, setBind2fa: setChatgptBind2fa } =
@@ -192,7 +194,7 @@ export default function RegisterTaskPage() {
     const chatgptRegistrationRequestAdapter =
       buildChatGPTRegistrationRequestAdapter(
         values.platform,
-        chatgptRegistrationMode,
+        chatgptTokenPlan,
         chatgptRegisterFlow,
         chatgptBind2fa,
       )
@@ -364,9 +366,9 @@ export default function RegisterTaskPage() {
                 />
               </Form.Item>
               <Form.Item label="ChatGPT Token 方案">
-                <ChatGPTRegistrationModeSwitch
-                  mode={chatgptRegistrationMode}
-                  onChange={setChatgptRegistrationMode}
+                <ChatGPTTokenPlanSelect
+                  plan={chatgptTokenPlan}
+                  onChange={setChatgptTokenPlan}
                 />
               </Form.Item>
               <Form.Item label="绑定 2FA">

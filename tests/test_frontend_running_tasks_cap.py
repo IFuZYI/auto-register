@@ -24,6 +24,27 @@ FRONTEND = os.path.join(ROOT, "frontend")
     not os.path.isdir(os.path.join(FRONTEND, "node_modules")),
     reason="frontend/node_modules 未安装，跳过真实 TS 执行",
 )
+def test_chatgpt_token_plan_has_three_options():
+    """「Token 方案」必须是三选一（用户要求：合并成三种）。
+
+    检查脚本真实执行 `lib/chatgptTokenPlan.ts`，覆盖方案数量、取值顺序、
+    默认值、以及每个方案落成的后端键。
+    """
+    script = os.path.join(FRONTEND, "scripts", "run_chatgpt_token_plan_checks.mjs")
+    assert os.path.exists(script), f"缺少执行脚本: {script}"
+    proc = subprocess.run(
+        ["node", script], cwd=FRONTEND, capture_output=True, text=True, timeout=180
+    )
+    assert proc.returncode == 0, f"脚本失败: {proc.stdout[-800:]}{proc.stderr[-800:]}"
+    result = json.loads(proc.stdout.strip().splitlines()[-1])
+    assert not result["failures"], result["failures"]
+    assert result["checked"] >= 13
+
+
+@pytest.mark.skipif(
+    not os.path.isdir(os.path.join(FRONTEND, "node_modules")),
+    reason="frontend/node_modules 未安装，跳过真实 TS 执行",
+)
 def test_failed_tasks_are_not_hidden_behind_the_cap():
     """25 条 done + 1 条刚 failed → 那条 failed 必须可见。"""
     script = os.path.join(FRONTEND, "scripts", "run_finished_cap_checks.mjs")
