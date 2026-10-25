@@ -33,6 +33,12 @@ logger = logging.getLogger(__name__)
 
 STRATEGY_SESSION = "session"
 STRATEGY_LOGIN = "login"
+#: 走 platform client_id 的**密码登录**路线换 RT。
+#:
+#: 与 `STRATEGY_LOGIN`（"协议重登"）不是一回事：后者的终点仍然是 Codex 交换，
+#: 只是把登录态先弄好；本策略换的是端点与 client_id，全程不碰 Codex、不碰
+#: add-phone（2026-10-26 实测：新号 3 次、存量号 1 次拿到 RT）。
+STRATEGY_PLATFORM_LOGIN = "platform_login"
 
 # 两条路共用的协议开关：只为拿 RT，别的一律省掉。
 # OAUTH_CODEX_RT_ALLOW_RETRY 打开是因为补 RT 场景下一轮里可能要试两次
@@ -56,6 +62,15 @@ _LOGIN_OVERRIDES = {
     "OAUTH_REFRESH_ONLY": "1",
     "OAUTH_CODEX_RT_BEFORE_CALLBACK": "1",
     # 补 RT 的对象必然是已有账号，别让协议层把"这邮箱已注册"当失败
+    "WEBUI_ALLOW_LOGIN": "1",
+}
+
+
+#: 密码登录路线**不需要** Codex 相关开关：它自己换端点与 client_id。
+#: 关掉 Codex 交换是为了让 `run_protocol_login` 内部不要顺手多打一次。
+_PLATFORM_LOGIN_OVERRIDES = {
+    "OAUTH_CODEX_RT_EXCHANGE": "0",
+    "OAUTH_REFRESH_ONLY": "1",
     "WEBUI_ALLOW_LOGIN": "1",
 }
 
@@ -176,10 +191,7 @@ class RefreshTokenBackfiller:
 
         result = BackfillResult(success=False, email=self.email)
 
-        for strategy, runner in (
-            (STRATEGY_SESSION, self._try_session),
-            (STRATEGY_LOGIN, self._try_login),
-        ):
+        for strategy, runner in self._strategy_runners():
             skip_reason = self._skip_reason(strategy)
             if skip_reason:
                 result.attempts.append(BackfillAttempt(strategy, False, skip_reason))
@@ -303,6 +315,49 @@ class RefreshTokenBackfiller:
 
     # ── 结果整理 ──
 
+    def _strategy_runners(self):
+        """按代价从低到高排：复用会话 → 协议重登 → 密码登录。
+
+        密码登录放最后：它要重新走一遍 authorize + sentinel + 密码 + 2FA，
+        比前两条都重；前面能成就不该跑它。
+
+        绑定实例方法（`self._try_xxx`）而不是类上的裸函数 —— 后者丢 `self`，
+        调用时直接 TypeError（实测踩过）。
+        """
+        return (
+            (STRATEGY_SESSION, self._try_session),
+            (STRATEGY_LOGIN, self._try_login),
+            (STRATEGY_PLATFORM_LOGIN, self._try_platform_login),
+        )
+
+    def _strategy_order(self) -> list:
+        return [strategy for strategy, _ in self._strategy_runners()]
+
+    def _try_platform_login(self) -> None:
+        """策略三：platform 密码登录路线换 RT（不碰 Codex、不碰 add-phone）。"""
+        self.log(f"[补RT] 尝试密码登录路线: {self.email}")
+        flow = self._build_flow(_PLATFORM_LOGIN_OVERRIDES)
+        self._active_flow = flow
+        # 设备标识复用：沿用注册时落库的 oai-did，别让重登看起来像新设备
+        flow.seed_device_id(self.device_id)
+        flow.result.email = self.email or flow.result.email
+        if self.totp_secret:
+            flow.result.totp_secret = self.totp_secret
+        ok = self._run_platform_login(flow)
+        if not ok:
+            reason = getattr(flow, "last_platform_route_error", "") or "未知原因"
+            raise RuntimeError(reason)
+
+    def _run_platform_login(self, flow: AuthFlow) -> bool:
+        """调用密码登录路线。
+
+        单独一层是为了可测：测试替换本方法即可，不必让假 flow 假装整个协议栈
+        —— 桩打在别处会让测试**真的发网络请求**（实测踩过：401 + 28 秒）。
+        """
+        return bool(flow.acquire_rt_via_platform_login(
+            email=self.email, password=self.password, totp_secret=self.totp_secret,
+        ))
+
     def _skip_reason(self, strategy: str) -> str:
         if strategy == STRATEGY_SESSION and not (self.session_token or self.access_token):
             return "库里没有 session_token / access_token，跳过会话复用"
@@ -311,6 +366,13 @@ class RefreshTokenBackfiller:
                 return "已关闭协议重登"
             if not self.password:
                 return "库里没有密码，无法协议重登"
+        if strategy == STRATEGY_PLATFORM_LOGIN:
+            if not self.password:
+                return "库里没有密码，无法走密码登录路线"
+            # 服务端若已绑 2FA 就会要动态码，而密钥只有本地有。缺了必然卡死，
+            # 提前跳过并说明原因，比跑一轮再报「没拿到 code」清楚。
+            if not self.totp_secret:
+                return "库里没有 totp_secret，密码登录路线无法过 2FA"
         return ""
 
     def _absorb(self, result: BackfillResult, flow: AuthFlow) -> None:
@@ -335,7 +397,11 @@ class RefreshTokenBackfiller:
 
     @staticmethod
     def _label(strategy: str) -> str:
-        return "复用会话" if strategy == STRATEGY_SESSION else "协议重登"
+        return {
+            STRATEGY_SESSION: "复用会话",
+            STRATEGY_LOGIN: "协议重登",
+            STRATEGY_PLATFORM_LOGIN: "密码登录",
+        }.get(strategy, strategy)
 
 
 def backfill_refresh_token(**kwargs) -> BackfillResult:

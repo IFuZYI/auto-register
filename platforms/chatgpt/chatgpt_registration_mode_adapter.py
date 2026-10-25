@@ -69,6 +69,34 @@ def normalize_chatgpt_registration_mode(value) -> str:
     return DEFAULT_CHATGPT_REGISTRATION_MODE
 
 
+#: 换取 RT 的路线。
+#:
+#: - `codex`：现有行为，走 Codex CLI 的 client_id 做 OAuth 授权；撞 add-phone
+#:   时要靠接码平台才能过。
+#: - `login`：走 platform 的 client_id 做**密码登录**（password/verify →
+#:   mfa/verify → code → token）；实测不需要手机号，但要求账号有密码与
+#:   TOTP 密钥。
+#:
+#: 2026-10-26 实测：`codex` 在新号上卡在 choose-an-account / session.select，
+#: 拿不到 RT；`login` 在同样的号上拿到。默认保持 `codex`（不改既有行为），
+#: 由用户在设置里显式切换。
+RT_ROUTE_CODEX = "codex"
+RT_ROUTE_LOGIN = "login"
+DEFAULT_CHATGPT_RT_ROUTE = RT_ROUTE_CODEX
+
+
+def normalize_chatgpt_rt_route(value) -> str:
+    text = str(value or "").strip().lower().replace("-", "_")
+    if text in {"login", "password", "password_login", "pwd", "1", "true", "yes", "on"}:
+        return RT_ROUTE_LOGIN
+    return RT_ROUTE_CODEX
+
+
+def resolve_chatgpt_rt_route(extra: Optional[dict]) -> str:
+    """从任务/全局设置里解析路线；缺省或无法识别时保持 `codex`。"""
+    return normalize_chatgpt_rt_route((extra or {}).get("chatgpt_rt_route"))
+
+
 def resolve_chatgpt_registration_mode(extra: Optional[dict]) -> str:
     extra = extra or {}
     if "chatgpt_registration_mode" in extra:

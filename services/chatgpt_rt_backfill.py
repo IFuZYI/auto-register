@@ -146,6 +146,11 @@ def build_extra_patch(result: BackfillResult) -> dict[str, Any]:
     if result.refresh_token:
         # 号已经有 RT 了，别再被当成 access_token_only 方案的产物
         patch["chatgpt_has_refresh_token_solution"] = True
+        # `partial` / `missing` 是注册时「RT 没拿到」打的标记（见
+        # `registration_engine._note_missing_refresh_token`）。补到 RT 后必须清掉，
+        # 否则账号永远显示「凭证不全」—— 与事实相反。
+        patch["partial"] = False
+        patch["missing"] = ""
     patch["chatgpt_rt_backfill"] = {
         "ok": result.success,
         "strategy": result.strategy,

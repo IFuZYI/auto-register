@@ -516,3 +516,6 @@ git diff --stat
 原因：根目录长期有未跟踪目录（`.hermes/` 这类本地状态），把它们算作脏会让戳被
 永久钉成 `+dirty`，此后真改了已跟踪文件戳也不变 —— `stale` 恒为 false，
 **恰好漏掉这个端点要防的情况**。
+
+
+| `tests/test_chatgpt_platform_rt_route.py` | ChatGPT 换 RT 的两条路线（Codex / 密码登录）、路线开关、补 RT 策略顺序与 `partial` 清理 |

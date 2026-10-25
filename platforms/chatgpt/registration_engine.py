@@ -275,6 +275,100 @@ class ChatGPTRegistrationEngine:
             except Exception:
                 logger.debug("更新邮箱池状态失败", exc_info=True)
 
+    # ── 换 RT 的路线选择 ──
+
+    def _acquire_refresh_token(
+        self,
+        *,
+        flow: AuthFlow,
+        email: str,
+        password: str,
+        totp_secret: str = "",
+    ) -> bool:
+        """按 `chatgpt_rt_route` 选路换 refresh_token。
+
+        用户要求的顺序（2026-10-26）：
+        - `codex`（默认，现有行为）→ 失败时**回退**到登录链；
+        - `login` → 只走登录链，不跑 Codex（那条路在这个场景白花时间）。
+
+        为什么 Codex 失败要回退：实测 Codex 路线在新号上卡在
+        choose-an-account / session.select，而登录路线能在同样的号上拿到 RT
+        （新号 3 次 / 存量号 1 次验证）。回退让默认配置也能拿到 RT。
+
+        `access_token_only` 模式两条都不跑 —— 那个模式本来就明确不要 RT。
+        """
+        from platforms.chatgpt.chatgpt_registration_mode_adapter import (
+            RT_ROUTE_LOGIN, resolve_chatgpt_rt_route,
+        )
+
+        if self.mode == REGISTRATION_MODE_ACCESS_TOKEN_ONLY:
+            return False
+
+        route = resolve_chatgpt_rt_route(self.extra_config)
+
+        if route == RT_ROUTE_LOGIN:
+            return bool(self._run_login_rt(
+                flow, email=email, password=password, totp_secret=totp_secret,
+            ))
+
+        if self._run_codex_rt(flow):
+            return True
+
+        # Codex 没成 → 回退登录链。登录链要有密码，没有就别白试。
+        if not str(password or "").strip():
+            self.log(
+                "Codex 换 RT 未成功，且账号没有密码，无法回退登录链"
+                "（无密码注册的号只能靠 Codex 路线 + 接码）"
+            )
+            return False
+        self.log("Codex 换 RT 未成功，回退「密码登录」路线再试一次…")
+        return bool(self._run_login_rt(
+            flow, email=email, password=password, totp_secret=totp_secret,
+        ))
+
+    def _run_codex_rt(self, flow: AuthFlow) -> bool:
+        """跑一次 Codex OAuth 交换。成功以 `refresh_token` 到手为准。"""
+        try:
+            flow.oauth_codex_rt_exchange(mail_provider=self.mail_provider)
+        except Exception as exc:  # noqa: BLE001 - 失败要能回退，不该炸整条链
+            self.log(f"Codex 换 RT 报错（将尝试回退）: {type(exc).__name__}: {exc}")
+            return False
+        return bool((flow.result.refresh_token or "").strip())
+
+    def _run_login_rt(
+        self,
+        flow: AuthFlow,
+        *,
+        email: str,
+        password: str,
+        totp_secret: str = "",
+    ) -> bool:
+        """跑一次 platform 密码登录路线换 RT。"""
+        try:
+            ok = flow.acquire_rt_via_platform_login(
+                email=email, password=password, totp_secret=totp_secret,
+            )
+        except Exception as exc:  # noqa: BLE001 - 同上，失败要可回退
+            self.log(f"登录链换 RT 报错: {type(exc).__name__}: {exc}")
+            return False
+        if not ok:
+            reason = getattr(flow, "last_platform_route_error", "") or "未知原因"
+            self.log(f"登录链换 RT 未成功: {reason}")
+        return bool(ok)
+
+    def _acquire_rt_adapter(self, flow: AuthFlow) -> bool:
+        """协议层调用的注入点：把 flow 上已落的凭据交给路线选择。
+
+        密码与 TOTP 都从 flow 取 —— 注册链刚设的密码在 `flow.result.password`，
+        绑 2FA 拿到的密钥在 `flow.result.totp_secret`，两者都不需要落库即可用。
+        """
+        return self._acquire_refresh_token(
+            flow=flow,
+            email=(flow.result.email or self.email or ""),
+            password=(flow.result.password or self.password or ""),
+            totp_secret=(flow.result.totp_secret or ""),
+        )
+
     def _build_flow(self, sms_callback: Optional[object] = None) -> AuthFlow:
         flow = AuthFlow(
             Config(proxy=self.proxy),
@@ -283,6 +377,8 @@ class ChatGPTRegistrationEngine:
             on_password=self._on_password,
             # 不开 2FA 就一个钩子都不挂：挂上会顺带关掉 callback 前那次 Codex 抢跑
             on_session_ready=self._on_session_ready if self.bind_2fa else None,
+            # 换 RT 的路线选择（Codex / 密码登录）交给引擎决定，协议层不认识设置项
+            acquire_rt=self._acquire_rt_adapter,
         )
         self.flow = flow
         return flow

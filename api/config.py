@@ -122,6 +122,7 @@ CONFIG_KEYS = [
     # ChatGPT 的注册方式全局默认值（原先只在任务页 localStorage 里选，
     # 换机器就丢）。见 platforms/chatgpt/plugin.py 的 registration_modes。
     "chatgpt_registration_mode",
+    "chatgpt_rt_route",
     "chatgpt_register_flow",
     "sms_enabled",
     "sms_provider",

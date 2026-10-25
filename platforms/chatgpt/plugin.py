@@ -55,6 +55,20 @@ class ChatGPTPlatform(BasePlatform):
             ],
         },
         {
+            "key": "chatgpt_rt_route",
+            "label": "RT 获取方式",
+            "desc": (
+                "Codex 授权：走现有链路，撞 add-phone 时需接码平台才能过；"
+                "密码登录：用账号密码 + 2FA 直接换 RT，不需要接码（要求账号有密码与"
+                "TOTP 密钥，实测新号与老号都能拿到 RT）。任务页可临时覆盖"
+            ),
+            "default": "codex",
+            "options": [
+                {"value": "codex", "label": "Codex 授权（需要接码）"},
+                {"value": "login", "label": "密码登录（不需要接码）"},
+            ],
+        },
+        {
             "key": "chatgpt_register_flow",
             "label": "注册流程",
             "desc": "邮箱注册用邮箱池收码；手机注册进 add-phone 后自动租号、等短信。任务页可临时覆盖",

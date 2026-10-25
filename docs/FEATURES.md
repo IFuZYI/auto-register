@@ -198,6 +198,33 @@ SSO 判定是「访问 accounts.x.ai 看是否跳登录页」，本仓实测它�
 - NSFW 顺序不能换：`accept-terms` → `birth-date` → `nsfw`
 - 管理面要**用户名+密码换 token**（不是固定 API Key），有效期约 10 分钟
 
+## ChatGPT 换 RT 的两条路线
+
+`chatgpt_rt_route`（设置 → 各平台设置 → ChatGPT，或任务页临时覆盖）决定
+**怎么拿 refresh_token**：
+
+| 路线 | 做法 | 需要接码 | 实测结果 |
+| --- | --- | --- | --- |
+| `codex`（默认） | Codex CLI 的 client_id 做 OAuth 授权 | 撞 add-phone 时需要 | 新号卡在 choose-an-account，拿不到 RT |
+| `login` | platform 的 client_id 做密码登录（password/verify → mfa/verify → code → token） | **不需要** | 新号 3 次、存量号 1 次拿到 RT |
+
+**回退方向是反的**：`codex` 失败会**回退到 `login`**（不是反过来）。理由：
+实测 Codex 路线在新号上 0 成功，而登录路线能拿到。`login` 路线失败不会回头
+跑 Codex —— 那条路在该场景只会白花时间。
+
+**`login` 路线的前置条件**（缺一不可）：
+
+- 账号在 OpenAI 侧有**密码**（无密码注册的号没有）
+- 服务端若已绑 2FA，本地必须存有 `totp_secret`。缺了会明确报
+  「密码登录路线无法过 2FA」而不是猜密码 —— 密钥无法从服务端取回，
+  这种号只能走 `codex` + 接码。
+
+两条路线互不共享授权链状态：各自的 authorize / PKCE / sentinel / cookie 都要
+独立走一遍，一次性 code 不能跨路线复用。
+
+补 RT 的策略顺序是**代价从低到高**：复用会话 → 协议重登（Codex）→ 密码登录。
+前两条失败才会跑第三条。
+
 ## 前端交付
 
 产物按**路由拆分**（`React.lazy`）：首屏只下载 Dashboard 那一份，其余页面用到才拉。

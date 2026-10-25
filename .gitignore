@@ -86,3 +86,6 @@ reference/
 
 # 本地 git worktree（研发分支工作树，仅本地）
 .worktrees/
+
+# 自我改进日志（本地，不入库）
+.learnings/

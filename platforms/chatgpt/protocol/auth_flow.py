@@ -29,6 +29,7 @@ from platforms.chatgpt.protocol.mail_provider import MailProvider
 from platforms.chatgpt.protocol.http_client import create_http_session
 from platforms.chatgpt.protocol.phone_flow import PhoneRegisterMixin
 from platforms.chatgpt.protocol.mixins import add_phone as __add_phone_mixin
+from platforms.chatgpt.protocol.mixins import platform_rt as __platform_rt_mixin
 from platforms.chatgpt.protocol.mixins import codex as __codex_mixin
 from platforms.chatgpt.protocol.mixins import redirect as __redirect_mixin
 from platforms.chatgpt.protocol.mixins import session as __session_mixin
@@ -81,6 +82,7 @@ class AuthFlow(
     __trace_mixin.TraceMixin,
     __redirect_mixin.RedirectMixin,
     __add_phone_mixin.AddPhoneMixin,
+    __platform_rt_mixin.PlatformRtMixin,
     __codex_mixin.CodexMixin,
     __session_mixin.SessionMixin,
     __signup_mixin.SignupMixin,
@@ -95,6 +97,7 @@ class AuthFlow(
         env_overrides: Optional[dict] = None,
         on_password: Optional[Any] = None,
         on_session_ready: Optional[Any] = None,
+        acquire_rt: Optional[Any] = None,
         account_callback: Optional[Any] = None,
     ):
         # 本次流程专属的配置覆盖（WEBUI_ALLOW_LOGIN / OTP_TIMEOUT / OAuth 开关等）。
@@ -149,6 +152,9 @@ class AuthFlow(
         #    （:3051 OAUTH_CODEX_RT_BEFORE_CALLBACK），否则 Codex 会跑在钩子前面，
         #    顺序就白调了。不传则一个字节都不变，老行为。
         self._on_session_ready = on_session_ready
+        #: 换 RT 的注入点（注册引擎提供），签名 (flow) -> bool。
+        #: None = 保持旧行为：只跑 Codex 交换。
+        self._acquire_rt = acquire_rt
         # 账号凭证回调：已有账号登录时从数据库加载密码和 totp_secret。
         # 签名 (email: str) -> dict，返回 {"password": "...", "totp_secret": "..."}。
         # 用于 mfa-challenge 路径：密码验证后需要 TOTP 码，从库里读 secret。
