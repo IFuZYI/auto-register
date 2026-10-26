@@ -44,8 +44,33 @@ _MAILBOX_ERROR_MARKERS = ("service_abuse_mode", "oauth_token_failed", "imap")
 _MAX_ATTEMPTS = 3
 
 
+#: 合并后的「Token 方案」三取值 —— 一个值同时决定「要不要 RT」与「怎么换 RT」。
+#:
+#: 为什么合并：设置页原先渲染成两个独立下拉（有/无 RT + Codex/密码登录），
+#: 而任务页早已合并成三选一（`frontend/src/lib/chatgptTokenPlan.ts`）。同一件事
+#: 两处呈现不同，用户会以为设置页少了东西（用户 2026-10-26 要求合并）。
+#:
+#: 三个值都写进 `chatgpt_registration_mode`；`chatgpt_rt_route` 保留为**兼容输入**
+#: （老配置里存过它），但不再单独渲染。
+TOKEN_PLAN_REFRESH_LOGIN = "refresh_token_login"
+TOKEN_PLAN_REFRESH_CODEX = "refresh_token_codex"
+
+#: 设置页「Token 方案」的声明默认值 —— 必须与运行时行为一致。
+#:
+#: 选密码登录作为默认：2026-10-26 实测 Codex 路线在新号上卡在
+#: choose-an-account / session.select（拿不到 RT），而密码登录路线在新号与
+#: 老号上都能拿到。`DEFAULT_CHATGPT_REGISTRATION_MODE` 仍是 `refresh_token`
+#: （合并值会归一成它），两者不冲突：前者是**声明层的默认选项**，后者是
+#: **归一后的运行时模式**。
+DEFAULT_CHATGPT_TOKEN_PLAN = TOKEN_PLAN_REFRESH_LOGIN
+
+
 def normalize_chatgpt_registration_mode(value) -> str:
     normalized = str(value or "").strip().lower().replace("-", "_")
+    # 合并值：先判它们，再走两态别名（`refresh_token_login` 里也含
+    # "refresh_token"，顺序反了会被下面的集合先吃掉）。
+    if normalized in {TOKEN_PLAN_REFRESH_LOGIN, TOKEN_PLAN_REFRESH_CODEX}:
+        return CHATGPT_REGISTRATION_MODE_REFRESH_TOKEN
     if normalized in {
         CHATGPT_REGISTRATION_MODE_ACCESS_TOKEN_ONLY,
         "access_token",
@@ -92,9 +117,52 @@ def normalize_chatgpt_rt_route(value) -> str:
     return RT_ROUTE_CODEX
 
 
+def resolve_chatgpt_token_plan(extra: Optional[dict]) -> str:
+    """把任意历史配置归一成**合并后的**「Token 方案」三取值之一。
+
+    设置页的下拉要显示当前选中项。已保存的旧值（`refresh_token` /
+    `access_token_only`，或更早的 `chatgpt_rt_route` 独立键）都不是新选项，
+    antd `Select` 只能把原始串显示出来 —— 用户看到 `refresh_token` 这种内部
+    标识符，不知道实际选了哪个方案（实测 2026-10-26）。
+
+    这个函数是前端的显示依据：任何旧配置都能还原成三个方案之一。
+    """
+    data = extra or {}
+    mode = str(data.get("chatgpt_registration_mode") or "").strip().lower().replace("-", "_")
+
+    if mode == TOKEN_PLAN_REFRESH_LOGIN:
+        return TOKEN_PLAN_REFRESH_LOGIN
+    if mode == TOKEN_PLAN_REFRESH_CODEX:
+        return TOKEN_PLAN_REFRESH_CODEX
+    if normalize_chatgpt_registration_mode(mode) == CHATGPT_REGISTRATION_MODE_ACCESS_TOKEN_ONLY:
+        return CHATGPT_REGISTRATION_MODE_ACCESS_TOKEN_ONLY
+    # 旧的两态值 `refresh_token`（或空）：看有没有存过独立的路线键。
+    # 没存过就跟**合并后的默认值**走（密码登录）—— 否则「默认改成密码登录了，
+    # 但老用户的下拉还显示 Codex」这种不一致。
+    route_key = str(data.get("chatgpt_rt_route") or "").strip()
+    if not route_key:
+        return DEFAULT_CHATGPT_TOKEN_PLAN
+    return (
+        TOKEN_PLAN_REFRESH_LOGIN
+        if resolve_chatgpt_rt_route(data) == RT_ROUTE_LOGIN
+        else TOKEN_PLAN_REFRESH_CODEX
+    )
+
+
 def resolve_chatgpt_rt_route(extra: Optional[dict]) -> str:
-    """从任务/全局设置里解析路线；缺省或无法识别时保持 `codex`。"""
-    return normalize_chatgpt_rt_route((extra or {}).get("chatgpt_rt_route"))
+    """解析「怎么换 RT」。
+
+    优先看合并值 `chatgpt_registration_mode`（`refresh_token_login` /
+    `refresh_token_codex`）—— 那是设置页现在唯一暴露的入口；没有合并值时
+    回落到旧的独立键 `chatgpt_rt_route`（老配置兼容）。
+    """
+    data = extra or {}
+    mode = str(data.get("chatgpt_registration_mode") or "").strip().lower().replace("-", "_")
+    if mode == TOKEN_PLAN_REFRESH_LOGIN:
+        return RT_ROUTE_LOGIN
+    if mode == TOKEN_PLAN_REFRESH_CODEX:
+        return RT_ROUTE_CODEX
+    return normalize_chatgpt_rt_route(data.get("chatgpt_rt_route"))
 
 
 def resolve_chatgpt_registration_mode(extra: Optional[dict]) -> str:

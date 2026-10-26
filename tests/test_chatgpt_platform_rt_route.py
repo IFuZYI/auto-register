@@ -266,20 +266,25 @@ class RtRouteSelectionTests(unittest.TestCase):
         self.assertEqual(resolve_chatgpt_rt_route({"chatgpt_rt_route": "banana"}),
                          RT_ROUTE_CODEX)
 
-    def test_declared_in_registration_modes_for_ui(self):
-        """面板靠 registration_modes 渲染下拉框 —— 不声明就等于没这个开关。"""
+    def test_rt_route_is_reachable_from_the_settings_ui(self):
+        """路线必须能从设置界面选到 —— 但**不再**是独立下拉。
+
+        2026-10-26 起「RT 获取方式」合并进「Token 方案」三选一（用户要求）：
+        设置页只渲染一个 `chatgpt_registration_mode`，两个路线取值是它的选项。
+        所以这里断言的是「路线能从声明里选到」，而不是「有一个独立键」。
+
+        独立键的断言搬到了 `tests/test_chatgpt_token_plan_settings.py`
+        （`test_rt_route_is_no_longer_a_separate_field`）。
+        """
         from platforms.chatgpt.plugin import ChatGPTPlatform
+
         keys = {m["key"]: m for m in ChatGPTPlatform.registration_modes}
-        self.assertIn("chatgpt_rt_route", keys,
-                      "没在 registration_modes 里声明，面板不会渲染它")
-        mode = keys["chatgpt_rt_route"]
-        values = [o["value"] for o in mode["options"]]
-        self.assertIn("codex", values)
-        self.assertIn("login", values)
-        # 默认值必须与运行时一致，否则面板显示的和实际行为对不上
-        self.assertEqual(mode.get("default"), "codex")
-        # 文案要说清代价：登录路线不需要接码
-        joined = (mode.get("label", "") + mode.get("desc", ""))
+        self.assertNotIn("chatgpt_rt_route", keys,
+                         "「RT 获取方式」仍单独声明 —— 应已合并进 Token 方案")
+        values = [o["value"] for o in keys["chatgpt_registration_mode"]["options"]]
+        self.assertIn("refresh_token_codex", values, "Codex 路线在声明里选不到")
+        self.assertIn("refresh_token_login", values, "密码登录路线在声明里选不到")
+        joined = keys["chatgpt_registration_mode"].get("desc", "")
         self.assertTrue(any(w in joined for w in ("接码", "手机")),
                         f"文案要说明与接码的关系，实际: {joined!r}")
 

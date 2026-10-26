@@ -44,28 +44,23 @@ class ChatGPTPlatform(BasePlatform):
             "key": "chatgpt_registration_mode",
             "label": "Token 方案",
             "desc": (
-                "有 RT 方案走新链路，产出 Access Token + Refresh Token；"
-                "无 RT 方案走旧链路，只产出 Access Token / Session，"
-                "依赖 RT 的能力可能不可用。任务页可临时覆盖"
+                "一个选择同时决定「要不要 RT」与「怎么换 RT」："
+                "密码登录走账号密码 + 2FA，不需要接码；"
+                "Codex 授权走现有链路，撞 add-phone 时需接码平台才能过；"
+                "无 RT 只产 Access Token / Session。任务页可临时覆盖"
             ),
-            "default": "refresh_token",
+            "default": "refresh_token_login",
+            # 合并前存过的值 → 对应哪个新选项。前端据此把旧值显示成正确标签，
+            # 而不是把 `refresh_token` 这种内部标识符直接摆在下拉里（实测）。
+            "legacy_aliases": {
+                "refresh_token": "refresh_token_login",
+                "access_token": "access_token_only",
+                "at_only": "access_token_only",
+            },
             "options": [
-                {"value": "refresh_token", "label": "有 RT（默认推荐）"},
-                {"value": "access_token_only", "label": "无 RT（兼容旧方案）"},
-            ],
-        },
-        {
-            "key": "chatgpt_rt_route",
-            "label": "RT 获取方式",
-            "desc": (
-                "Codex 授权：走现有链路，撞 add-phone 时需接码平台才能过；"
-                "密码登录：用账号密码 + 2FA 直接换 RT，不需要接码（要求账号有密码与"
-                "TOTP 密钥，实测新号与老号都能拿到 RT）。任务页可临时覆盖"
-            ),
-            "default": "codex",
-            "options": [
-                {"value": "codex", "label": "Codex 授权（需要接码）"},
-                {"value": "login", "label": "密码登录（不需要接码）"},
+                {"value": "refresh_token_login", "label": "有 RT · 密码登录（不需要接码）"},
+                {"value": "refresh_token_codex", "label": "有 RT · Codex 授权（需要接码）"},
+                {"value": "access_token_only", "label": "无 RT"},
             ],
         },
         {

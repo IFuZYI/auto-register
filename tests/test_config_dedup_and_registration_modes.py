@@ -292,17 +292,34 @@ class RegistrationModesDeclarationTests(unittest.TestCase):
         )
 
     def test_chatgpt_declared_defaults_match_runtime(self):
-        """ChatGPT 的两个声明默认也要与运行时常量一致。"""
+        """ChatGPT 的声明默认要与运行时常量一致。
+
+        `chatgpt_registration_mode` 自 2026-10-26 起是**合并的三选一**
+        （`refresh_token_login` / `refresh_token_codex` / `access_token_only`），
+        所以声明默认比对的是 `DEFAULT_CHATGPT_TOKEN_PLAN`（合并层），
+        而不是归一后的 `DEFAULT_CHATGPT_REGISTRATION_MODE`。两者都要能被
+        各自的解析函数还原 —— 下面一并断言，避免「声明一个值、运行时解析成
+        另一个」这种静默错位。
+        """
         from core.registry import list_platforms
         from platforms.chatgpt.chatgpt_registration_mode_adapter import (
             DEFAULT_CHATGPT_REGISTER_FLOW,
-            DEFAULT_CHATGPT_REGISTRATION_MODE,
+            DEFAULT_CHATGPT_TOKEN_PLAN,
+            resolve_chatgpt_registration_mode,
+            resolve_chatgpt_rt_route,
         )
 
         chatgpt = next(p for p in list_platforms() if p["name"] == "chatgpt")
         by_key = {m["key"]: m for m in chatgpt["registration_modes"]}
+        declared = by_key["chatgpt_registration_mode"]["default"]
+        self.assertEqual(declared, DEFAULT_CHATGPT_TOKEN_PLAN)
+        # 声明的默认值必须能被运行时正确解析（否则界面显示的和实际跑的不一样）
         self.assertEqual(
-            by_key["chatgpt_registration_mode"]["default"], DEFAULT_CHATGPT_REGISTRATION_MODE
+            resolve_chatgpt_registration_mode({"chatgpt_registration_mode": declared}),
+            "refresh_token",
+        )
+        self.assertEqual(
+            resolve_chatgpt_rt_route({"chatgpt_registration_mode": declared}), "login"
         )
         self.assertEqual(
             by_key["chatgpt_register_flow"]["default"], DEFAULT_CHATGPT_REGISTER_FLOW

@@ -30,6 +30,14 @@ interface RegistrationModeSpec {
   min?: number
   max?: number
   options?: { value: string; label: string }[]
+  /**
+   * 合并前的旧值 → 对应哪个新选项。
+   *
+   * 合并「Token 方案」后，已保存的旧值（`refresh_token`）不在新选项里，
+   * antd `Select` 会把原始标识符直接显示出来（实测 2026-10-26）。这里按声明
+   * 把旧值映射成新值，用户看到的就是「有 RT · 密码登录」而不是 `refresh_token`。
+   */
+  legacy_aliases?: Record<string, string>
 }
 
 interface PlatformInfo {
@@ -228,6 +236,21 @@ function PlatformModeCard({ platform }: { platform: PlatformInfo }) {
                       // 说明三行、另一列一行，下拉框因此错位）。
                       tooltip={mode.desc}
                       style={{ marginBottom: 12 }}
+                      // 旧值 → 新选项：Form 把存储值直接给 Select，而旧值
+                      // （`refresh_token`）不在新选项里，antd 会把原始标识符
+                      // 显示出来（实测 2026-10-26）。`getValueProps` 是
+                      // Form.Item 提供的正规入口 —— 在 `Select` 上传 `value`
+                      // 会被 Form 接管，改不动。
+                      getValueProps={
+                        mode.legacy_aliases
+                          ? (value: unknown) => ({
+                              value:
+                                typeof value === 'string' && mode.legacy_aliases![value]
+                                  ? mode.legacy_aliases![value]
+                                  : value,
+                            })
+                          : undefined
+                      }
                     >
                       {mode.type === 'number' ? (
                         <InputNumber
