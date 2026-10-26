@@ -46,6 +46,7 @@ import {
   PlusOutlined,
   DownloadOutlined,
   UploadOutlined,
+  CloudUploadOutlined,
   MoreOutlined,
   DeleteOutlined,
   SyncOutlined,
@@ -373,6 +374,14 @@ export default function Accounts() {
   const [registerModalOpen, setRegisterModalOpen] = useState(false)
   const [addModalOpen, setAddModalOpen] = useState(false)
   const [importModalOpen, setImportModalOpen] = useState(false)
+  // 「上传到面板」：把筛选/勾选的账号推送到指定面板。
+  //
+  // 需求变更（2026-10-26）：此前上传按钮被**刻意**移到了「面板管理」页
+  // （那里的注释写着「上传就在同一页发」）。用户现在要求回到账号页，因为
+  // 他要在**账号的上下文里**按筛选挑号上传。面板页保留对比与双向更新。
+  const [panelUploadOpen, setPanelUploadOpen] = useState(false)
+  const [panelUploadTarget, setPanelUploadTarget] = useState('chatgpt2api')
+  const [panelUploadRunning, setPanelUploadRunning] = useState(false)
   const [exportModalOpen, setExportModalOpen] = useState(false)
   const [detailModalOpen, setDetailModalOpen] = useState(false)
   const [currentAccount, setCurrentAccount] = useState<any>(null)
@@ -747,6 +756,53 @@ export default function Accounts() {
   }
 
   const missingRtCount = accounts.filter((item) => !getRefreshToken(item)).length
+
+  /** 可选的上传目标面板 → 对应的动作 id（与后端 `_UPLOAD_ACTIONS` 同名）。 */
+  const PANEL_UPLOAD_TARGETS = [
+    { value: 'chatgpt2api', label: 'chatgpt2api' },
+    { value: 'cpa', label: 'CPA 面板' },
+    { value: 'sub2api', label: 'Sub2API' },
+  ] as const
+
+  const handlePanelUpload = async () => {
+    // 与「批量补 RT」同一套 scope 约定：勾了就传勾选的，没勾就传筛选结果。
+    const scope = selectedRowKeys.length > 0 ? 'selected' : 'all'
+    const actionId = `upload_${panelUploadTarget}`
+
+    const body: Record<string, unknown> = {}
+    if (scope === 'selected') {
+      body.account_ids = Array.from(selectedRowKeys)
+        .map((value) => Number(value))
+        .filter((value) => Number.isInteger(value) && value > 0)
+    } else {
+      body.all_filtered = true
+      if (search) body.email = search
+      if (filterStatus) body.status = filterStatus
+      if (filterPlusStatus) body.plus_status = filterPlusStatus
+      // 日期筛选**必须转发**：列表上的计数包含它，请求不带的话「处理数会大于
+      // 显示数」（本仓既有约定，见 tests/test_batch_scope_consistency.py）。
+      if (createdAtStart) body.created_at_start = createdAtStart
+      if (createdAtEnd) body.created_at_end = createdAtEnd
+    }
+
+    setPanelUploadRunning(true)
+    try {
+      const result = (await apiFetch(`/actions/${currentPlatform}/${actionId}/batch`, {
+        method: 'POST',
+        body: JSON.stringify(body),
+      })) as { total?: number; success?: number; failed?: number }
+      const okCount = Number(result?.success) || 0
+      const badCount = Number(result?.failed) || 0
+      if (badCount > 0) message.warning(`上传完成：成功 ${okCount}，失败 ${badCount}`)
+      else message.success(`已上传 ${okCount} 个账号到 ${panelUploadTarget}`)
+      setPanelUploadOpen(false)
+      load()
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : '上传失败')
+    } finally {
+      setPanelUploadRunning(false)
+    }
+  }
 
   const handleBackfillRt = async () => {
     const values = await backfillRtForm.validateFields()
@@ -1212,6 +1268,14 @@ export default function Accounts() {
                     disabled: total === 0,
                   }] : []),
                   { key: 'import', icon: <UploadOutlined />, label: '导入' },
+                  ...(currentPlatform === 'chatgpt' ? [{
+                    key: 'panel_upload',
+                    icon: <CloudUploadOutlined />,
+                    label: selectedRowKeys.length > 0
+                      ? `上传到面板 (${selectedRowKeys.length})`
+                      : '上传到面板',
+                    disabled: total === 0,
+                  }] : []),
                   { key: 'export', icon: <DownloadOutlined />, label: selectedRowKeys.length > 0 ? `导出 (${selectedRowKeys.length})` : '导出', disabled: total === 0 },
                   { type: 'divider' as const },
                   // 「手工新增」= 手动录一条，与「注册」（自动跑流程）不是一回事，
@@ -1228,6 +1292,7 @@ export default function Accounts() {
                   if (key === 'rt') setBackfillRtModalOpen(true)
                   else if (key === 'refresh_token') setRefreshTokenModalOpen(true)
                   else if (key === 'import') setImportModalOpen(true)
+                  else if (key === 'panel_upload') setPanelUploadOpen(true)
                   else if (key === 'export') setExportModalOpen(true)
                   else if (key === 'add') setAddModalOpen(true)
                   else if (key === 'delete') { void handleBatchDelete() }
@@ -1525,6 +1590,41 @@ export default function Accounts() {
           .filter((value) => Number.isInteger(value) && value > 0)}
         filteredTotal={total}
       />
+
+      <Modal
+        title="上传到面板"
+        open={panelUploadOpen}
+        onCancel={() => setPanelUploadOpen(false)}
+        onOk={handlePanelUpload}
+        okText="开始上传"
+        cancelText="取消"
+        confirmLoading={panelUploadRunning}
+        maskClosable={false}
+      >
+        <Space direction="vertical" size={10} style={{ width: '100%' }}>
+          <div>
+            <div style={{ marginBottom: 6, fontSize: 13 }}>目标面板</div>
+            <Select
+              value={panelUploadTarget}
+              onChange={setPanelUploadTarget}
+              style={{ width: 220 }}
+              options={PANEL_UPLOAD_TARGETS.map((t) => ({ value: t.value, label: t.label }))}
+            />
+          </div>
+          {/* 数量必须写在确认里：筛选条件写错会把几百个号一次推上去。 */}
+          <p style={{ margin: 0, fontSize: 12, color: 'var(--text-muted)' }}>
+            {selectedRowKeys.length > 0 ? (
+              <>将上传<strong>勾选的 {selectedRowKeys.length} 个</strong>账号。</>
+            ) : (
+              <>未勾选账号 —— 将上传<strong>当前筛选结果的全部 {total} 个</strong>账号。
+                想只传一部分就先勾选。</>
+            )}
+          </p>
+          <p style={{ margin: 0, fontSize: 12, color: 'var(--text-muted)' }}>
+            上传成功后这些账号会被<strong>登记</strong>到该面板，参与后续的凭证同步。
+          </p>
+        </Space>
+      </Modal>
 
       <Modal
         title="批量导入"

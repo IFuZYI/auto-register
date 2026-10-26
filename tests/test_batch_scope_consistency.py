@@ -206,16 +206,22 @@ class BackfillAndTwoFactorDateTests(unittest.TestCase):
 
 
 class FrontendDateForwardingTests(unittest.TestCase):
-    """前端三个批量 handler 的 all_filtered 分支必须带上日期。"""
+    """前端每个批量 handler 的 all_filtered 分支都必须带上日期。
+
+    计数是**变更探测器**：新增一个 all_filtered 分支时它会红，逼你确认新分支
+    也转发了日期（否则列表计数包含日期筛选、请求不带，处理数会大于显示数）。
+    2026-10-26 新增「上传到面板」分支时触发过一次 —— 那个分支确实漏了日期，
+    已补上。
+    """
 
     def _src(self):
         return (ROOT / "frontend" / "src" / "pages" / "Accounts.tsx").read_text(encoding="utf-8")
 
     def test_handlers_forward_dates(self):
         src = self._src()
-        # 三个 all_filtered 分支（status-sync / backfill / refresh）
+        # 四个 all_filtered 分支（status-sync / backfill / refresh / 上传到面板）
         occurrences = src.count("body.all_filtered = true")
-        self.assertEqual(occurrences, 3, f"all_filtered 分支数变了: {occurrences}")
+        self.assertEqual(occurrences, 4, f"all_filtered 分支数变了: {occurrences}")
 
         forwarded = src.count("if (createdAtStart) body.created_at_start = createdAtStart")
         self.assertEqual(
