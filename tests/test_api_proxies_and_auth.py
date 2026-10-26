@@ -269,12 +269,22 @@ def test_verify_token_rejects_expired_token():
     assert "过期" in excinfo.value.detail
 
 
-def test_hash_pw_is_stable_sha256():
-    from api.auth import _hash_pw
+def test_hash_pw_is_salted_slow_kdf():
+    """密码哈希是**加盐慢 KDF**，不再是无盐 SHA-256。
 
-    assert _hash_pw("secret123") == _hash_pw("secret123")
-    assert _hash_pw("secret123") == hashlib.sha256("secret123".encode("utf-8")).hexdigest()
-    assert _hash_pw("secret123") != _hash_pw("secret124")
+    安全审查（2026-10-27）改的：面板密码是唯一保护整个凭据库的东西，而裸
+    SHA-256 在 GPU 上是十亿次/秒量级 —— 库或备份泄漏就等于密码泄漏。
+    加盐后同一密码两次哈希**必然不同**，校验靠 `verify_password` 而不是相等比较。
+    """
+    from api.auth import hash_password, verify_password
+
+    first = hash_password("secret123")
+    second = hash_password("secret123")
+    assert first != second, "两次哈希相同 —— 没有盐"
+    assert first.startswith("pbkdf2_sha256$"), first
+    assert verify_password("secret123", first)
+    assert verify_password("secret123", second)
+    assert not verify_password("secret124", first)
 
 
 def test_generate_totp_secret_is_base32_and_random():
@@ -341,7 +351,7 @@ def test_setup_rejects_short_password(client, auth_state):
 
 
 def test_setup_requires_token_when_password_already_set(client, auth_state):
-    from api.auth import _hash_pw, create_token
+    from api.auth import _hash_pw, create_token, verify_password
 
     auth_state.set("auth_password_hash", _hash_pw("oldsecret"))
     response = client.post("/api/auth/setup", json={"password": "newsecret"})
@@ -353,7 +363,9 @@ def test_setup_requires_token_when_password_already_set(client, auth_state):
         headers=_bearer(create_token()),
     )
     assert response.status_code == 200, response.text
-    assert auth_state.get("auth_password_hash", "") == _hash_pw("newsecret")
+    assert verify_password("newsecret", auth_state.get("auth_password_hash", "")), (
+        "改密码后新密码应能通过校验（哈希是加盐的，不能直接比相等）"
+    )
 
 
 def test_login_without_password_returns_403(client, auth_state):
@@ -483,7 +495,9 @@ def test_change_password_requires_auth_and_validates(client, auth_state):
         headers=headers,
     )
     assert response.status_code == 200, response.text
-    assert auth_state.get("auth_password_hash", "") == _hash_pw("brandnew1")
+    from api.auth import verify_password
+
+    assert verify_password("brandnew1", auth_state.get("auth_password_hash", ""))
     assert (
         client.post("/api/auth/login", json={"password": "brandnew1"}).status_code == 200
     )

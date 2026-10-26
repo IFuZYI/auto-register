@@ -71,9 +71,28 @@ async def import_bundle(request: Request):
     if declared.isdigit() and int(declared) > MAX_BUNDLE_BYTES:
         raise HTTPException(413, "导入包超过大小上限（2GB）—— 拒绝接收")
 
+    # **没有 Content-Length 就拒**（安全审查 2026-10-27 F4）。
+    #
+    # `chunked` 编码的请求不带这个头，上面那段预检会被整段跳过，随后
+    # `await request.body()` 把**任意大小**的体攒进内存。本应用单进程单
+    # worker，一个这样的请求就能 OOM 掉整个面板 —— 未设密码时还是未认证可达。
+    #
+    # 要求长度是合理约束：浏览器与 `curl --data-binary` 都会带；只有刻意
+    # 流式发送的客户端才不带，而备份导入本来就该是一个完整的文件。
+    if not declared.isdigit():
+        raise HTTPException(
+            411,
+            "缺少 Content-Length —— 备份导入需要一次性提交完整文件，"
+            "不支持分块流式上传",
+        )
+
     body = await request.body()
     if not body:
         raise HTTPException(400, "请求体为空 —— 请以 ZIP 原始字节提交备份文件")
+    if len(body) > MAX_BUNDLE_BYTES:
+        # 双保险：Content-Length 可以撒谎（HTTP/1.1 允许服务端按实际长度截断，
+        # 但某些中间件会改写成真实值）。读完再核一次，超了就拒。
+        raise HTTPException(413, "导入包超过大小上限（2GB）—— 拒绝接收")
 
     filename = ""
     disposition = request.headers.get("X-Bundle-Filename", "")

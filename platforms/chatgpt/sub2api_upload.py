@@ -3,6 +3,7 @@ Sub2API 上传功能
 """
 
 from __future__ import annotations
+from core.panel_tls import verify_for
 
 import base64
 import json
@@ -165,7 +166,7 @@ def upload_to_sub2api(
             headers=headers,
             json=payload,
             proxies=None,
-            verify=False,
+            verify=verify_for("sub2api"),
             timeout=30,
             impersonate="chrome110",
         )

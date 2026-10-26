@@ -1,6 +1,7 @@
 """CLIProxyAPI 只读状态同步。"""
 
 from __future__ import annotations
+from core.panel_tls import verify_for
 
 import base64
 import json
@@ -148,7 +149,7 @@ def _request_json(
             json=json_body,
             params=params,
             timeout=30,
-            verify=False,
+            verify=verify_for("cliproxyapi"),
         )
     except requests.exceptions.ConnectionError as exc:
         raise RuntimeError(f"CLIProxyAPI 无法连接，请确认服务已启动或 API URL 是否正确：{_base_url(api_url)}") from exc

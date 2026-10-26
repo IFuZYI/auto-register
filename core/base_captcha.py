@@ -25,13 +25,15 @@ class YesCaptcha(BaseCaptcha):
         self.api = "https://api.yescaptcha.com"
 
     def solve_turnstile(self, page_url: str, site_key: str) -> str:
-        import requests, time, urllib3
-        urllib3.disable_warnings()
+        import requests, time
+        # 校验证书：YesCaptcha 是**外部公共服务**，用公共 CA 签的证书。
+        # 此前这里是 `verify=False` + `disable_warnings()`，等于允许中间人
+        # 截获 clientKey 并返回伪造的验证码（安全审查 2026-10-27 F3）。
         r = requests.post(f"{self.api}/createTask", json={
             "clientKey": self.client_key,
             "task": {"type": "TurnstileTaskProxyless",
                      "websiteURL": page_url, "websiteKey": site_key}
-        }, timeout=30, verify=False)
+        }, timeout=30, verify=True)
         task_id = r.json().get("taskId")
         if not task_id:
             raise RuntimeError(f"YesCaptcha 创建任务失败: {r.text}")
@@ -39,7 +41,7 @@ class YesCaptcha(BaseCaptcha):
             time.sleep(3)
             d = requests.post(f"{self.api}/getTaskResult", json={
                 "clientKey": self.client_key, "taskId": task_id
-            }, timeout=30, verify=False).json()
+            }, timeout=30, verify=True).json()
             if d.get("status") == "ready":
                 return d["solution"]["token"]
             if d.get("errorId", 0) != 0:

@@ -170,7 +170,38 @@ async def lifespan(app: FastAPI):
     stop()
 
 
-app = FastAPI(title="account-manager", version="1.0.0", lifespan=lifespan)
+app = FastAPI(
+    title="account-manager",
+    version="1.0.0",
+    lifespan=lifespan,
+    # 关掉自动文档与 schema（安全审查 2026-10-27 F8）：中间件只守 `/api/`，
+    # `/openapi.json` 与 `/docs` 不在其内 —— 未认证访问者能拿到完整路由清单
+    # （含凭据导出与备份端点），是白送的侦察情报。需要时用
+    # `?openapi=1` 这类显式开关在开发环境临时打开。
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
+)
+
+
+def _is_loopback_client(request: Request) -> bool:
+    """请求是否来自本机回环。
+
+    **不看 `X-Forwarded-For`**：那是请求方可伪造的头，用来决定「是否放行」
+    等于把开关交给攻击者。反向代理场景下本机代理连进来就是回环地址，
+    判定仍然正确。
+    """
+    client = request.client
+    if client is None:
+        return False
+    host = str(client.host or "")
+    if host in {"127.0.0.1", "::1", "localhost"} or host.startswith("127."):
+        return True
+    # 测试客户端的主机名是 `testclient`（不是回环地址）。只在显式设置了
+    # `APP_TRUST_TEST_CLIENT` 的测试环境里放行 —— 生产环境没有这个变量。
+    if host == "testclient" and os.getenv("APP_TRUST_TEST_CLIENT", "") == "1":
+        return True
+    return False
 
 
 @app.middleware("http")
@@ -180,7 +211,26 @@ async def auth_middleware(request: Request, call_next):
         return await call_next(request)
     from core.config_store import config_store as _cs
     if not _cs.get("auth_password_hash", ""):
-        return await call_next(request)
+        # **没设密码 ≠ 随便看**（安全审查 2026-10-27 F1）。
+        #
+        # 原实现直接放行（fail-open），而默认部署绑 0.0.0.0 —— 于是「装好还没
+        # 设密码」这个窗口里，任何能访问端口的人都读得到全量账号（password /
+        # SSO / AT / RT / id_token / totp_secret），以及 `/api/backup/export`
+        # 那个含**凭据加密密钥本身**的 ZIP。
+        #
+        # 现在只放行**本机回环**（本机调试不受影响），其余来源 503 并说明原因。
+        if _is_loopback_client(request):
+            return await call_next(request)
+        return JSONResponse(
+            {
+                "detail": (
+                    "面板尚未设置登录密码，已拒绝来自非本机的请求。"
+                    "请先在本机打开面板设置密码，或改用 127.0.0.1 访问。"
+                ),
+                "code": "password_not_set",
+            },
+            status_code=503,
+        )
     auth_header = request.headers.get("Authorization", "")
     if not auth_header.startswith("Bearer "):
         return JSONResponse(

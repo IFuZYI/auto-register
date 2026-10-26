@@ -3,6 +3,7 @@ CPA (Codex Protocol API) 上传功能
 """
 
 import json
+from core.panel_tls import verify_for
 import base64
 import logging
 from typing import Tuple
@@ -263,7 +264,7 @@ def upload_to_cpa(
             multipart=mime,
             headers=headers,
             proxies=None,
-            verify=False,
+            verify=verify_for("cpa"),
             timeout=30,
             impersonate="chrome110",
         )

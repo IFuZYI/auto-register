@@ -234,7 +234,11 @@ class SolverEnvTests(unittest.TestCase):
         from services import solver_manager
 
         with mock.patch.dict("os.environ", {}, clear=True):
-            self.assertEqual(solver_manager._solver_bind_host(), "0.0.0.0")
+            # 默认**只绑本机**（安全审查 2026-10-27 F10）：solver 的 HTTP 接口
+            # 没有鉴权，默认绑 0.0.0.0 等于把「用本机出口打开任意 URL」的能力
+            # 送出去。容器里由 compose/Dockerfile 显式设 0.0.0.0，对外仍只经
+            # 127.0.0.1 端口映射。
+            self.assertEqual(solver_manager._solver_bind_host(), "127.0.0.1")
             self.assertEqual(solver_manager._solver_browser_type(), "camoufox")
 
 

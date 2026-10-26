@@ -25,6 +25,7 @@
 """
 
 from __future__ import annotations
+from core.panel_tls import verify_for
 
 import logging
 from dataclasses import dataclass, field
@@ -784,7 +785,7 @@ def fetch_sub2api_remote_accounts(*, api_url: str = "", api_key: str = "") -> li
                 "Accept": "application/json, text/plain, */*",
             },
             timeout=20,
-            verify=False,
+            verify=verify_for("panel-comparison"),
         )
         if response.status_code != 200:
             raise RuntimeError(f"Sub2API 列表请求失败: HTTP {response.status_code}")
@@ -1079,7 +1080,7 @@ def _chatgpt2api_export_credentials(
                 # yukkcat、没修好任何可达路径，已撤回。
                 json={"account_ids": ids, "format": "json"},
                 timeout=timeout,
-                verify=False,
+                verify=verify_for("panel-comparison"),
             )
 
         try:
@@ -1177,7 +1178,7 @@ def fetch_chatgpt2api_remote_accounts(
             params={"page": page, "page_size": _CHATGPT2API_PAGE_SIZE},
             headers=headers,
             timeout=20,
-            verify=False,
+            verify=verify_for("panel-comparison"),
         )
         if response.status_code != 200:
             raise RuntimeError(f"chatgpt2api 列表请求失败: HTTP {response.status_code}")

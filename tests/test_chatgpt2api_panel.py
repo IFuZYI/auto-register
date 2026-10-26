@@ -211,15 +211,21 @@ class UploadFormatTests(unittest.TestCase):
             ok, msg = upload_to_chatgpt2api(_account(), api_url="http://c2a", api_key="k")
         self.assertTrue(ok, f"幂等重传被误判为失败: {msg}")
 
-    def test_verify_false_is_the_project_wide_convention(self):
-        """`verify=False` 是项目既有的上传约定，不是本模块的疏漏。
+    def test_tls_verification_goes_through_the_shared_policy(self):
+        """上传器**不再硬编码 `verify=False`**，改用统一策略。
 
-        审查员曾把「向外部服务发送凭据时关闭 TLS 校验」标为安全问题。
-        核查：CPA（`platforms/chatgpt/cpa_upload.py`）与 Sub2API
-        （`platforms/chatgpt/sub2api_upload.py`）上传器**早就**这样写，
-        早于本模块；自签/内网部署的对端很常见。这是**已知取舍**，要改应该
-        全局一起改（例如引入 `verify_ssl` 配置项），而不是只改这一处。
-        这条测试把这个事实钉住，避免后续审查反复把它当成新引入的缺陷。
+        这条测试原本叫 `test_verify_false_is_the_project_wide_convention`，
+        钉住的是「关闭 TLS 校验是项目惯例」。它自己在注释里写了正确的出路：
+
+        > 这是**已知取舍**，要改应该全局一起改（例如引入 `verify_ssl`
+        > 配置项），而不是只改这一处。
+
+        2026-10-27 的安全审查正是按这个方向改的：新增
+        `core.panel_tls.verify_for()`，**默认校验证书**，自签名面板由用户
+        显式配置 CA bundle 或显式关闭。三处上传器全部改走它。
+
+        原测试的顾虑（「自签/内网部署很常见」）仍然成立 —— 所以保留了显式
+        关闭的开关，只是不再把「不安全」当默认。
         """
         from pathlib import Path
 
@@ -231,8 +237,12 @@ class UploadFormatTests(unittest.TestCase):
         ):
             src = (root / rel).read_text(encoding="utf-8")
             self.assertIn(
+                "verify=verify_for(", src,
+                f"{rel} 没走统一的 TLS 策略（core.panel_tls.verify_for）",
+            )
+            self.assertNotIn(
                 "verify=False", src,
-                f"{rel} 不再用 verify=False —— 若是有意改为校验，请同时更新本测试与其余上传器",
+                f"{rel} 仍有硬编码的 verify=False",
             )
 
     def test_missing_config_is_reported(self):

@@ -386,7 +386,10 @@ class YesCaptchaTests(unittest.TestCase):
             },
         )
         self.assertEqual(first.kwargs["timeout"], 30)
-        self.assertIs(first.kwargs["verify"], False)
+        # YesCaptcha 是**外部公共服务**，用公共 CA 签的证书 —— 必须校验。
+        # 此前这里是 `verify=False`，等于允许中间人截获 clientKey 并返回伪造
+        # 的验证码（安全审查 2026-10-27 F3）。
+        self.assertIs(first.kwargs["verify"], True)
         self.assertEqual(second.args[0], "https://api.yescaptcha.com/getTaskResult")
         self.assertEqual(second.kwargs["json"], {"clientKey": "KEY-1", "taskId": "task-1"})
 

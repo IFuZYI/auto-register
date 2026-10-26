@@ -27,6 +27,12 @@ import tempfile
 # conftest 是唯一保证先执行的入口，放这里最稳）。
 os.environ.setdefault("APP_ENABLE_SOLVER", "0")
 
+# 未设密码时中间件只放行「本机回环」（安全审查 F1）。`TestClient` 的客户端
+# 主机名是 `testclient`，不是 127.0.0.1 —— 不放行的话所有走 `/api/` 的测试
+# 都会拿到 503。这里显式标记「测试环境」，让中间件把 `testclient` 视作本机。
+# 生产环境不会设这个变量，判定不受影响。
+os.environ.setdefault("APP_TRUST_TEST_CLIENT", "1")
+
 _TMP_DB_DIR = tempfile.TemporaryDirectory()
 _TMP_DATA_DIR = tempfile.TemporaryDirectory()
 # 顺序无所谓（core.paths 惰性读环境），但两个都要在 import core.db 之前设好

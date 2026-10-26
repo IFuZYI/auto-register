@@ -26,7 +26,17 @@ def _solver_url() -> str:
 
 
 def _solver_bind_host() -> str:
-    return os.getenv("SOLVER_BIND_HOST", "0.0.0.0")
+    """Solver 监听地址，**默认只绑本机**。
+
+    solver 的 HTTP 接口（`/turnstile`、`/result`）**没有任何鉴权**（安全审查
+    2026-10-27 F10）。默认绑 `0.0.0.0` 时，任何人可让服务器用自己的出口 IP
+    打开任意 URL（SSRF / 匿名代理），也能把浏览器池打满逼出空闲回收，把正在
+    跑的注册任务拖垮 —— 一条绕过面板登录的拒绝服务路径。
+
+    compose 与 systemd 都把端口显式映射到 127.0.0.1；裸 `python main.py`
+    时靠这个默认值兜底。需要跨容器访问时显式设 `SOLVER_BIND_HOST=0.0.0.0`。
+    """
+    return os.getenv("SOLVER_BIND_HOST", "127.0.0.1")
 
 
 def _solver_browser_type() -> str:

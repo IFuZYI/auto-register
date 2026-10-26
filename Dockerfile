@@ -30,6 +30,10 @@ FROM ${PYTHON_IMAGE} AS runtime
 ARG CAMOUFOX_VERSION=135.0.1
 ARG CAMOUFOX_RELEASE=beta.24
 
+# SOLVER_BIND_HOST 在镜像里是 0.0.0.0（容器内必须这样，否则端口映射进不来）。
+# solver 的 HTTP 接口**没有鉴权**，所以 compose 只把它映射到 127.0.0.1；
+# 裸 `docker run -p 8889:8889` 会把一个无鉴权浏览器服务暴露到公网 ——
+# 需要对外时请自行加反代与鉴权，不要直接映射。
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \

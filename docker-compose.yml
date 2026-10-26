@@ -33,6 +33,8 @@ services:
       CREDENTIAL_ENCRYPTION_KEY_FILE: /runtime/secrets/credential_key
       APP_ENABLE_SOLVER: "1"
       SOLVER_PORT: "8889"
+      # 容器内必须绑 0.0.0.0（否则端口映射进不来），但对外只经下面那条
+      # 127.0.0.1 映射暴露 —— solver 接口**没有鉴权**，绝不能直接对外。
       SOLVER_BIND_HOST: 0.0.0.0
       LOCAL_SOLVER_URL: http://127.0.0.1:8889
       SOLVER_BROWSER_TYPE: ${SOLVER_BROWSER_TYPE:-camoufox}
@@ -58,4 +60,15 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+    # /dev/shm 给 Chromium/Camoufox：默认 64MB 会让浏览器渲染进程崩溃
     shm_size: "1gb"
+    # 内存上限：浏览器（Camoufox + Chromium）是内存大户，泄漏或僵尸进程
+    # 会一路吃满宿主机。设上限让内核 OOM killer 只杀这个容器，而不是
+    # 拖垮整台机器。按并发调：每个浏览器上下文约 300-500MB。
+    #
+    # 用 `mem_limit`（非 Swarm 也生效）而不是 `deploy.resources.limits`
+    # ——后者只在 `docker stack deploy` 下生效，普通 `docker compose up`
+    # 会静默忽略，等于没设。
+    mem_limit: ${APP_MEMORY_LIMIT:-4g}
+    # 容器内进程数上限：防止浏览器子进程泄漏时把宿主 PID 表打满
+    pids_limit: 4096

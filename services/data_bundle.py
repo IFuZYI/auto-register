@@ -82,6 +82,18 @@ BACKUP_DIR_NAME = "import_backups"
 MAX_DB_BYTES = 512 * 1024 * 1024
 #: 整个导入包的压缩后大小上限。
 MAX_BUNDLE_BYTES = 2 * 1024 * 1024 * 1024
+#: manifest 的大小上限（正常只有几 KB）。
+MAX_MANIFEST_BYTES = 4 * 1024 * 1024
+
+#: 凭据密钥文件的大小上限。密钥是 base64 的 32 字节，正常不到 100 字节；
+#: 给 64 KB 已经宽松到不可能误伤。
+MAX_KEY_BYTES = 64 * 1024
+
+#: 备份包允许的成员数量上限。
+#:
+#: 没有上限时，一个只有几十 KB、但含几万个空成员的 ZIP 会让解压与逐成员
+#: 校验耗尽 CPU/内存（安全审查 2026-10-27 F4）。
+MAX_MEMBERS = 2000
 
 
 class BundleError(RuntimeError):
@@ -339,6 +351,13 @@ def collect_bundle_info() -> dict[str, Any]:
 
 def _read_manifest(zf: zipfile.ZipFile) -> dict[str, Any]:
     try:
+        # 先看声明大小：manifest 只是个小 JSON，几 MB 就已经不正常了。
+        # 裸 `zf.read` 会整块进内存，高压缩比的小 ZIP 能借此撑爆内存。
+        info = zf.getinfo(MANIFEST_NAME)
+        if info.file_size > MAX_MANIFEST_BYTES:
+            raise BundleError(
+                f"{MANIFEST_NAME} 异常过大（{info.file_size} 字节），拒绝导入"
+            )
         raw = zf.read(MANIFEST_NAME)
     except KeyError as exc:
         raise BundleError(f"导入包缺少 {MANIFEST_NAME} —— 不是本应用导出的备份") from exc
@@ -374,7 +393,14 @@ def _safe_member_name(name: str) -> str:
 
 def _verify_members(zf: zipfile.ZipFile, manifest: dict[str, Any]) -> dict[str, dict]:
     """逐个核对 manifest 里登记的库：存在、大小、sha256。"""
-    infos = {info.filename: info for info in zf.infolist()}
+    all_infos = zf.infolist()
+    # 成员数上限：一个几十 KB、含几万个空成员的 ZIP 会让解压与逐成员校验
+    # 耗尽 CPU/内存（安全审查 2026-10-27 F4）。
+    if len(all_infos) > MAX_MEMBERS:
+        raise BundleError(
+            f"备份包成员数 {len(all_infos)} 超过上限（{MAX_MEMBERS}），拒绝导入"
+        )
+    infos = {info.filename: info for info in all_infos}
     verified: dict[str, dict] = {}
     for entry in manifest.get("databases") or []:
         if not isinstance(entry, dict):
@@ -576,6 +602,15 @@ def apply_import_bundle(bundle_bytes: bytes, *, filename: str = "") -> dict[str,
             if key_member in zf.namelist():
                 staged_key = staging / key_member
                 staged_key.parent.mkdir(parents=True, exist_ok=True)
+                # **先看声明大小再读**：`zf.read()` 会整块进内存，而这个成员
+                # 此前完全没做大小检查（MAX_DB_BYTES 只作用于 manifest 里
+                # 列出的库）。一个高压缩比的小 ZIP 解压后能撑爆内存，本应用
+                # 单进程单 worker，一次就够（安全审查 2026-10-27 F4）。
+                key_info = zf.getinfo(key_member)
+                if key_info.file_size > MAX_KEY_BYTES:
+                    raise BundleError(
+                        f"凭据密钥文件异常过大（{key_info.file_size} 字节），拒绝导入"
+                    )
                 staged_key.write_bytes(zf.read(key_member))
 
             # 替换前先断开所有连接（SQLite 打开的文件句柄在 Windows 上还会

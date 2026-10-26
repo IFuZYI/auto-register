@@ -36,6 +36,7 @@ export），上传协议两边一致：
 """
 
 from __future__ import annotations
+from core.panel_tls import verify_for
 
 import base64
 import json
@@ -264,7 +265,7 @@ def upload_to_chatgpt2api(
                 headers=headers,
                 json=payload,
                 proxies=None,
-                verify=False,
+                verify=verify_for("chatgpt2api"),
                 timeout=60,
                 impersonate="chrome110",
             )

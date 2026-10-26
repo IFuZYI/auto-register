@@ -113,6 +113,13 @@ class TurnstileAPIServer:
         self._active_tasks = 0
         self._last_used_at = time.time()
         self._idle_reaper_task: Optional[asyncio.Task] = None
+        # 后台任务的**强引用**集合：事件循环只对任务持弱引用，丢掉返回值的
+        # 任务可能在运行中被 GC 并静默取消（CPython 文档明确）。表现为「求解
+        # 任务偶尔永远不完成」，极难复现 —— 所以统一收在这里，完成时移除。
+        self._background_tasks: set[asyncio.Task] = set()
+        # 求解任务的独立集合：便于观察在飞数量（`_background_tasks` 里还混着
+        # 周期性清理等长驻协程，数它们没有意义）。
+        self._solve_tasks: set[asyncio.Task] = set()
         self._pool_lock = asyncio.Lock()
         # camoufox 每个浏览器一个 AsyncCamoufox 会话（原先所有线程共用一个实例，
         # `__aexit__` 只关得掉最后一个 → 关服务时 playwright driver 变孤儿进程）。
@@ -273,7 +280,7 @@ class TurnstileAPIServer:
             await self._ensure_pool()
             
             # Запускаем периодическую очистку старых результатов
-            asyncio.create_task(self._periodic_cleanup())
+            self._spawn(self._periodic_cleanup())
             # 空闲回收：池没人用时整体关掉，把内存还给系统（见 __init__ 的说明）
             self._start_idle_reaper()
             
@@ -362,6 +369,17 @@ class TurnstileAPIServer:
                 logger.warning(f"Error closing a camoufox session during reap: {e}")
 
         self._playwright = None
+
+    def _spawn(self, coro) -> asyncio.Task:
+        """起一个后台任务并**持有引用**，完成时自动移除。
+
+        直接用 `asyncio.create_task` 而不保存返回值，任务可能被 GC 掉并静默
+        取消（见 `__init__` 的说明）。所有后台协程都该走这里。
+        """
+        task = asyncio.create_task(coro)
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+        return task
 
     def _start_idle_reaper(self) -> None:
         """起后台回收协程；TTL=0（回收关闭）时不启动。"""
@@ -1207,7 +1225,12 @@ class TurnstileAPIServer:
         })
 
         try:
-            asyncio.create_task(self._solve_turnstile(task_id=task_id, url=url, sitekey=sitekey, action=action, cdata=cdata))
+            # 每次求解都起一个后台任务 —— 量大，必须持有引用（见 `_spawn`）
+            _solve_task = self._spawn(
+                self._solve_turnstile(task_id=task_id, url=url, sitekey=sitekey, action=action, cdata=cdata)
+            )
+            self._solve_tasks.add(_solve_task)
+            _solve_task.add_done_callback(self._solve_tasks.discard)
 
             if self.debug:
                 logger.debug(f"Request completed with taskid {task_id}.")

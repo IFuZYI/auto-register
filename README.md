@@ -242,6 +242,32 @@ Docker 部署细节、环境变量清单与 Turnstile Solver 说明见 [部署�
 在「面板管理」里配置面板地址后，用**本地 ↔ 远程对比**查看哪些号没上传、
 凭证是否一致，并在对比页直接上传 / 同步（方向严格分开，绝不拿旧凭证覆盖新的）。
 
+上传有两个入口，走同一套后端：
+
+| 入口 | 位置 | 适合 |
+| --- | --- | --- |
+| **按筛选批量上传** | 账号页「更多 → 上传到面板」 | 按状态 / 平台 / 日期挑一批号推上去 |
+| **对比页补传** | 面板页 → 状态筛选「未上传」→「上传未上传」 | 看着差异结果补 |
+
+两个入口的范围规则一致：**勾了就传勾选的，没勾传当前筛选结果**，确认弹窗会
+显示确切数量。
+
+**上传成功即「登记」**（`extra.panel_uploads[<面板>]`）：只有登记过的账号参与
+该面板的凭证同步。登记按面板独立 —— 同一个号传给 chatgpt2api 与 CPA 是两次
+独立登记，其中一个在远端被删不影响另一个（远端删号会自动撤销登记）。
+
+面板页的状态筛选同时决定**同步范围**与**可用按钮**：
+
+| 筛选 | 给的按钮 |
+| --- | --- |
+| 未上传 | 只有「上传未上传」 |
+| 已同步 | 只有「同步远端状态」 |
+| 凭证不同 / 无法比对 / 全部 | 上传 + 更新远程 + 更新本地 + 状态同步 |
+| 仅远端 | 无（本地没有账号行） |
+
+> 「更新远程凭证」= 推送（本地 → 远端），「更新本地凭证」= 拉回（远端 → 本地）。
+> 方向术语见 [GLOSSARY.md](GLOSSARY.md)。
+
 ### 7. Token 自动维护
 
 「全局配置 → 面板配置」里有两个开关（默认关闭）：
@@ -361,12 +387,14 @@ Register/
 ├── scripts/              运行时脚本（camoufox 安装、Turnstile 铸造等）
 ├── tests/                pytest 测试
 ├── docs/                 主题专文（功能、部署、接口、扩展、维护、分库、目录规范）
+│   └── adr/              架构决策记录（记录「为什么这样定」）
 ├── data/                 运行时数据（见部署文档，不进版本控制）
 ├── docker/               容器启动脚本
 ├── main.py               应用入口
 ├── requirements.txt
 ├── Dockerfile
-└── docker-compose.yml
+├── docker-compose.yml
+└── GLOSSARY.md           凭据流转术语（登记 / 推送 / 拉回）
 ```
 
 技术栈：后端 FastAPI + SQLite（SQLModel）；前端 React + TypeScript + Vite；
@@ -384,7 +412,8 @@ Sentinel PoW 走 Node 沙箱。
 | [docs/API_REFERENCE.md](docs/API_REFERENCE.md) | 每个接口的请求 / 响应形状 |
 | [docs/DATABASE_MODULARITY.md](docs/DATABASE_MODULARITY.md) | 分库、邮箱唯一键、跨库查询 |
 | [docs/DATA_DIRECTORY.md](docs/DATA_DIRECTORY.md) | 数据目录布局与路径规则 |
-| [docs/GLOSSARY.md](docs/GLOSSARY.md) | 项目特有术语（主号 / 隐私邮箱 / 本地与远程 / 号池…） |
+| [docs/GLOSSARY.md](docs/GLOSSARY.md) | 项目特有术语（主号 / 隐私邮箱 / 号池…） |
+| [GLOSSARY.md](GLOSSARY.md) | 本地 ↔ 远端凭据流转术语（登记 / 推送 / 拉回） |
 | [docs/adr/](docs/adr/) | 架构决策记录（ADR） |
 
 ## 界面预览

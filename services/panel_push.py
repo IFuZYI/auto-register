@@ -20,6 +20,7 @@ chatgpt2api 的上传是新建式（每次 add 一条新记录），所以本地
 """
 
 from __future__ import annotations
+from core.panel_tls import verify_for
 
 import logging
 from dataclasses import dataclass, field
@@ -273,7 +274,7 @@ def delete_chatgpt2api_account(remote_id: str, *, api_url: str = "", api_key: st
                 "Authorization": f"Bearer {key}",
             },
             json={"account_ids": [target]},
-            verify=False,
+            verify=verify_for("panel-push"),
             timeout=30,
             impersonate="chrome110",
         )
@@ -311,7 +312,7 @@ def delete_sub2api_account(remote_id: str, *, api_url: str = "", api_key: str = 
                 "Accept": "application/json",
                 "x-api-key": key,
             },
-            verify=False,
+            verify=verify_for("panel-push"),
             timeout=30,
             impersonate="chrome110",
         )
