@@ -139,15 +139,19 @@ class PanelPlatformFilterWiringTests(unittest.TestCase):
                 "测试的切分口径失效，请同步更新",
             )
             body = rest.split("\n    [", 1)[0]
+            # 2026-10-26 起同步范围是 **平台筛选 + 状态筛选** 的交集
+            # （用户要求「点着凭证不同就只同步凭证不同的」），所以读的是
+            # `filteredRows` 而不是 `platformRows` —— 后者只含平台维度，
+            # 用它会把当前状态筛选忽略掉。
             self.assertIn(
-                "platformRows",
+                "filteredRows",
                 body,
-                f"{name} 读的不是平台筛选后的行 —— 筛选与批量动作会对不上",
+                f"{name} 读的不是当前筛选出的行 —— 筛选与批量动作会对不上",
             )
             self.assertNotIn(
                 "payload?.rows",
                 body,
-                f"{name} 直接读了原始行 —— 平台筛选被绕过，会传错平台的账号",
+                f"{name} 直接读了原始行 —— 筛选被绕过，会传错账号",
             )
 
     def test_push_and_pull_use_the_direction_helpers(self):
@@ -158,12 +162,14 @@ class PanelPlatformFilterWiringTests(unittest.TestCase):
         `run_panel_filter_checks.mjs` 真实执行验证。
         """
         src = self._panel()
+        # 参数是 `filteredRows`（平台 + 状态筛选后的行），不是全量 ——
+        # 同步范围必须跟着用户当前看到的筛选走（2026-10-26）。
         self.assertIn(
-            "selectPushIds(platformRows)", src,
+            "selectPushIds(filteredRows)", src,
             "推送方向没接纯函数（selectPushIds）",
         )
         self.assertIn(
-            "selectPullIds(platformRows)", src,
+            "selectPullIds(filteredRows)", src,
             "拉回方向没接纯函数（selectPullIds）",
         )
         # 组件里不该再有「不判方向就上传」的凭证过滤 —— 那正是被修掉的 bug。

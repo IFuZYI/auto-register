@@ -160,3 +160,52 @@ export function selectPullIds(rows: DirectionFilterableRow[]): number[] {
     )
     .map((row) => row.local_id as number)
 }
+
+/**
+ * 某个状态筛选下，页面上该给哪些批量动作。
+ *
+ * 用户要求（2026-10-26）：**同步只作用于当前筛选出的行**，而不是全量。
+ * 于是「显示什么按钮」也随筛选变 —— 选中「未上传」时同步没有意义
+ * （远端还没有这些号，没东西可拉/可覆盖），只该给「上传」。
+ *
+ * 返回的 key 与组件里的按钮一一对应：
+ * - `upload`  上传到面板（登记）
+ * - `push`    更新远程凭证（本地 → 远端）
+ * - `pull`    更新本地凭证（远端 → 本地）
+ * - `status`  同步远端状态
+ */
+export type PanelActionKey = 'upload' | 'push' | 'pull' | 'status'
+
+export function actionsForState(state: string): PanelActionKey[] {
+  const normalized = String(state || '').trim()
+
+  // 未上传：远端没有这些号 —— 只能上传（登记）。推送/拉回/状态同步都无对象。
+  if (normalized === 'local_only') return ['upload']
+
+  // 仅远端：本地没有账号行，任何「按本地账号发起」的动作都无处落脚。
+  if (normalized === 'remote_only') return []
+
+  // 已同步：凭证一致，没有要推要拉的；状态同步仍有意义（远端可能变了）。
+  if (normalized === 'synced') return ['status']
+
+  // 凭证不同 / 无法比对 / 全部：三个方向都给（具体目标由 selectPushIds /
+  // selectPullIds 按方向规则再收窄）。
+  return ['upload', 'push', 'pull', 'status']
+}
+
+/**
+ * 「上传」的目标 id：只取**未登记**（`local_only`）且本地存在的行。
+ *
+ * 已登记的不必重传（对端 `skipped` 也会合并字段，但重传是白花时间）；
+ * 禁用账号不参与上传（与后端 `_UPLOAD_ACTIONS` 的既有口径一致）。
+ */
+export function selectUploadIds(rows: DirectionFilterableRow[]): number[] {
+  return (Array.isArray(rows) ? rows : [])
+    .filter(
+      (row) =>
+        row?.local_id &&
+        String(row?.local_status || '').trim().toLowerCase() !== 'banned' &&
+        row?.state === 'local_only',
+    )
+    .map((row) => row.local_id as number)
+}

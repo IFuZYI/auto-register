@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { App, Button, Empty, Popconfirm, Segmented, Space, Spin, Switch, Table, Tag, Tooltip, Typography } from 'antd'
+import { App, Button, Empty, Popconfirm, Segmented, Space, Spin, Table, Tag, Tooltip, Typography } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
 import {
   CloudDownloadOutlined,
@@ -12,8 +12,10 @@ import { formatLocalTime, localTimezoneLabel } from '@/lib/time'
 import {
   countByPlatform,
   filterRowsByPlatform,
+  actionsForState,
   selectPullIds,
   selectPushIds,
+  selectUploadIds,
   shouldShowPlatformFilter,
   summarizeRows,
 } from '@/lib/panelComparison'
@@ -408,14 +410,7 @@ export function PanelComparisonPanel({
    * 的话，用户看着 32 个 Grok 行点「上传」，实际会把 ChatGPT 的一起传上去。
    */
   const [platformFilter, setPlatformFilter] = useState('')
-  /**
-   * 是否显示**未登记**（`local_only`）的账号。默认关闭。
-   *
-   * 用户要求（2026-10-26，见 `docs/adr/0002-panel-enrollment-and-bidirectional-sync.md`）：
-   * 只有登记过的账号参与同步，所以默认只看已登记的 —— 但**不能连提示都没有**，
-   * 否则漏传的号永远发现不了，而那正是需要行动的状态。页头另给一条提示。
-   */
-  const [showUnenrolled, setShowUnenrolled] = useState(false)
+
   // 操作进行中的标记（`sync-remote` / `push-to-remote` / `sync-from-remote`）
   const [running, setRunning] = useState('')
 
@@ -454,20 +449,26 @@ export function PanelComparisonPanel({
     [payload, platformFilter],
   )
 
-  /** 未登记（未上传）的行数 —— 页头提示与开关都用它。 */
-  const unenrolledCount = useMemo(
-    () => platformRows.filter((row) => row.state === 'local_only').length,
-    [platformRows],
-  )
+  /**
+   * 当前筛选出的行 —— **同步范围就是它**（用户要求 2026-10-26：点着「凭证不同」
+   * 就只同步凭证不同的那批，不是全量）。
+   *
+   * 状态筛选不再额外叠加「隐藏未上传」：想看未上传就点「未上传」，想全看就点
+   * 「全部」。一个控件表达一件事，比开关 + 筛选两个维度叠加清楚。
+   */
+  const filteredRows = useMemo(() => {
+    if (!stateFilter) return platformRows
+    return platformRows.filter((row) => row.state === stateFilter)
+  }, [platformRows, stateFilter])
 
-  const rows = useMemo(() => {
-    // 默认隐去未登记的：只有登记过的账号参与同步，列表也以它们为主。
-    let visible = showUnenrolled
-      ? platformRows
-      : platformRows.filter((row) => row.state !== 'local_only')
-    if (stateFilter) visible = visible.filter((row) => row.state === stateFilter)
-    return visible
-  }, [platformRows, stateFilter, showUnenrolled])
+  const rows = filteredRows
+
+  /** 该状态下该给哪些批量动作（纯函数在 lib 里，有测试）。 */
+  const allowedActions = useMemo(() => actionsForState(stateFilter), [stateFilter])
+  const canUpload = allowedActions.includes('upload')
+  const canPush = allowedActions.includes('push')
+  const canPull = allowedActions.includes('pull')
+  const canSyncStatus = allowedActions.includes('status')
 
   // 计数在前端重算：平台筛选后统计条的数字必须跟着变（读后端全量值会「筛了
   // Grok 还显示 181」）。
@@ -479,15 +480,19 @@ export function PanelComparisonPanel({
    * （会把全部本地账号重传）—— 推送按钮据此禁用。 */
   const remoteUnavailable = Boolean(payload?.remote_error)
 
+  /** 上传（登记）的目标：只取未登记的行。 */
+  const uploadIds = useMemo(() => selectUploadIds(filteredRows), [filteredRows])
+
   /** 更新远程凭证的目标（推送方向，见 lib 的 `selectPushIds`）。 */
   const pushIds = useMemo(
-    () => selectPushIds(platformRows),
-    [platformRows],
+    // 只对**当前筛选出的行**取方向目标 —— 筛选是同步范围的唯一来源。
+    () => selectPushIds(filteredRows),
+    [filteredRows],
   )
   /** 更新本地凭证的目标（拉回方向，与 `pushIds` 互斥）。 */
   const pullIds = useMemo(
-    () => selectPullIds(platformRows),
-    [platformRows],
+    () => selectPullIds(filteredRows),
+    [filteredRows],
   )
 
   /** 跑「同步远端状态」批量动作：按**每个账号自己的平台**分发接口
@@ -654,27 +659,6 @@ export function PanelComparisonPanel({
           <Typography.Text type="secondary" style={{ fontSize: 12 }}>
             本地 {payload?.local_count ?? 0} · 远端 {payload?.remote_count ?? 0}
           </Typography.Text>
-          {/* 未登记的账号默认不显示 —— 但必须给出入口与数量，否则漏传的号
-              永远发现不了（那正是需要行动的状态）。 */}
-          {unenrolledCount > 0 ? (
-            <Tooltip title="未登记的账号不参与该面板的凭证同步；去「账号管理」页按筛选上传即可登记">
-              <Typography.Text
-                type="warning"
-                style={{ fontSize: 12, cursor: showUnenrolled ? 'default' : 'pointer' }}
-                onClick={() => setShowUnenrolled((v) => !v)}
-              >
-                还有 {unenrolledCount} 个未上传{showUnenrolled ? '' : '（点此显示）'}
-              </Typography.Text>
-            </Tooltip>
-          ) : null}
-          <Tooltip title="未登记的账号不参与同步，默认隐藏">
-            <Space size={4}>
-              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                显示未上传
-              </Typography.Text>
-              <Switch size="small" checked={showUnenrolled} onChange={setShowUnenrolled} />
-            </Space>
-          </Tooltip>
           {/* 时区标注：时间列统一按浏览器本地时区显示（后端已归一）。 */}
           <Tooltip title="所有时间列均按浏览器本地时区显示（后端已把本地 UTC 与远端面板时间归一后比较）">
             <Typography.Text type="secondary" style={{ fontSize: 12 }}>
@@ -684,7 +668,7 @@ export function PanelComparisonPanel({
         </Space>
         {/* 按钮组要允许换行：窄屏下按钮一排超宽，不 wrap 会被容器裁掉。 */}
         <Space wrap>
-          {syncAction || Object.keys(platformActions.sync || {}).length ? (
+          {canSyncStatus && (syncAction || Object.keys(platformActions.sync || {}).length) ? (
             <Tooltip title="读远端状态回写本地（含封禁/失效判定）">
               <Button
                 icon={<SyncOutlined />}
@@ -704,7 +688,33 @@ export function PanelComparisonPanel({
               </Button>
             </Tooltip>
           ) : null}
+          {/* 上传（登记）：只在「未上传」等需要补传的状态下给。 */}
+          {canUpload ? (
+            <Tooltip title="把当前筛选出的未上传账号推送到该面板，成功后登记并纳入同步范围">
+              <Popconfirm
+                title={`把 ${uploadIds.length} 个未上传账号推送到 ${panelLabel}？`}
+                description="上传成功后这些账号会被登记，参与后续凭证同步。"
+                okText="上传"
+                cancelText="取消"
+                disabled={Boolean(running) || remoteUnavailable || uploadIds.length === 0}
+                onConfirm={() => void runBatch(
+                  `upload_${panelKey === 'cpa' ? 'cpa' : panelKey === 'sub2api' ? 'sub2api' : 'chatgpt2api'}`,
+                  '上传到面板', uploadIds, 'upload-to-remote',
+                )}
+              >
+                <Button
+                  type="primary"
+                  icon={<CloudUploadOutlined />}
+                  loading={running === 'upload-to-remote'}
+                  disabled={Boolean(running) || remoteUnavailable || uploadIds.length === 0}
+                >
+                  上传未上传{uploadIds.length ? ` (${uploadIds.length})` : ''}
+                </Button>
+              </Popconfirm>
+            </Tooltip>
+          ) : null}
           {/* 更新远程凭证：未上传 + 本地较新的推上去（推送方向）。 */}
+          {canPush ? (
           <Tooltip title="推送「未上传 + 本地较新」的凭证；远端较新的用「更新本地凭证」">
             <Popconfirm
               title={
@@ -729,7 +739,9 @@ export function PanelComparisonPanel({
               </Button>
             </Popconfirm>
           </Tooltip>
+          ) : null}
           {/* 更新本地凭证：远端较新的拉回来（拉回方向）。 */}
+          {canPull ? (
           <Tooltip title="拉回「远端较新」的凭证（AT/RT）—— 覆盖本地凭证字段">
             <Popconfirm
               title={
@@ -753,6 +765,7 @@ export function PanelComparisonPanel({
               </Button>
             </Popconfirm>
           </Tooltip>
+          ) : null}
           <Tooltip title="重新拉取账号清单（绕缓存，不改任何账号）">
             <Button
               icon={<SyncOutlined />}
