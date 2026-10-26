@@ -246,6 +246,55 @@ class AuthFlow(
 
 
 
+    def _speculative_rt_attempt(self, mail_provider: Any = None) -> bool:
+        """callback 链之前的「抢跑」换 RT。
+
+        路线选了密码登录时**不抢跑** —— 密码登录是一次完整登录（authorize +
+        密码 + 2FA），跑两遍纯属浪费；留到 callback 之后的正式那一次做。
+        Codex 路线的抢跑有意义（它能在创建账户前就拿到 RT）。
+        """
+        from platforms.chatgpt.chatgpt_registration_mode_adapter import (
+            RT_ROUTE_LOGIN, resolve_chatgpt_rt_route,
+        )
+
+        if resolve_chatgpt_rt_route(self._env_overrides) == RT_ROUTE_LOGIN:
+            return False
+        if not self._env_flag("OAUTH_CODEX_RT_EXCHANGE", "1"):
+            return False
+        self.oauth_codex_rt_exchange(mail_provider=mail_provider, speculative=True)
+        return bool(self.result.refresh_token)
+
+
+    def _ensure_refresh_token(self, mail_provider: Any = None) -> bool:
+        """按 `chatgpt_rt_route` 设置拿 RT；返回是否拿到了。
+
+        **所有换 RT 的调用点都要走这里**，不要直接 `oauth_codex_rt_exchange`。
+        此前 `_acquire_rt` 被赋值却从未调用（四个 Codex 调用点全都绕过它），
+        于是设置选了「密码登录」，注册链仍走 Codex —— 实测日志里密码登录的
+        路线一次都没被尝试过（用户 2026-10-27 报）。结构性测试
+        `test_rt_route_reaches_protocol_flow.py` 盯住这一点。
+
+        顺序：注入的路线（引擎按设置决定）→ 失败再回落 Codex。
+        注入路线抛异常也吞掉回退：换不到 RT 是「少个字段」，炸掉整条注册链
+        是「账号白注册」。
+        """
+        if self.result.refresh_token:
+            return True
+
+        if self._acquire_rt is not None:
+            try:
+                if self._acquire_rt(self):
+                    return True
+            except Exception as exc:  # noqa: BLE001 - 失败要能回退
+                logger.warning(
+                    f"按路线换 RT 失败（回退 Codex OAuth）: {type(exc).__name__}: {exc}"
+                )
+
+        if self._env_flag("OAUTH_CODEX_RT_EXCHANGE", "1"):
+            self.oauth_codex_rt_exchange(mail_provider=mail_provider)
+        return bool(self.result.refresh_token)
+
+
     def seed_device_id(self, device_id: str) -> None:
         """预置要复用的设备标识（oai-did）——登录链专用。
 
@@ -801,9 +850,11 @@ class AuthFlow(
             ):
                 # `speculative=True`：抢跑失败不能占掉本轮名额，否则下面
                 # （callback 链跑完之后）那次真正有条件的尝试会被跳过。
-                self.oauth_codex_rt_exchange(
-                    mail_provider=mail_provider, speculative=True
-                )
+                #
+                # 抢跑**仍走路线判断**：设置选密码登录时 Codex 抢跑只会白等
+                # 一次 add-phone。不走 helper 是因为要带 `speculative=True`
+                # —— 见下面的 `_speculative_rt_attempt`。
+                self._speculative_rt_attempt(mail_provider)
             callback_url, final_url = self.follow_redirect_chain(continue_url)
             if (not callback_url) and final_url and ("/workspace" in final_url):
                 normalized = self._normalize_continue_url(final_url)
@@ -837,8 +888,9 @@ class AuthFlow(
         # Codex OAuth refresh_token 交换（独立 authorize 链路，不依赖上面 callback 的 code）
         if callback_url or continue_url:
             self.fetch_client_auth_session_dump("pre_oauth_exchange_register")
-            if (not self.result.refresh_token) and self._env_flag("OAUTH_CODEX_RT_EXCHANGE", "1"):
-                self.oauth_codex_rt_exchange(mail_provider=mail_provider)
+            if not self.result.refresh_token:
+                # 走路线判断（设置选密码登录时不会先撞 Codex 的 add-phone）
+                self._ensure_refresh_token(mail_provider)
             # 最终再拉一次 session（Codex 流程可能更新 cookie/access_token）
             if not refresh_only_mode:
                 self.get_auth_session()
@@ -1065,9 +1117,7 @@ class AuthFlow(
             continue_url = self._normalize_continue_url(continue_url)
             if (not self.result.refresh_token) and self._env_flag("OAUTH_CODEX_RT_BEFORE_CALLBACK", "1"):
                 # `speculative=True`：抢跑失败不占本轮名额（见该方法 docstring）。
-                self.oauth_codex_rt_exchange(
-                    mail_provider=mail_provider, speculative=True
-                )
+                self._speculative_rt_attempt(mail_provider)
             callback_url, final_url = self.follow_redirect_chain(continue_url)
             if (not callback_url) and final_url and ("/workspace" in final_url):
                 normalized = self._normalize_continue_url(final_url)
@@ -1079,8 +1129,8 @@ class AuthFlow(
 
         if callback_url or continue_url:
             self.fetch_client_auth_session_dump("pre_oauth_exchange_protocol")
-            if (not self.result.refresh_token) and self._env_flag("OAUTH_CODEX_RT_EXCHANGE", "1"):
-                self.oauth_codex_rt_exchange(mail_provider=mail_provider)
+            if not self.result.refresh_token:
+                self._ensure_refresh_token(mail_provider)
             if not refresh_only_mode:
                 self.get_auth_session()
 

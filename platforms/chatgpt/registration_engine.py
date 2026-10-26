@@ -519,6 +519,14 @@ class ChatGPTRegistrationEngine:
             overrides["OAUTH_CODEX_RT_EXCHANGE"] = "0"
             overrides["OAUTH_CODEX_RT_BEFORE_CALLBACK"] = "0"
 
+        # 把「Token 方案」原样带进协议层：抢跑判定（`_speculative_rt_attempt`）
+        # 要按它决定跑不跑 Codex。不带的话协议层读不到设置、只能按默认走
+        # （实测 2026-10-27：设置选密码登录，抢跑仍是 Codex）。
+        for key in ("chatgpt_registration_mode", "chatgpt_rt_route"):
+            value = str(self.extra_config.get(key) or "").strip()
+            if value:
+                overrides[key] = value
+
         for config_key, env_key in (
             ("sms_per_phone_timeout", "OPENAI_PHONE_OTP_TIMEOUT"),
             ("sms_max_phone_attempts", "OPENAI_PHONE_MAX_ATTEMPTS"),
