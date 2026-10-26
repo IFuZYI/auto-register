@@ -19,7 +19,9 @@ class CpaPerPlatformUploadToggleTests(unittest.TestCase):
         from api.config import CONFIG_KEYS
 
         self.assertIn("cpa_upload_chatgpt_enabled", CONFIG_KEYS)
-        self.assertIn("cpa_upload_grok_enabled", CONFIG_KEYS)
+        # Grok 不再支持 CPA（2026-10-27）—— 那个平台键已删除，
+        # 留着会变成「界面能调、实际没人读」的死旋钮。
+        self.assertNotIn("cpa_upload_grok_enabled", CONFIG_KEYS)
 
     def test_resolver_prefers_the_platform_key(self):
         """平台键优先于历史单开关 —— 否则分不开。"""
@@ -32,25 +34,44 @@ class CpaPerPlatformUploadToggleTests(unittest.TestCase):
             def get(self, key, default=""):
                 return self._v.get(key, default)
 
-        # ChatGPT 开、Grok 关：这正是「分开」的核心场景
+        # ChatGPT 的平台键生效
         cfg = _Cfg({
             "cpa_upload_chatgpt_enabled": "1",
-            "cpa_upload_grok_enabled": "0",
-            "cpa_enabled": "1",          # 老开关开着也不该把 Grok 带开
+            "cpa_enabled": "1",
             "cpa_api_url": "http://x",
         })
         self.assertTrue(cpa_upload_enabled_for("chatgpt", cfg))
-        self.assertFalse(cpa_upload_enabled_for("grok", cfg))
 
-        # 反过来
         cfg2 = _Cfg({
             "cpa_upload_chatgpt_enabled": "0",
-            "cpa_upload_grok_enabled": "1",
             "cpa_enabled": "1",
             "cpa_api_url": "http://x",
         })
         self.assertFalse(cpa_upload_enabled_for("chatgpt", cfg2))
-        self.assertTrue(cpa_upload_enabled_for("grok", cfg2))
+
+    def test_grok_is_always_disabled_after_cpa_support_removal(self):
+        """Grok **恒不**自动上传 CPA（2026-10-27 起不再支持）。
+
+        原来这里断言「ChatGPT 开、Grok 关」的分开语义 —— Grok 那条路径整个
+        删掉了，所以无论配置怎么填都该是 False。老配置里残留的
+        `cpa_upload_grok_enabled=1` 也不能让它复活。
+        """
+        from services.external_sync import cpa_upload_enabled_for
+
+        class _Cfg:
+            def __init__(self, values):
+                self._v = values
+
+            def get(self, key, default=""):
+                return self._v.get(key, default)
+
+        cfg = _Cfg({
+            "cpa_upload_grok_enabled": "1",   # 老配置残留
+            "cpa_enabled": "1",
+            "cpa_api_url": "http://x",
+        })
+        self.assertFalse(cpa_upload_enabled_for("grok", cfg),
+                         "Grok 不该再自动上传 CPA")
 
     def test_legacy_single_switch_still_applies_when_platform_keys_absent(self):
         """老配置只有 `cpa_enabled=true` 时，两边都要传 —— 不能静默失效。"""
@@ -61,7 +82,8 @@ class CpaPerPlatformUploadToggleTests(unittest.TestCase):
                 return {"cpa_enabled": "true", "cpa_api_url": "http://x"}.get(key, default)
 
         self.assertTrue(cpa_upload_enabled_for("chatgpt", _Cfg()))
-        self.assertTrue(cpa_upload_enabled_for("grok", _Cfg()))
+        # Grok 已不支持 CPA —— 老开关开着也不该让它复活
+        self.assertFalse(cpa_upload_enabled_for("grok", _Cfg()))
 
     def test_legacy_switch_off_keeps_both_off(self):
         from services.external_sync import cpa_upload_enabled_for
@@ -84,8 +106,10 @@ class CpaPerPlatformUploadToggleTests(unittest.TestCase):
             def get(self, key, default=""):
                 return self._url if key == "cpa_api_url" else default
 
-        self.assertTrue(cpa_upload_enabled_for("grok", _Cfg("http://x")))
-        self.assertFalse(cpa_upload_enabled_for("grok", _Cfg("")))
+        self.assertTrue(cpa_upload_enabled_for("chatgpt", _Cfg("http://x")))
+        self.assertFalse(cpa_upload_enabled_for("chatgpt", _Cfg("")))
+        # Grok 恒 False（不再支持 CPA），哪怕填了地址
+        self.assertFalse(cpa_upload_enabled_for("grok", _Cfg("http://x")))
 
     def test_chatgpt_upload_path_uses_the_resolver(self):
         """自动上传入口必须走解析器，不能退回读单一 `cpa_enabled`。"""

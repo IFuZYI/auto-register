@@ -71,10 +71,9 @@ const PANEL_SECTIONS: PanelSection[] = [
     anchor: 'cpa',
     section: {
       title: 'CPA 面板（CLIProxyAPI）',
-      desc: '地址与管理口令。注册完自动上传、状态同步也从这里读（同一个 auth-files 端点）；上传开关按平台分开。',
+      desc: '地址与管理口令。注册完自动上传、状态同步也从这里读（同一个 auth-files 端点）。Grok 自 2026-10-27 起不再支持 CPA，只保留 grok2api。',
       fields: [
         { key: 'cpa_upload_chatgpt_enabled', label: '自动上传 ChatGPT 账号', type: 'boolean' },
-        { key: 'cpa_upload_grok_enabled', label: '自动上传 Grok 账号', type: 'boolean' },
         { key: 'cpa_upload_proxy_enabled', label: '上传代理（账号绑定的代理）', type: 'boolean' },
         { key: 'cpa_api_url', label: 'API URL', placeholder: 'http://127.0.0.1:8317' },
         { key: 'cpa_api_key', label: '管理口令', secret: true, placeholder: '默认 cliproxyapi' },
@@ -138,7 +137,6 @@ const PANEL_SECTIONS: PanelSection[] = [
 /** 库里存 "0"/"1" 字符串的开关：读时归一成布尔，写时归一回去。 */
 const BOOLEAN_KEYS = [
   'cpa_upload_chatgpt_enabled',
-  'cpa_upload_grok_enabled',
   'cpa_upload_proxy_enabled',
   'sub2api_enabled',
   'grok2api_enabled',
@@ -284,10 +282,6 @@ export function PanelConfigPanel() {
       const legacyCpa = resolveFeatureEnabledConfig(config.cpa_enabled, cpaReady)
       config.cpa_upload_chatgpt_enabled = resolveFeatureEnabledConfig(
         config.cpa_upload_chatgpt_enabled,
-        legacyCpa,
-      )
-      config.cpa_upload_grok_enabled = resolveFeatureEnabledConfig(
-        config.cpa_upload_grok_enabled,
         legacyCpa,
       )
       config.sub2api_enabled = resolveFeatureEnabledConfig(

@@ -1082,7 +1082,9 @@ class FrontendWiringTests(unittest.TestCase):
         idx = src.find("const BOOLEAN_KEYS")
         block = src[idx : src.find("] as const", idx)]
         keys = [k.strip().strip("',") for k in block.splitlines() if k.strip().startswith("'")]
-        self.assertGreaterEqual(len(keys), 9, f"BOOLEAN_KEYS 解析异常: {keys}")
+        # 数量是「解析没坏」的粗检。2026-10-27 删掉 `cpa_upload_grok_enabled`
+        # （Grok 不再支持 CPA）后从 9 降到 8。
+        self.assertGreaterEqual(len(keys), 8, f"BOOLEAN_KEYS 解析异常: {keys}")
 
         loop_covers_all = (
             "for (const key of BOOLEAN_KEYS)" in src

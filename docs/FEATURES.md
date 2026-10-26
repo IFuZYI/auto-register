@@ -428,11 +428,12 @@ iCloud 隐私邮箱还有第三种形态：**远程仓库** —— 主号凭据�
   本地账号不参与对比**：本地行与对应的远端记录都不出现在表里，`本地 N /
   远端 M` 计数同步排除（用户要求 2026-10-10；留在表里只会给出「未上传 /
   凭证不同」这类没有意义的待办提示）
-- **多平台面板支持按平台筛选**（CPA 同时托管 ChatGPT 与 Grok）：表头上方一个
-  「全部 / ChatGPT / Grok」选择器，带各自的账号数；选中的平台**同时**作用于
-  表格、状态筛选计数与批量动作 —— 筛了 Grok 点上传，传的就是 Grok 那批，
-  不会把 ChatGPT 的一起带上。「更新本地/远程凭证」也按当前平台筛选
-  （后端 `?platform=`）
+- **多平台面板支持按平台筛选**：表头上方一个「全部 / ChatGPT / Grok」选择器，
+  带各自的账号数；选中的平台**同时**作用于表格、状态筛选计数与批量动作 ——
+  筛了某平台点上传，传的就是那批，不会把另一个平台的一起带上。
+  「更新本地/远程凭证」也按当前平台筛选（后端 `?platform=`）。
+  > 2026-10-27 起 **CPA 只管 ChatGPT**（Grok 不再支持 CPA，只保留 SSO +
+  > grok2api），所以这个选择器现在只有 grok2api 之外的多平台面板才会出现。
 - **对比页上直接操作**（每个面板三个动作，方向严格分开）：
   **同步远端状态**读远端状态回写本地（含封禁/失效判定）；**更新远程凭证**把
   「未上传 + 本地较新」的凭证推到远端（新建式面板会清理被替换的旧记录）；
@@ -446,19 +447,18 @@ iCloud 隐私邮箱还有第三种形态：**远程仓库** —— 主号凭据�
 
 | 面板 | 用途 | 项目主页 |
 | --- | --- | --- |
-| CPA 面板 | ChatGPT 账号上传与状态同步（CLIProxyAPI 的 `/v0/management/auth-files`） | <https://github.com/router-for-me/CLIProxyAPI> |
+| CPA 面板 | **仅 ChatGPT** 账号上传与状态同步（CLIProxyAPI 的 `/v0/management/auth-files`）；Grok 自 2026-10-27 起不再支持 | <https://github.com/router-for-me/CLIProxyAPI> |
 | Sub2API | 账号上传到 Sub2API 后台 | <https://github.com/Wei-Shaw/sub2api> |
 | grok2api | Grok 账号池与 API 网关 | <https://github.com/chenyme/grok2api> |
 | chatgpt2api | ChatGPT 网页号池（只认 `access_token`） | <https://github.com/yukkcat/chatgpt2api> |
 
-**对比的匹配与判定**：匹配键是 **(平台, 邮箱)**（CPA 同时托管 ChatGPT 的 `codex` 与
-Grok 的 `xai` 两类凭据）；主判据是**凭证本体是否相同**（AT/RT/session/id_token/sso），
-时间（优先凭证签发时间 JWT `iat`，两侧可比时秒级；回落记录时间时小时档）降为辅助信息。
+**对比的匹配与判定**：匹配键是 **(平台, 邮箱)**（多平台面板靠它区分同一邮箱的不同
+凭据）；主判据是**凭证本体是否相同**（AT/RT/session/id_token/sso），时间（优先凭证
+签发时间 JWT `iat`，两侧可比时秒级；回落记录时间时小时档）降为辅助信息。
 
-**上传开关按平台分开**：CPA 的 ChatGPT 与 Grok 各自控制（`cpa_upload_chatgpt_enabled` /
-`cpa_upload_grok_enabled`）；其余面板各有自己的 `*_enabled` 开关。Grok 侧这两个开关
-只对**有 AT/RT 的账号**有意义 —— 注册默认不产 build 凭据（见「Grok 专项能力 →
-注册只产 Web SSO」）。
+**上传开关按平台分开**：每个面板各有自己的 `*_enabled` 开关。Grok 只上传
+grok2api（SSO），不再有 CPA / Sub2API 的上传路径 —— 见「Grok 专项能力 →
+注册只产 Web SSO」。
 
 > **chatgpt2api 有两个同名项目**：`yukkcat/chatgpt2api`（v3.2.3）与
 > `basketikun/chatgpt2api`（v1.8.0），上传器同一份代码两边都能用，但**读回账号状态

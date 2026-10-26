@@ -25,12 +25,13 @@ def _is_config_enabled(value: Any, default: bool = False) -> bool:
 
 #: 平台 → 「CPA 自动上传」开关的配置键。
 #:
-#: 用户要求「CPA 面板里的自动上传不同平台要分开开启」：ChatGPT 与 Grok 是两条
-#: 独立的产物（前者传 codex 凭据，后者传 xai 凭据），常有一边先跑通、另一边还
-#: 在调试。合成一个开关时开一边会连带把另一边也推上去。
+#: CPA 自动上传的平台开关。
+#:
+#: **只有 chatgpt**：Grok 自 2026-10-27 起不再支持 CPA（只保留 SSO + grok2api），
+#: `cpa_upload_grok_enabled` 随之删除 —— 留着会变成一个「界面能调、实际没人读」
+#: 的死旋钮。
 _CPA_UPLOAD_ENABLED_KEYS: dict[str, str] = {
     "chatgpt": "cpa_upload_chatgpt_enabled",
-    "grok": "cpa_upload_grok_enabled",
 }
 
 
@@ -38,7 +39,7 @@ def cpa_upload_enabled_for(platform: str, config: Any = None) -> bool:
     """这个平台的账号是否要自动上传到 CPA。
 
     取值的三层顺序（先具体后笼统）：
-    1. 平台专属开关（`cpa_upload_chatgpt_enabled` / `cpa_upload_grok_enabled`）
+    1. 平台专属开关（`cpa_upload_chatgpt_enabled`）
     2. 历史单开关 `cpa_enabled` —— 老配置里它=true 表示「两边都传」，
        不能因为新增了平台键就让老用户的自动上传静默失效
     3. 兜底：填了 CPA 地址就认为要传（与其它外部同步的默认口径一致）
@@ -56,7 +57,15 @@ def cpa_upload_enabled_for(platform: str, config: Any = None) -> bool:
         except Exception:
             return ""
 
-    key = _CPA_UPLOAD_ENABLED_KEYS.get(str(platform or "").strip().lower())
+    wanted = str(platform or "").strip().lower()
+
+    # **不在表里的平台恒为 False**：Grok 自 2026-10-27 起不再支持 CPA。
+    # 不拦的话它会落到下面的历史开关 / 地址兜底 —— 老配置里 `cpa_enabled=1`
+    # 或「填了地址」就会让一个已删除的上传路径复活（实测断言抓到）。
+    if wanted not in _CPA_UPLOAD_ENABLED_KEYS:
+        return False
+
+    key = _CPA_UPLOAD_ENABLED_KEYS.get(wanted)
     if key:
         raw = _get(key)
         if raw:
