@@ -91,6 +91,19 @@ def _record_sync_result(extra: dict[str, Any], sync_name: str, ok: bool, msg: st
 
     sync_statuses[sync_name] = state
     extra["sync_statuses"] = sync_statuses
+
+    # 顺带登记该面板：上传成功才算（用户要求「只有筛选上传的账号才参与同步」，
+    # 见 `docs/adr/0002-panel-enrollment-and-bidirectional-sync.md`）。
+    #
+    # 为什么接在这里：自动上传、面板推送、单账号动作三条路径都调用本函数，
+    # 一处接入即全覆盖。`sync_statuses.uploaded` 是粘性布尔、区分不了撤销，
+    # 所以登记另存一份（`panel_uploads`），两者各司其职。
+    try:
+        from services.panel_enrollment import enroll
+
+        enroll(extra, sync_name, ok=bool(ok), message=str(msg or ""))
+    except Exception:  # noqa: BLE001 - 登记失败不该毁掉上传结果
+        logger.warning("面板登记写入失败（忽略）: %s", sync_name, exc_info=True)
     return state
 
 

@@ -161,9 +161,29 @@ def generate_token_json(account) -> dict:
     expired / account_id 从 JWT 自动解码，与 chatgpt_register 逻辑一致。
     """
     email = getattr(account, "email", "")
-    access_token = getattr(account, "access_token", "")
-    refresh_token = getattr(account, "refresh_token", "")
-    id_token = getattr(account, "id_token", "")
+
+    # 凭据**优先从 `extra` 取**：本仓的 `core.base_platform.Account` 把凭据放在
+    # `extra` 字典里，对象上根本没有 `access_token` / `refresh_token` 这些属性。
+    # 只读属性会让面板推送那两条路径（`api/integrations.py` 构造账号时只给
+    # `token=AT`）产出**空凭据**上传给对端 —— 实测复现过：AT/RT/IDT 全是空串。
+    # 属性兜底保留：协议层另有调用方是按属性挂的（如 grok 的同步账号）。
+    from core.credential_fields import get_credential
+
+    extra = getattr(account, "extra", None)
+    extra = extra if isinstance(extra, dict) else {}
+
+    access_token = (
+        get_credential(extra, "access_token")
+        or getattr(account, "access_token", "")
+    )
+    refresh_token = (
+        get_credential(extra, "refresh_token")
+        or getattr(account, "refresh_token", "")
+    )
+    id_token = (
+        get_credential(extra, "id_token")
+        or getattr(account, "id_token", "")
+    )
     if access_token and not id_token:
         id_token = _build_compat_id_token(access_token=access_token, email=email)
 

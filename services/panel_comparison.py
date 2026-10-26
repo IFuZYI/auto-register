@@ -1061,6 +1061,22 @@ def _chatgpt2api_export_credentials(
             return requests.post(
                 f"{base}/api/accounts/export",
                 headers=headers,
+                # **键名按变体不同，这里是 yukkcat 的 `account_ids`。**
+                #
+                # 两个同名变体在这个端点上互不兼容（读源码确认，2026-10-26）：
+                #
+                # - yukkcat（`reference/panel/chatgpt2api/api/accounts.py:110-114`）
+                #   两个键都收，但把 `access_tokens` 当 **legacy token** ——
+                #   查出对不上就 400（`missing_legacy_tokens` 那段）。所以
+                #   management_id 只能放 `account_ids`。
+                # - 部署版（IFuZYI 2.3.0，`internal/api/account_refresh.go:160`）
+                #   只读 `access_tokens`，忽略这里。
+                #
+                # 这不是缺陷：**部署版根本走不到这里** —— 它的列表直接带
+                # `access_token`（`_chatgpt2api_credentials_from_item` 非空），
+                # 于是 `credential_targets` 不填、导出分支不触发。
+                # 曾按「部署版只认 access_tokens」改过这一行，结果只破坏了
+                # yukkcat、没修好任何可达路径，已撤回。
                 json={"account_ids": ids, "format": "json"},
                 timeout=timeout,
                 verify=False,
