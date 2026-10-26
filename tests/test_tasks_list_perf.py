@@ -275,10 +275,13 @@ def test_list_payload_stays_under_one_megabyte(client):
 def test_list_query_does_not_read_heavy_columns(client):
     """列表查询不该把 `logs_json` / `errors_json` 读进内存。
 
-    用 SQL 语句记录器验证，而不是看耗时 —— 耗时在 CI 上不稳定，但「有没有
-    查这两列」是确定的事实。
+    断言「**任何**取 task_runs 的语句都不含这两个列，除非它带状态过滤」——
+    早先只检查「无 WHERE 的语句」，于是 `SELECT logs_json … WHERE status=…`
+    这种回归能通过（复审实测）。现在改成白名单式：只有「带 WHERE 的」
+    才允许出现重列（那是运行中任务那条，刻意要明细）。
     """
     from sqlalchemy import event
+
     from core.db import current_engine
 
     statements: list[str] = []
@@ -295,16 +298,22 @@ def test_list_query_does_not_read_heavy_columns(client):
 
     touched = [s for s in statements if "task_runs" in s]
     assert touched, "没抓到 task_runs 的查询语句（记录器没生效）"
-    # 运行中/等待中的任务**允许**读大字段（实时面板要明细），所以只看
-    # 「不带状态过滤」的那条 —— 它取的是全部历史任务，763 行里 99% 是已结束的。
-    unfiltered = [
+
+    # 只有**运行中任务那条**允许读重列。判据：带 WHERE **且** 限定在
+    # `status IN ('pending','running')`。早先只写「带 WHERE 就放行」——
+    # 轻量查询也有 WHERE，于是它加回重列照样绿（变异实测）。
+    def _is_live_query(sql: str) -> bool:
+        """运行中任务那条：`WHERE status IN (?, ?)`（参数是占位符，看不到字面量）。"""
+        low = sql.lower()
+        return "where" in low and "status in" in low
+
+    offenders = [
         s for s in touched
-        if "logs_json" in s or "errors_json" in s
+        if ("logs_json" in s or "errors_json" in s) and not _is_live_query(s)
     ]
-    heavy_all = [s for s in unfiltered if "WHERE" not in s.upper()]
-    assert not heavy_all, (
-        "全量列表查询仍 SELECT 了 logs_json / errors_json —— 763 行的大字段被"
-        f"读进内存后才清空，白花 6–10 倍时间: {heavy_all[:1]}"
+    assert not offenders, (
+        "有查询在**不是**「只取运行中任务」的情况下读了 logs_json / "
+        f"errors_json —— 763 行的大字段被读进内存后才丢弃: {offenders[:1]}"
     )
 
 
@@ -362,3 +371,44 @@ def test_live_statuses_do_not_claim_null_rows():
             .compile(s.bind, compile_kwargs={"literal_binds": True})
         )
     assert "IS NULL" not in sql.upper(), f"运行中查询里出现了 IS NULL: {sql}"
+
+
+def test_list_columns_cover_every_model_column():
+    """`_LIST_COLUMNS` 必须与 `TaskRunModel` 的列一一对上。
+
+    轻量分支手写 dict 构造快照（为了不读 `logs_json`/`errors_json`），这等于
+    把 `_task_run_to_snapshot` 抄了一遍。给模型加一个字段而忘了同步，列表就会
+    **静默丢字段**、详情端点却有 —— 这是唯一「没有测试能发现」的失败模式。
+
+    所以这里断言：模型的每一列，要么在 `_LIST_COLUMNS` 里，要么在「刻意不取」
+    的名单里。新增列必须在这三处之一被显式处理，不能漏。
+    """
+    from core.db import TaskRunModel
+    from services.task_store_io import _LIST_COLUMNS
+
+    all_columns = {c.name for c in TaskRunModel.__table__.columns}
+    # 这两个刻意不进列表查询（它们就是瘦身的意义所在）
+    intentionally_skipped = {"logs_json", "errors_json"}
+
+    covered = set(_LIST_COLUMNS) | intentionally_skipped
+    missing = all_columns - covered
+    assert not missing, (
+        f"这些列既不在 `_LIST_COLUMNS` 也不在刻意跳过名单里 —— 列表会静默丢掉"
+        f"它们: {sorted(missing)}。新增字段时请同步 `_LIST_COLUMNS` 与"
+        f" `_list_persisted_tasks` 里手写的 dict。"
+    )
+
+    stale = set(_LIST_COLUMNS) - all_columns
+    assert not stale, f"`_LIST_COLUMNS` 里有模型上不存在的列: {sorted(stale)}"
+
+
+def test_list_snapshot_has_same_keys_as_detail(client):
+    """列表返回的字段集合必须与单条详情一致（值可以不同，键不能少）。"""
+    tid = _make_finished_task(client, 8)
+    try:
+        listed = next(t for t in client.get("/api/tasks").json() if t["id"] == tid)
+        detail = client.get(f"/api/tasks/{tid}").json()
+        missing = set(detail) - set(listed)
+        assert not missing, f"列表比详情少了这些键: {sorted(missing)}"
+    finally:
+        client.delete(f"/api/tasks/{tid}")

@@ -137,9 +137,15 @@ export default function RunningTasks() {
     }, pollIntervalMs(hasActiveForPolling))
     // 每秒刷新「已运行时长」：只在有运行中任务时开 —— 没有秒级变化的数字时
     // 每秒 setState 只是让整棵树空转重渲染。
+    //
+    // 任务刚从 running 变 done 时（`hasActiveForPolling` 由 true 转 false），
+    // effect 重建、立刻 fetch，但 tick 不再重建 —— 最后一次「已运行时长」
+    // 会停在旧值直到下一次轮询（最多一个 idle 间隔 15 秒）。这里在切换时
+    // 补一次 setNow，让终态时长立刻正确。
     const tick = shouldTickSeconds(hasActiveForPolling)
       ? setInterval(() => setNow(Date.now() / 1000), 1000)
       : null
+    if (!hasActiveForPolling) setNow(Date.now() / 1000)
     return () => {
       clearInterval(poll)
       if (tick !== null) clearInterval(tick)

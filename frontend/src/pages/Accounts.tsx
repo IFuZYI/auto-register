@@ -15,6 +15,7 @@ import {
   planMeta,
   atLifecycleMeta,
   atListSummary,
+  atSummaryFromClaims,
 } from '@/lib/accountFormat'
 import {
   Table,
@@ -470,11 +471,18 @@ export default function Accounts() {
    * `extra_json` 的大头，列表页只用它判有无 —— 见 `api/accounts.py` 的
    * `_slim_extra_for_list`）。兼容旧值：老响应里可能还是明文。
    */
+  //: 列表行不带 token 正文时的占位串。**只用于判有无**，绝不可展示/复制。
+  const HAS_TOKEN_PLACEHOLDER = '__has_token__'
+
   const getRefreshToken = (record: any): string => {
     try {
       const extra = JSON.parse(record.extra_json || '{}')
-      if (extra.has_refresh_token === true) return 'present'
-      return extra.refresh_token || extra.refreshToken || ''
+      // 正文优先：详情端点给的是全量，能拿到真值就用真值。
+      const raw = extra.refresh_token || extra.refreshToken || ''
+      if (raw) return String(raw)
+      // 列表行没有正文，只有布尔 —— 返回占位串仅用于「有没有」判断，
+      // **不可**拿去展示或复制（抽屉里用的是详情数据，不会走到这里）。
+      return extra.has_refresh_token === true ? HAS_TOKEN_PLACEHOLDER : ''
     } catch {
       return ''
     }
@@ -490,16 +498,36 @@ export default function Accounts() {
   const getAccessToken = (record: { token?: string; extra_json?: string } | null | undefined): string => {
     try {
       const extra = JSON.parse(record?.extra_json || '{}')
-      // 列表响应给的是布尔（正文不进列表，见 api/accounts.py）：
-      // 有值就返回一个占位串，调用方只判空/非空。
-      if (extra.has_access_token === true) return 'present'
+      // 正文优先（详情端点给全量）；列表行只有布尔，返回占位串仅供判有无。
       const fromExtra = String(extra.access_token || '').trim()
       if (fromExtra) return fromExtra
+      if (extra.has_access_token === true) return HAS_TOKEN_PLACEHOLDER
     } catch {
       // ignore，退回列
     }
     if (currentPlatform === 'grok') return ''
     return String(record?.token || '').trim()
+  }
+
+  /**
+   * 打开详情抽屉：**先拉全量**再用。
+   *
+   * 列表响应已把 token 正文裁掉（`session_token`/`access_token` 等换成布尔，
+   * 见 `api/accounts.py`）。直接把列表行塞进抽屉，会让 AT 有效期算不出来、
+   * RT 显示成占位串、甚至把占位串复制进剪贴板（复审实测）。
+   * 详情端点仍返回全量，所以打开时补一次。
+   */
+  const openDetail = async (record: { id: number; platform?: string }) => {
+    setDetailModalOpen(true)
+    setCurrentAccount(record)          // 先用列表行占位，避免抽屉空白
+    try {
+      const full = await apiFetch(
+        `/accounts/${record.id}?platform=${encodeURIComponent(record.platform || currentPlatform)}`,
+      )
+      if (full && typeof full === 'object') setCurrentAccount(full)
+    } catch {
+      // 拉不到就继续用列表行：抽屉里其它字段仍可用，只是 token 部分为空
+    }
   }
 
   const handleDelete = async (id: number) => {
@@ -924,7 +952,17 @@ export default function Accounts() {
         // 与详情弹窗同口径（atListSummary 内部复用 atLifecycleMeta）。
         // 参考实现（chatgpt2api）在列表行内直接显示凭据状态，用户反馈
         // 「GPT 界面没见到 AT 日期」——此前只在详情弹窗里。
-        const at = atListSummary(getAccessToken(record))
+        // 列表响应不带 AT 正文（占 extra_json 的大头），但后端把 JWT 的
+        // iat/exp 提成两个时间戳放进行里（约 20 字节），所以这里仍能显示
+        // 到期日与剩余时间 —— 那是用户 2026-10-05 明确要求的功能。
+        const parsed = (() => {
+          try {
+            return JSON.parse(record.extra_json || '{}')
+          } catch {
+            return {}
+          }
+        })()
+        const at = atSummaryFromClaims(parsed) ?? atListSummary(getAccessToken(record))
         const hasDate = Boolean(at.expiresShort || at.remainingText)
         if (at.label === '无 AT' && !hasDate) {
           return (
@@ -943,9 +981,7 @@ export default function Accounts() {
             {hasDate ? (
               // 日期与剩余时间**分行**：两者拼一行需要 146px，而该列可用
               // 内容宽只有 ~92px（130px 列宽 - 两重 padding）—— 实测日期
-              // 被截断成「到期 2026-10-…」（dogfood 2026-10-05，缩放前后
-              // 均复现）。拆行后「到期 2026-10-12」78px、「6 天 20 小时」
-              // 59px，都放得下。
+              // 被截断成「到期 2026-10-…」。拆行后都放得下。
               <Text type="secondary" style={secondaryTextStyle} ellipsis={{ tooltip: at.tooltip }}>
                 {at.expiresShort ? `到期 ${at.expiresShort}` : ''}
               </Text>
@@ -1084,7 +1120,7 @@ export default function Accounts() {
       fixed: 'right',
       render: (_: any, record: any) => (
         <Space size={4} wrap>
-          <Button type="link" size="small" onClick={() => { setCurrentAccount(record); setDetailModalOpen(true); }}>
+          <Button type="link" size="small" onClick={() => { void openDetail(record) }}>
             详情
           </Button>
           <Popconfirm
@@ -1275,8 +1311,7 @@ export default function Accounts() {
         scroll={{ x: isChatgptPlatform ? 1430 : 1250 }}
         onRow={(record) => ({
           onDoubleClick: () => {
-            setCurrentAccount(record)
-            setDetailModalOpen(true)
+            void openDetail(record)
           },
         })}
       />

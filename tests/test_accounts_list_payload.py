@@ -39,6 +39,18 @@ def client():
     return TestClient(main.app)
 
 
+def _fake_jwt(*, iat: int, exp: int) -> str:
+    """造一个形状合法的 JWT（不验签，只为让 iat/exp 可解）。"""
+    import base64
+
+    def seg(obj) -> str:
+        return base64.urlsafe_b64encode(
+            json.dumps(obj).encode()
+        ).decode().rstrip("=")
+
+    return f"{seg({'alg': 'RS256', 'typ': 'JWT'})}.{seg({'iat': iat, 'exp': exp, 'sub': 'u'})}.sig"
+
+
 def _make_account(idx: int, *, with_tokens: bool = True) -> str:
     """造一个带重型字段的账号，返回 email。"""
     from core.base_platform import Account, AccountStatus, RegisterConfig  # noqa: PLC0415
@@ -52,7 +64,8 @@ def _make_account(idx: int, *, with_tokens: bool = True) -> str:
         "register_proxy": "socks5h://u:p@127.0.0.1:1",
         # 重型字段：真实体量（session_token 平均 4 KB、AT 1.5 KB）
         "session_token": "s" * 4000,
-        "access_token": "a" * 1500,
+        # 真 JWT 形状（三段、payload 带 iat/exp）—— 列表要从中提有效期
+        "access_token": _fake_jwt(iat=1_760_000_000, exp=1_760_086_400),
         "id_token": "i" * 300,
         "cookies": "c" * 350,
         "cpa_record": {"blob": "r" * 1800},
@@ -169,3 +182,88 @@ def test_list_payload_per_item_is_small(client):
         )
     finally:
         _cleanup(client, emails)
+
+
+def test_slim_is_idempotent():
+    """瘦身必须是幂等的：已经瘦过的行再跑一次，布尔标记不能被翻成 False。
+
+    这是真实风险路径：调用方把瘦身后的行原样回传（PATCH 带 extra_json），
+    再经列表渲染时会二次瘦身。原实现先 `pop` 再补标记，导致「已有布尔被
+    当成没有正文」而写成 False —— 实测 `{"has_access_token": true}` →
+    `{"has_access_token": false}`，账号会从「有 AT」变成「无 AT」。
+    """
+    from api.accounts import _slim_extra_for_list
+
+    once = _slim_extra_for_list('{"access_token": "a", "refresh_token": "rt"}')
+    twice = _slim_extra_for_list(once)
+    assert json.loads(twice) == json.loads(once), (
+        f"二次瘦身改变了结果: {once} → {twice}"
+    )
+
+    # 关键性质：已瘦身行里的 `true` 不能被翻成 `false`（这才是真实的中毒路径）
+    for key in ("has_access_token", "has_refresh_token"):
+        assert json.loads(_slim_extra_for_list(json.dumps({key: True})))[key] is True, (
+            f"{key}: true 被翻成 false —— 账号会从「有 token」变成「无 token」"
+        )
+
+
+def test_slim_keeps_true_when_both_forms_present():
+    """正文与布尔同时存在时，任一为真就该报 True。"""
+    from api.accounts import _slim_extra_for_list
+
+    out = json.loads(_slim_extra_for_list('{"access_token": "a", "has_access_token": true}'))
+    assert out["has_access_token"] is True
+    assert "access_token" not in out, "正文仍应被裁掉"
+
+
+def test_list_keeps_iso_datetime_format(client):
+    """列表响应里的时间格式必须与详情端点一致（`...T...Z`）。
+
+    原实现用 `row.model_dump()` 重建整行，导致 `created_at` 从 FastAPI 的
+    `2026-01-02T03:04:05.123456Z` 变成 `2026-01-02 03:04:05.123456+00:00`
+    —— 同一时刻、不同字符串。这是对外契约的静默变化（前端 `new Date()`
+    两种都吃，但任何按字符串比较/解析的调用方会坏）。
+    """
+    email = _make_account(6)
+    try:
+        row = _row_for(client, email)
+        created = str(row["created_at"])
+        assert "T" in created, f"列表的 created_at 不是 ISO-T 格式: {created!r}"
+        assert created.endswith("Z") or created.endswith("+00:00"), created
+
+        detail = client.get(
+            f"/api/accounts/{row['id']}", params={"platform": "chatgpt"}
+        ).json()
+        # 两个端点对同一行的同一时刻应当给出同一种表示
+        assert str(detail["created_at"]) == created, (
+            f"列表与详情的时间格式不一致: {created!r} vs {detail['created_at']!r}"
+        )
+    finally:
+        _cleanup(client, [email])
+
+
+def test_list_exposes_at_expiry_without_the_token_body(client):
+    """列表要能显示 AT 有效期，但**不**下发 AT 正文。
+
+    用户反馈（2026-10-05）：「AT 有效判断和 AT 日期呢？我怎么在 GPT 界面
+    没见到」——那之后列表就有了「AT 有效期」列。本轮把 AT 正文裁掉后，
+    前端再解不出 JWT，那一列就废了。
+
+    正解：后端从 JWT 里只取 `iat`/`exp` 两个数字放进行里（约 20 字节），
+    前端用它算日期，不需要正文。完整 claims 有 1283 字节且含 `session_id`
+    等敏感项，绝不能整个下发。
+    """
+    email = _make_account(7)
+    try:
+        row = _row_for(client, email)
+        extra = json.loads(row["extra_json"])
+        assert "access_token" not in extra, "AT 正文仍在下发"
+        assert "at_exp" in extra or "at_iat" in extra, (
+            "列表既没有 AT 正文、也没有 exp/iat —— 「AT 有效期」列无法渲染"
+        )
+        assert isinstance(extra.get("at_exp"), int), f"at_exp 应是数字: {extra.get('at_exp')!r}"
+        # 不能把完整 claims 塞进来
+        assert "session_id" not in json.dumps(extra), "把敏感 claims 也带出来了"
+        assert len(json.dumps(extra)) < 2000, "只该带 iat/exp 两个数字"
+    finally:
+        _cleanup(client, [email])

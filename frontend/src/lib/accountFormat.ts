@@ -295,6 +295,41 @@ export interface AtListSummary {
  * 我们的列表此前只在详情弹窗里有 AT 生成/到期（用户反馈「没见到」）。
  * 与 `atLifecycleMeta` 同口径，输出列表用的紧凑形状。
  */
+/**
+ * 用后端给的 `at_iat` / `at_exp`（两个时间戳）渲染 AT 有效期。
+ *
+ * 列表响应不带 AT 正文（占 `extra_json` 的大头），所以没法在前端解 JWT。
+ * 后端从 JWT 里只提这两个数字放进行里（约 20 字节），这里据此算日期 ——
+ * 用户 2026-10-05 明确要求列表能看到 AT 日期，不能因为瘦身就丢掉。
+ */
+export function atSummaryFromClaims(
+  extra: Record<string, unknown> | null | undefined,
+): AtListSummary | null {
+  const iat = Number((extra || {}).at_iat)
+  const exp = Number((extra || {}).at_exp)
+  if (!Number.isFinite(exp) || exp <= 0) return null
+  const pad = (n: number) => String(n).padStart(2, '0')
+  const d = new Date(exp * 1000)
+  const expiresShort = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+  const remainingSec = exp - Math.floor(Date.now() / 1000)
+  const remainingText =
+    remainingSec <= 0
+      ? '已过期'
+      : remainingSec >= 86400
+        ? `${Math.floor(remainingSec / 86400)} 天 ${Math.floor((remainingSec % 86400) / 3600)} 小时`
+        : `${Math.floor(remainingSec / 3600)} 小时 ${Math.floor((remainingSec % 3600) / 60)} 分`
+  const issuedText = Number.isFinite(iat) && iat > 0
+    ? `${new Date(iat * 1000).getFullYear()}-${pad(new Date(iat * 1000).getMonth() + 1)}-${pad(new Date(iat * 1000).getDate())}`
+    : ''
+  return {
+    label: remainingSec > 0 ? '有效' : '已过期',
+    color: remainingSec > 0 ? 'green' : 'red',
+    expiresShort,
+    remainingText,
+    tooltip: `${issuedText ? `生成于 ${issuedText} · ` : ''}到期 ${expiresShort} · ${remainingText}`,
+  }
+}
+
 export function atListSummary(accessToken?: string): AtListSummary {
   const meta = atLifecycleMeta(accessToken)
   // 短日期用 epoch 确定性构造（不解析 locale 字符串 —— 不同 locale 下

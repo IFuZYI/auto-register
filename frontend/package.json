@@ -7,7 +7,8 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "check": "for f in scripts/run_*.mjs; do node \"$f\" > /dev/null || exit 1; done && echo 'all checks passed'"
   },
   "dependencies": {
     "@ant-design/icons": "^5.6.1",

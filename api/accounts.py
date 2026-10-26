@@ -156,6 +156,37 @@ _LIST_HEAVY_EXTRA_KEYS = ("session_token", "id_token", "cookies", "cpa_record")
 _LIST_TOKEN_EXTRA_KEYS = ("access_token", "refresh_token")
 
 
+def _at_claims_for_list(token: str) -> dict:
+    """从 AT（JWT）里只取 `iat` / `exp` 两个数字。
+
+    **为什么需要**：列表裁掉了 AT 正文（它占 `extra_json` 的大头），但列表的
+    「AT 有效期」列要靠 JWT 的 `exp` 才能显示到期时间 —— 那是用户 2026-10-05
+    明确要求的功能（「我怎么在 GPT 界面没见到 AT 日期」）。整串不发、只发两个
+    时间戳，前端照样能算，且不泄露 token。
+
+    完整 claims 有 1283 字节并含 `session_id` / `scp` 等敏感项，绝不能整个下发。
+
+    解析失败返回空 dict（不抛）：一个畸形 token 不该让整个列表 500。
+    """
+    import base64
+    import json as _json
+
+    parts = str(token or "").split(".")
+    if len(parts) != 3:
+        return {}
+    try:
+        payload = parts[1] + "=" * (-len(parts[1]) % 4)
+        claims = _json.loads(base64.urlsafe_b64decode(payload))
+    except Exception:
+        return {}
+    out = {}
+    for key in ("iat", "exp"):
+        value = claims.get(key)
+        if isinstance(value, (int, float)) and value > 0:
+            out[f"at_{key}"] = int(value)
+    return out
+
+
 def _slim_extra_for_list(raw: str) -> str:
     """把列表用的 `extra_json` 瘦下来。
 
@@ -177,14 +208,25 @@ def _slim_extra_for_list(raw: str) -> str:
     slim = dict(data)
     for key in _LIST_HEAVY_EXTRA_KEYS:
         slim.pop(key, None)
-    for key in _LIST_TOKEN_EXTRA_KEYS:
-        value = str(slim.pop(key, "") or "").strip()
-        slim[f"has_{key}"] = bool(value)
-    # 幂等：已经是布尔标记的条目再跑一次不该变成 False
+    # 把 AT 的 iat/exp 提出来放进列表（约 20 字节），前端据此渲染「AT 有效期」。
+    # 必须在 pop 掉正文**之前**取。
+    for claims_key in ("at_iat", "at_exp"):
+        slim.pop(claims_key, None)
+    slim.update(_at_claims_for_list(str(slim.get("access_token") or "")))
+
     for key in _LIST_TOKEN_EXTRA_KEYS:
         flag = f"has_{key}"
-        if flag not in slim:
-            slim[flag] = bool(str(data.get(key) or "").strip())
+        # **先读旧的布尔再写**：`pop` 之后再判断「标记在不在」永远为假，
+        # 会把已经瘦过的 `has_x: true` 翻成 False —— 账号会从「有 token」
+        # 变成「无 token」（实测：`{"has_access_token": true}` →
+        # `{"has_access_token": false}`）。正文与布尔任一为真就算有。
+        #
+        # 标记**永远写**：前端要一个确定的布尔来判「有没有」（没有 AT 的账号
+        # 必须拿到 `False`，而不是缺键）。幂等性靠「读旧值再 OR」保证 ——
+        # 二次瘦身时旧值 `true` 仍为真，不会被翻成 `false`。
+        flag_value = slim.pop(flag, None) is True
+        has_body = bool(str(slim.pop(key, "") or "").strip())
+        slim[flag] = bool(flag_value or has_body)
     try:
         return _json.dumps(slim, ensure_ascii=False)
     except Exception:
@@ -192,10 +234,18 @@ def _slim_extra_for_list(raw: str) -> str:
 
 
 def _slim_account_row(row):
-    """给一行账号做列表瘦身。ORM 行复制一份，不改原对象。"""
+    """给一行账号做列表瘦身。返回 dict，**只替换 `extra_json` 一个字段**。
+
+    为什么不 `row.model_dump()` 重建整行：那会换掉 FastAPI 的序列化路径 ——
+    `created_at` 从 `2026-01-02T03:04:05.123456Z` 变成
+    `2026-01-02 03:04:05.123456+00:00`（实测），同一时刻、不同字符串，是
+    对外契约的静默变化。这里只动需要动的那一个字段，其余交给 FastAPI。
+    """
     import json as _json
 
-    payload = dict(row.model_dump()) if hasattr(row, "model_dump") else dict(row)
+    from fastapi.encoders import jsonable_encoder
+
+    payload = jsonable_encoder(row)
     raw = payload.get("extra_json")
     if isinstance(raw, str):
         payload["extra_json"] = _slim_extra_for_list(raw)

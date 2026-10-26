@@ -68,6 +68,33 @@ def test_form_hints_live_in_tooltips_not_on_the_page():
     not os.path.isdir(os.path.join(FRONTEND, "node_modules")),
     reason="frontend/node_modules 未安装，跳过真实 TS 执行",
 )
+@pytest.mark.parametrize("script_name", [
+    "run_poll_backoff_checks.mjs",
+    "run_accounts_list_token_checks.mjs",
+])
+def test_frontend_script_passes(script_name):
+    """把每个前端检查脚本都接入 pytest —— 否则它们永远不会被执行。
+
+    复审指出：脚本躺在 `frontend/scripts/` 下，既不在 package.json 的
+    scripts、也不在 CI、也不在 pytest 里，等于死代码（`run_poll_backoff_checks`
+    就是这种情况，`pollIntervalMs` 的取值守卫从没跑过）。
+    """
+    script = os.path.join(FRONTEND, "scripts", script_name)
+    assert os.path.exists(script), f"缺少执行脚本: {script}"
+    proc = subprocess.run(
+        ["node", script], cwd=FRONTEND, capture_output=True, text=True, timeout=180
+    )
+    assert proc.returncode == 0, (
+        f"{script_name} 失败: {proc.stdout[-600:]}{proc.stderr[-600:]}"
+    )
+    result = json.loads(proc.stdout.strip().splitlines()[-1])
+    assert not result["failures"], result["failures"]
+
+
+@pytest.mark.skipif(
+    not os.path.isdir(os.path.join(FRONTEND, "node_modules")),
+    reason="frontend/node_modules 未安装，跳过真实 TS 执行",
+)
 def test_failed_tasks_are_not_hidden_behind_the_cap():
     """25 条 done + 1 条刚 failed → 那条 failed 必须可见。"""
     script = os.path.join(FRONTEND, "scripts", "run_finished_cap_checks.mjs")
