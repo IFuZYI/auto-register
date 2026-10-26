@@ -79,6 +79,35 @@ def _pick_text(source: Any, *keys: str, default: str = "") -> str:
     return default
 
 
+def _build_chatgpt_upload_account_for_tests(account):
+    """测试入口：复用生产路径里的账号构造（`sync_account` 内部的闭包）。
+
+    闭包没法直接测，所以把它抽出来单独暴露。只给测试用，生产调用仍走
+    `sync_account` 内部那一份。
+    """
+    return _build_chatgpt_upload_account(account)
+
+
+def _build_chatgpt_upload_account(account):
+    extra = _get_account_extra(account)
+
+    class _UploadAccount:
+        pass
+
+    a = _UploadAccount()
+    a.email = getattr(account, "email", "")
+    a.access_token = _pick_text(extra, "access_token", "accessToken") or getattr(account, "token", "")
+    a.refresh_token = _pick_text(extra, "refresh_token", "refreshToken")
+    a.id_token = _pick_text(extra, "id_token", "idToken")
+    a.session_token = _pick_text(extra, "session_token", "sessionToken")
+    a.client_id = _pick_text(extra, "client_id", "clientId", default="app_EMoamEEZ73f0CkXaXp7hrann")
+    # password 在独立列、totp_secret 在 extra —— 两处都要带上（对端 2.2.0 靠它们
+    # 做失效后自动重登）。extra 整个带过去，上传器各取所需。
+    a.password = str(getattr(account, "password", "") or "")
+    a.extra = dict(extra)
+    return a
+
+
 def sync_account(account) -> list[dict[str, Any]]:
     """根据平台将账号同步到外部系统。"""
     from core.config_store import config_store
@@ -86,22 +115,10 @@ def sync_account(account) -> list[dict[str, Any]]:
     platform = getattr(account, "platform", "")
     results: list[dict[str, Any]] = []
 
-    def _build_chatgpt_upload_account():
-        class _A:
-            pass
-
-        a = _A()
-        a.email = account.email
-        extra = _get_account_extra(account)
-        a.access_token = _pick_text(extra, "access_token", "accessToken") or account.token
-        a.refresh_token = _pick_text(extra, "refresh_token", "refreshToken")
-        a.id_token = _pick_text(extra, "id_token", "idToken")
-        a.session_token = _pick_text(extra, "session_token", "sessionToken")
-        a.client_id = _pick_text(extra, "client_id", "clientId", default="app_EMoamEEZ73f0CkXaXp7hrann")
-        return a
-
     if platform == "chatgpt":
-        upload_account = _build_chatgpt_upload_account()
+        # 抽成模块级函数（原来是个闭包）：闭包没法直接测，而这段构造恰恰
+        # 是「凭据有没有带全」的现场 —— 漏一个字段对端就救不回号。
+        upload_account = _build_chatgpt_upload_account(account)
 
         # 贡献模式优先级最高：开启后仅上传到贡献服务器，避免重复上报到其它平台。
         contribution_enabled = _is_config_enabled(config_store.get("contribution_enabled", "0"))

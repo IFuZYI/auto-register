@@ -136,6 +136,32 @@ _PANEL_PUSH_KIND: dict[str, str] = {
 }
 
 
+def _lookup_account_row(account_id):
+    """按 id 取账号仓储行（拿独立列上的字段，如 password）。
+
+    对比行（`fetch_panel_raw` 的产物）只带 `extra`，而 password 存在独立列上。
+    """
+    from core.db import account_repository
+
+    try:
+        return account_repository.get(int(account_id))
+    except Exception:
+        return None
+
+
+def _password_for_row(row) -> str:
+    """取该行的 password（独立列）。
+
+    取不到就返回空串 —— 对端是「非空才写入」，空串等于不下发该字段，
+    不会抹掉远端已有的密码。
+    """
+    account_id = row.get("id") if isinstance(row, dict) else None
+    if account_id is None:
+        return ""
+    found = _lookup_account_row(account_id)
+    return str(getattr(found, "password", "") or "").strip() if found else ""
+
+
 def _push_account_uploader(panel_key: str, platform: str, row: dict):
     """把一行本地账号推给对应面板，返回 `(ok, message)`。
 
@@ -219,7 +245,11 @@ def _push_account_uploader(panel_key: str, platform: str, row: dict):
         from services.chatgpt_sync import upload_proxy_for
 
         account = Account(
-            platform=plat or "chatgpt", email=email, password="",
+            platform=plat or "chatgpt", email=email,
+            # `password` 在**独立列**上、不在 extra 里 —— `row` 只带了 extra，
+            # 所以按 id 回查一次。对端 chatgpt2api 2.2.0 起靠 password +
+            # totp_secret 做「RT 失效后自动密码重登」，不给就只能人工救号。
+            password=_password_for_row(row),
             token=get_credential(extra, "access_token"),
             status=AccountStatus.REGISTERED, extra=extra,
         )

@@ -198,6 +198,44 @@ SSO 判定是「访问 accounts.x.ai 看是否跳登录页」，本仓实测它�
 - NSFW 顺序不能换：`accept-terms` → `birth-date` → `nsfw`
 - 管理面要**用户名+密码换 token**（不是固定 API Key），有效期约 10 分钟
 
+## 导入 chatgpt2api：带上可救号的凭据
+
+对端 **≥ 2.2.0**（2026-10-26）起，导入可写字段扩到 `access_token` /
+`refresh_token` / `id_token` / `email` / `password` / `totp_secret` / `proxy` /
+`type` / `source_type`。对端文档原话：「**务必带 `password` + `totp_secret`**。
+RT 会失效，没有密码就只能人工救。」
+
+| 字段 | 本地来源 | 作用 |
+| --- | --- | --- |
+| `refresh_token` | `extra.refresh_token` | RT 续期，不必重新登录 |
+| `id_token` | `extra.id_token`（**不取合成的**兼容 IDT） | 迁移更完整 |
+| `password` | **独立列** `accounts.password` | 失效后自动密码重登 |
+| `totp_secret` | `extra.totp_secret` | 开了 2FA 时必需，缺了重登必失败 |
+
+### 两个必须知道的坑
+
+**1. 空值会覆盖。** 对端对已存在的账号按
+`merged = {**current, **incoming}` 合并 —— incoming 的每个键都覆盖，**空串也覆盖**
+（`skipped` 的账号同样走这段）。所以传 `password: ""` 会**抹掉对端已有的密码**、
+传 `totp_secret: ""` 会让 2FA 号永久锁死。**只发非空字段**。
+
+实测验证：用对端新增的 `POST /api/accounts/proxy` 传空串清代理，`password_set`
+仍为 `True` —— 空值语义是「清空该字段」而非「抹掉所有」。
+
+**2. `source_type` 与是否带 RT 无关。** 对端只在 `type == "codex"` 或
+`export_type == "codex"` 时置 `SourceCodex`。本仓早先注释里「多传 RT 会让对端
+当成另一种源」是 2.2.0 之前的猜测，已证伪。
+
+### 三条上传路径都要带全
+
+| 路径 | password | totp_secret |
+| --- | --- | --- |
+| 单账号动作（账号页菜单） | ✅ `acc_model.password` | ✅ `extra` |
+| 面板推送（面板管理页） | ✅ 按 id 回查独立列 | ✅ `extra` |
+| 注册自动上传 | ✅ 独立列 | ✅ `extra` |
+
+后两条在本轮之前是**缺的** —— 新字段加了但生产路径没搬，等于没生效。
+
 ## 列表接口的性能约束
 
 界面卡顿的根因**不在数据库查询速率**，而在「返回体太大 × 轮询太勤」。
