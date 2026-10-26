@@ -44,9 +44,10 @@ docker compose logs -f app        # 日志
   curl -s http://localhost:8000/api/tasks | python3 -c "import json,sys; d=json.load(sys.stdin); sys.exit('被鉴权拒绝（设了登录密码时需带 Authorization 头）') if isinstance(d,dict) and d.get('detail') else None; ts=d if isinstance(d,list) else d.get('tasks') or []; print('running:', [t['id'] for t in ts if str(t.get('status')) in ('running','pending')])"
   ```
 
-> ⚠️ **对外暴露前必须先设登录密码。** 没设密码时鉴权中间件会直接放行所有 `/api/` 请求。
-> 这个面板管着账号、Token、接码 API Key、邮箱和代理凭据。先在「全局配置 → 安全」里
-> 设密码，或：
+> ⚠️ **对外暴露前必须先设登录密码。** 没设密码时**只允许本机（`127.0.0.1`）访问
+> `/api/`**，其他来源一律 503 —— 但本机访问不受限制，所以别把端口直接映射到公网再
+> 依赖这个兜底。这个面板管着账号、Token、接码 API Key、邮箱和代理凭据。
+> 先在「全局配置 → 安全」里设密码，或：
 >
 > ```bash
 > curl -X POST http://127.0.0.1:8000/api/auth/setup \
@@ -132,12 +133,15 @@ docker run -d \
 | `CREDENTIAL_ENCRYPTION_KEY_FILE` | `$DATA_DIR/secrets/credential_key` | 凭据加密密钥文件 |
 | `APP_ENABLE_SOLVER` | `1` | 是否自动启动本地 Solver，设 `0` 禁用 |
 | `SOLVER_PORT` | `8889` | Solver 监听端口 |
-| `SOLVER_BIND_HOST` | `0.0.0.0` | Solver 绑定地址 |
+| `SOLVER_BIND_HOST` | `127.0.0.1` | Solver 绑定地址。**接口无鉴权**，默认只绑本机；容器内需设 `0.0.0.0` 才能被端口映射访问（对外仍只经 `127.0.0.1` 映射） |
 | `SOLVER_BROWSER_TYPE` | `camoufox` | Solver 用的浏览器类型 |
 | `SOLVER_PROXY_ENABLED` | `1` | Solver 是否启用代理支持 |
 | `LOCAL_SOLVER_URL` | `http://127.0.0.1:8889` | 后端访问 Solver 的地址 |
 | `OPENAI_SENTINEL_NODE_PATH` | `node` | Sentinel PoW 求解器用的 Node 可执行文件（不在 `PATH` 时填绝对路径） |
 | `APP_JWT_SECRET` | 自动生成并存库 | 面板登录态 JWT 签名密钥 |
+| `APP_MEMORY_LIMIT` | `4g` | 容器内存上限（compose 的 `mem_limit`），防止浏览器泄漏拖垮宿主机 |
+| `panel_tls_ca_bundle` | — | 面板 TLS 的 CA bundle（自签名面板用这个，而不是关校验） |
+| `panel_tls_insecure` | — | 设为 `1` 完全关闭面板 TLS 校验，**仅临时排障** |
 
 如需传入 `OPENAI_*` 等配置：Docker 部署时写进仓库根的 `.env` 即可 —— compose 已带
 `env_file: .env`（`required: false`，没建该文件也能启动），应用变量会注入容器。

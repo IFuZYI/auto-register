@@ -145,7 +145,12 @@ def test_list_keeps_fields_the_page_uses(client):
         row = _row_for(client, email)
         extra = json.loads(row["extra_json"])
         assert extra.get("chatgpt_local"), "chatgpt_local 被裁了 —— 列表要读 state/plan"
-        assert extra.get("totp_secret"), "totp_secret 被裁了 —— 列表要显示 2FA 状态"
+        # 2FA **状态**要留，密钥**本体**不能进列表（安全审查 2026-10-27）。
+        # 密钥泄漏比密码更严重：拿到 TOTP 密钥等于永久通过第二因子。
+        assert extra.get("has_totp_secret"), "2FA 状态标记丢了 —— 列表要显示它"
+        assert "totp_secret" not in extra, "列表仍带 2FA 密钥本体"
+        assert "password" not in row, "列表仍带明文密码"
+        assert row.get("has_password"), "「有没有密码」的标记丢了"
         assert extra.get("register_proxy"), "register_proxy 被裁了"
     finally:
         _cleanup(client, [email])

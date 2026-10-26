@@ -214,6 +214,13 @@ def _slim_extra_for_list(raw: str) -> str:
         slim.pop(claims_key, None)
     slim.update(_at_claims_for_list(str(slim.get("access_token") or "")))
 
+    # 2FA 密钥**本体**不能进列表（安全审查 2026-10-27 加固项 1，实测确认）：
+    # 列表页要的是「有没有绑 2FA」这个布尔，而密钥泄漏比密码更严重 ——
+    # 拿到 TOTP 密钥等于永久通过第二因子，密码还能改，密钥不能。
+    totp_body = str(slim.pop("totp_secret", "") or "").strip()
+    if totp_body:
+        slim["has_totp_secret"] = True
+
     for key in _LIST_TOKEN_EXTRA_KEYS:
         flag = f"has_{key}"
         # **先读旧的布尔再写**：`pop` 之后再判断「标记在不在」永远为假，
@@ -249,6 +256,13 @@ def _slim_account_row(row):
     raw = payload.get("extra_json")
     if isinstance(raw, str):
         payload["extra_json"] = _slim_extra_for_list(raw)
+    # **明文密码不进列表**（安全审查 2026-10-27 加固项 1）：列表页从不显示它
+    # （复制入口在详情页，走 `GET /api/accounts/{id}`），而一次
+    # `page_size=1000` 的列表请求就能拖走整个账号池的密码。
+    # 列表只需要「有没有密码」—— 补一个布尔，删掉正文。
+    if "password" in payload:
+        has_password = bool(str(payload.pop("password", "") or "").strip())
+        payload["has_password"] = has_password
     return payload
 
 
