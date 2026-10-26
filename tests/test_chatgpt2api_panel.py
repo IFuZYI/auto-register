@@ -100,8 +100,10 @@ class UploadFormatTests(unittest.TestCase):
         self.assertEqual(item["email"], "user@example.com")
         self.assertEqual(item["account_id"], "acc-1")
         self.assertEqual(item["type"], "free")
-        # 普通网页号不能带 codex 标记，也不能塞 refresh/id token
+        # 普通网页号不能带 codex 标记。
         self.assertNotEqual(str(item.get("type", "")).lower(), "codex")
+        # 这个 fixture 没有 RT / IDT —— 所以两键都不该出现（**因为空、不是因为
+        # 「普通号不该带」**：2.2.0 起对端支持且推荐带，见 ImportCredentialFieldTests）。
         self.assertNotIn("refresh_token", item)
         self.assertNotIn("id_token", item)
 
@@ -283,6 +285,174 @@ class UploadFormatTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertEqual(calls["n"], 1, f"确定性错误被重试了 {calls['n']} 次")
         sleeper.assert_not_called()
+
+
+class ImportCredentialFieldTests(unittest.TestCase):
+    """导入对象补齐 4 个凭据字段（对端 chatgpt2api 2.2.0，2026-10-26）。
+
+    对端文档明说「务必带 `password` + `totp_secret`。RT 会失效，没有密码就只能
+    人工救」；上传可写字段已扩到 `access_token` / `refresh_token` / `id_token` /
+    `email` / `password` / `totp_secret` / `proxy` / `type` / `source_type`。
+
+    **本类盯的是「空值会覆盖」这个坑**：对端 `addAccountPayloads` 对已存在的账号做
+    `merged = copyMap(current); for k, v := range incoming { merged[k] = v }`
+    —— incoming 的每个键都会覆盖，**包括空串**，而且 `skipped` 的账号照样走这段
+    合并。所以传 `password: ""` 会抹掉对端已有的密码，传 `totp_secret: ""` 会让
+    开了 2FA 的号永久锁死。只发非空字段是硬要求，不是「shape 好看」的取舍。
+    """
+
+    def test_all_four_fields_are_sent_when_present(self):
+        """非空的 RT / IDT / 密码 / TOTP 密钥都要出现在导入对象里。
+
+        RT/IDT 只放在 `extra`（不放对象属性），确保读的是 extra 那条路 ——
+        生产上 `api/integrations.py` 传的就是只有 extra 的 `Account`。
+        """
+        from platforms.chatgpt.chatgpt2api_upload import build_chatgpt2api_account
+
+        acct = _account(
+            extra={
+                "access_token": _account().access_token,
+                "refresh_token": "rt-value",
+                "id_token": "idt-value",
+                "password": "Pw-123456",
+                "totp_secret": "JBSWY3DPEHPK3PXP",
+            }
+        )
+        item = build_chatgpt2api_account(acct)
+
+        self.assertEqual(item.get("refresh_token"), "rt-value")
+        self.assertEqual(item.get("id_token"), "idt-value")
+        self.assertEqual(item.get("password"), "Pw-123456")
+        self.assertEqual(item.get("totp_secret"), "JBSWY3DPEHPK3PXP")
+
+    def test_camel_case_extras_are_recognised(self):
+        """`refreshToken` / `idToken` 拼写也要认 —— 历史落库两种写法都有。
+
+        `core/credential_fields` 的存在理由就是这个（整理前只读蛇形，camelCase
+        落库的账号被当成「缺 RT」）。这里钉住上传器走同一套读取口径。
+        """
+        from platforms.chatgpt.chatgpt2api_upload import build_chatgpt2api_account
+
+        acct = _account(
+            extra={
+                "access_token": _account().access_token,
+                "refreshToken": "rt-camel",
+                "idToken": "idt-camel",
+            }
+        )
+        item = build_chatgpt2api_account(acct)
+
+        self.assertEqual(item.get("refresh_token"), "rt-camel")
+        self.assertEqual(item.get("id_token"), "idt-camel")
+
+    def test_empty_credentials_are_never_sent(self):
+        """空值绝不能下发 —— 空串会抹掉对端已有值（本任务最容易踩的坑）。
+
+        特别是 `password` / `totp_secret`：对端拿它们做「失效后自动密码重登」，
+        抹掉之后开了 2FA 的号再也登不回来（只能人工救）。
+        """
+        from platforms.chatgpt.chatgpt2api_upload import build_chatgpt2api_account
+
+        acct = _account(
+            password="",
+            extra={
+                "access_token": _account().access_token,
+                "refresh_token": "",
+                "id_token": "",
+                "password": "",
+                "totp_secret": "",
+            },
+        )
+        item = build_chatgpt2api_account(acct)
+
+        for key in ("refresh_token", "id_token", "password", "totp_secret"):
+            with self.subTest(key=key):
+                self.assertNotIn(
+                    key,
+                    item,
+                    f"{key} 为空时不该出现在导入对象里 —— 空串会覆盖掉对端已有值",
+                )
+
+    def test_blank_only_values_are_treated_as_empty(self):
+        """只有空白的值等同空值（`str.strip()` 口径，与本文件其它字段一致）。"""
+        from platforms.chatgpt.chatgpt2api_upload import build_chatgpt2api_account
+
+        acct = _account(
+            extra={
+                "access_token": _account().access_token,
+                "refresh_token": "   ",
+                "password": " \t ",
+                "totp_secret": "  ",
+            }
+        )
+        item = build_chatgpt2api_account(acct)
+
+        for key in ("refresh_token", "password", "totp_secret"):
+            with self.subTest(key=key):
+                self.assertNotIn(key, item)
+
+    def test_synthesized_compat_id_token_is_not_forwarded(self):
+        """本地合成的兼容 IDT 不能传到对端。
+
+        `generate_token_json` 在没有真 IDT 时会用 `_build_compat_id_token`
+        现造一个 —— 那个函数的 docstring 写明「仅用于不校验签名、只解析 payload
+        的本地兼容场景」（签名是固定的假值）。把它当 `id_token` 发给对端，等于
+        用假凭证覆盖对端 OAuth 登录时拿到的真 IDT；而且它永远非空，会让
+        「非空才下发」形同虚设。真 IDT 只从 extra / 账号属性取。
+        """
+        from platforms.chatgpt.chatgpt2api_upload import build_chatgpt2api_account
+
+        acct = _account(extra={"access_token": _account().access_token})
+        item = build_chatgpt2api_account(acct)
+
+        self.assertNotIn(
+            "id_token", item, "把本地合成的兼容 IDT 当凭证传上去了"
+        )
+
+    def test_codex_guard_still_holds_with_the_new_fields(self):
+        """补齐 4 个字段不能顺手丢掉 codex 守卫（既有行为，回归钉住）。"""
+        import base64 as _b64
+        import json as _json
+
+        from platforms.chatgpt.chatgpt2api_upload import build_chatgpt2api_account
+
+        payload = {"https://api.openai.com/auth": {"chatgpt_account_id": "acc-1"}}
+        seg = _b64.urlsafe_b64encode(_json.dumps(payload).encode()).decode().rstrip("=")
+        token = f"eyJhbGciOiJIUzI1NiJ9.{seg}.sig"
+
+        acct = _account(
+            access_token=token,
+            plan_type="codex",
+            extra={
+                "access_token": token,
+                "refresh_token": "rt-value",
+                "password": "Pw-123456",
+                "totp_secret": "JBSWY3DPEHPK3PXP",
+            },
+        )
+        item = build_chatgpt2api_account(acct)
+
+        self.assertNotIn("type", item, "codex 不能被当套餐类型传给对端")
+        # 守卫之外，四个字段仍要照常下发（别为了挡 codex 把整段 return 掉了）
+        self.assertEqual(item.get("refresh_token"), "rt-value")
+        self.assertEqual(item.get("password"), "Pw-123456")
+
+    def test_missing_access_token_still_raises_with_new_fields(self):
+        """有 RT / 密码也不能顶替 access_token —— 既有契约不变。"""
+        from platforms.chatgpt.chatgpt2api_upload import build_chatgpt2api_account
+
+        with self.assertRaises(ValueError):
+            build_chatgpt2api_account(
+                _account(
+                    access_token="",
+                    token="",
+                    extra={
+                        "refresh_token": "rt-value",
+                        "password": "Pw-123456",
+                        "totp_secret": "JBSWY3DPEHPK3PXP",
+                    },
+                )
+            )
 
 
 class Chatgpt2apiStatusPropagationTests(unittest.TestCase):

@@ -11,8 +11,28 @@ export），上传协议两边一致：
 * 重复 access_token 对端按 `skipped` 处理，所以重传是幂等的。
 * 响应回 `{added, skipped, refreshed, errors}`。
 
-与 CPA / Sub2API 的区别：这里传的是**普通网页号**（只要 access_token），
-不传 refresh_token / id_token，也不生成 codex 凭证。
+## 凭据字段（对端 ≥ 2.2.0，2026-10-26）
+
+对端可写字段已扩到 `access_token` / `refresh_token` / `id_token` / `email` /
+`password` / `totp_secret` / `proxy` / `type` / `source_type`。对端文档明说
+「务必带 `password` + `totp_secret`。RT 会失效，没有密码就只能人工救」——
+本模块因此额外下发 `refresh_token` / `id_token` / `password` / `totp_secret`。
+
+**只发非空字段，这条是硬要求，不是格式洁癖。** 对端 `addAccountPayloads` 对已
+存在的账号做 `merged = copyMap(current); for k, v := range incoming { merged[k] = v }`
+—— incoming 的每个键都会覆盖，**包括空串**（而且 `skipped` 的账号照样走这段
+合并）。所以传 `password: ""` 会抹掉对端已有的密码、传 `totp_secret: ""` 会让
+开了 2FA 的号永久锁死。**永远不要为了「字段形状稳定」把空值填进去。**
+
+`source_type` 与是否带 RT 无关：对端 `prepareAccountPayload` 只在
+`type == "codex"` 或 `export_type == "codex"` 时置 `SourceCodex`（本模块传
+`source_type: "web"`，不受影响）。旧注释里「多传 RT 会让对端当成另一种源」是
+2.2.0 之前的猜测，已证伪 —— 对端支持且推荐带上。
+
+字段支持依赖对端 ≥ 2.2.0：老版本会忽略不认识的字段，不会因为多传而坏掉。
+
+与 CPA / Sub2API 的区别：这里传的是**普通网页号**（`access_token` 必需），
+不生成 codex 凭证（`type` 里绝不出现 `codex`）。
 """
 
 from __future__ import annotations
@@ -72,16 +92,39 @@ def _first_non_empty(*values: Any) -> str:
     return ""
 
 
+def _account_extra(account) -> dict[str, Any]:
+    """取账号的 `extra`（duck-typed 对象可能压根没有这个属性）。"""
+    extra = getattr(account, "extra", None)
+    return extra if isinstance(extra, dict) else {}
+
+
 def build_chatgpt2api_account(account, proxy: str = "") -> dict[str, Any]:
     """把本地账号转成 chatgpt2api 的导入对象。
 
-    只放对端认的字段：`access_token`（必需）+ 可选的 `email` / `account_id` /
-    `type`（套餐类型，对端自己再归一）。**不放** `refresh_token` / `id_token`
-    —— 普通网页号用不上，且多传会让对端把它当另一种源。
+    必填 `access_token`；可选 `email` / `account_id` / `type`（套餐类型，对端
+    自己再归一）/ `proxy`，以及对端 ≥ 2.2.0 才认的 `refresh_token` /
+    `id_token` / `password` / `totp_secret`。
+
+    **四个凭据字段一律「非空才下发」。** 对端对已存在的账号按
+    `merged = copyMap(current); for k, v := range incoming { merged[k] = v }` 合并
+    —— 每个 incoming 键都会覆盖，**空串也会**（`skipped` 的账号同样走这段合并）。
+    发 `password: ""` 就抹掉对端已有密码、发 `totp_secret: ""` 就让 2FA 号永久
+    锁死。所以这里绝不能为「字段形状稳定」把空值塞进去。
+
+    `id_token` 只从 extra / 账号属性取，**不取 `generate_token_json` 的返回值**：
+    那里在没有真 IDT 时会用 `_build_compat_id_token` 现造一个签名是假值的兼容
+    token（docstring 写明仅供本地解析），发给对端等于用假凭证覆盖真 IDT，而且它
+    永远非空 —— 会让「非空才下发」形同虚设。`refresh_token` 没有这个问题
+    （`generate_token_json` 原样透传，不会合成），所以两处都取。
 
     `proxy` 非空时作为 `proxy` 字段带上（对端 `_add_account_payloads` 认它，
     custom 模式直接是代理 URL）。由「上传代理」开关控制。
+
+    对端 < 2.2.0 会忽略这些新字段，不会因为多传而失败。
     """
+    from core.credential_fields import get_credential
+
+    extra = _account_extra(account)
     token_data = generate_token_json(account)
     access_token = str(
         token_data.get("access_token")
@@ -111,6 +154,20 @@ def build_chatgpt2api_account(account, proxy: str = "") -> dict[str, Any]:
         getattr(account, "plan_type", ""),
     )
 
+    # 四个凭据字段：先 extra（认 camelCase 别名），再账号属性兜底。
+    refresh_token = _first_non_empty(
+        get_credential(extra, "refresh_token"),
+        getattr(account, "refresh_token", ""),
+        token_data.get("refresh_token"),
+    )
+    id_token = _first_non_empty(
+        get_credential(extra, "id_token"),
+        getattr(account, "id_token", ""),
+        # 故意不取 token_data["id_token"] —— 见 docstring：可能是本地合成的假 IDT
+    )
+    password = _first_non_empty(extra.get("password"), getattr(account, "password", ""))
+    totp_secret = _first_non_empty(extra.get("totp_secret"))
+
     item: dict[str, Any] = {"access_token": access_token, "source_type": "web"}
     if email:
         item["email"] = email
@@ -119,6 +176,15 @@ def build_chatgpt2api_account(account, proxy: str = "") -> dict[str, Any]:
     proxy_url = str(proxy or "").strip()
     if proxy_url:
         item["proxy"] = proxy_url
+    if refresh_token:
+        item["refresh_token"] = refresh_token
+    if id_token:
+        item["id_token"] = id_token
+    if password:
+        item["password"] = password
+    if totp_secret:
+        # 开了 2FA 的号没有它，对端「失效后自动密码重登」必失败（只能人工救）
+        item["totp_secret"] = totp_secret
     if plan_type:
         # 对端会把这个值当归一化前的套餐类型（free / Plus / Pro…）。
         #
