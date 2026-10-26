@@ -78,86 +78,6 @@ class TestOAuthConstants(unittest.TestCase):
         self.assertEqual(CPA_PROBE_MODEL, "grok-4.5")
 
 
-class TestCpaRecord(unittest.TestCase):
-    """CPA 记录格式与文件名。"""
-
-    def _token(self):
-        import base64
-
-        def b64(d):
-            return base64.urlsafe_b64encode(json.dumps(d).encode()).decode().rstrip("=")
-
-        return {
-            "access_token": f"{b64({'alg':'RS256'})}.{b64({'sub':'u1','email':'a@b.com','exp':1893456000})}.sig",
-            "refresh_token": "rt-123",
-            "id_token": "",
-            "expires_in": 21600,
-            "token_type": "Bearer",
-        }
-
-    def test_record_fields(self):
-        from platforms.grok.oauth_device import token_to_cpa_record
-
-        record = token_to_cpa_record(self._token(), email="a@b.com", sso="sso-val")
-        self.assertEqual(record["type"], "xai")
-        self.assertEqual(record["auth_kind"], "oauth")
-        self.assertEqual(record["email"], "a@b.com")
-        self.assertEqual(record["sub"], "u1")
-        self.assertEqual(record["token_type"], "Bearer")
-        self.assertEqual(record["token_endpoint"], "https://auth.x.ai/oauth2/token")
-        self.assertEqual(record["base_url"], "https://cli-chat-proxy.grok.com/v1")
-        self.assertIn("headers", record)
-        self.assertTrue(record["expired"].endswith("Z"), "expired 应为 RFC3339 带 Z")
-
-    def test_sso_excluded_by_default(self):
-        """默认不写 sso 字段（对齐健康号格式）。"""
-        import os
-
-        from platforms.grok.oauth_device import token_to_cpa_record
-
-        old = os.environ.pop("CPA_INCLUDE_SSO", None)
-        try:
-            record = token_to_cpa_record(self._token(), email="a@b.com", sso="secret")
-            self.assertNotIn("sso", record)
-        finally:
-            if old is not None:
-                os.environ["CPA_INCLUDE_SSO"] = old
-
-    def test_sso_included_when_enabled(self):
-        import os
-
-        from platforms.grok.oauth_device import token_to_cpa_record
-
-        os.environ["CPA_INCLUDE_SSO"] = "1"
-        try:
-            record = token_to_cpa_record(self._token(), email="a@b.com", sso="secret")
-            self.assertEqual(record["sso"], "secret")
-        finally:
-            os.environ.pop("CPA_INCLUDE_SSO", None)
-
-    def test_filename(self):
-        from platforms.grok.oauth_device import cpa_auth_filename
-
-        self.assertEqual(
-            cpa_auth_filename({"email": "a@b.com"}), "xai-a@b.com.json"
-        )
-        # 已是 xai 开头不重复加前缀
-        self.assertEqual(
-            cpa_auth_filename({"email": "xai-user@b.com"}), "xai-user@b.com.json"
-        )
-        # 无 email 时用 sub
-        self.assertEqual(cpa_auth_filename({"sub": "user-1"}), "xai-user-1.json")
-
-    def test_auth_entry_format(self):
-        from platforms.grok.oauth_device import token_to_auth_entry
-
-        key, entry = token_to_auth_entry(self._token(), email="a@b.com")
-        self.assertEqual(key, "https://auth.x.ai::b1a00492-073a-47ea-816f-4c329264a828")
-        self.assertEqual(entry["auth_mode"], "oidc")
-        self.assertEqual(entry["oidc_client_id"], "b1a00492-073a-47ea-816f-4c329264a828")
-        self.assertEqual(entry["refresh_token"], "rt-123")
-
-
 class TestPlatformContract(unittest.TestCase):
     """平台插件契约完备性。"""
 
@@ -198,9 +118,15 @@ class TestPlatformContract(unittest.TestCase):
         instance = get("grok")()
         actions = instance.get_platform_actions()
         ids = {a["id"] for a in actions}
+        # Grok 只保留 SSO + grok2api（2026-10-27）：CPA / Sub2API 的
+        # `upload_cpa` / `upload_sub2api` / `export_cpa_json` /
+        # `sync_cliproxyapi_status` 已全部删除。
         for expected in ("probe", "probe_refresh", "refresh_token", "refresh_oauth",
-                         "export_cpa_json", "upload_cpa", "upload_sub2api"):
+                         "upload_grok2api", "sync_grok2api_status"):
             self.assertIn(expected, ids, f"缺少操作: {expected}")
+        for gone in ("upload_cpa", "upload_sub2api", "export_cpa_json",
+                     "sync_cliproxyapi_status"):
+            self.assertNotIn(gone, ids, f"{gone} 应已删除（Grok 不再支持 CPA）")
         # 每个 action 都要有 label 与 params
         for a in actions:
             self.assertIn("label", a)

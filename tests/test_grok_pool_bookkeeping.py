@@ -62,8 +62,7 @@ class BrowserPathBookkeepingTests(unittest.TestCase):
              patch("platforms.grok.register_browser.exchange_oauth_via_browser",
                    return_value={"access_token": "at", "refresh_token": "rt",
                                  "expires_in": 3600}), \
-             patch("platforms.grok.grok2api.Grok2ApiClient") as g2a_cls, \
-             patch.object(plat, "_maybe_write_cpa", return_value=None):
+             patch("platforms.grok.grok2api.Grok2ApiClient") as g2a_cls:
             g2a_cls.from_config.return_value.configured = False
             plat.register()
         self.assertEqual(mb.calls, ["used"],

@@ -66,14 +66,15 @@ PANELS: list[dict[str, Any]] = [
         # 这里不再渲染配置表单 —— 同一份配置在两个页面各渲染一次会让用户以为
         # 要分别填，改了一个另一个不生效。
         "config_form": False,
-        # CLIProxyAPI 同时托管 ChatGPT（codex）与 Grok（xai）两类凭据，
-        # 所以面板对应两个平台；上传/同步动作按账号所属平台各自分发。
-        "platforms": ["chatgpt", "grok"],
+        # **只管 ChatGPT（codex）**。Grok 自 2026-10-27 起不再支持 CPA
+        # （用户要求：Grok 只保留 SSO + grok2api）—— 它的 CPA 路径需要额外的
+        # OAuth 交换产 AT/RT，而那套双产物结构既增加状态面又不被使用。
+        "platforms": ["chatgpt"],
         #: 动作 id 按平台查（同名的动作在两个平台上都有实现）
-        "upload_actions": {"chatgpt": "upload_cpa", "grok": "upload_cpa"},
-        "sync_actions": {"chatgpt": "sync_cliproxyapi_status", "grok": "sync_cliproxyapi_status"},
+        "upload_actions": {"chatgpt": "upload_cpa"},
+        "sync_actions": {"chatgpt": "sync_cliproxyapi_status"},
         #: CPA 里各平台对应的 auth-file provider（对比远端时按它过滤）
-        "providers": {"chatgpt": "codex", "grok": "xai"},
+        "providers": {"chatgpt": "codex"},
         # 兼容字段：单平台消费方（老代码/脚本）仍读这两个键，取第一个平台
         "platform": "chatgpt",
         "upload_action": "upload_cpa",

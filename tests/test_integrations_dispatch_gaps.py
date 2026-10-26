@@ -38,38 +38,33 @@ class PushAccountUploaderDispatchTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("SSO", msg)
 
-    def test_cpa_grok_rebuilds_record_from_credentials(self):
-        """没有 cpa_record 时用 access_token 重建（实测用户库里老号都没有）。"""
-        from api import integrations
+    def test_cpa_grok_is_rejected_with_a_clear_reason(self):
+        """Grok 不再支持 CPA（2026-10-27）。
 
-        captured = {}
+        原测试断言「没有 cpa_record 时用 access_token 重建」—— 那条重建路径
+        已随 CPA 支持一起删除。现在该明确拒绝并说明去哪传，而不是静默跳过：
+        批量推送时用户需要知道「为什么这个号没传」。
+        """
+        from api.integrations import _push_account_uploader
 
-        def fake_upload(record, proxy=""):
-            captured["record"] = record
-            return True, "uploaded"
+        ok, msg = _push_account_uploader(
+            "cpa",
+            "grok",
+            {"email": "a@b.com", "extra": {"access_token": "at-1", "sso": "sso-1"}},
+        )
+        self.assertFalse(ok)
+        self.assertIn("grok2api", msg, f"没说清该去哪传: {msg!r}")
+        self.assertIn("CPA", msg)
 
-        with (
-            mock.patch("platforms.grok.upload.upload_to_cpa", side_effect=fake_upload),
-            mock.patch("platforms.grok.oauth_device.token_to_cpa_record", return_value={"email": "a@b.com"}),
-            mock.patch("services.chatgpt_sync.upload_proxy_for", return_value=""),
-        ):
-            ok, _msg = integrations._push_account_uploader(
-                "cpa",
-                "grok",
-                {"email": "a@b.com", "extra": {"access_token": "at-1", "sso": "sso-1"}},
-            )
-
-        self.assertTrue(ok)
-        self.assertEqual(captured["record"], {"email": "a@b.com"})
-
-    def test_cpa_grok_without_any_credential_reports_clearly(self):
+    def test_cpa_grok_without_credential_is_also_rejected(self):
+        """没有凭据时也是同一句拒绝 —— 不再区分「有没有可重建的 AT」。"""
         from api.integrations import _push_account_uploader
 
         ok, msg = _push_account_uploader(
             "cpa", "grok", {"email": "a@b.com", "extra": {}}
         )
         self.assertFalse(ok)
-        self.assertIn("access_token", msg)
+        self.assertIn("grok2api", msg)
 
     def test_cpa_chatgpt_uses_generate_token_json(self):
         from api import integrations

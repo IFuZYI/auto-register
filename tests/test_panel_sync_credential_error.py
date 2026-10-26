@@ -41,54 +41,6 @@ def _chatgpt_account(**extra):
     )
 
 
-class GrokSyncCredentialErrorTests(unittest.TestCase):
-    def test_credential_error_is_reported_as_failure(self):
-        from platforms.grok.plugin import GrokPlatform
-
-        platform = GrokPlatform(config=RegisterConfig(extra={}))
-        account = _grok_account()
-        credential_error = {
-            "uploaded": True,
-            "remote_state": "credential_error",
-            "last_probe_status_code": 400,
-            "last_probe_message": "auth token refresh failed",
-            "message": "auth token refresh failed",
-            "status": "error",
-            "status_message": "invalid grant (retrying)",
-        }
-
-        with patch(
-            "services.cliproxyapi_sync.sync_grok_cliproxyapi_status_batch",
-            return_value={7: credential_error},
-        ):
-            result = platform.execute_action("sync_cliproxyapi_status", account, {})
-
-        self.assertFalse(result["ok"], "凭证被拒不能报成同步成功")
-        patch_data = result.get("account_extra_patch") or {}
-        state = (patch_data.get("sync_statuses") or {}).get("cliproxyapi") or {}
-        self.assertEqual(state.get("remote_state"), "credential_error")
-
-    def test_usable_still_reports_success(self):
-        from platforms.grok.plugin import GrokPlatform
-
-        platform = GrokPlatform(config=RegisterConfig(extra={}))
-        account = _grok_account()
-        usable = {
-            "uploaded": True,
-            "remote_state": "usable",
-            "status": "active",
-            "status_message": "",
-        }
-
-        with patch(
-            "services.cliproxyapi_sync.sync_grok_cliproxyapi_status_batch",
-            return_value={7: usable},
-        ):
-            result = platform.execute_action("sync_cliproxyapi_status", account, {})
-
-        self.assertTrue(result["ok"])
-
-
 class ChatgptSyncCredentialErrorTests(unittest.TestCase):
     def test_credential_error_is_reported_as_failure(self):
         from platforms.chatgpt.plugin import ChatGPTPlatform

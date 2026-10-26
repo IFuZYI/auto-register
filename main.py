@@ -154,6 +154,13 @@ async def lifespan(app: FastAPI):
     recovered = recover_pending_totp_secrets(log=lambda msg: print(msg))
     if recovered:
         print(f"[OK] 已从写前日志补写 {recovered} 个 2FA 密钥")
+
+    # Grok 只保留 SSO + grok2api（2026-10-27）：清掉存量账号里只为 CPA /
+    # Sub2API 上传而存在的字段（cpa_record / AT / RT / id_token）。
+    # 幂等 —— 没有变更就不写库。
+    from platforms.grok.migrate_sso_only import migrate_stored_accounts
+
+    migrate_stored_accounts(log=lambda msg: print(msg))
     from core.registry import list_platforms
     print(f"[OK] 已加载平台: {[p['name'] for p in list_platforms()]}")
     # 业务周期任务自注册（core.scheduler 不认识具体业务，见其模块 docstring）

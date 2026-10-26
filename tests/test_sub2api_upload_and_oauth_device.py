@@ -205,55 +205,6 @@ class DeviceLocationErrorTests(unittest.TestCase):
         self.assertIsNone(oauth_device._device_location_error("::::"))
 
 
-class TokenToCpaRecordTests(unittest.TestCase):
-    def test_exp_from_jwt(self):
-        access = _jwt({"exp": 1800000000, "sub": "s-1"})
-        record = oauth_device.token_to_cpa_record({"access_token": access}, email="a@b.com")
-
-        self.assertEqual(record["email"], "a@b.com")
-        self.assertEqual(record["sub"], "s-1")
-        self.assertEqual(record["expired"], "2027-01-15T08:00:00Z")
-        self.assertEqual(record["type"], "xai")
-
-    def test_exp_from_expires_in_when_no_jwt_exp(self):
-        import time
-
-        access = _jwt({"sub": "s-2"})
-        before = int(time.time())
-        record = oauth_device.token_to_cpa_record(
-            {"access_token": access, "expires_in": 3600}, email="a@b.com"
-        )
-
-        # 2026+3600s 的 ISO 串 —— 只验证在合理窗口内（时区串以 Z 结尾）
-        self.assertTrue(record["expired"].endswith("Z"), record["expired"])
-        self.assertGreater(len(record["expired"]), 10)
-        # 大致接近 now+3600（允许格式化误差）
-        import datetime as _dt
-        parsed = _dt.datetime.strptime(record["expired"], "%Y-%m-%dT%H:%M:%SZ").replace(
-            tzinfo=_dt.timezone.utc
-        )
-        self.assertGreaterEqual(parsed.timestamp(), before + 3500)
-
-    def test_email_falls_back_to_jwt_payload(self):
-        access = _jwt({"exp": 1800000000, "email": "jwt@example.com"})
-        record = oauth_device.token_to_cpa_record({"access_token": access})
-        self.assertEqual(record["email"], "jwt@example.com")
-
-    def test_sso_included_only_when_enabled(self):
-        access = _jwt({"exp": 1800000000})
-        with mock.patch("platforms.grok.constants.cpa_include_sso", return_value=True):
-            with_sso = oauth_device.token_to_cpa_record(
-                {"access_token": access}, email="a@b.com", sso="sso-1"
-            )
-        self.assertEqual(with_sso.get("sso"), "sso-1")
-
-        with mock.patch("platforms.grok.constants.cpa_include_sso", return_value=False):
-            without = oauth_device.token_to_cpa_record(
-                {"access_token": access}, email="a@b.com", sso="sso-1"
-            )
-        self.assertNotIn("sso", without)
-
-
 class CpaAuthFilenameTests(unittest.TestCase):
     def test_email_based(self):
         self.assertEqual(oauth_device.cpa_auth_filename({"email": "a@b.com"}), "xai-a@b.com.json")

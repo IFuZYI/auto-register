@@ -35,7 +35,6 @@ from .constants import (
     mail_retries as _mail_retries,
     signup_retries,
 )
-from .oauth_device import cpa_auth_filename, token_to_cpa_record
 from .probe import probe_token
 from .profile import generate_password, random_name
 
@@ -408,40 +407,14 @@ class GrokPlatform(BasePlatform):
             # 已弃用：纯协议 device flow 被 CF 挡死（实测 403），从未成功过。
             # 保留 id 转发到 `refresh_token`（老任务/老脚本可能还引用）。
             {"id": "refresh_oauth", "label": "重换 OAuth（已弃用，等同「刷新 Token」）", "params": []},
-            {"id": "export_cpa_json", "label": "导出 CPA JSON", "params": []},
             # 面板动作（`scope: "panel"`）：目标是外部面板，操作面在「面板管理」
             # 页。账号页的菜单按 scope 过滤掉它们（用户要求「平台管理主要管账号」）。
             # 声明留在这里是因为面板注册表与批量端点都按动作 id 找它们。
-            {
-                "id": "upload_cpa",
-                "label": "上传 CPA",
-                "scope": "panel",
-                "params": [
-                    {"key": "api_url", "label": "CPA API URL", "type": "text"},
-                    {"key": "api_key", "label": "CPA API Key", "type": "text"},
-                ],
-            },
-            {
-                "id": "sync_cliproxyapi_status",
-                "label": "同步 CPA 状态",
-                "scope": "panel",
-                "params": [],
-            },
             {
                 "id": "sync_grok2api_status",
                 "label": "同步 grok2api 状态",
                 "scope": "panel",
                 "params": [],
-            },
-            {
-                "id": "upload_sub2api",
-                "label": "上传 Sub2API",
-                "scope": "panel",
-                "params": [
-                    {"key": "api_url", "label": "Sub2API URL", "type": "text"},
-                    {"key": "api_key", "label": "API Key", "type": "text"},
-                    {"key": "group", "label": "分组", "type": "text"},
-                ],
             },
             {
                 "id": "upload_grok2api",
@@ -537,22 +510,9 @@ class GrokPlatform(BasePlatform):
                     "probe_status": "refresh_ok",
                     "probe_summary": "refresh grant 成功",
                 }
-                log_fn = getattr(self, "_log_fn", None)
-                settings = {**extra, **dict(self.config.extra or {})}
-                try:
-                    record = token_to_cpa_record(
-                        tokens, email=account.email, sso=str(extra.get("sso") or "")
-                    )
-                    patch["cpa_record"] = record
-                    patch["cpa_auth_filename"] = cpa_auth_filename(record)
-                    # 与 `refresh_token` 对齐：换到新凭证就落盘/上传。
-                    # 复审 I2 指出这两个动作产出同样的 AT/RT，却只有
-                    # `refresh_token` 接了这一跳 —— 而 `probe_refresh` 走
-                    # refresh grant，比 device flow 便宜得多，用户更容易点它。
-                    self._maybe_write_cpa(patch, settings, log_fn or (lambda _m: None))
-                except Exception as exc:  # noqa: BLE001 - 记录生成失败不该毁刷新结果
-                    if log_fn:
-                        log_fn(f"[Grok] 生成 CPA 记录失败: {type(exc).__name__}")
+                # CPA / Sub2API 产物已随「Grok 只保留 SSO + grok2api」
+                # （2026-10-27）一并删除 —— 这里只落 AT/RT 本身，
+                # 不再生成 `cpa_record` / 不再落盘到 `cpa_auth_dir`。
                 return {
                     "ok": True,
                     "data": {
@@ -640,71 +600,14 @@ class GrokPlatform(BasePlatform):
             }
             log_fn = getattr(self, "_log_fn", None)
             # 在 try **之前**算好：下面 `cpa_notes` 在 try 之外读它，
-            # 若 `token_to_cpa_record` 先抛就会 UnboundLocalError（自查踩过）。
-            settings = {**extra, **dict(self.config.extra or {})}
-            # 判定只算**一次**，写路径与消息路径共用同一份结果：各算一次会读两遍
-            # 全局配置、吞两次异常，第二次抛时消息会静默漏报（复审 I3）。
-            cpa_enabled, cpa_url = self._cpa_upload_decision()
-            try:
-                record = token_to_cpa_record(tokens, email=account.email, sso=sso)
-            except Exception as exc:  # noqa: BLE001 - 记录生成失败不该毁刷新结果
-                record = None
-                if log_fn:
-                    log_fn(f"[Grok] 生成 CPA 记录失败: {type(exc).__name__}")
-            if record:
-                patch["cpa_record"] = record
-                patch["cpa_auth_filename"] = cpa_auth_filename(record)
-                # 落盘/上传走与注册 opt-in 分支**同一个**收尾函数（`_maybe_write_cpa`）。
-                # 之前这里只把记录塞进 patch、从不调用它 —— 而注册默认不再换
-                # OAuth 之后，这个动作就是新号补 build 凭据的**唯一**入口，不落盘
-                # 等于 `cpa_auth_dir` 与 `cpa_upload_grok_enabled` 双双变成死开关
-                # （独立评审发现）。写回 patch 的 `cpa_auth_path` / `cpa_uploaded`
-                # 由调用方合并进账号 extra，与注册路径的落库字段一致。
-                #
-                # 设置来源见上方：`cpa_auth_dir` 是**任务/全局**设置，不在账号
-                # extra 上（注册路径传的就是配置 extra）。账号 extra 只在配置没给
-                # 时兜底 —— 只传账号 extra 的话这个开关永远读空。
-                try:
-                    self._maybe_write_cpa(patch, settings, log_fn or (lambda _m: None))
-                except Exception as exc:  # noqa: BLE001 - 落盘/上传失败不该毁刷新结果
-                    if log_fn:
-                        log_fn(f"[Grok] CPA 落盘/上传异常: {type(exc).__name__}: {str(exc)[:120]}")
-            # 消息不能说满：`_maybe_write_cpa` 把落盘/上传失败吞成日志（它自己
-            # 不该让刷新失败），所以「已保存」只在**确实**写了/传了时才成立。
-            # 用户拿这句话当「成了」的唯一信号（终审发现）。
-            cpa_notes: list[str] = []
-            if record is None:
-                # 记录都没生成 → 落盘/上传**整段没跑**。只说这一条：再加
-                # 「本地目录未写入」会暗示「写过但失败」，而实际一次都没尝试
-                # （复审实测：两条同时出现，读起来像两个独立故障）。
-                cpa_notes.append("CPA 记录未生成，未落盘/上传")
-            else:
-                # 与 `_maybe_write_cpa` 读同一处来源：它认配置键，也认环境变量
-                # `GROK_CPA_AUTH_DIR`（后者是文档推荐的入口）。只看配置键的话，
-                # 用环境变量且写入失败时消息仍是光秃秃的「已保存」（复审 N1 实测）。
-                wanted_dir = str(
-                    settings.get("cpa_auth_dir") or os.getenv("GROK_CPA_AUTH_DIR", "")
-                ).strip()
-                if "cpa_auth_path" not in patch and wanted_dir:
-                    cpa_notes.append("本地目录未写入")
-                if "cpa_uploaded" in patch and not patch.get("cpa_uploaded"):
-                    cpa_notes.append("CPA 上传失败")
-                if "cpa_uploaded" not in patch and cpa_enabled and not cpa_url:
-                    # 开关开着、地址却空：`_maybe_write_cpa` 直接 return，什么都不写。
-                    # 不提一句的话，消息和「没配置 CPA」一模一样，用户看不出少填了地址。
-                    cpa_notes.append("未填 CPA 地址，未上传")
-            message = "Token 已刷新（登录协议），新凭证已保存"
-            if cpa_notes:
-                # 把**真实原因**放进消息：动作端点（`api/actions.py`）构造插件时
-                # 从不设 `_log_fn`，`_maybe_write_cpa` 的失败原因只进日志 ——
-                # 那条日志在按钮路径上根本不存在（正确性复审 I1）。
-                reason = str(patch.get("cpa_upload_result") or "").strip()
-                detail = f"：{reason[:120]}" if reason else ""
-                message += f"；CPA 侧：{'、'.join(cpa_notes)}{detail}"
+            # **CPA / Sub2API 产物已删**（2026-10-27，用户要求 Grok 只保留
+            # SSO + grok2api）。这里只落 AT/RT 本身 —— 刷新链路仍需要它们
+            # （`refresh_via_grant` 用 RT 换新 token），但不再生成
+            # `cpa_record`、不再落盘到 `cpa_auth_dir`、不再上传到面板。
             return {
                 "ok": True,
                 "data": {
-                    "message": message,
+                    "message": "Token 已刷新（登录协议），新凭证已保存",
                     "method": result.method,
                     "expires_in": tokens.get("expires_in"),
                 },
@@ -718,94 +621,6 @@ class GrokPlatform(BasePlatform):
             # 现在由 `refresh_token` 完整取代（同一件事，走浏览器完成授权）。
             # 保留 id 转发到新实现：老任务/老脚本里可能还引用着它。
             return self.execute_action("refresh_token", account, params)
-
-        if action_id == "export_cpa_json":
-            record = extra.get("cpa_record")
-            if not record:
-                tokens = {
-                    "access_token": extra.get("access_token", ""),
-                    "refresh_token": extra.get("refresh_token", ""),
-                    "id_token": extra.get("id_token", ""),
-                    "expires_in": extra.get("expires_in", 0),
-                }
-                if not tokens["access_token"]:
-                    return {"ok": False, "error": "账号没有 OAuth 记录"}
-                record = token_to_cpa_record(tokens, email=account.email, sso=extra.get("sso", ""))
-            return {
-                "ok": True,
-                "data": {
-                    "message": f"CPA 记录已生成（{cpa_auth_filename(record)}）",
-                    "filename": cpa_auth_filename(record),
-                    "record": record,
-                },
-            }
-
-        if action_id == "upload_cpa":
-            record = extra.get("cpa_record")
-            if not record:
-                return {"ok": False, "error": "账号没有 CPA 记录，请先执行「刷新 Token（登录协议）」"}
-            from .upload import upload_to_cpa
-
-            # 地址/口令留空时回落到全局配置（「全局配置 → 面板配置 → CPA 面板」）。
-            # 面板管理页批量上传时不带 params —— 不带回落的话每个账号都报
-            # 「未配置 CPA API URL」，而配置明明填好了（实测踩过）。
-            from core.config_store import config_store
-            from services.chatgpt_sync import upload_proxy_for
-
-            ok, msg = upload_to_cpa(
-                record,
-                api_url=params.get("api_url") or str(config_store.get("cpa_api_url", "") or ""),
-                api_key=params.get("api_key") or str(config_store.get("cpa_api_key", "") or ""),
-                proxy=upload_proxy_for("cpa", extra),
-            )
-            return {"ok": ok, "data": msg, "error": "" if ok else msg}
-
-        if action_id == "sync_cliproxyapi_status":
-            from types import SimpleNamespace
-
-            from services.cliproxyapi_sync import is_sync_ok, sync_grok_cliproxyapi_status_batch
-
-            # 同步函数只用到 id / email（按邮箱匹配远端记录），构造一个轻量对象。
-            # `Account` 上没有 id（那是仓储行才有的），用 extra 里的账号 id 兜底。
-            sync_account = SimpleNamespace(
-                id=getattr(account, "id", None) or int(extra.get("account_id") or 0) or 0,
-                email=account.email,
-            )
-            results = sync_grok_cliproxyapi_status_batch([sync_account])
-            sync_result = results.get(int(sync_account.id or 0), {})
-            ok = is_sync_ok(sync_result)
-            summary = (
-                f"远端状态={sync_result.get('status') or 'not_found'}, "
-                f"探测={sync_result.get('remote_state') or 'not_checked'}"
-            )
-            return {
-                "ok": ok,
-                "data": {
-                    "message": f"CPA 状态同步完成：{summary}",
-                    "sync": sync_result,
-                },
-                "error": sync_result.get("message") if not ok else "",
-                "account_extra_patch": {
-                    "sync_statuses": {"cliproxyapi": sync_result},
-                },
-            }
-
-        if action_id == "upload_sub2api":
-            record = extra.get("cpa_record")
-            if not record:
-                return {"ok": False, "error": "账号没有 CPA 记录，请先执行「刷新 Token（登录协议）」"}
-            from .upload import upload_to_sub2api
-
-            # 同 upload_cpa：留空回落到全局配置（面板页批量动作不带 params）
-            from core.config_store import config_store
-
-            ok, msg = upload_to_sub2api(
-                record,
-                api_url=params.get("api_url") or str(config_store.get("sub2api_api_url", "") or ""),
-                api_key=params.get("api_key") or str(config_store.get("sub2api_api_key", "") or ""),
-                group=params.get("group") or "",
-            )
-            return {"ok": ok, "data": msg, "error": "" if ok else msg}
 
         if action_id == "sync_grok2api_status":
             # 单账号版（批量端点有专用分支，一次拉列表写回所有账号）。
@@ -992,13 +807,9 @@ class GrokPlatform(BasePlatform):
                     "expires_in": tokens.get("expires_in", 0),
                     "token_type": tokens.get("token_type", "Bearer"),
                 })
-                try:
-                    rec = token_to_cpa_record(tokens, email=email, sso=sso)
-                    account_extra["cpa_record"] = rec
-                    account_extra["cpa_auth_filename"] = cpa_auth_filename(rec)
-                    self._maybe_write_cpa(account_extra, extra, log)
-                except Exception as exc:
-                    log(f"[Grok] 生成 CPA 记录失败: {type(exc).__name__}")
+                # CPA / Sub2API 产物已删（2026-10-27）：不再生成 `cpa_record`、
+                # 不再落盘到 `cpa_auth_dir`。AT/RT 本身仍写入 extra ——
+                # `refresh_via_grant` 需要 RT 才能续期。
             else:
                 log("[Grok] OAuth 未成功（SSO 仍可用）")
         else:
@@ -1043,7 +854,7 @@ class GrokPlatform(BasePlatform):
                     code_http, summary = probe_token(
                         access,
                         email=email,
-                        sub=str(account_extra.get("cpa_record", {}).get("sub", "")),
+                        sub=self._subject_from_access_token(access),
                         proxy=proxy or "",
                         model=str(extra.get("grok_probe_model") or CPA_PROBE_MODEL),
                         log=log,
@@ -1057,7 +868,7 @@ class GrokPlatform(BasePlatform):
             platform=self.name,
             email=email,
             password=final_password,
-            user_id=str((account_extra.get("cpa_record") or {}).get("sub", "")),
+            user_id=self._subject_from_access_token(str(account_extra.get("access_token") or "")),
             region=str(extra.get("grok_region") or ""),
             token=sso,
             status=AccountStatus.REGISTERED,
@@ -1199,89 +1010,22 @@ class GrokPlatform(BasePlatform):
         }
 
     @staticmethod
-    def _cpa_upload_decision() -> tuple[bool, str]:
-        """Grok 自动上传是否启用、要传到哪 —— **唯一**的判定处。
+    def _subject_from_access_token(access_token: str) -> str:
+        """从 AT 的 JWT 里取 `sub`。
 
-        返回 `(是否启用, 地址)`：
-
-        - `(False, "")`：开关关着（不传，也不必解释）；
-        - `(True, "")`：开关开着但没填地址（要告诉用户「少填了地址」）；
-        - `(True, url)`：正常上传。
-
-        为什么把「启用」和「地址」一起返回：原本它们是两次独立调用
-        （`cpa_upload_enabled_for` 被算两遍），且消息侧无法区分「没开」与
-        「开了没填地址」—— 前者不该提示、后者必须提示（复审 Minor 3）。
-
-        开关口径仍由 `services.external_sync.cpa_upload_enabled_for` 统一
-        （平台键 → 老开关 → 填了地址就传）。
+        以前这里读 `extra.cpa_record.sub` —— 而 `cpa_record` 已随 CPA 支持
+        一并删除（2026-10-27）。`sub` 本身仍有用（测活与账号 user_id 要它），
+        直接从 AT 解，不再依赖那个中间结构。
         """
+        token = str(access_token or "").strip()
+        if not token:
+            return ""
         try:
-            from core.config_store import config_store
-            from services.external_sync import cpa_upload_enabled_for
+            from .oauth_device import _decode_jwt_payload
 
-            if not cpa_upload_enabled_for("grok"):
-                return (False, "")
-            return (True, str(config_store.get("cpa_api_url", "") or "").strip())
-        except Exception:
-            # 判定本身出错 → 当作「不传」，不据此给用户任何提示（宁可沉默，
-            # 也不要因为一次导入失败报出「未填地址」这种误导）。
-            return (False, "")
-
-    def _maybe_write_cpa(self, account_extra: dict, extra: dict, log,
-                         *, decision: tuple[bool, str] | None = None) -> None:
-        """按配置把 CPA 记录写入本地目录（热加载）**并可选上传到远端 CPA**。
-
-        两条路互相独立：
-        * `cpa_auth_dir`（或 `GROK_CPA_AUTH_DIR`）→ 写本地目录，供 CLIProxyAPI
-          以文件方式热加载。
-        * `cpa_upload_grok_enabled` → 走 Management API 上传到远端 CPA
-          （与 ChatGPT 的自动上传同一套开关口径，见
-          `services/external_sync.cpa_upload_enabled_for`）。
-
-        用户要求「自动上传不同平台要分开开启」，所以这里只认 Grok 自己的开关，
-        不去看 ChatGPT 那个键。
-        """
-        record = account_extra.get("cpa_record")
-        if not record:
-            return
-
-        auth_dir = str(extra.get("cpa_auth_dir") or os.getenv("GROK_CPA_AUTH_DIR", "")).strip()
-        if auth_dir:
-            try:
-                target = Path(auth_dir)
-                target.mkdir(parents=True, exist_ok=True)
-                path = target / cpa_auth_filename(record)
-                tmp = path.with_suffix(".tmp")
-                tmp.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
-                tmp.replace(path)
-                account_extra["cpa_auth_path"] = str(path)
-                log(f"[Grok] CPA 记录已写入 {path}")
-            except Exception as exc:
-                log(f"[Grok] 写入 CPA 记录失败: {exc}")
-
-        try:
-            # 与消息侧共用同一处判定 —— 各写一份就会走偏：一边判「传了」、
-            # 另一边判「没配」（复审 N4）。调用方能传进来就复用，避免重复读
-            # 全局配置（复审 I3）。
-            enabled, api_url = decision if decision is not None else self._cpa_upload_decision()
-            if not enabled or not api_url:
-                return
-            from .upload import upload_to_cpa
-
-            from core.config_store import config_store
-
-            ok, msg = upload_to_cpa(
-                record,
-                api_url=api_url,
-                api_key=str(config_store.get("cpa_api_key", "") or "").strip(),
-            )
-            account_extra["cpa_uploaded"] = bool(ok)
-            account_extra["cpa_upload_result"] = msg
-            log(f"[Grok] 自动上传 CPA {'成功' if ok else '失败'}: {msg[:120]}")
-        except Exception as exc:
-            account_extra["cpa_uploaded"] = False
-            account_extra["cpa_upload_result"] = f"{type(exc).__name__}: {exc}"
-            log(f"[Grok] 自动上传 CPA 异常: {type(exc).__name__}: {exc}")
-
+            payload = _decode_jwt_payload(token)
+        except Exception:  # noqa: BLE001 - 解不出就当没有（不影响主流程）
+            return ""
+        return str(payload.get("sub") or "")
 
 __all__ = ["GrokPlatform"]

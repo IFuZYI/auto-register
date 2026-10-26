@@ -196,23 +196,12 @@ def _push_account_uploader(panel_key: str, platform: str, row: dict):
         from services.chatgpt_sync import upload_proxy_for
 
         if plat == "grok":
-            from core.credential_fields import get_credential
-            from platforms.grok.oauth_device import token_to_cpa_record
-            from platforms.grok.upload import upload_to_cpa
-
-            record = extra.get("cpa_record")
-            if not isinstance(record, dict) or not record:
-                access = get_credential(extra, "access_token")
-                if not access:
-                    return False, "账号没有 CPA 记录（也没有 access_token 可重建）"
-                record = token_to_cpa_record(
-                    {"access_token": access,
-                     "refresh_token": get_credential(extra, "refresh_token"),
-                     "id_token": get_credential(extra, "id_token")},
-                    email=email,
-                    sso=get_credential(extra, "sso"),
-                )
-            return upload_to_cpa(record, proxy=upload_proxy_for("cpa", extra))
+            # **Grok 不再支持 CPA**（2026-10-27，用户要求只保留 SSO + grok2api）。
+            # 明说原因而不是静默跳过：批量推送时用户需要知道「为什么这个号没传」。
+            return False, (
+                "Grok 已不再支持 CPA 上传（只支持 grok2api）"
+                "—— 请在面板管理里用 grok2api"
+            )
 
         # ChatGPT：走 generate_token_json（与手动动作 / 自动上传同一条路径）
         from core.credential_fields import get_credential

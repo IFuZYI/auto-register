@@ -63,9 +63,9 @@ class BrowserPathBookkeepingTests(unittest.TestCase):
             "grok_probe_after_register": "0",
             "grok_grok2api_ingest": "0",
         }
+        # `_maybe_write_cpa` 已随 CPA 支持一并删除（2026-10-27），无需再 mock。
         with patch("platforms.grok.register_browser.register_grok_via_browser",
-                   return_value=browser_result), \
-             patch.object(plugin, "_maybe_write_cpa", return_value=None):
+                   return_value=browser_result):
             try:
                 plugin._register_via_browser(extra, None, logs.append, "")
             except Exception as exc:

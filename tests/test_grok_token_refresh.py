@@ -310,8 +310,11 @@ class PlatformActionTests(unittest.TestCase):
         self.assertEqual(patch["access_token"], "fresh-at")
         self.assertEqual(patch["refresh_token"], "fresh-rt")
         self.assertEqual(patch["id_token"], "fresh-idt")
-        # CPA 记录同步更新（下游上传用）
-        self.assertIn("cpa_record", patch)
+        # CPA / Sub2API 产物已删（2026-10-27）：不再生成 cpa_record。
+        # 刷新链路仍需要 AT/RT 本身（refresh_via_grant 用 RT 换新 token），
+        # 所以这三个字段必须留着。
+        self.assertNotIn("cpa_record", patch,
+                         "cpa_record 已随 CPA 支持删除，不该再写入")
 
     def test_refresh_token_action_without_sso_fails(self):
         account = self._account(refresh_token="rt-1")  # 无 SSO

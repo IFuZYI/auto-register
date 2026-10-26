@@ -129,7 +129,8 @@ class PanelScopeTests(unittest.TestCase):
     #: 这些动作的目标是外部面板，不该出现在账号页
     PANEL_SCOPED_ACTIONS = {
         "chatgpt": {"upload_cpa", "upload_sub2api", "sync_cliproxyapi_status"},
-        "grok": {"upload_cpa", "upload_sub2api", "upload_grok2api"},
+        # Grok 只保留 grok2api（2026-10-27）：CPA / Sub2API 的动作已删除
+        "grok": {"upload_grok2api", "sync_grok2api_status"},
     }
 
     #: 这些动作属于账号本身，必须留在账号页（漏掉它们才是回归）
@@ -146,7 +147,6 @@ class PanelScopeTests(unittest.TestCase):
             "probe_refresh",
             "refresh_token",
             "refresh_oauth",
-            "export_cpa_json",
         },
     }
 
@@ -332,9 +332,14 @@ class MultiPlatformPanelTests(unittest.TestCase):
     Grok 的 CPA 上传走的是 JSON body（实测 404，必须 multipart）。
     """
 
-    def test_cpa_declares_both_platforms(self):
+    def test_cpa_declares_chatgpt_only(self):
+        """CPA **只管 ChatGPT**（2026-10-27 起 Grok 不再支持 CPA）。
+
+        Grok 的 CPA 路径需要额外的 OAuth 交换产 AT/RT，而那套双产物结构
+        既增加状态面又不被使用 —— 用户要求 Grok 只保留 SSO + grok2api。
+        """
         panel = PANELS_BY_KEY["cpa"]
-        self.assertEqual(sorted(panel.get("platforms") or []), ["chatgpt", "grok"])
+        self.assertEqual(sorted(panel.get("platforms") or []), ["chatgpt"])
         # 兼容字段仍在（老消费方读它们）
         self.assertEqual(panel.get("platform"), "chatgpt")
 
@@ -343,10 +348,10 @@ class MultiPlatformPanelTests(unittest.TestCase):
         uploads = panel.get("upload_actions") or {}
         syncs = panel.get("sync_actions") or {}
         self.assertEqual(uploads.get("chatgpt"), "upload_cpa")
-        self.assertEqual(uploads.get("grok"), "upload_cpa")
         self.assertEqual(syncs.get("chatgpt"), "sync_cliproxyapi_status")
-        # Grok 侧的同步动作也必须存在（两边都支持，不能只挂一半）
-        self.assertEqual(syncs.get("grok"), "sync_cliproxyapi_status")
+        # Grok 侧已移除（不再支持 CPA）
+        self.assertNotIn("grok", uploads)
+        self.assertNotIn("grok", syncs)
 
     def test_declared_per_platform_actions_exist(self):
         """按平台声明的动作都要在对应平台上真的实现。"""
@@ -527,14 +532,22 @@ class GrokCpaSyncTests(unittest.TestCase):
             out = _probe_grok_remote_auth("idx-1")
         self.assertEqual(out["remote_state"], "access_token_invalidated")
 
-    def test_grok_action_is_panel_scoped(self):
-        """Grok 的同步动作也要标 scope=panel（否则它会冒回账号页菜单）。"""
+    def test_grok_cpa_actions_are_gone(self):
+        """Grok 的 CPA 同步/上传动作已删除（2026-10-27，不再支持 CPA）。
+
+        原测试断言 `sync_cliproxyapi_status` 标了 `scope=panel` —— 那个动作
+        现在整个不存在了。Grok 只剩 grok2api 两个面板动作。
+        """
         from core.registry import get, load_all
 
         load_all()
         actions = {a["id"]: a for a in get("grok")(config=None).get_platform_actions()}
-        self.assertIn("sync_cliproxyapi_status", actions)
-        self.assertEqual(actions["sync_cliproxyapi_status"].get("scope"), "panel")
+        for gone in ("sync_cliproxyapi_status", "upload_cpa", "upload_sub2api"):
+            self.assertNotIn(gone, actions, f"{gone} 应已删除")
+        # grok2api 的两个面板动作仍在，且都标了 scope=panel
+        for kept in ("sync_grok2api_status", "upload_grok2api"):
+            self.assertIn(kept, actions)
+            self.assertEqual(actions[kept].get("scope"), "panel")
 
 
 class GrokCpaUploadFormatTests(unittest.TestCase):

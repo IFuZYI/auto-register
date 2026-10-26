@@ -92,11 +92,18 @@ class CpaPerPlatformUploadToggleTests(unittest.TestCase):
         src = (ROOT / "services/external_sync.py").read_text(encoding="utf-8")
         self.assertIn('cpa_upload_enabled_for("chatgpt")', src)
 
-    def test_grok_registration_auto_uploads_to_cpa(self):
-        """Grok 注册链路要能自动上传到远端 CPA（此前只有写本地目录）。"""
+    def test_grok_no_longer_uploads_to_cpa(self):
+        """Grok **不再**支持 CPA（2026-10-27，只保留 SSO + grok2api）。
+
+        原测试断言「Grok 注册链路要能自动上传到远端 CPA」。用户随后要求
+        Grok 只保留 SSO + grok2api —— 那套双产物结构（CPA 需要额外的
+        OAuth 交换产 AT/RT）既增加状态面又不被使用，已整体删除。
+        """
         src = (ROOT / "platforms/grok/plugin.py").read_text(encoding="utf-8")
-        self.assertIn('cpa_upload_enabled_for("grok")', src)
-        self.assertIn("upload_to_cpa", src)
+        self.assertNotIn('cpa_upload_enabled_for("grok")', src,
+                         "Grok 的 CPA 自动上传判定应已删除")
+        self.assertNotIn("upload_to_cpa", src,
+                         "Grok 不该再引用 CPA 上传器")
 
 
 class CpaAutoMaintenanceRemovedTests(unittest.TestCase):

@@ -383,62 +383,6 @@ def sso_to_token(
     return None
 
 
-def token_to_cpa_record(token: dict, email: str = "", sso: str = "") -> dict:
-    """token dict → CLIProxyAPI 扁平 xai auth 记录。
-
-    出处：sso_to_auth_json.py:590-636
-    """
-    from datetime import datetime, timezone
-
-    from .constants import cpa_include_sso
-
-    access = token.get("access_token") or token.get("key") or ""
-    refresh = token.get("refresh_token") or ""
-    id_token = token.get("id_token") or ""
-    payload = _decode_jwt_payload(access)
-    id_payload = _decode_jwt_payload(id_token) if id_token else {}
-
-    if not email:
-        email = id_payload.get("email") or payload.get("email") or ""
-    sub = payload.get("sub") or id_payload.get("sub") or ""
-
-    expired = ""
-    if "exp" in payload:
-        try:
-            expired = datetime.fromtimestamp(int(payload["exp"]), tz=timezone.utc).strftime(
-                "%Y-%m-%dT%H:%M:%SZ"
-            )
-        except Exception:
-            expired = ""
-    elif token.get("expires_in") is not None:
-        try:
-            expired = datetime.fromtimestamp(
-                int(time.time()) + int(token["expires_in"]), tz=timezone.utc
-            ).strftime("%Y-%m-%dT%H:%M:%SZ")
-        except Exception:
-            expired = ""
-
-    record = {
-        "type": "xai",
-        "auth_kind": "oauth",
-        "email": email or "",
-        "sub": sub,
-        "access_token": access,
-        "refresh_token": refresh,
-        "id_token": id_token,
-        "token_type": token.get("token_type", "Bearer"),
-        "expires_in": token.get("expires_in"),
-        "expired": expired,
-        "last_refresh": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "token_endpoint": CPA_TOKEN_ENDPOINT,
-        "base_url": CPA_GROK_BASE_URL,
-        "headers": dict(CPA_GROK_HEADERS),
-    }
-    if str(sso or "").strip() and cpa_include_sso():
-        record["sso"] = sso
-    return record
-
-
 def cpa_auth_filename(record: dict) -> str:
     """生成 CPA auth 文件名：xai-<email>.json。"""
     ident = str(record.get("email") or "").strip() or str(record.get("sub") or "").strip()
@@ -484,7 +428,6 @@ def token_to_auth_entry(token: dict, email: str = "") -> tuple[str, dict]:
 
 __all__ = [
     "sso_to_token",
-    "token_to_cpa_record",
     "token_to_auth_entry",
     "cpa_auth_filename",
 ]
