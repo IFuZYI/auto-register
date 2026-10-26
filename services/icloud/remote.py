@@ -199,6 +199,49 @@ def list_remote_accounts() -> list[dict[str, Any]]:
     return [_account_public_dict(row) for row in rows]
 
 
+def _first_remote_account_with_aliases(session) -> Optional[ICloudAccountModel]:
+    """挑一个**有可用别名**的远程主号；都没有时回落到第一个启用的。
+
+    为什么不能只取 `order_by(id).first()`（用户 2026-10-27 报的注册失败）：
+
+    库里 789 个可用别名全在 account 4/5 名下，而按 id 取到的是 account 3
+    （`fuzy202610`）—— 它名下**一个可用别名都没有**。于是取号流程回落到
+    「生成新别名」，而远程渠道明确不支持生成（只允许本地主号生成）→
+    注册直接失败「远程账号不支持生成隐私邮箱」。
+
+    兜底仍然返回第一个启用的：全都没别名时至少让取号走到「生成」那一步，
+    报错信息比「没有可用远程账号」准确。
+    """
+    from sqlalchemy import or_
+
+    accounts = session.exec(
+        select(ICloudAccountModel)
+        .where(ICloudAccountModel.source == SOURCE_REMOTE)
+        .where(ICloudAccountModel.enabled == True)  # noqa: E712 - SQLModel 需要值比较
+        .order_by(ICloudAccountModel.id)
+    ).all()
+    if not accounts:
+        return None
+
+    for account in accounts:
+        available = session.exec(
+            select(ICloudAliasModel.id)
+            .where(ICloudAliasModel.account_id == account.id)
+            .where(ICloudAliasModel.status == ALIAS_STATUS_ACTIVE)
+            .where(
+                or_(
+                    ICloudAliasModel.pool_status == "available",
+                    ICloudAliasModel.pool_status.is_(None),
+                    ICloudAliasModel.pool_status == "",
+                )
+            )
+            .limit(1)
+        ).first()
+        if available is not None:
+            return account
+    return accounts[0]
+
+
 def resolve_remote_account(account_id: str = "") -> ICloudAccountModel:
     """按本地 id / 远端账号 id 定位远程账号；留空时取第一个启用的。"""
     raw = str(account_id or "").strip()
@@ -221,12 +264,7 @@ def resolve_remote_account(account_id: str = "") -> ICloudAccountModel:
                 raise ICloudError("account_disabled", f"远程账号已停用: {row.email}")
             return row
 
-        row = session.exec(
-            select(ICloudAccountModel)
-            .where(ICloudAccountModel.source == SOURCE_REMOTE)
-            .where(ICloudAccountModel.enabled == True)  # noqa: E712 - SQLModel 需要值比较
-            .order_by(ICloudAccountModel.id)
-        ).first()
+        row = _first_remote_account_with_aliases(session)
     if row is None:
         raise ICloudError(
             "account_not_found", "还没有可用的远程 iCloud 账号，请先在「邮箱服务」里接入"
