@@ -244,12 +244,18 @@ class PlatformLoginRouteTests(unittest.TestCase):
 class RtRouteSelectionTests(unittest.TestCase):
     """`chatgpt_rt_route` 决定换来 RT 走哪条路：codex（可能要接码）/ login（不要接码）。"""
 
-    def test_defaults_to_codex(self):
-        """不配时保持现有行为 —— 换默认值必须是一次显式决定。"""
+    def test_defaults_to_login(self):
+        """默认是**密码登录**。
+
+        2026-10-27 改的：实测 Codex 路线在新号上卡 choose-an-account
+        （拿不到 RT），密码登录路线新号老号都能拿到。默认值必须与「Token 方案」
+        的声明默认（`DEFAULT_CHATGPT_TOKEN_PLAN`）一致，否则设置页显示的和
+        实际跑的不是一回事。
+        """
         from platforms.chatgpt.chatgpt_registration_mode_adapter import (
-            RT_ROUTE_CODEX, resolve_chatgpt_rt_route,
+            RT_ROUTE_LOGIN, resolve_chatgpt_rt_route,
         )
-        self.assertEqual(resolve_chatgpt_rt_route({}), RT_ROUTE_CODEX)
+        self.assertEqual(resolve_chatgpt_rt_route({}), RT_ROUTE_LOGIN)
 
     def test_accepts_login_and_aliases(self):
         from platforms.chatgpt.chatgpt_registration_mode_adapter import (
@@ -377,13 +383,19 @@ class BackfillLoginRouteTests(unittest.TestCase):
         self.assertEqual(bf._skip_reason(strategy), "")
 
     def test_strategy_is_registered_in_run_order(self):
-        """策略要在 run() 的尝试顺序里，否则永远不会被执行。"""
+        """策略要在 run() 的尝试顺序里，否则永远不会被执行。
+
+        顺序**跟着路线设置走**（2026-10-27）：默认「密码登录」把它排在最前，
+        后面才是 Codex 链路（复用会话 → 协议重登）作为回退。
+        """
         from platforms.chatgpt import rt_backfill as mod
         bf, _ = self._backfill()
         order = bf._strategy_order()
         self.assertIn(mod.STRATEGY_PLATFORM_LOGIN, order)
-        self.assertLess(order.index(mod.STRATEGY_LOGIN), order.index(mod.STRATEGY_PLATFORM_LOGIN),
-                        "先试代价低的：会话复用 → 协议重登（Codex）→ 密码登录")
+        self.assertEqual(order[0], mod.STRATEGY_PLATFORM_LOGIN,
+                         f"默认路线是密码登录，它该排第一，实际 {order}")
+        self.assertEqual(order[1:], [mod.STRATEGY_SESSION, mod.STRATEGY_LOGIN],
+                         f"回退链路应保持 复用会话 → 协议重登，实际 {order}")
 
 
 class StrategyBindingTests(unittest.TestCase):
@@ -452,3 +464,95 @@ class BackfillClearsPartialFlagTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BackfillHonoursRtRouteSettingTests(unittest.TestCase):
+    """补 RT 的策略**顺序**必须跟着 `chatgpt_rt_route` 设置走。
+
+    实测（用户 2026-10-27 报）：设置里选「密码登录」，补 RT 却仍先跑 Codex
+    授权（撞 add-phone、白等 30 秒），最后才走密码登录。
+
+    这里直接测 `_strategy_runners()` 的顺序 —— 那是顺序的唯一定义处。
+    不模拟 `run()` 的完整循环：那需要伪造 `_absorb`/`_active_flow` 才能让
+    循环跳出，桩一多就测不到顺序本身了（第一版就栽在这）。
+    """
+
+    def _order(self, config: dict) -> list[str]:
+        from platforms.chatgpt.rt_backfill import RefreshTokenBackfiller
+
+        bf = RefreshTokenBackfiller(
+            email="a@b.c", password="pw", totp_secret="SECRET",
+            session_token="st", access_token="at",
+            extra_config=dict(config), log_fn=lambda _m: None,
+        )
+        return [strategy for strategy, _runner in bf._strategy_runners()]
+
+    def test_login_route_puts_password_route_first(self):
+        from platforms.chatgpt.rt_backfill import (
+            STRATEGY_LOGIN, STRATEGY_PLATFORM_LOGIN, STRATEGY_SESSION,
+        )
+
+        order = self._order({"chatgpt_rt_route": "login"})
+        self.assertEqual(order[0], STRATEGY_PLATFORM_LOGIN,
+                         f"设置选了密码登录，第一条却是 {order[0]}")
+        # 后面回退 Codex 链路（复用会话 → 协议重登）
+        self.assertEqual(order[1:], [STRATEGY_SESSION, STRATEGY_LOGIN])
+
+    def test_codex_route_keeps_the_legacy_order(self):
+        from platforms.chatgpt.rt_backfill import (
+            STRATEGY_LOGIN, STRATEGY_PLATFORM_LOGIN, STRATEGY_SESSION,
+        )
+
+        self.assertEqual(
+            self._order({"chatgpt_rt_route": "codex"}),
+            [STRATEGY_SESSION, STRATEGY_LOGIN, STRATEGY_PLATFORM_LOGIN],
+        )
+
+    def test_default_route_is_login(self):
+        """没有设置时跟随合并后的默认（密码登录）。"""
+        from platforms.chatgpt.rt_backfill import STRATEGY_PLATFORM_LOGIN
+
+        self.assertEqual(self._order({})[0], STRATEGY_PLATFORM_LOGIN)
+
+    def test_merged_mode_value_also_works(self):
+        """设置页现在写的是合并值 `refresh_token_login`，也要认。"""
+        from platforms.chatgpt.rt_backfill import STRATEGY_PLATFORM_LOGIN
+
+        self.assertEqual(
+            self._order({"chatgpt_registration_mode": "refresh_token_login"})[0],
+            STRATEGY_PLATFORM_LOGIN,
+        )
+        from platforms.chatgpt.rt_backfill import STRATEGY_SESSION
+        self.assertEqual(
+            self._order({"chatgpt_registration_mode": "refresh_token_codex"})[0],
+            STRATEGY_SESSION,
+        )
+
+
+class SuccessMessageNamesTheActualStrategyTests(unittest.TestCase):
+    """成功消息要说**真正成功的那条**策略。
+
+    实测（用户 2026-10-27 报）：密码登录成功，日志却写「补 RT 成功（协议重登）」
+    —— `summary()` 的三元表达式只区分「复用会话」与「其余」，把
+    `platform_login` 归成了协议重登。
+    """
+
+    def test_platform_login_is_named_correctly(self):
+        from platforms.chatgpt.rt_backfill import (
+            STRATEGY_PLATFORM_LOGIN, BackfillResult,
+        )
+
+        result = BackfillResult(success=True, email="a@b.c")
+        result.strategy = STRATEGY_PLATFORM_LOGIN
+        self.assertIn("密码登录", result.summary(),
+                      f"消息没说对策略: {result.summary()!r}")
+
+    def test_other_strategies_unchanged(self):
+        from platforms.chatgpt.rt_backfill import (
+            STRATEGY_LOGIN, STRATEGY_SESSION, BackfillResult,
+        )
+
+        for strategy, expected in ((STRATEGY_SESSION, "复用会话"), (STRATEGY_LOGIN, "协议重登")):
+            r = BackfillResult(success=True, email="a@b.c")
+            r.strategy = strategy
+            self.assertIn(expected, r.summary())

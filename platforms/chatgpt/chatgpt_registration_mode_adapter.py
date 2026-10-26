@@ -107,7 +107,10 @@ def normalize_chatgpt_registration_mode(value) -> str:
 #: 由用户在设置里显式切换。
 RT_ROUTE_CODEX = "codex"
 RT_ROUTE_LOGIN = "login"
-DEFAULT_CHATGPT_RT_ROUTE = RT_ROUTE_CODEX
+#: 路线默认值 —— 必须与「Token 方案」的声明默认（`DEFAULT_CHATGPT_TOKEN_PLAN`
+#: = 密码登录）一致，否则会出现「设置页默认显示密码登录、运行时却按 Codex 走」
+#: 的静默错位（实测 2026-10-27：补 RT 空配置时仍先跑 Codex）。
+DEFAULT_CHATGPT_RT_ROUTE = RT_ROUTE_LOGIN
 
 
 def normalize_chatgpt_rt_route(value) -> str:
@@ -162,7 +165,15 @@ def resolve_chatgpt_rt_route(extra: Optional[dict]) -> str:
         return RT_ROUTE_LOGIN
     if mode == TOKEN_PLAN_REFRESH_CODEX:
         return RT_ROUTE_CODEX
-    return normalize_chatgpt_rt_route(data.get("chatgpt_rt_route"))
+
+    # 旧的独立键：**存过**才用它，没存过就跟随默认值。
+    # 不能直接把 None 丢给 `normalize_chatgpt_rt_route` —— 它把「没值」也
+    # 归一成 codex，于是「设置页默认显示密码登录、运行时按 Codex 走」
+    # （实测 2026-10-27）。
+    route_key = str(data.get("chatgpt_rt_route") or "").strip()
+    if not route_key:
+        return DEFAULT_CHATGPT_RT_ROUTE
+    return normalize_chatgpt_rt_route(route_key)
 
 
 def resolve_chatgpt_registration_mode(extra: Optional[dict]) -> str:

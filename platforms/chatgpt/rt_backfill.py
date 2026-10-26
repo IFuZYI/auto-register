@@ -141,7 +141,14 @@ class BackfillResult:
 
     def summary(self) -> str:
         if self.success:
-            label = "复用会话" if self.strategy == STRATEGY_SESSION else "协议重登"
+            # 三种策略都要说对。此前是「复用会话 / 其余」的二元判断，把
+            # `platform_login` 归成了「协议重登」—— 实测日志里密码登录成功
+            # 却写「补 RT 成功（协议重登）」，排查时会被带偏。
+            label = {
+                STRATEGY_SESSION: "复用会话",
+                STRATEGY_LOGIN: "协议重登",
+                STRATEGY_PLATFORM_LOGIN: "密码登录",
+            }.get(self.strategy, self.strategy or "未知策略")
             return f"补 RT 成功（{label}）"
         if self.banned:
             return f"账号已封禁：{self.error_message or '登录链认出账号已停用'}"
@@ -316,19 +323,33 @@ class RefreshTokenBackfiller:
     # ── 结果整理 ──
 
     def _strategy_runners(self):
-        """按代价从低到高排：复用会话 → 协议重登 → 密码登录。
+        """策略顺序**跟着 `chatgpt_rt_route` 设置走**。
 
-        密码登录放最后：它要重新走一遍 authorize + sentinel + 密码 + 2FA，
-        比前两条都重；前面能成就不该跑它。
+        - `login`（默认）：密码登录优先。它一次走完 authorize + 密码 + 2FA，
+          实测新号老号都能拿到 RT；Codex 路线在新号上会卡 choose-an-account。
+          密码登录失败才回退 Codex 链路。
+        - `codex`：保持原有递进（复用会话 → 协议重登 → 密码登录）。用户明确
+          选了 Codex 授权就尊重它，不要把密码登录提到前面。
+
+        为什么之前是写死的：这条链路早于「路线开关」存在，加开关时只改了
+        注册链与 `_try_platform_login` 的实现，漏了**顺序**。实测后果是
+        设置选「密码登录」时仍先跑 Codex，白等 30 秒撞 add-phone
+        （用户 2026-10-27 报）。
 
         绑定实例方法（`self._try_xxx`）而不是类上的裸函数 —— 后者丢 `self`，
         调用时直接 TypeError（实测踩过）。
         """
-        return (
-            (STRATEGY_SESSION, self._try_session),
-            (STRATEGY_LOGIN, self._try_login),
-            (STRATEGY_PLATFORM_LOGIN, self._try_platform_login),
+        from platforms.chatgpt.chatgpt_registration_mode_adapter import (
+            RT_ROUTE_LOGIN, resolve_chatgpt_rt_route,
         )
+
+        session = (STRATEGY_SESSION, self._try_session)
+        codex = (STRATEGY_LOGIN, self._try_login)
+        platform = (STRATEGY_PLATFORM_LOGIN, self._try_platform_login)
+
+        if resolve_chatgpt_rt_route(self.extra_config) == RT_ROUTE_LOGIN:
+            return (platform, session, codex)
+        return (session, codex, platform)
 
     def _strategy_order(self) -> list:
         return [strategy for strategy, _ in self._strategy_runners()]

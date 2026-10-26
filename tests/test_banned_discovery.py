@@ -131,8 +131,12 @@ class BackfillBannedDetectionTests(unittest.TestCase):
             def oauth_codex_rt_exchange(self, mail_provider=None):
                 raise RuntimeError(DEACTIVATED_TEXT)
 
+        # 显式走 Codex 路线：这条测的是「Codex 链路认出封禁后不再跑协议重登」。
+        # 默认路线自 2026-10-27 起是密码登录，不指定的话第一条策略就不是
+        # 会话复用了（测试的假体只实现了那条路径）。
         backfiller = RefreshTokenBackfiller(
-            email="demo@example.com", password="pw", session_token="st-old", extra_config={}
+            email="demo@example.com", password="pw", session_token="st-old",
+            extra_config={"chatgpt_rt_route": "codex"},
         )
         login_flow = _FakeFlow()
         queue = [_BannedFlow(), login_flow]

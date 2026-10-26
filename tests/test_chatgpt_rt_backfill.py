@@ -75,13 +75,23 @@ class _FakeFlow:
 
 
 def _backfiller(flows, **overrides):
-    """构造 backfiller，并按调用顺序发放预置的 flow。"""
+    """构造 backfiller，并按调用顺序发放预置的 flow。
+
+    **默认走 Codex 路线**：本文件整体在测 `_try_session` / `_try_login`
+    那条链（假体也只实现了它）。默认路线自 2026-10-27 起是密码登录，不指定
+    的话第一条策略就变成 `_try_platform_login`，这些用例的前提全部失效。
+    测密码登录路线的用例在 `test_chatgpt_platform_rt_route.py`。
+    """
     kwargs = dict(
         email="demo@example.com",
         password="pw",
         session_token="st-old",
-        extra_config={},
+        extra_config={"chatgpt_rt_route": "codex"},
     )
+    if "extra_config" in overrides:
+        merged = dict(kwargs["extra_config"])
+        merged.update(overrides["extra_config"] or {})
+        overrides = {**overrides, "extra_config": merged}
     kwargs.update(overrides)
     backfiller = RefreshTokenBackfiller(**kwargs)
     queue = list(flows)
