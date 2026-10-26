@@ -146,3 +146,107 @@ class SyncResultWritesEnrollmentTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SyncScopeHonoursEnrollmentTests(unittest.TestCase):
+    """「只有已登记的账号参与该面板的同步」必须真的生效。
+
+    代码审查（2026-10-27 C3）发现：`panel_uploads` 只写不读 —— `plan_sync` /
+    `plan_push` / 对比表都不看它，于是「登记」是纯记账，同步范围与改动前完全
+    一样。ADR-0002 写的规则没有落地。
+    """
+
+    def _remote(self):
+        from services.panel_comparison import RemoteAccount
+
+        return RemoteAccount(
+            email="a@b.c", platform="chatgpt",
+            credentials={"access_token": "AT-remote"},
+            updated_at="2026-01-02T00:00:00+00:00",
+        )
+
+    def test_unenrolled_account_is_skipped(self):
+        from services.panel_sync import plan_sync
+
+        outcome = plan_sync(
+            {"access_token": "AT-local"},
+            self._remote(),
+            panel="chatgpt2api",
+            enrolled=set(),          # 一个面板都没登记
+        )
+        self.assertFalse(outcome.pulled, "未登记的账号仍被拉回")
+        self.assertEqual(outcome.reason, "not_enrolled")
+
+    def test_enrolled_account_proceeds_normally(self):
+        from services.panel_sync import plan_sync
+
+        outcome = plan_sync(
+            {"access_token": "AT-local"},
+            self._remote(),
+            panel="chatgpt2api",
+            enrolled={"chatgpt2api"},
+        )
+        self.assertNotEqual(outcome.reason, "not_enrolled")
+
+    def test_omitting_enrolled_keeps_old_behaviour(self):
+        """不传 `enrolled` 时按原逻辑走（老调用方/测试不受影响）。"""
+        from services.panel_sync import plan_sync
+
+        outcome = plan_sync({"access_token": "AT-local"}, self._remote(), panel="x")
+        self.assertNotEqual(outcome.reason, "not_enrolled")
+
+
+class EnrollmentIsReadableFromExtraTests(unittest.TestCase):
+    """`plan_sync` 的 `enrolled` 由调用方从账号 extra 取。"""
+
+    def test_helper_reads_the_panel_uploads_table(self):
+        from services.panel_enrollment import enroll, enrolled_panels
+
+        extra = {}
+        enroll(extra, "chatgpt2api", remote_id="r1", ok=True, message="ok")
+        enroll(extra, "cpa", remote_id="r2", ok=True, message="ok")
+        self.assertEqual(enrolled_panels(extra), {"chatgpt2api", "cpa"})
+
+
+class RemoteDeletionRevokesEnrollmentTests(unittest.TestCase):
+    """远端删号 → 本地自动撤销登记（ADR-0002）。
+
+    代码审查（2026-10-27 C2）发现 `reconcile_with_remote` **零调用方** ——
+    需求「远端删号自动撤销」在生产代码里不存在，只有定义与测试。
+    不撤销的后果：本地一直以为「已登记」，同步反复去拉一个不存在的账号。
+    """
+
+    def test_reconcile_is_called_from_a_production_path(self):
+        """结构性：生产代码里必须有调用方（不能只有定义与测试）。"""
+        import re
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parent.parent
+        callers = []
+        for d in ("api", "services"):
+            base = root / d
+            if not base.exists():
+                continue
+            for path in base.rglob("*.py"):
+                if "__pycache__" in path.parts:
+                    continue
+                text = path.read_text(encoding="utf-8", errors="replace")
+                # 排除定义文件自身
+                if path.name == "panel_enrollment.py":
+                    continue
+                if re.search(r"reconcile_with_remote\s*\(", text):
+                    callers.append(str(path.relative_to(root)))
+        self.assertTrue(
+            callers,
+            "`reconcile_with_remote` 没有任何生产调用方 —— "
+            "「远端删号自动撤销」没有落地",
+        )
+
+    def test_revokes_when_remote_lacks_the_account(self):
+        from services.panel_enrollment import enroll, is_enrolled, reconcile_with_remote
+
+        extra = {}
+        enroll(extra, "chatgpt2api", remote_id="r1", ok=True, message="ok")
+        changed = reconcile_with_remote(extra, "chatgpt2api", present=False)
+        self.assertTrue(changed, "撤销应当报告发生了变更（调用方据此决定要不要落库）")
+        self.assertFalse(is_enrolled(extra, "chatgpt2api"))

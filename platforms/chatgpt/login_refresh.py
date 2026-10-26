@@ -175,6 +175,12 @@ class LoginAccessTokenRefresher:
             # 登录已有账号；别让协议层把「这邮箱已注册」当失败
             "WEBUI_ALLOW_LOGIN": "1",
         }
+        # 路线设置也要带进协议层（抢跑判定要用，见代码审查 2026-10-27 I4）。
+        from platforms.chatgpt.chatgpt_registration_mode_adapter import (
+            rt_route_env_overrides,
+        )
+
+        merged.update(rt_route_env_overrides(self.extra_config))
         return merged
 
     def _otp_timeout(self) -> int:

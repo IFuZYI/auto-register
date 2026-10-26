@@ -315,6 +315,12 @@ class RefreshTokenBackfiller:
             value = str(self.extra_config.get(config_key) or "").strip()
             if value:
                 merged[env_key] = value
+        # 路线设置也要带进协议层（抢跑判定要用，见代码审查 2026-10-27 I4）。
+        from platforms.chatgpt.chatgpt_registration_mode_adapter import (
+            rt_route_env_overrides,
+        )
+
+        merged.update(rt_route_env_overrides(self.extra_config))
         return merged
 
     def _otp_timeout(self) -> int:

@@ -141,6 +141,7 @@ function modeSummary(
   options: { value: string; label: string }[] | undefined,
   value: unknown,
   defaultValue?: string | number,
+  legacyAliases?: Record<string, string>,
 ): string {
   // 未设置（空串 / null）时回落到插件声明的默认值 —— 运行时对「没配」
   // 用的就是它，摘要要显示**实际生效**的值。此前空串直接显示「未设置」，
@@ -149,7 +150,11 @@ function modeSummary(
   if (raw === undefined || raw === null || raw === '') return '未设置'
   // 数值项（type: 'number'）：没有选项表可查，直接显示数字
   if (!options || options.length === 0) return String(raw)
-  const current = String(raw)
+  const rawText = String(raw)
+  // 旧值先映射到新选项再查标签：否则收起态显示 `refresh_token`、
+  // 展开后的 Select 显示「有 RT · 密码登录」，同一控件两处不一致
+  // （代码审查 2026-10-27 I2）。
+  const current = legacyAliases?.[rawText] ?? rawText
   return options.find((o) => o.value === current)?.label ?? current
 }
 
@@ -316,6 +321,7 @@ function PlatformModeSummary({
           key={mode.key}
           label={mode.label}
           options={mode.options}
+          legacyAliases={mode.legacy_aliases}
           fieldKey={mode.key}
           default={mode.default}
           form={form}
@@ -328,12 +334,14 @@ function PlatformModeSummary({
 function SummaryItem({
   label,
   options,
+  legacyAliases,
   fieldKey,
   default: defaultValue,
   form,
 }: {
   label: string
   options?: { value: string; label: string }[]
+  legacyAliases?: Record<string, string>
   fieldKey: string
   default?: string | number
   form: ReturnType<typeof Form.useFormInstance>
@@ -351,7 +359,7 @@ function SummaryItem({
         {label}
       </Typography.Text>
       <Typography.Text strong style={{ fontSize: 13 }}>
-        {modeSummary(options, value, defaultValue)}
+        {modeSummary(options, value, defaultValue, legacyAliases)}
       </Typography.Text>
     </Space>
   )

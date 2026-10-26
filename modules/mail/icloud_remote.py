@@ -71,7 +71,11 @@ class ICloudRemoteMailbox(BaseMailbox):
         """定位远程账号：显式指定优先，否则取第一个可用的远程账号。"""
         service = self._service()
         if not self._account_id:
-            return service.resolve_remote_account("")
+            # 带上平台：挑主号时要排除「别名已被本平台用尽」的那些，
+            # 否则会挑到领不到号的主号（代码审查 2026-10-27 I3）。
+            return service.resolve_remote_account(
+                "", getattr(self, "platform_name", "") or ""
+            )
 
         raw = self._account_id
         if raw.isdigit() or raw.startswith("acc_"):

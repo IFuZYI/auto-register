@@ -8,6 +8,7 @@ from core.base_platform import Account, BasePlatform, RegisterConfig
 from core.registry import register
 from modules.platforms import create_application_platform_registration_service
 from platforms.chatgpt.chatgpt_registration_mode_adapter import (
+    LEGACY_TOKEN_PLAN_ALIASES,
     ChatGPTRegistrationContext,
     build_chatgpt_registration_mode_adapter,
 )
@@ -52,11 +53,9 @@ class ChatGPTPlatform(BasePlatform):
             "default": "refresh_token_login",
             # 合并前存过的值 → 对应哪个新选项。前端据此把旧值显示成正确标签，
             # 而不是把 `refresh_token` 这种内部标识符直接摆在下拉里（实测）。
-            "legacy_aliases": {
-                "refresh_token": "refresh_token_login",
-                "access_token": "access_token_only",
-                "at_only": "access_token_only",
-            },
+            # 从适配器的**单一来源**取，不在这里手抄一份 —— 手抄会漂移
+            # （代码审查 2026-10-27 I2）。
+            "legacy_aliases": dict(LEGACY_TOKEN_PLAN_ALIASES),
             "options": [
                 {"value": "refresh_token_login", "label": "有 RT · 密码登录（不需要接码）"},
                 {"value": "refresh_token_codex", "label": "有 RT · Codex 授权（需要接码）"},

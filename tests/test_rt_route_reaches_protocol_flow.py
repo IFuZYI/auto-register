@@ -93,13 +93,52 @@ class InjectedRtRouteIsActuallyCalledTests(unittest.TestCase):
 
 
 class RealCallSitesGoThroughTheRouteTests(unittest.TestCase):
-    """结构性：真实的交换点必须走 `_ensure_refresh_token`。
+    """结构性：真实的交换点必须走两个 helper。
 
     纯行为测试挡不住这个 bug —— 它测的是新函数自己，而问题是**旧调用点没改**。
+
+    **必须扫整个 `platforms/chatgpt/` 目录**：第一版只扫了 `auth_flow.py`，
+    于是 `phone_flow.py`（手机注册链）里两处裸调完全不在覆盖内 ——
+    `chatgpt_register_flow=phone` 时设置选「密码登录」仍然全程走 Codex
+    （代码审查 2026-10-27 C4 抓到）。`PhoneRegisterMixin` 是 `AuthFlow` 的
+    基类，两个 helper 直接可用。
     """
+
+    def _sources(self) -> list[tuple[str, str]]:
+        """所有可能定义/调用 Codex 交换的文件。"""
+        base = AUTH_FLOW_SRC.parent
+        return [
+            (str(path.relative_to(base.parent.parent.parent)), path.read_text(encoding="utf-8"))
+            for path in sorted(base.rglob("*.py"))
+            if "__pycache__" not in path.parts
+        ]
 
     def _src(self) -> str:
         return AUTH_FLOW_SRC.read_text(encoding="utf-8")
+
+    def test_no_bare_codex_exchange_anywhere_under_platforms_chatgpt(self):
+        """整个 `platforms/chatgpt/` 下不许有裸调 —— 含手机注册链。"""
+        offenders: list[str] = []
+        for rel, text in self._sources():
+            if "oauth_codex_rt_exchange(" not in text:
+                continue
+            # 切掉两个 helper 的定义体（它们内部允许直接调）
+            outside = text
+            for name in ("_ensure_refresh_token", "_speculative_rt_attempt"):
+                marker = f"def {name}("
+                if marker not in outside:
+                    continue
+                start = outside.index(marker)
+                end = outside.find("\n    def ", start + 10)
+                if end == -1:
+                    end = len(outside)
+                outside = outside[:start] + outside[end:]
+            if re.search(r"self\.oauth_codex_rt_exchange\(", outside):
+                offenders.append(rel)
+        self.assertEqual(
+            offenders, [],
+            f"这些文件仍有裸调 Codex（会绕过 chatgpt_rt_route 设置）: {offenders}",
+        )
 
     def test_no_bare_codex_exchange_outside_the_helper(self):
         src = self._src()

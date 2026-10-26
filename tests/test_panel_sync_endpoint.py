@@ -31,7 +31,11 @@ class SyncEndpointTests(unittest.TestCase):
         local_rows = [{
             "id": 1, "email": "a@x.com", "platform": "grok",
             "updated_at": (datetime(2026, 10, 1, tzinfo=timezone.utc)).isoformat(),
-            "extra": {"access_token": "old-at", "refresh_token": "old-rt"},
+            # 已登记到 grok2api —— 只有登记的账号参与拉回（ADR-0002）
+            "extra": {
+                "access_token": "old-at", "refresh_token": "old-rt",
+                "panel_uploads": {"grok2api": {"at": "2026-10-01T00:00:00+00:00"}},
+            },
         }]
         remote = [RemoteAccount(
             email="a@x.com", platform="grok",
@@ -108,7 +112,10 @@ class SyncEndpointPlatformScopeTests(unittest.TestCase):
             return {
                 "id": account_id, "email": email, "platform": platform,
                 "updated_at": (datetime(2026, 10, 1, tzinfo=timezone.utc)).isoformat(),
-                "extra": {"access_token": old, "refresh_token": old + "-rt"},
+                "extra": {
+                    "access_token": old, "refresh_token": old + "-rt",
+                    "panel_uploads": {"cpa": {"at": "2026-10-01T00:00:00+00:00"}},
+                },
             }
 
         local_rows = [
@@ -150,7 +157,10 @@ class SyncEndpointPlatformScopeTests(unittest.TestCase):
         local_rows = [{
             "id": 1, "email": "g@x.com", "platform": "grok",
             "updated_at": (datetime(2026, 10, 1, tzinfo=timezone.utc)).isoformat(),
-            "extra": {"access_token": "old-g", "refresh_token": "old-g-rt"},
+            "extra": {
+                "access_token": "old-g", "refresh_token": "old-g-rt",
+                "panel_uploads": {"cpa": {"at": "2026-10-01T00:00:00+00:00"}},
+            },
         }]
         remote = [RemoteAccount(
             email="g@x.com", platform="grok",

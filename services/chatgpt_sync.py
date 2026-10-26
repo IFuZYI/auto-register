@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from typing import Any
 
@@ -9,6 +10,8 @@ from sqlmodel import Session
 
 from core.db import AccountModel, platform_session
 from services.chatgpt_account_state import apply_chatgpt_status_policy
+
+logger = logging.getLogger(__name__)
 
 CPA_SYNC_NAME = "cpa"
 SUB2API_SYNC_NAME = "sub2api"
@@ -72,7 +75,14 @@ def get_cliproxy_sync_state(extra_or_account: Any) -> dict[str, Any]:
     return state if isinstance(state, dict) else {}
 
 
-def _record_sync_result(extra: dict[str, Any], sync_name: str, ok: bool, msg: str) -> dict[str, Any]:
+def _record_sync_result(
+    extra: dict[str, Any],
+    sync_name: str,
+    ok: bool,
+    msg: str,
+    *,
+    remote_id: str = "",
+) -> dict[str, Any]:
     sync_statuses = extra.get("sync_statuses")
     if not isinstance(sync_statuses, dict):
         sync_statuses = {}
@@ -101,7 +111,12 @@ def _record_sync_result(extra: dict[str, Any], sync_name: str, ok: bool, msg: st
     try:
         from services.panel_enrollment import enroll
 
-        enroll(extra, sync_name, ok=bool(ok), message=str(msg or ""))
+        enroll(
+            extra, sync_name, ok=bool(ok), message=str(msg or ""),
+            # `remote_id` 是登记记录的必要字段（ADR-0002）：新建式面板删旧
+            # 记录要靠它。调用方手上有就传，没有就留空（不阻塞登记）。
+            remote_id=str(remote_id or ""),
+        )
     except Exception:  # noqa: BLE001 - 登记失败不该毁掉上传结果
         logger.warning("面板登记写入失败（忽略）: %s", sync_name, exc_info=True)
     return state

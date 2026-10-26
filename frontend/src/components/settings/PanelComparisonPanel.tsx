@@ -397,7 +397,11 @@ export function PanelComparisonPanel({
    * 面板同时服务多个平台时（CPA 托管 ChatGPT + Grok），同一个动作在两个平台上
    * 是两份实现、两条接口 —— 批量时必须按**行自己的平台**分发，不能全用第一个。
    */
-  platformActions?: { sync?: Record<string, string> }
+  platformActions?: {
+    sync?: Record<string, string>
+    /** 上传动作 id 按平台查 —— **不要复用 sync**（两者语义完全不同） */
+    upload?: Record<string, string>
+  }
   /** 拉远端状态的动作 id（如 `sync_cliproxyapi_status`）；空串表示没有 */
   syncAction?: string
 }) {
@@ -506,13 +510,18 @@ export function PanelComparisonPanel({
       actionLabel: string,
       accountIds: number[],
       key: string,
+      actionMap?: Record<string, string>,
     ) => {
       if (!accountIds.length) {
         message.info(`没有需要${actionLabel}的账号`)
         return
       }
+      // 按**调用方给的映射**解析动作 id，不再一律复用 sync。
+      // 此前上传复用 sync 映射：CPA 的 sync 是 `sync_cliproxyapi_status`，
+      // 点「上传未上传」实际发的是「同步远端状态」—— 一个号都传不上去，
+      // 还会把远端状态写回本地（代码审查 2026-10-27 C1）。
       const actionFor = (plat: string) =>
-        platformActions.sync?.[plat] || (plat === platform ? fallbackActionId : '')
+        actionMap?.[plat] || (plat === platform ? fallbackActionId : '')
       const idsByPlatform = new Map<string, number[]>()
       for (const row of payload?.rows || []) {
         if (!row.local_id || !accountIds.includes(row.local_id)) continue
@@ -560,7 +569,8 @@ export function PanelComparisonPanel({
         setRunning('')
       }
     },
-    [platform, platformActions, payload, message, load],
+    // `platformActions` 不再是依赖：动作映射改为**调用时传参**（见 `actionMap`）
+    [platform, payload, message, load],
   )
 
   /**
@@ -582,7 +592,11 @@ export function PanelComparisonPanel({
     const toastKey = 'panel-sync-from-remote'
     message.loading({ content: '更新本地凭证中（拉取远端较新的凭证）...', key: toastKey, duration: 0 })
     try {
-      const query = platformFilter ? `?platform=${encodeURIComponent(platformFilter)}` : ''
+      const syncParams = new URLSearchParams()
+      if (platformFilter) syncParams.set('platform', platformFilter)
+      // 同 push：按当前筛选出的 id 集合收窄（代码审查 I1）。
+      if (pullIds.length) syncParams.set('account_ids', pullIds.join(','))
+      const query = syncParams.toString() ? `?${syncParams.toString()}` : ''
       const result = (await apiFetch(`/integrations/panels/${panelKey}/sync${query}`, {
         method: 'POST',
       })) as { pulled: number; skipped: number; total: number; remote_error?: string }
@@ -605,7 +619,7 @@ export function PanelComparisonPanel({
     } finally {
       setRunning('')
     }
-  }, [panelKey, platformFilter, message, load])
+  }, [panelKey, platformFilter, pullIds, message, load])
 
   /** 更新远程凭证：未上传 + 本地较新的推上去（面板级 `POST .../push`，方向
    * 判定在后端）。`delete_old=true`：新建式面板推成功后清理旧记录。 */
@@ -616,6 +630,9 @@ export function PanelComparisonPanel({
     try {
       const params = new URLSearchParams({ delete_old: 'true' })
       if (platformFilter) params.set('platform', platformFilter)
+      // 传**当前筛选出的 id 集合**：不传的话后端会推该平台全部本地较新的行，
+      // 而弹窗按筛选后的数量报数 —— 「看到的 ≠ 被改的」（代码审查 I1）。
+      if (pushIds.length) params.set('account_ids', pushIds.join(','))
       const result = (await apiFetch(`/integrations/panels/${panelKey}/push?${params.toString()}`, {
         method: 'POST',
       })) as { pushed: number; deleted: number; failed: number; skipped: number; total: number; remote_error?: string }
@@ -645,7 +662,7 @@ export function PanelComparisonPanel({
     } finally {
       setRunning('')
     }
-  }, [panelKey, platformFilter, message, load])
+  }, [panelKey, platformFilter, pushIds, message, load])
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
@@ -683,7 +700,10 @@ export function PanelComparisonPanel({
                   const ids = platformRows
                     .filter((row) => row.local_id)
                     .map((row) => row.local_id as number)
-                  void runBatch(syncAction, '同步远端状态', ids, 'sync-remote')
+                  void runBatch(
+                    syncAction, '同步远端状态', ids, 'sync-remote',
+                    platformActions.sync,
+                  )
                 }}
                 data-hermes-action="sync-remote-status"
               >
@@ -703,6 +723,7 @@ export function PanelComparisonPanel({
                 onConfirm={() => void runBatch(
                   `upload_${panelKey === 'cpa' ? 'cpa' : panelKey === 'sub2api' ? 'sub2api' : 'chatgpt2api'}`,
                   '上传到面板', uploadIds, 'upload-to-remote',
+                  platformActions.upload,
                 )}
               >
                 <Button

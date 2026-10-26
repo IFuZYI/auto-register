@@ -199,7 +199,9 @@ def list_remote_accounts() -> list[dict[str, Any]]:
     return [_account_public_dict(row) for row in rows]
 
 
-def _first_remote_account_with_aliases(session) -> Optional[ICloudAccountModel]:
+def _first_remote_account_with_aliases(
+    session, platform: str = ""
+) -> Optional[ICloudAccountModel]:
     """挑一个**有可用别名**的远程主号；都没有时回落到第一个启用的。
 
     为什么不能只取 `order_by(id).first()`（用户 2026-10-27 报的注册失败）：
@@ -223,8 +225,10 @@ def _first_remote_account_with_aliases(session) -> Optional[ICloudAccountModel]:
     if not accounts:
         return None
 
+    wanted_platform = str(platform or "").strip().lower()
+
     for account in accounts:
-        available = session.exec(
+        stmt = (
             select(ICloudAliasModel.id)
             .where(ICloudAliasModel.account_id == account.id)
             .where(ICloudAliasModel.status == ALIAS_STATUS_ACTIVE)
@@ -236,13 +240,28 @@ def _first_remote_account_with_aliases(session) -> Optional[ICloudAccountModel]:
                 )
             )
             .limit(1)
-        ).first()
-        if available is not None:
+        )
+        if wanted_platform:
+            # **还要看这个地址有没有被该平台用掉**（代码审查 2026-10-27 I3）：
+            # 真正取号的 `services/icloud/aliases.py` 会按 `used_platforms`
+            # 过滤。只看 pool_status 的话，可能挑到一个「别名都已被本平台
+            # 用完」的主号 → claim 领不到 → 回落生成 → 远程拒绝生成 →
+            # 仍是用户报的那个失败。
+            stmt = stmt.where(
+                or_(
+                    ICloudAliasModel.used_platforms.is_(None),
+                    ICloudAliasModel.used_platforms == "",
+                    ~ICloudAliasModel.used_platforms.contains(f",{wanted_platform},"),
+                )
+            )
+        if session.exec(stmt).first() is not None:
             return account
     return accounts[0]
 
 
-def resolve_remote_account(account_id: str = "") -> ICloudAccountModel:
+def resolve_remote_account(
+    account_id: str = "", platform: str = ""
+) -> ICloudAccountModel:
     """按本地 id / 远端账号 id 定位远程账号；留空时取第一个启用的。"""
     raw = str(account_id or "").strip()
     with platform_session("icloud") as session:
@@ -264,7 +283,7 @@ def resolve_remote_account(account_id: str = "") -> ICloudAccountModel:
                 raise ICloudError("account_disabled", f"远程账号已停用: {row.email}")
             return row
 
-        row = _first_remote_account_with_aliases(session)
+        row = _first_remote_account_with_aliases(session, platform)
     if row is None:
         raise ICloudError(
             "account_not_found", "还没有可用的远程 iCloud 账号，请先在「邮箱服务」里接入"

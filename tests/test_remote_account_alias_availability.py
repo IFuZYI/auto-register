@@ -40,7 +40,7 @@ def _session_with(accounts, aliases):
 class PicksAccountWithAvailableAliasesTests(unittest.TestCase):
     """挑选规则：优先有可用别名的主号。"""
 
-    def _pick(self, accounts, aliases):
+    def _pick(self, accounts, aliases, platform: str = ""):
         """走**生产入口** `resolve_remote_account("")`，不是内部函数。
 
         早先直接调 `_first_remote_account_with_aliases` —— 那样把实现换回
@@ -60,7 +60,7 @@ class PicksAccountWithAvailableAliasesTests(unittest.TestCase):
                 yield s
 
         with mock.patch.object(remote_mod, "platform_session", _fake_session):
-            return remote_mod.resolve_remote_account("")
+            return remote_mod.resolve_remote_account("", platform)
 
     def test_skips_account_without_available_aliases(self):
         accounts = [
@@ -99,15 +99,36 @@ class PicksAccountWithAvailableAliasesTests(unittest.TestCase):
         row = self._pick(accounts, aliases)
         self.assertEqual(row.id, 4, "选到了停用的主号")
 
-    def test_ignores_aliases_already_used_by_the_platform(self):
-        """`used_platforms` 含本平台的不算可用（否则会重领已消耗的地址）。"""
-        accounts = [{"id": 4, "email": "b@x.com", "source": "remote", "enabled": True}]
-        aliases = [
-            {"id": 1, "account_id": 4, "address": "u1@x.com",
-             "status": "active", "pool_status": "available", "used_platforms": ",chatgpt,"},
+    def test_skips_account_whose_aliases_are_all_used_by_the_platform(self):
+        """别名都被**本平台**用掉的主号要跳过（代码审查 2026-10-27 I3/I8）。
+
+        原版这条测试的 docstring 说「`used_platforms` 含本平台的不算可用」，
+        断言却是「兜底返回第一个，但没有可用的判断」—— 把缺口写成了预期。
+        """
+        accounts = [
+            {"id": 3, "email": "a@x.com", "source": "remote", "enabled": True},
+            {"id": 4, "email": "b@x.com", "source": "remote", "enabled": True},
         ]
-        row = self._pick(accounts, aliases)
-        self.assertEqual(row.id, 4)  # 兜底返回第一个，但没有「可用」的判断
+        aliases = [
+            # account 3 的别名池可用，但都已被 chatgpt 用过
+            {"id": 1, "account_id": 3, "address": "u1@x.com", "status": "active",
+             "pool_status": "available", "used_platforms": ",chatgpt,"},
+            # account 4 有一个干净的
+            {"id": 2, "account_id": 4, "address": "u2@x.com", "status": "active",
+             "pool_status": "available", "used_platforms": ""},
+        ]
+        row = self._pick(accounts, aliases, platform="chatgpt")
+        self.assertEqual(row.id, 4,
+                         "选中了「别名已被本平台用尽」的主号 —— 取号会领不到")
+
+    def test_without_platform_filter_ignores_used_platforms(self):
+        """不传 platform 时保持旧行为（只看 pool_status）。"""
+        accounts = [{"id": 3, "email": "a@x.com", "source": "remote", "enabled": True}]
+        aliases = [
+            {"id": 1, "account_id": 3, "address": "u1@x.com", "status": "active",
+             "pool_status": "available", "used_platforms": ",chatgpt,"},
+        ]
+        self.assertEqual(self._pick(accounts, aliases).id, 3)
 
 
 if __name__ == "__main__":

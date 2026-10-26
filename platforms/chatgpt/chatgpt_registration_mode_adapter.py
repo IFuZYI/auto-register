@@ -65,12 +65,40 @@ TOKEN_PLAN_REFRESH_CODEX = "refresh_token_codex"
 DEFAULT_CHATGPT_TOKEN_PLAN = TOKEN_PLAN_REFRESH_LOGIN
 
 
+#: 旧值 → 合并方案的**单一来源**。设置页的 `legacy_aliases` 与
+#: `normalize_chatgpt_registration_mode` 都从这里取 —— 各写一份的话，
+#: 下拉里显示的与运行时解析的会漂移（代码审查 2026-10-27 I2）。
+LEGACY_TOKEN_PLAN_ALIASES: dict[str, str] = {
+    # 无 RT 的各种旧写法
+    "access_token": CHATGPT_REGISTRATION_MODE_ACCESS_TOKEN_ONLY,
+    "at_only": CHATGPT_REGISTRATION_MODE_ACCESS_TOKEN_ONLY,
+    "without_rt": CHATGPT_REGISTRATION_MODE_ACCESS_TOKEN_ONLY,
+    "without_refresh_token": CHATGPT_REGISTRATION_MODE_ACCESS_TOKEN_ONLY,
+    "no_rt": CHATGPT_REGISTRATION_MODE_ACCESS_TOKEN_ONLY,
+    "0": CHATGPT_REGISTRATION_MODE_ACCESS_TOKEN_ONLY,
+    "false": CHATGPT_REGISTRATION_MODE_ACCESS_TOKEN_ONLY,
+    # 有 RT 的各种旧写法（具体路线由 `chatgpt_rt_route` 或默认值决定，
+    # 显示层映射到默认方案 —— 与 `resolve_chatgpt_token_plan` 同口径）
+    "rt": TOKEN_PLAN_REFRESH_LOGIN,
+    "with_rt": TOKEN_PLAN_REFRESH_LOGIN,
+    "has_rt": TOKEN_PLAN_REFRESH_LOGIN,
+    "1": TOKEN_PLAN_REFRESH_LOGIN,
+    "true": TOKEN_PLAN_REFRESH_LOGIN,
+    CHATGPT_REGISTRATION_MODE_REFRESH_TOKEN: TOKEN_PLAN_REFRESH_LOGIN,
+}
+
+
 def normalize_chatgpt_registration_mode(value) -> str:
     normalized = str(value or "").strip().lower().replace("-", "_")
     # 合并值：先判它们，再走两态别名（`refresh_token_login` 里也含
     # "refresh_token"，顺序反了会被下面的集合先吃掉）。
     if normalized in {TOKEN_PLAN_REFRESH_LOGIN, TOKEN_PLAN_REFRESH_CODEX}:
         return CHATGPT_REGISTRATION_MODE_REFRESH_TOKEN
+    # 运行时归一：无 RT 的旧写法 → `access_token_only`；其余有 RT 的写法
+    # → `refresh_token`。这里**不复用** `LEGACY_TOKEN_PLAN_ALIASES` ——
+    # 那张表是给显示层用的（旧值 → 合并方案三选一），两者的目标值域不同：
+    # 显示层要 `refresh_token_login`，运行时归一要 `refresh_token`。
+    # 硬把两者合并会让 `normalize` 返回显示层的值（实测踩过）。
     if normalized in {
         CHATGPT_REGISTRATION_MODE_ACCESS_TOKEN_ONLY,
         "access_token",
@@ -316,3 +344,23 @@ def build_chatgpt_registration_mode_adapter(
         resolve_chatgpt_register_flow(extra),
         resolve_chatgpt_bind_2fa(extra),
     )
+
+
+def rt_route_env_overrides(config: Optional[dict]) -> dict[str, str]:
+    """把路线设置翻译成协议层 `env_overrides` 里的两个键。
+
+    `AuthFlow._speculative_rt_attempt` 从 `env_overrides` 读路线决定要不要抢跑
+    Codex。三处构造 flow 的地方都要带（注册引擎、补 RT、登录刷新）——
+    此前只有注册引擎带了，另外两处读空后按默认判定，抢跑行为与设置不符
+    （代码审查 2026-10-27 I4）。
+
+    抽成一个函数而不是各写一遍：这份映射是**单一来源**，漏一处就是一处
+    静默不一致。
+    """
+    data = config or {}
+    out: dict[str, str] = {}
+    for key in ("chatgpt_registration_mode", "chatgpt_rt_route"):
+        value = str(data.get(key) or "").strip()
+        if value:
+            out[key] = value
+    return out

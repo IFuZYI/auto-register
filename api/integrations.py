@@ -79,7 +79,7 @@ def get_panel_comparison_endpoint(panel_key: str, refresh: bool = False):
 
 
 @router.post("/panels/{panel_key}/sync")
-def sync_panel_endpoint(panel_key: str, platform: str = ""):
+def sync_panel_endpoint(panel_key: str, platform: str = "", account_ids: str = ""):
     """把远端较新的凭证拉回本地（「同步到最新」的动作面）。
 
     与「重新拉取对比」的区别：那个只重拉**对比表**，这个会**改本地账号**
@@ -116,7 +116,8 @@ def sync_panel_endpoint(panel_key: str, platform: str = ""):
             row for row in local_rows
             if str(row.get("platform") or "").strip().lower() == wanted
         ]
-    summary = sync_local_from_remote(local_rows, remote_accounts)
+    # 传 panel_key：只有**已登记到该面板**的账号参与拉回（ADR-0002）。
+    summary = sync_local_from_remote(local_rows, remote_accounts, panel_key=key)
     summary["panel"] = key
     summary["remote_error"] = ""
     return summary
@@ -320,6 +321,18 @@ def _persist_push_results(panel_key: str, items: list[dict]) -> None:
                 ).first()
                 if row is None:
                     continue
+                # 远端删号 → 自动撤销登记（ADR-0002）。这里掌握的是「推送成功」
+                # 的账号，所以 present=True 恒成立 —— 真正的撤销判定在拉回路径
+                # （那里能确定远端有没有这个账号，见下面的 `_revoke_missing`）。
+                from services.panel_enrollment import enroll
+
+                extra = row.get_extra()
+                enroll(
+                    extra, panel_key, ok=ok, message=message,
+                    remote_id=str(item.get("remote_id") or ""),
+                )
+                row.set_extra(extra)
+
                 if panel_key == "grok2api":
                     # grok2api 的落库没有 update_account_model_* 版本
                     # （它走 record_grok2api_sync_result 的 extra 形状）——

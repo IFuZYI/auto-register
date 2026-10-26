@@ -87,12 +87,16 @@ class SyncOutcome:
         }
 
 
+from services.panel_enrollment import enrolled_panels, reconcile_with_remote
+
 def plan_sync(
     local_extra: dict[str, Any],
     remote: RemoteAccount,
     *,
     local_updated: Optional[str] = None,
     local_status: str = "",
+    panel: str = "",
+    enrolled: Optional[set[str]] = None,
 ) -> SyncOutcome:
     """决定这个账号该不该从远端拉凭证（纯函数，不落库）。
 
@@ -108,6 +112,16 @@ def plan_sync(
     email = str(remote.email or "")
     platform = str(remote.platform or "")
     outcome = SyncOutcome(email=email, platform=platform)
+
+    # **只有已登记到该面板的账号参与同步**（用户要求，见 ADR-0002）。
+    #
+    # `enrolled=None` 表示「调用方没提供这个信息」→ 按原逻辑走，保持向后
+    # 兼容（老调用方与测试不受影响）。传了集合就严格判定 —— 空集合意味着
+    # 「一个面板都没登记」，那这个账号不该被任何面板同步。
+    if enrolled is not None and panel:
+        if str(panel).strip().lower() not in {str(p).strip().lower() for p in enrolled}:
+            outcome.reason = "not_enrolled"
+            return outcome
 
     if _is_banned_status(local_status):
         outcome.reason = "banned"
@@ -172,11 +186,35 @@ def apply_pull(local_extra: dict[str, Any], remote: RemoteAccount) -> dict[str, 
     return merged
 
 
+def _persist_extra_only(
+    row: dict[str, Any], extra: dict[str, Any], platform: str, *, commit: bool
+) -> None:
+    """只写 `extra`（撤销登记用，不动凭证字段）。"""
+    from core.credential_fields import sync_token_column
+    from core.db import platform_database_registry
+    from core.db.models_account import AccountModel
+    from sqlmodel import select
+
+    account_id = row.get("id")
+    if not account_id:
+        return
+    with platform_database_registry.session_for(platform) as session:
+        model = session.get(AccountModel, int(account_id))
+        if model is None:
+            return
+        model.set_extra(extra)
+        sync_token_column(model, platform, extra)
+        session.add(model)
+        if commit:
+            session.commit()
+
+
 def sync_local_from_remote(
     local_rows: list[dict[str, Any]],
     remote_accounts: list[RemoteAccount],
     *,
     commit: bool = True,
+    panel_key: str = "",
 ) -> dict[str, Any]:
     """按对比结果把「远端较新」的凭证拉回本地（批量）。
 
@@ -199,7 +237,23 @@ def sync_local_from_remote(
         key = _match_key(platform, email)
         remote = remote_by_key.get(key)
         if remote is None:
-            continue  # 远端没有这个账号 → 不在「拉回」的职责范围（那是上传）
+            # 远端没有这个账号 → 不在「拉回」的职责范围（那是上传）。
+            #
+            # **但这是一次「远端已删」的观测**：如果本地登记过该面板，说明
+            # 曾经传上去、现在远端没了（人工删了或对端重置）。按 ADR-0002
+            # 自动撤销登记，否则本地一直以为「已登记」，同步反复去拉一个
+            # 不存在的账号（代码审查 2026-10-27 C2：`reconcile_with_remote`
+            # 原本零调用方）。
+            if panel_key:
+                raw_extra = row.get("extra")
+                revoked_extra = dict(raw_extra) if isinstance(raw_extra, dict) else {}
+                if reconcile_with_remote(revoked_extra, panel_key, present=False):
+                    try:
+                        _persist_extra_only(row, revoked_extra, platform, commit=commit)
+                        summary["revoked"] = int(summary.get("revoked") or 0) + 1
+                    except Exception as exc:  # noqa: BLE001 - 撤销失败不该毁整批
+                        logger.warning("撤销登记失败 %s: %s", email, exc)
+            continue
         summary["total"] += 1
         extra = row.get("extra") if isinstance(row.get("extra"), dict) else {}
         outcome = plan_sync(
@@ -207,6 +261,10 @@ def sync_local_from_remote(
             # 禁用的不参与同步（用户要求 2026-10-07）：在 plan 层跳过 ——
             # 不写库、不进 pulled 计数。
             local_status=str(row.get("status") or ""),
+            # 只有已登记到该面板的账号参与同步（ADR-0002）。`panel_key` 为空
+            # （老调用方）时 `enrolled` 传 None，按原逻辑走。
+            panel=panel_key,
+            enrolled=(enrolled_panels(extra) if panel_key else None),
         )
         if not outcome.pulled:
             summary["skipped"] += 1

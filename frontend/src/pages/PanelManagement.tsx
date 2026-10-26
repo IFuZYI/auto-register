@@ -211,6 +211,11 @@ export default function PanelManagement() {
           platforms={selectedPanel.platforms}
           platformActions={{
             sync: selectedPanel.sync_actions,
+            // 上传动作也按平台查（CPA 托管 chatgpt + grok 两个平台）。
+            // 不传的话上传会去复用 sync 映射 —— CPA 的 sync 是
+            // `sync_cliproxyapi_status`，于是「上传」实际发成了「同步远端状态」，
+            // 一个号都传不上去（代码审查 2026-10-27 C1）。
+            upload: selectedPanel.upload_actions,
           }}
           syncAction={selectedPanel.sync_action || ''}
         />

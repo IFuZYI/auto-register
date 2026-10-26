@@ -862,10 +862,10 @@ class PhoneRegisterMixin:
                 and self._on_session_ready is None
                 and self._env_flag("OAUTH_CODEX_RT_BEFORE_CALLBACK", "1")
             ):
-                # `speculative=True`：抢跑失败不占本轮名额（见该方法 docstring）。
-                self.oauth_codex_rt_exchange(
-                    mail_provider=mail_provider, speculative=True
-                )
+                # 走路线判断的抢跑：设置选「密码登录」时不该先撞 Codex。
+                # 此前这里是裸调 —— `chatgpt_register_flow=phone` 时设置选
+                # 密码登录仍全程 Codex（代码审查 2026-10-27 C4）。
+                self._speculative_rt_attempt(mail_provider)
             callback_url, final_url = self.follow_redirect_chain(continue_url)
             if (not callback_url) and final_url and ("/workspace" in final_url):
                 normalized = self._normalize_continue_url(final_url)
@@ -887,8 +887,9 @@ class PhoneRegisterMixin:
 
         if callback_url or continue_url:
             self.fetch_client_auth_session_dump("pre_oauth_exchange_phone_register")
-            if (not self.result.refresh_token) and self._env_flag("OAUTH_CODEX_RT_EXCHANGE", "1"):
-                self.oauth_codex_rt_exchange(mail_provider=mail_provider)
+            if not self.result.refresh_token:
+                # 同上：走路线判断（密码登录优先时不会先跑 Codex）。
+                self._ensure_refresh_token(mail_provider)
             if not refresh_only_mode:
                 self.get_auth_session()
 
