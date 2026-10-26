@@ -188,9 +188,12 @@ export function actionsForState(state: string): PanelActionKey[] {
   // 已同步：凭证一致，没有要推要拉的；状态同步仍有意义（远端可能变了）。
   if (normalized === 'synced') return ['status']
 
-  // 凭证不同 / 无法比对 / 全部：三个方向都给（具体目标由 selectPushIds /
-  // selectPullIds 按方向规则再收窄）。
-  return ['upload', 'push', 'pull', 'status']
+  // 其余档位（凭证不同 / 无法比对 / 全部）：推/拉/状态三个方向，**不含上传**。
+  //
+  // 用户要求（2026-10-26）：「上传未上传」只该在「未上传」筛选下出现 ——
+  // 上传的目标就是未登记的账号，把它摆在「凭证不同」或「全部」下，
+  // 按钮名（上传**未上传**）与实际范围（当前筛选出的行）就对不上。
+  return ['push', 'pull', 'status']
 }
 
 /**

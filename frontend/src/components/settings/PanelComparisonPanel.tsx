@@ -97,11 +97,14 @@ const PLATFORM_LABELS: Record<string, string> = {
  * 摆成筛选项会恒为 0。
  */
 const STATE_ORDER = [
-  'local_only',
-  'remote_only',
+  // 顺序由用户指定（2026-10-26）：从「已同步」到「仅远端」，
+  // 越往下越需要动作。此前按状态机内部枚举排（未上传在前），
+  // 与用户阅读顺序相反。
+  'synced',
   'credential_diff',
   'unknown_credential',
-  'synced',
+  'local_only',
+  'remote_only',
 ]
 
 /** 时间串 → 浏览器本地时区显示（远端时区可能不同，后端已归一）。 */

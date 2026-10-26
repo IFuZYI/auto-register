@@ -17,12 +17,12 @@ eq(actionsForState('local_only'), ['upload'], '未上传 → 只给上传')
 eq(actionsForState('synced'), ['status'], '已同步 → 只给状态同步')
 // 仅远端：本地没有行，按本地发起的动作都无处落脚
 eq(actionsForState('remote_only'), [], '仅远端 → 不给动作')
-// 凭证不同 / 无法比对：三个方向都要给
+// 凭证不同 / 无法比对：三个方向都要给（**不含上传** —— 上传只属于「未上传」）
 for (const s of ['credential_diff', 'unknown_credential']) {
-  eq(actionsForState(s), ['upload', 'push', 'pull', 'status'], `${s} → 全给`)
+  eq(actionsForState(s), ['push', 'pull', 'status'], `${s} → 推/拉/状态`)
 }
-// 全部：也全给
-eq(actionsForState(''), ['upload', 'push', 'pull', 'status'], '全部 → 全给')
+// 全部：推/拉/状态（**不含上传**，用户要求上传只出现在「未上传」档）
+eq(actionsForState(''), ['push', 'pull', 'status'], '全部 → 推/拉/状态')
 
 // selectUploadIds：只取未登记、非 banned、有 local_id 的行
 const rows = [

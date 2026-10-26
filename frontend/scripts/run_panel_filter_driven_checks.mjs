@@ -25,10 +25,20 @@ ok(!/selectPullIds\(platformRows\)/.test(panel),
 ok(/local_only/.test(panel), '没有针对 local_only 的分支')
 ok(/上传/.test(panel), '缺少上传按钮文案')
 
-// 5) 状态筛选的六档都在（用户列出的那六个）
-for (const label of ['全部', '已同步', '凭证不同', '无法比对', '未上传', '仅远端']) {
-  ok(new RegExp(label).test(panel) || /stateLabels/.test(panel), `筛选档位缺少「${label}」`)
+// 5) 六个档位的**顺序**必须是用户指定的那个
+const order = ['synced', 'credential_diff', 'unknown_credential', 'local_only', 'remote_only']
+const m = panel.match(/const STATE_ORDER = \[([\s\S]*?)\]/)
+ok(Boolean(m), '找不到 STATE_ORDER 定义')
+if (m) {
+  const actual = [...m[1].matchAll(/'([a-z_]+)'/g)].map((x) => x[1])
+  ok(JSON.stringify(actual) === JSON.stringify(order),
+     `筛选顺序不对：got ${JSON.stringify(actual)}，want ${JSON.stringify(order)}`)
 }
+
+// 6) 上传按钮只在「未上传」档出现
+ok(/canUpload = allowedActions\.includes\('upload'\)/.test(panel), '缺少 canUpload 判定')
+ok(/if \(normalized === 'local_only'\) return \['upload'\]/.test(lib),
+   '纯函数里「未上传」不是只给上传')
 
 // 6) 选「未上传」时**只**给上传按钮（用户明确要求）
 ok(/actionsForState\('local_only'\)|local_only'\) return \['upload'\]/.test(lib) ||
