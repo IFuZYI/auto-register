@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import HTTPException
+from sqlalchemy import or_
 from sqlmodel import Session, select
 
 from core.db import TaskRunModel, current_engine
@@ -192,6 +193,22 @@ _LIST_COLUMNS = (
 _LIVE_STATUSES = ("pending", "running")
 
 
+def _finished_status_filter():
+    """「已结束任务」的 SQL 过滤条件。
+
+    **必须显式带上 `IS NULL`**：SQL 里 `NULL NOT IN (...)` 求值为 NULL 而不是
+    TRUE，只写 `notin_` 会让 NULL 行在「运行中」与「非运行中」两条查询里都不
+    命中，从列表里静默消失。
+
+    抽成函数是为了让测试能检查**生产代码真正用的**那个条件 —— 早先的测试在
+    测试里重写了一遍同样的 WHERE，结果变异掉生产代码它照样绿（实测）。
+    """
+    return or_(
+        TaskRunModel.status.is_(None),
+        TaskRunModel.status.notin_(_LIVE_STATUSES),
+    )
+
+
 def _list_persisted_tasks(*, include_logs: bool = False) -> list[dict]:
     """列出所有任务快照。
 
@@ -228,7 +245,7 @@ def _list_persisted_tasks(*, include_logs: bool = False) -> list[dict]:
             ).all()
             cols = [getattr(TaskRunModel, name) for name in _LIST_COLUMNS]
             light_rows = s.exec(
-                select(*cols).where(TaskRunModel.status.notin_(_LIVE_STATUSES))
+                select(*cols).where(_finished_status_filter())
             ).all()
             snapshots = [_task_run_to_snapshot(row) for row in live_rows]
             snapshots += [

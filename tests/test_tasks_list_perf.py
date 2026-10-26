@@ -319,3 +319,46 @@ def test_list_with_logs_still_reads_heavy_columns(client):
         assert len(row.get("errors") or []) == 3, "include_logs=1 时错误丢了"
     finally:
         client.delete(f"/api/tasks/{tid}")
+
+def test_finished_status_filter_covers_null_rows():
+    """「已结束任务」的过滤条件必须显式处理 NULL。
+
+    列表分两条 SQL：`status IN (pending, running)` 与 `_finished_status_filter()`。
+    SQL 里 `NULL NOT IN (...)` 求值为 NULL 而非 TRUE —— 只写 `notin_` 会让 NULL
+    行两边都不命中，**从列表里静默消失**。
+
+    检查的是**生产代码真正用的那个函数**，不是测试里重写的一份 —— 早先的写法
+    在测试里重建了同样的 WHERE，变异掉生产代码它照样绿（实测踩过）。
+    """
+    from sqlmodel import Session
+
+    from core.db import TaskRunModel, current_engine
+    from services.task_store_io import _finished_status_filter
+
+    with Session(current_engine()) as s:
+        sql = str(
+            _finished_status_filter().compile(
+                s.bind, compile_kwargs={"literal_binds": True}
+            )
+        )
+
+    assert "IS NULL" in sql.upper(), (
+        f"已结束任务的过滤条件没有 IS NULL 分支，NULL 行会消失: {sql}"
+    )
+    assert "NOT IN" in sql.upper(), f"过滤条件里没有 NOT IN: {sql}"
+
+
+def test_live_statuses_do_not_claim_null_rows():
+    """NULL 不能被归到「运行中」一侧 —— 那会让它被当成正在跑而保留明细。"""
+    from sqlmodel import Session, select
+
+    from core.db import TaskRunModel, current_engine
+    from services.task_store_io import _LIVE_STATUSES
+
+    with Session(current_engine()) as s:
+        sql = str(
+            select(TaskRunModel.id)
+            .where(TaskRunModel.status.in_(_LIVE_STATUSES))
+            .compile(s.bind, compile_kwargs={"literal_binds": True})
+        )
+    assert "IS NULL" not in sql.upper(), f"运行中查询里出现了 IS NULL: {sql}"
