@@ -337,7 +337,9 @@ class _GzipStatic(StaticFiles):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self._gzip_cache: dict[str, bytes] = {}
+        #: rel path → (mtime_ns, size, gzip bytes)。存 mtime/size 是为了让缓存
+        #: 能感知文件被替换 —— 见 `_gzip_for`。
+        self._gzip_cache: dict[str, tuple[int, int, bytes]] = {}
         self._precompress()
 
     #: 不值得再压的格式（已经压缩过，再压只烧 CPU 与内存）。
@@ -371,8 +373,53 @@ class _GzipStatic(StaticFiles):
                 # `assets/x.js` 与 `assets/sub/x.js` 会互相串味
                 # （复审实测：两个不同文件返回了同一份字节）。
                 rel = os.path.relpath(path, root).replace(os.sep, "/")
-                self._gzip_cache[rel] = gzip.compress(data, 9)
+                try:
+                    stat = os.stat(path)
+                except OSError:
+                    continue
+                self._gzip_cache[rel] = (
+                    stat.st_mtime_ns, stat.st_size, gzip.compress(data, 9)
+                )
                 budget -= len(data)
+
+    def _gzip_for(self, rel: str) -> bytes | None:
+        """取某个相对路径的压缩体；文件变了就重压。
+
+        为什么不能只在启动时压一次：`npm run build` 会**就地替换** `assets/`
+        （vite `emptyOutDir: true`），文件名还带新 hash。缓存不失效的话，
+        重建后不重启服务就拿不到新变体 —— 用户下到的是未压缩文件（体积差 3 倍）。
+        实测这个现象复发过 2 次（测试跑到一半构建前端时 6 条 gzip 用例变红）。
+
+        失效判据用 `(mtime_ns, size)`：mtime 能覆盖「同名替换」，size 作为
+        兜底（同一秒内的替换 mtime 可能相同）。文件没变时返回**同一个**缓存
+        对象 —— 每次请求都重压等于把 CPU 白送出去。
+        """
+        import gzip
+        import os as _os
+
+        if _os.path.splitext(rel)[1].lower() in self._SKIP_EXT:
+            return None
+        path = _os.path.join(str(self.directory), rel)
+        try:
+            stat = _os.stat(path)
+            if stat.st_size < self.MIN_SIZE:
+                return None
+        except OSError:
+            return None
+
+        key = (stat.st_mtime_ns, stat.st_size)
+        entry = self._gzip_cache.get(rel)
+        if entry is not None and entry[0] == key[0] and entry[1] == key[1]:
+            return entry[2]
+
+        try:
+            with open(path, "rb") as fh:
+                data = fh.read()
+        except OSError:
+            return None
+        compressed = gzip.compress(data, 9)
+        self._gzip_cache[rel] = (key[0], key[1], compressed)
+        return compressed
 
     async def get_response(self, path: str, scope):  # noqa: D102 - Starlette 钩子
         from starlette.responses import Response
@@ -406,9 +453,9 @@ class _GzipStatic(StaticFiles):
             return resp
 
         rel = str(path).replace(os.sep, "/").lstrip("/")
-        compressed = self._gzip_cache.get(rel)
+        compressed = self._gzip_for(rel)
         if compressed is None:
-            # 小文件或读不到（目录/不存在）—— 不压，保持原响应。
+            # 小文件、已压缩格式或读不到（目录/不存在）—— 不压，保持原响应。
             return resp
 
         accept = ""

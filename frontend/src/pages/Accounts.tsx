@@ -463,9 +463,17 @@ export default function Accounts() {
     message.success(`${label}已复制`)
   }
 
+  /**
+   * 列表里是否「有 RT」。
+   *
+   * 后端列表响应把 `refresh_token` 换成了布尔 `has_refresh_token`（正文占
+   * `extra_json` 的大头，列表页只用它判有无 —— 见 `api/accounts.py` 的
+   * `_slim_extra_for_list`）。兼容旧值：老响应里可能还是明文。
+   */
   const getRefreshToken = (record: any): string => {
     try {
       const extra = JSON.parse(record.extra_json || '{}')
+      if (extra.has_refresh_token === true) return 'present'
       return extra.refresh_token || extra.refreshToken || ''
     } catch {
       return ''
@@ -482,6 +490,9 @@ export default function Accounts() {
   const getAccessToken = (record: { token?: string; extra_json?: string } | null | undefined): string => {
     try {
       const extra = JSON.parse(record?.extra_json || '{}')
+      // 列表响应给的是布尔（正文不进列表，见 api/accounts.py）：
+      // 有值就返回一个占位串，调用方只判空/非空。
+      if (extra.has_access_token === true) return 'present'
       const fromExtra = String(extra.access_token || '').trim()
       if (fromExtra) return fromExtra
     } catch {
@@ -880,15 +891,15 @@ export default function Accounts() {
       key: 'refresh_token',
       width: 120,
       render: (_: any, record: any) => {
+        // 列表**只显示有没有**，不渲染 token 正文：正文已从列表响应里裁掉
+        // （它占 `extra_json` 的 62%，见 api/accounts.py）。要看/复制原文请
+        // 点进详情 —— 详情走 `GET /accounts/{id}`，那里仍是全量。
         const rt = getRefreshToken(record)
         if (!rt) return <span style={{ color: 'var(--text-muted)' }}>-</span>
         return (
-          <div style={secretCellStyle}>
-            <Text style={{ ...secretPreviewStyle, fontSize: 11 }} title={rt}>
-              {rt}
-            </Text>
-            <Button type="text" size="small" icon={<CopyOutlined />} onClick={() => copyText(rt)} />
-          </div>
+          <Text type="success" style={{ fontSize: 11 }}>
+            有（详情可复制）
+          </Text>
         )
       },
     },

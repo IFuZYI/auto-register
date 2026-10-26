@@ -112,33 +112,61 @@ def test_conditional_request_returns_304(client):
     )
 
 
-def test_precompression_cache_is_built_once_at_startup(tmp_path):
-    """预压缩缓存是**启动时一次构建**的：构建产物在进程运行期间被替换时，
-    缓存仍持有旧字节，新文件名则完全没有 gzip 变体。
+def test_new_asset_is_picked_up_without_restart(tmp_path):
+    """构建产物在进程运行期间变化时，缓存必须能跟上。
 
-    这是**已知取舍**（不在每个请求上压是为了省 CPU），不是缺陷 —— 但它是
-    真实属性，必须写下来：实测踩到过「测试跑到一半重建前端」导致 6 条 gzip
-    用例红。DN 的部署流程是「构建 → 重启服务」，正好避开这个窗口。
+    这条是**回归测试**：原来预压缩只在启动时做一次、永不失效，后果是
+    「测试跑到一半构建前端」会让 6 条 gzip 用例变红（实测复发 2 次）。
+    那不只是测试问题 —— 真实场景里 `npm run build` 之后不重启服务，
+    用户拿到的新文件就是**未压缩**的（体积差 3 倍）。
 
-    这条测试钉住「缓存不会自己失效」，以免有人误以为改了文件就自动生效。
+    修法是按 mtime 失效：文件变了就重新压，同名替换与新增文件都要覆盖。
     """
+    import gzip
+    import main as main_mod
+
+    original = b"var a=1;\n" * 400
+    (tmp_path / "a.js").write_bytes(original)
+    store = main_mod._GzipStatic(directory=str(tmp_path))
+    assert "a.js" in store._gzip_cache, "首次构建应缓存 a.js"
+    assert gzip.decompress(store._gzip_for("a.js")) == original
+
+    # 1) 同名文件被替换（真实场景：重建后文件名不变）
+    import os
+    import time
+
+    replacement = b"var b=2;\n" * 500
+    (tmp_path / "a.js").write_bytes(replacement)
+    os.utime(tmp_path / "a.js", (time.time() + 10, time.time() + 10))
+    cached = store._gzip_for("a.js")
+    assert cached is not None, "替换后应能取到压缩体"
+    assert gzip.decompress(cached) == replacement, (
+        "仍返回旧字节 —— 构建后未重启服务，用户会拿到过期内容"
+    )
+
+    # 2) 新增文件（真实场景：重建后文件名带新 hash）
+    added = b"var c=3;\n" * 600
+    (tmp_path / "b.js").write_bytes(added)
+    cached_new = store._gzip_for("b.js")
+    assert cached_new is not None, (
+        "新文件没有 gzip 变体 —— 重建后必须重启服务才能压缩（实测复发 2 次）"
+    )
+    assert gzip.decompress(cached_new) == added
+
+    # 3) 已压缩格式仍不压（别为了失效逻辑把这个守卫弄丢）
+    (tmp_path / "c.png").write_bytes(b"\x89PNG" + b"x" * 5000)
+    assert store._gzip_for("c.png") is None, "png 不该被压"
+
+
+def test_cache_still_reuses_when_file_unchanged(tmp_path):
+    """文件没变时必须**复用**缓存 —— 否则等于每个请求都重压，白烧 CPU。"""
     import main as main_mod
 
     (tmp_path / "a.js").write_bytes(b"var a=1;\n" * 400)
     store = main_mod._GzipStatic(directory=str(tmp_path))
-    self_initial = list(store._gzip_cache)
-    assert "a.js" in self_initial, "首次构建应缓存 a.js"
-
-    # 进程运行期间替换同名文件：缓存不会更新
-    (tmp_path / "a.js").write_bytes(b"var b=2;\n" * 400)
-    assert list(store._gzip_cache) == self_initial, (
-        "缓存应当保持不变（这是取舍，不是失效 bug）—— 若这里变了，"
-        "说明有人加了自动失效，需要同步更新文档与部署约定"
-    )
-
-    # 新文件也不会被自动收录
-    (tmp_path / "b.js").write_bytes(b"var c=3;\n" * 400)
-    assert "b.js" not in store._gzip_cache, "新增文件不会被自动预压"
+    first = store._gzip_for("a.js")
+    second = store._gzip_for("a.js")
+    assert first is second, "同一个未变化的文件必须返回同一份缓存对象（不是重新压）"
 
 
 def test_range_request_is_not_served_gzip(client):
@@ -241,4 +269,4 @@ def test_already_compressed_formats_are_skipped(tmp_path):
         f"子目录文件没被压缩，cache keys={list(store._gzip_cache)}"
     )
     # key 是相对路径 —— basename 会让 assets/x.js 与 assets/sub/x.js 串味
-    assert gzip.decompress(store._gzip_cache["sub/b.js"]).startswith(b"var y=2;")
+    assert gzip.decompress(store._gzip_for("sub/b.js")).startswith(b"var y=2;")

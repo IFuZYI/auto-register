@@ -25,6 +25,7 @@ import {
 } from '@ant-design/icons'
 import { getPlatformTagColor, getPlatformLabel } from '@/lib/platforms'
 import { visibleFinishedTasks } from '@/lib/finishedTasks'
+import { pollIntervalMs, shouldTickSeconds } from '@/lib/pollBackoff'
 import { taskKindMeta } from '@/lib/taskKinds'
 import { CLEANUP_ENDPOINTS, RETENTION_OPTIONS, retentionLabel, retentionOptionFromKey } from '@/lib/logCleanup'
 import { apiFetch } from '@/lib/utils'
@@ -122,19 +123,28 @@ export default function RunningTasks() {
     }
   }, [])
 
+  // 轮询间隔跟着「有没有运行中任务」走：实测 715 个任务全结束时页面仍每
+  // 2.5 秒拉一次大响应，60 秒内 24 次请求而内容没变（见 lib/pollBackoff.ts）。
+  const hasActiveForPolling = tasks.some(
+    (t) => t.status === 'running' || t.status === 'pending',
+  )
+
   useEffect(() => {
     load()
     const poll = setInterval(() => {
       load()
-      setNow(Date.now() / 1000)
-    }, 2500)
-    // tick every second for live duration
-    const tick = setInterval(() => setNow(Date.now() / 1000), 1000)
+      if (shouldTickSeconds(hasActiveForPolling)) setNow(Date.now() / 1000)
+    }, pollIntervalMs(hasActiveForPolling))
+    // 每秒刷新「已运行时长」：只在有运行中任务时开 —— 没有秒级变化的数字时
+    // 每秒 setState 只是让整棵树空转重渲染。
+    const tick = shouldTickSeconds(hasActiveForPolling)
+      ? setInterval(() => setNow(Date.now() / 1000), 1000)
+      : null
     return () => {
       clearInterval(poll)
-      clearInterval(tick)
+      if (tick !== null) clearInterval(tick)
     }
-  }, [load])
+  }, [load, hasActiveForPolling])
 
   const isActive = (t: TaskSnapshot) => t.status === 'running' || t.status === 'pending'
   const activeTasks = tasks.filter(isActive)

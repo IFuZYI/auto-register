@@ -144,6 +144,64 @@ def _count_accounts(
     )
 
 
+#: 列表响应里**明文不下发**的 token 键。实测（1006 个账号）：
+#: `session_token` 占 `extra_json` 的 39%（2.53 MB）、`access_token` 23%
+#: （1.48 MB）、`cpa_record` 10%、`cookies` 3%、`id_token` 3%。
+#:
+#: 列表页只拿 AT/RT 判「有没有」（`Accounts.tsx` 的 getAccessToken /
+#: getRefreshToken 只用来显示有无），正文一概不渲染 —— 于是把它们换成布尔，
+#: 详情端点（`GET /accounts/{id}`）仍返回全量。
+_LIST_HEAVY_EXTRA_KEYS = ("session_token", "id_token", "cookies", "cpa_record")
+#: 这两个不是删掉，而是换成 `has_xxx` 布尔。
+_LIST_TOKEN_EXTRA_KEYS = ("access_token", "refresh_token")
+
+
+def _slim_extra_for_list(raw: str) -> str:
+    """把列表用的 `extra_json` 瘦下来。
+
+    只动上面列出的重型键，其余原样保留 —— `chatgpt_local`（state/plan）、
+    `totp_secret`（2FA 状态）、`register_proxy`、`sync_statuses` 等
+    列表页都要读。
+
+    解析失败时原样返回：宁可多传几 KB，也不要让一行脏数据把整个列表打空。
+    """
+    import json as _json
+
+    try:
+        data = _json.loads(raw or "{}")
+    except Exception:
+        return raw
+    if not isinstance(data, dict):
+        return raw
+
+    slim = dict(data)
+    for key in _LIST_HEAVY_EXTRA_KEYS:
+        slim.pop(key, None)
+    for key in _LIST_TOKEN_EXTRA_KEYS:
+        value = str(slim.pop(key, "") or "").strip()
+        slim[f"has_{key}"] = bool(value)
+    # 幂等：已经是布尔标记的条目再跑一次不该变成 False
+    for key in _LIST_TOKEN_EXTRA_KEYS:
+        flag = f"has_{key}"
+        if flag not in slim:
+            slim[flag] = bool(str(data.get(key) or "").strip())
+    try:
+        return _json.dumps(slim, ensure_ascii=False)
+    except Exception:
+        return raw
+
+
+def _slim_account_row(row):
+    """给一行账号做列表瘦身。ORM 行复制一份，不改原对象。"""
+    import json as _json
+
+    payload = dict(row.model_dump()) if hasattr(row, "model_dump") else dict(row)
+    raw = payload.get("extra_json")
+    if isinstance(raw, str):
+        payload["extra_json"] = _slim_extra_for_list(raw)
+    return payload
+
+
 @router.get("")
 def list_accounts(
     platform: Optional[str] = None,
@@ -195,7 +253,13 @@ def list_accounts(
             offset=offset,
         )
 
-    return {"total": total, "page": page, "items": items}
+    # 列表只下发瘦身后的行：重型 token 换布尔（见 `_slim_extra_for_list`）。
+    # 详情端点不走这里，所以 token 正文仍可取。
+    return {
+        "total": total,
+        "page": page,
+        "items": [_slim_account_row(row) for row in items],
+    }
 
 
 @router.post("")

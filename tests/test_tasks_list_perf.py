@@ -263,3 +263,59 @@ def test_list_payload_stays_under_one_megabyte(client):
         for tid in tids:
             client.delete(f"/api/tasks/{tid}")
 
+
+
+# ---------------------------------------------------- SQL 层不取大字段
+#
+# 上面两条只省了**传输**：763 行的 `logs_json` / `errors_json` 仍被
+# `SELECT *` 读进内存再在 Python 里清空 —— 实测 SELECT 86–518ms、
+# 序列化再 200–320ms。改成 SQL 层只取轻量列后：42–82ms（快 6–10 倍）。
+
+
+def test_list_query_does_not_read_heavy_columns(client):
+    """列表查询不该把 `logs_json` / `errors_json` 读进内存。
+
+    用 SQL 语句记录器验证，而不是看耗时 —— 耗时在 CI 上不稳定，但「有没有
+    查这两列」是确定的事实。
+    """
+    from sqlalchemy import event
+    from core.db import current_engine
+
+    statements: list[str] = []
+
+    def _record(conn, cursor, statement, params, context, executemany):
+        statements.append(statement)
+
+    engine = current_engine()
+    event.listen(engine, "before_cursor_execute", _record)
+    try:
+        client.get("/api/tasks")
+    finally:
+        event.remove(engine, "before_cursor_execute", _record)
+
+    touched = [s for s in statements if "task_runs" in s]
+    assert touched, "没抓到 task_runs 的查询语句（记录器没生效）"
+    # 运行中/等待中的任务**允许**读大字段（实时面板要明细），所以只看
+    # 「不带状态过滤」的那条 —— 它取的是全部历史任务，763 行里 99% 是已结束的。
+    unfiltered = [
+        s for s in touched
+        if "logs_json" in s or "errors_json" in s
+    ]
+    heavy_all = [s for s in unfiltered if "WHERE" not in s.upper()]
+    assert not heavy_all, (
+        "全量列表查询仍 SELECT 了 logs_json / errors_json —— 763 行的大字段被"
+        f"读进内存后才清空，白花 6–10 倍时间: {heavy_all[:1]}"
+    )
+
+
+def test_list_with_logs_still_reads_heavy_columns(client):
+    """`?include_logs=1` 必须仍然读大字段 —— 不能为了快把它整个丢了。"""
+    tid = _make_finished_task(client, 7, error_count=3)
+    try:
+        tasks = client.get("/api/tasks?include_logs=1").json()
+        row = next((t for t in tasks if t["id"] == tid), None)
+        assert row is not None
+        assert len(row.get("logs") or []) == 30, "include_logs=1 时日志丢了"
+        assert len(row.get("errors") or []) == 3, "include_logs=1 时错误丢了"
+    finally:
+        client.delete(f"/api/tasks/{tid}")
