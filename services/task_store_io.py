@@ -186,12 +186,19 @@ _LIVE_STATUSES = ("pending", "running")
 def _list_persisted_tasks(*, include_logs: bool = False) -> list[dict]:
     """列出所有任务快照。
 
-    `include_logs=False`（默认）时，**已结束**任务的日志不下发 —— 实测
-    `/api/tasks` 一次返回 253 个任务、415 KB，其中 52% 是历史日志，而前端
-    每 2.5 秒轮询一次，主线程被拖到帧间隔 4–8 秒（正常 16ms）。
-    历史任务的日志点开单条时再取（`GET /api/tasks/{id}` 仍带全量）。
+    `include_logs=False`（默认）时，**已结束**任务的 `logs` 与 `errors`
+    都不下发。实测两轮：
 
-    仍在跑/等待的任务**保留**日志：那是实时面板要用的，裁掉就没得看了。
+    - 第一轮：253 个任务、415 KB，其中 52% 是历史日志；
+    - 第二轮（日志裁掉后）：仍有 5.5–6.1 MB，其中 **`errors` 占 4.49 MB
+      （96%）**，最大单条 37 KB，而 715 个任务里**运行中 0 个**。
+
+    列表页对 `errors` 只用 `.length` 显示「✗ 失败 N」，明细在单条详情里看。
+
+    两个字段共用一个开关是刻意的：拆成 `include_logs` + `include_errors`
+    会得到四种组合，而没有任何调用方需要「只要其中一个」。
+
+    仍在跑/等待的任务**保留**两者：那是实时面板要用的，裁掉就没得看了。
     """
     with Session(current_engine()) as s:
         rows = s.exec(select(TaskRunModel)).all()
@@ -200,6 +207,7 @@ def _list_persisted_tasks(*, include_logs: bool = False) -> list[dict]:
         for snap in snapshots:
             if str(snap.get("status") or "") not in _LIVE_STATUSES:
                 snap["logs"] = []
+                snap["errors"] = []
     snapshots.sort(
         key=lambda item: (
             {"running": 0, "pending": 1, "done": 2, "failed": 3, "stopped": 4}.get(
