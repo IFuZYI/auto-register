@@ -45,41 +45,54 @@ logger = logging.getLogger(__name__)
 
 
 def _alias_to_dict(
-    row: ICloudAliasModel, account_email: str, *, registered: Optional[set[str]] = None
+    row: Any, account_email: str, *, registered: Optional[set[str]] = None
 ) -> dict[str, Any]:
+    """别名行 → 界面用的 dict。
+
+    **接受模型或 dict**：JSON 后端下仓储返回 dict，SQLite 下是
+    `ICloudAliasModel` —— 两种形状都要能读，否则接一种后端就炸另一种。
+    """
+    def _v(name: str, default: Any = None) -> Any:
+        if isinstance(row, dict):
+            got = row.get(name)
+        else:
+            got = getattr(row, name, None)
+        return default if got is None else got
+
     return {
-        "id": row.id,
-        "account_id": row.account_id,
+        "id": _v("id"),
+        "account_id": _v("account_id"),
         "account_email": account_email,
-        "address": row.address,
-        "label": row.label,
-        "note": row.note,
-        "status": row.status,
+        "address": _v("address"),
+        "label": _v("label"),
+        "note": _v("note"),
+        "status": _v("status"),
         # 来源：local（本机直连 Apple）/ remote（远程 icloud-hme 仓库）。
         # 界面按它显示「本地 / 远程」标签并做来源筛选。
-        "source": getattr(row, "source", "") or "local",
+        "source": _v("source", "") or "local",
         # 老库（pool_status 列补上之前）没有这个字段，按「未入池」处理最保守：
         # 当作可用会把一批从没被用户确认过的地址直接送进注册取号池。
-        "pool_status": getattr(row, "pool_status", "") or POOL_STATUS_UNPOOLED,
+        "pool_status": _v("pool_status", "") or POOL_STATUS_UNPOOLED,
         # 被哪些平台消耗过（`,grok,chatgpt,`）。界面用它显示「谁用过」，
         # 也用来解释「为什么这个 used 号还能被某个平台领到」。
-        "used_platforms": getattr(row, "used_platforms", "") or "",
+        "used_platforms": _v("used_platforms", "") or "",
         # `accounts` 表里的权威注册证据（跨库），与上面的记账是两回事：
         # 任务中途崩掉会让记账缺项，这里查出来的才是「真的注册过」。
         # 界面按它显示「已注册平台」列并做平台筛选。
         "registered_platforms": sorted(registered or ()),
-        "provider_id": row.provider_id,
-        "share_token": row.share_token or "",
-        "created_at": _as_utc(row.created_at).isoformat() if row.created_at else None,
+        "provider_id": _v("provider_id"),
+        "share_token": _v("share_token", "") or "",
+        "created_at": _as_utc(_v("created_at")).isoformat() if _v("created_at") else None,
     }
 
 
 def list_aliases(account_id: Optional[int] = None) -> list[dict[str, Any]]:
+    # 别名行走**仓储**（按后端分派）；主号邮箱仍查本平台库（它不在别名表里）。
+    from core.db.icloud_alias_repository import icloud_alias_repository
+
+    rows = icloud_alias_repository.list_aliases(account_id)
+
     with platform_session("icloud") as session:
-        query = select(ICloudAliasModel)
-        if account_id is not None:
-            query = query.where(ICloudAliasModel.account_id == int(account_id))
-        rows = session.exec(query.order_by(ICloudAliasModel.id.desc())).all()
         emails = {
             row.id: row.email
             for row in session.exec(select(ICloudAccountModel)).all()
@@ -87,10 +100,11 @@ def list_aliases(account_id: Optional[int] = None) -> list[dict[str, Any]]:
     # 「这个地址注册过哪些平台」的权威证据在 `accounts` 表（跨库），不是池里的
     # `used_platforms` 记账。界面要按平台筛选、也要在取号前比对，所以列表接口
     # 一并把它算出来；一次批量查询，不是每行一次。
-    registered = _registered_platforms_for([row.address for row in rows])
+    registered = _registered_platforms_for([row["address"] for row in rows])
     return [
         _alias_to_dict(
-            row, emails.get(row.account_id, ""), registered=registered.get(str(row.address or "").strip().lower())
+            row, emails.get(row.get("account_id"), ""),
+            registered=registered.get(str(row.get("address") or "").strip().lower()),
         )
         for row in rows
     ]

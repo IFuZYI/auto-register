@@ -154,3 +154,43 @@ class ICloudAliasRepositoryContractTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NoFakeOrmAdapterTests(unittest.TestCase):
+    """不许做一个「看起来像 SQLModel 会话」的 JSON 适配器。
+
+    ## 为什么专门钉这条
+
+    我试过：给 `claim_alias` 那种复杂逻辑包一个适配器，把
+    `exec/get/add/commit` 映射到 `JsonTableStore`，让既有代码不改就跑在
+    JSON 上。**它静默忽略了 `where` 条件**（实测）：
+
+        查询 account_id=1 + status=active → 返回 2 行
+          a@x.c | account_id: 1
+          b@x.c | account_id: 2   ← 主号 2 的地址！
+
+    取号因此会把**别的主号的地址**发给注册任务 —— 而且不会报错。这是比
+    「功能没接」严重得多的失败模式，所以整块撤掉。
+
+    正确的做法是让业务逻辑改用**中立 clause**（`core/storage/query.py`），
+    两个执行器共用一份定义；而不是伪造一个会说谎的 ORM。
+    """
+
+    def test_no_session_adapter_exists(self):
+        import core.db.icloud_alias_repository as mod
+
+        for name in ("_JsonAliasSession", "_JsonAliasRow", "_JsonAliasResult", "_apply_statement"):
+            self.assertFalse(
+                hasattr(mod, name),
+                f"{name} 又出现了 —— 这类适配器会静默忽略 where 条件",
+            )
+
+    def test_repository_has_no_raw_session_escape_hatch(self):
+        """也不许开「返回原生会话」的口子：JSON 分支拿不到真实会话，
+        只能伪造，而伪造就是上面那个坑。"""
+        from core.db.icloud_alias_repository import ICloudAliasRepository
+
+        self.assertFalse(
+            hasattr(ICloudAliasRepository, "raw_session"),
+            "raw_session 又出现了 —— JSON 后端下它只能返回伪造的会话",
+        )
