@@ -1496,7 +1496,7 @@ export default function Accounts() {
                 label="只补缺 RT 的账号"
                 initialValue={true}
                 valuePropName="checked"
-                extra="关掉会给已有 RT 的账号也重新换一次，没必要时别开"
+                tooltip="关掉会给已有 RT 的账号也重新换一次，没必要时别开"
               >
                 <Switch />
               </Form.Item>
@@ -1505,7 +1505,7 @@ export default function Accounts() {
                 label="会话失效时用邮箱密码重登"
                 initialValue={true}
                 valuePropName="checked"
-                extra="关掉则只尝试复用会话，快但成功率低"
+                tooltip="关掉则只尝试复用会话，快但成功率低"
               >
                 <Switch />
               </Form.Item>
@@ -1516,7 +1516,7 @@ export default function Accounts() {
                 name="delay_seconds"
                 label="每个账号间隔(秒)"
                 initialValue={5}
-                extra="连续打授权链容易触发风控，建议留几秒"
+                tooltip="连续打授权链容易触发风控，建议留几秒"
               >
                 <InputNumber min={0} precision={1} step={1} style={{ width: '100%' }} />
               </Form.Item>
@@ -1561,7 +1561,7 @@ export default function Accounts() {
                 name="delay_seconds"
                 label="每个账号间隔(秒)"
                 initialValue={5}
-                extra="连续打会话/授权端点容易触发风控，建议留几秒"
+                tooltip="连续打会话/授权端点容易触发风控，建议留几秒"
               >
                 <InputNumber min={0} precision={1} step={1} style={{ width: '100%' }} />
               </Form.Item>
