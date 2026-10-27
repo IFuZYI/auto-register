@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -18,6 +19,8 @@ from sqlalchemy import or_
 from sqlmodel import Session, select
 
 from core.db import TaskRunModel, current_engine
+
+logger = logging.getLogger(__name__)
 
 
 
@@ -336,6 +339,14 @@ def _list_persisted_tasks(*, include_logs: bool = False) -> list[dict]:
 
 
 def _finalize_orphan_tasks() -> None:
+    # **JSON 后端走自己的路径**：数据在 `task_runs.json`，扫 SQLite 的
+    # `task_runs` 表会 `no such table`（实测，让 JSON 部署起不来）。
+    from core.db.task_repository import task_repository as _task_repo
+
+    if _task_repo._store() is not None:
+        _finalize_orphan_tasks_json()
+        return
+
     with Session(current_engine()) as s:
         rows = s.exec(
             select(TaskRunModel).where(TaskRunModel.status.in_(["pending", "running"]))
@@ -359,6 +370,34 @@ def _finalize_orphan_tasks() -> None:
             changed = True
         if changed:
             s.commit()
+
+
+def _finalize_orphan_tasks_json() -> None:
+    """JSON 后端下的孤儿收尾（与 SQLite 版同一规则）。
+
+    「孤儿」= 库里是 pending/running、但内存 store 里没有 —— 服务重启后
+    那些任务已经没人推进了，留在列表里会永远显示「运行中」。
+    """
+    from core.db.task_repository import task_repository as _task_repo
+
+    store = _task_repo._store()
+    if store is None:
+        return
+    changed = False
+    for record in store.find_in("status", ["pending", "running"]):
+        task_id = str(record.get("id") or "")
+        if not task_id or _store().exists(task_id):
+            continue
+        store.update(
+            task_id,
+            {
+                "status": "stopped",
+                "error": str(record.get("error") or "") or "任务因服务重启中断",
+            },
+        )
+        changed = True
+    if changed:
+        logger.info("已收尾 JSON 后端下的孤儿任务")
 
 
 def _ensure_task_exists(task_id: str) -> None:

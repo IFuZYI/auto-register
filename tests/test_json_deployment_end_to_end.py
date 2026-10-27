@@ -116,8 +116,19 @@ class JsonDeploymentEndToEndTests(unittest.TestCase):
             f"没生成 proxies.json —— 代理没落在 JSON 里（session 门控 bug？）",
         )
 
-        # **SQLite 里不该有数据**：文件可能因 schema 初始化而存在，但每张表
-        # 都必须是空的 —— 有数据就说明某条路径还在写 SQLite。
+        # **JSON 部署下连 .db 文件都不该有**：全部 7 张表接线后，`init_db`
+        # 不再建库（见 `core.storage.all_tables_use_json`）。
+        #
+        # 实测踩过的三层：create_all → run_migrations → 启动时的
+        # grok 迁移 / 任务孤儿收尾，都在 JSON 部署下连过 SQLite。
+        db_files = sorted(str(f.relative_to(self.data)) for f in self.data.rglob("*.db"))
+        self.assertEqual(
+            db_files, [],
+            f"JSON 部署下不该创建 .db 文件，但有: {db_files}",
+        )
+
+        # 兜底：即使将来某处又建了空库，也**不许有数据**
+        import sqlite3
         import sqlite3
 
         for db_file in self.data.rglob("*.db"):

@@ -73,6 +73,17 @@ def migrate_stored_accounts(log=None) -> int:
     from sqlmodel import select
 
     from core.db import AccountModel, platform_session
+    from core.storage import all_tables_use_json
+
+    # **JSON 后端下没有 SQLite 表可迁**：数据在 `accounts.json` 里，
+    # 这个迁移扫的是 `accounts` 表 —— 硬跑会 `no such table: accounts`
+    # （实测，让 JSON 部署起不来）。
+    #
+    # 那些死字段（cpa_record / access_token / …）在 JSON 里同样存在，
+    # 但清理时机应该在仓储层，不是这个 SQLite 迁移。见 `clean_grok_extra`。
+    if all_tables_use_json():
+        log("grok 迁移: JSON 后端，跳过 SQLite 迁移")
+        return 0
 
     changed_count = 0
     with platform_session("grok") as session:

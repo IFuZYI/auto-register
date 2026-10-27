@@ -136,20 +136,29 @@ def init_db() -> None:
     from sqlmodel import SQLModel
 
     from core.config_store import ConfigItem
+    from core.storage import all_tables_use_json
 
-    SQLModel.metadata.create_all(
-        current_engine(),
-        tables=[*INFRA_TABLES, *ACCOUNT_TABLES, ConfigItem.__table__],
-    )
+    # **全部表都走 JSON 时不建库**：否则会留下一批永远为空的 `.db` 文件，
+    # 让用户以为「设了 json 怎么还有 .db」。（实测：7/7 接线后那些文件里
+    # 每张表都是 0 行。）
+    #
+    # 只要有一张表没接线就必须建 —— 否则未接线的表直接报 no such table。
+    if not all_tables_use_json():
+        SQLModel.metadata.create_all(
+            current_engine(),
+            tables=[*INFRA_TABLES, *ACCOUNT_TABLES, ConfigItem.__table__],
+        )
 
-    # 平台库：注册平台建账号表，邮箱池建池表。
-    # 注意别把池表也建到账号库里 —— 那正是「默认库里有张永远为空的
-    # outlook_accounts」这种混乱的来源。
-    for platform in platform_database_registry.configured_platforms():
-        tables = MAILBOX_POOL_TABLES.get(platform, ACCOUNT_TABLES)
-        platform_database_registry.register_schema(platform, tables)
+        # 平台库：注册平台建账号表，邮箱池建池表。
+        # 注意别把池表也建到账号库里 —— 那正是「默认库里有张永远为空的
+        # outlook_accounts」这种混乱的来源。
+        for platform in platform_database_registry.configured_platforms():
+            tables = MAILBOX_POOL_TABLES.get(platform, ACCOUNT_TABLES)
+            platform_database_registry.register_schema(platform, tables)
 
-    run_migrations()
+        # 迁移只对 SQLite 有意义（它改的是既有库的表结构）。JSON 部署下
+        # 跑它只会白白创建/打开 `.db` 文件。
+        run_migrations()
 
 
 def close_all() -> None:

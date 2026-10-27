@@ -22,6 +22,13 @@ class ExportEndpointTests(unittest.TestCase):
     def setUp(self):
         from api.accounts import router
 
+        # **自己保证表存在**：JSON 后端下 `init_db` 不再建库（数据全在
+        # JSON），而这个用例直接用 `core.db.engine` 造数据 —— 不建表就会
+        # `no such table: accounts`（实测）。
+        from sqlmodel import SQLModel
+
+        SQLModel.metadata.create_all(engine, tables=[AccountModel.__table__])
+
         with Session(engine) as session:
             session.exec(delete(AccountModel))
             session.add_all(

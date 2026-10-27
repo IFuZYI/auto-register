@@ -69,6 +69,47 @@ def resolve_backend_name(
     return BACKEND_SQLITE if db_exists else DEFAULT_BACKEND
 
 
+def all_tables_use_json() -> bool:
+    """**所有**表都已接线 JSON 吗？是的话就不必建 SQLite 表了。
+
+    用来避免「JSON 部署下仍创建空的 `.db` 文件」—— 那些文件不含任何数据
+    （实测每张表 0 行），但会让用户以为「设了 json 怎么还有 .db」。
+
+    判据是「配置 + 全部白名单表都走 JSON」：
+    - 配置走 JSON（`resolve_backend_name()` == json）；
+    - 所有模型表都在 `JSON_TABLES` 里（账号、代理、任务、iCloud、邮箱池）。
+
+    只要有一张表没接线就返回 False —— 那种情况下必须建库，否则未接线的表
+    会直接报「no such table」。
+    """
+    if resolve_backend_name(db_exists=sqlite_db_exists()) != BACKEND_JSON:
+        return False
+
+    from core.storage.json_table import JSON_TABLES
+
+    # **不读 `SQLModel.metadata`**：`init_db()` 在模型还没被 import 时就会
+    # 调这里，metadata 是空的 → `required` 为空 → 恒真；而等到模型 import
+    # 之后再看又不同。两种时机给出不同答案（实测踩过）。
+    #
+    # 用**固定的表名清单**：它描述的是「这个项目有哪些表」，与 import 顺序
+    # 无关。加表时这里要跟着加 —— 漏了会导致该表在 JSON 部署下报
+    # `no such table`（比「多建一个空库」严重），所以清单放在最显眼处。
+    #
+    # `accounts` 单独列：它走 `AccountRepository` 自己的分派
+    # （`AccountStoreJson`），不经过 `JSON_TABLES`。
+    required = {
+        "accounts",
+        "proxies",
+        "task_runs",
+        "task_logs",
+        "icloud_accounts",
+        "icloud_aliases",
+        "outlook_accounts",
+    }
+    covered = set(JSON_TABLES) | {"accounts"}
+    return required.issubset(covered)
+
+
 def sqlite_db_exists() -> bool:
     """当前 engine 指向的 SQLite 库文件是否已存在。
 
