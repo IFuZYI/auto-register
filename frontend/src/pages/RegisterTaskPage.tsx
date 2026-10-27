@@ -388,9 +388,13 @@ export default function RegisterTaskPage() {
             name="mail_provider"
             label="邮箱服务"
             rules={[{ required: true }]}
-            extra={MAIL_PROVIDER_LABELS[globalMailProvider]
-              ? `默认：${MAIL_PROVIDER_LABELS[globalMailProvider]}（改后只影响本次任务）`
-              : undefined}
+            // 说明收进 tooltip（用户要求「注释放 Tooltip，UI 文本简洁」）。
+            // 上面那处 `extra` 是**加载状态**、不是说明，走 spinner 语义，保留。
+            tooltip={
+              MAIL_PROVIDER_LABELS[globalMailProvider]
+                ? `默认：${MAIL_PROVIDER_LABELS[globalMailProvider]}（改后只影响本次任务）`
+                : undefined
+            }
           >
             <Select options={MAIL_PROVIDER_OPTIONS} placeholder="请选择邮箱服务" />
           </Form.Item>
@@ -399,7 +403,7 @@ export default function RegisterTaskPage() {
               name="mail_import_source"
               label="导入类型"
               rules={[{ required: true }]}
-              extra="Outlook / Hotmail / MailAPI URL 共用同一个微软号池；三类账号互不顶替。"
+              tooltip="Outlook / Hotmail / MailAPI URL 共用同一个微软号池；三类账号互不顶替。"
             >
               <Select options={MAIL_IMPORT_SOURCE_OPTIONS} />
             </Form.Item>
@@ -408,7 +412,7 @@ export default function RegisterTaskPage() {
             <Form.Item
               name="outlook_backend"
               label="微软收信方式"
-              extra="默认 Graph；无 OAuth 凭据的账号自动回退 IMAP。"
+              tooltip="默认 Graph；无 OAuth 凭据的账号自动回退 IMAP。"
             >
               <Select
                 options={[
@@ -423,7 +427,7 @@ export default function RegisterTaskPage() {
               <Form.Item
                 name="icloud_local_account_id"
                 label="主号"
-                extra="留空时用第一个启用的主号（主号在「邮箱服务」页登录）。"
+                tooltip="留空时用第一个启用的主号（主号在「邮箱服务」页登录）。"
               >
                 <Select
                   allowClear
@@ -447,7 +451,7 @@ export default function RegisterTaskPage() {
               <Form.Item
                 name="icloud_remote_account_id"
                 label="远端账号"
-                extra="留空时用第一个可用的远程账号（在「邮箱服务」页接入）。"
+                tooltip="留空时用第一个可用的远程账号（在「邮箱服务」页接入）。"
               >
                 <Select
                   allowClear
