@@ -684,6 +684,86 @@ def _run_backfill_rt(task_id: str, account_ids: list[int], req: BackfillRtTaskRe
     )
 
 
+def _run_probe_status(task_id: str, account_ids: list[int], req: "ProbeStatusTaskRequest"):
+    """批量检测本地状态。逐号跑，可停可跳。
+
+    走 `probe_local_status` 动作的**完整实现**（与单账号按钮同一条路径），
+    结果落库复用 `_apply_action_result` —— 状态策略（封禁/过期/失效判定）
+    只在那一处，两套路径不会漂移。
+
+    与 `_run_refresh_token` 的差别：这个动作不发写请求给上游（只读探测），
+    所以默认间隔可以很小（1 秒）；但探测本身要打一次 CLI Proxy，仍然串行
+    更稳（并发可调）。
+    """
+    from api import tasks as _api  # 延迟 import：patch 打在 api.tasks 上必须被看到
+    from core.config_store import config_store
+
+    base_config = config_store.get_all() or {}
+
+    def _handle(*, account_id, fields, proxy, control, attempt_id) -> AttemptResult:
+        from api.actions import _apply_action_result, _result_message, _to_platform_account
+        from core.base_platform import RegisterConfig
+        from core.db import AccountModel, platform_session
+        from core.registry import get
+
+        email = fields["email"]
+        control.checkpoint(attempt_id=attempt_id)
+
+        PlatformCls = get("chatgpt")
+        instance = PlatformCls(config=RegisterConfig(extra=base_config))
+        if proxy:
+            instance.config.proxy = proxy
+        instance._log_fn = lambda msg: _api._log(task_id, f"  {msg}")
+        instance.bind_task_control(control)
+        instance._task_attempt_token = attempt_id
+
+        # 探测要打网络（几秒），不占着数据库连接 —— 与刷新/补 RT 同款。
+        with platform_session("chatgpt") as s:
+            row = s.get(AccountModel, account_id)
+            if row is None:
+                _api._log(task_id, f"[SKIP] 账号 #{account_id} 不存在")
+                return AttemptResult.skipped("账号不存在")
+            plat_account = _to_platform_account(row)
+
+        result = instance.execute_action("probe_local_status", plat_account, {})
+
+        with platform_session("chatgpt") as s:
+            account = s.get(AccountModel, account_id)
+            if account is not None:
+                _apply_action_result("chatgpt", "probe_local_status", account, result, s)
+                s.add(account)
+                s.commit()
+
+        if result.get("ok"):
+            message = _result_message(result) or "检测完成"
+            _api._log(task_id, f"[OK] {email} {message}")
+            _api._save_task_log(
+                "chatgpt", email, "success", detail={"action": "probe_local_status"}
+            )
+            return AttemptResult.success()
+
+        message = str(result.get("error") or _result_message(result) or "检测失败")
+        _api._log(task_id, f"[FAIL] {email} {message}")
+        _api._save_task_log(
+            "chatgpt",
+            email,
+            "failed",
+            error=message,
+            detail={"action": "probe_local_status"},
+        )
+        return AttemptResult.failed(f"{email}: {message}")
+
+    _run_account_batch_task(
+        task_id,
+        account_ids,
+        label="检测本地状态",
+        concurrency=req.concurrency,
+        delay_seconds=req.delay_seconds,
+        proxy=req.proxy,
+        handle_account=_handle,
+    )
+
+
 def _run_refresh_token(task_id: str, account_ids: list[int], req: RefreshTokenTaskRequest):
     """批量刷新 Token。逐号跑，可停可跳，进度和日志复用注册任务那套。
 

@@ -729,6 +729,34 @@ export default function Accounts() {
     }
 
     setStatusSyncLoading(loadingKey)
+
+    // 「检测本地状态」跑成**任务**（用户要求「检测本地状态这种也变成任务」）：
+    // 每个号要真打一次上游探测，几百个号同步跑会把请求挂住几分钟且界面无
+    // 反馈。走 /tasks/probe-status 后能在「任务运行」页看实时日志、可停止。
+    // Plus 试用检测仍是同步批量（单次请求，量小）。
+    if (kind === 'probe') {
+      try {
+        const created = (await apiFetch('/tasks/probe-status', {
+          method: 'POST',
+          body: JSON.stringify(body),
+        })) as { task_id: string; total: number }
+        message.success({
+          content: `${scopeLabel}${actionLabel}已开始（${created.total} 个），可在「任务运行」查看进度`,
+          key: toastKey,
+        })
+        await load()
+        return
+      } catch (e: unknown) {
+        message.error({
+          content: `${actionLabel}失败: ${e instanceof Error ? e.message : e}`,
+          key: toastKey,
+        })
+        return
+      } finally {
+        setStatusSyncLoading('')
+      }
+    }
+
     message.loading({ content: `${scopeLabel}${actionLabel}进行中...`, key: toastKey, duration: 0 })
     try {
       const result = await apiFetch(`/actions/${currentPlatform}/${actionId}/batch`, {

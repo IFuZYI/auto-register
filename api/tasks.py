@@ -160,6 +160,26 @@ class RefreshTokenTaskRequest(BaseModel):
     proxy: Optional[str] = None
 
 
+class ProbeStatusTaskRequest(BaseModel):
+    """批量检测本地状态的任务参数。
+
+    与「补 RT」「刷新 Token」同款：勾选优先，否则按列表筛选范围。
+    `probe_local_status` 要真打一次上游请求（每个号几秒），几百个号同步跑
+    会把请求挂住几分钟且界面无反馈 —— 所以改成任务。
+    """
+
+    account_ids: list[int] = Field(default_factory=list)
+    all_filtered: bool = False
+    email: str = ""
+    status: str = ""
+    plus_status: str = ""
+    created_at_start: Optional[UtcDatetime] = None
+    created_at_end: Optional[UtcDatetime] = None
+    concurrency: int = 1
+    delay_seconds: float = 1
+    proxy: Optional[str] = None
+
+
 # ── 拆包后的重导出：测试按名字 patch 这些目标，必须仍能从 api.tasks 取到 ──
 from services.task_store_io import (  # noqa: E402,F401
     _ensure_task_exists,
@@ -183,6 +203,7 @@ from services.task_runners import (  # noqa: E402,F401
     _run_account_batch_task,
     _run_backfill_rt,
     _run_bind_2fa,
+    _run_probe_status,
     _run_refresh_token,
     _run_register,
 )
@@ -361,6 +382,61 @@ def create_backfill_rt_task(req: BackfillRtTaskRequest, background_tasks: Backgr
     if missing_ids:
         _log(task_id, f"忽略不存在的账号: {missing_ids}")
     background_tasks.add_task(_run_backfill_rt, task_id, account_ids, req)
+    return {"task_id": task_id, "total": len(account_ids), "missing_ids": missing_ids}
+
+
+@router.post("/probe-status")
+def create_probe_status_task(
+    req: ProbeStatusTaskRequest, background_tasks: BackgroundTasks
+):
+    """批量检测本地状态（跑成任务，可停可看日志）。
+
+    与「补 RT」「刷新 Token」同一套骨架：解析目标 → 建任务 → 后台跑。
+    单账号按钮仍走 `/actions/{platform}/probe_local_status`（即时返回），
+    两条路径共用 `_apply_action_result` 落状态 —— 判定口径不会漂移。
+    """
+    from core.db import platform_session
+    from services.chatgpt_rt_backfill import select_backfill_targets
+
+    with platform_session("chatgpt") as s:
+        try:
+            accounts, missing_ids = select_backfill_targets(
+                s,
+                account_ids=req.account_ids,
+                all_filtered=req.all_filtered,
+                email=req.email,
+                status=req.status,
+                plus_status=req.plus_status,
+                created_at_start=req.created_at_start,
+                created_at_end=req.created_at_end,
+                # 检测状态与「有没有 RT」无关 —— 全量都要检测
+                only_missing_rt=False,
+            )
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        account_ids = [int(row.id) for row in accounts if row.id]
+
+    if not account_ids:
+        raise HTTPException(400, "所选账号不存在" if missing_ids else "没有匹配的账号")
+
+    task_id = f"probe_status_{int(time.time() * 1000)}"
+    _task_store.create(
+        task_id,
+        platform="chatgpt",
+        total=len(account_ids),
+        source="probe_status",
+        meta={
+            "kind": "probe_status",
+            "concurrency": req.concurrency,
+            "delay_seconds": req.delay_seconds,
+            "missing_ids": missing_ids,
+        },
+    )
+    _persist_task_snapshot(task_id)
+    _log(task_id, f"待检测状态账号 {len(account_ids)} 个")
+    if missing_ids:
+        _log(task_id, f"忽略不存在的账号: {missing_ids}")
+    background_tasks.add_task(_run_probe_status, task_id, account_ids, req)
     return {"task_id": task_id, "total": len(account_ids), "missing_ids": missing_ids}
 
 
