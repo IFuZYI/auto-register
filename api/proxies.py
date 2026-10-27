@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from sqlmodel import Session, select
 from pydantic import BaseModel
 from typing import Optional
-from core.db import ProxyModel, get_session
+from core.db import get_session, proxy_repository
 from core.proxy_pool import proxy_pool
 
 router = APIRouter(prefix="/proxies", tags=["proxies"])
@@ -24,20 +24,15 @@ class ProxyBatchDelete(BaseModel):
 
 @router.get("")
 def list_proxies(session: Session = Depends(get_session)):
-    items = session.exec(select(ProxyModel)).all()
-    return items
+    return proxy_repository.list_all(session=session)
 
 
 @router.post("")
 def add_proxy(body: ProxyCreate, session: Session = Depends(get_session)):
-    existing = session.exec(select(ProxyModel).where(ProxyModel.url == body.url)).first()
-    if existing:
+    # 读写都走仓储 —— 只接写不接读会「写 JSON、读 SQLite」看不到刚写的行
+    if proxy_repository.find_by_url(body.url, session=session):
         raise HTTPException(400, "代理已存在")
-    p = ProxyModel(url=body.url, region=body.region)
-    session.add(p)
-    session.commit()
-    session.refresh(p)
-    return p
+    return proxy_repository.add(url=body.url, region=body.region, session=session)
 
 
 @router.post("/bulk")
@@ -47,21 +42,19 @@ def bulk_add_proxies(body: ProxyBulkCreate, session: Session = Depends(get_sessi
         url = url.strip()
         if not url:
             continue
-        existing = session.exec(select(ProxyModel).where(ProxyModel.url == url)).first()
+        existing = proxy_repository.find_by_url(url, session=session)
         if not existing:
-            session.add(ProxyModel(url=url, region=body.region))
+            proxy_repository.add(url=url, region=body.region, session=session)
             added += 1
-    session.commit()
     return {"added": added}
 
 
 @router.delete("/{proxy_id}")
 def delete_proxy(proxy_id: int, session: Session = Depends(get_session)):
-    p = session.get(ProxyModel, proxy_id)
-    if not p:
+    found = proxy_repository.get_many([proxy_id], session=session)
+    if not found:
         raise HTTPException(404, "代理不存在")
-    session.delete(p)
-    session.commit()
+    proxy_repository.delete(found[0], session=session)
     return {"ok": True}
 
 
@@ -73,11 +66,10 @@ def batch_delete_proxies(body: ProxyBatchDelete, session: Session = Depends(get_
     if len(ids) > 1000:
         raise HTTPException(400, "单次最多删除 1000 条代理")
 
-    proxies = session.exec(select(ProxyModel).where(ProxyModel.id.in_(ids))).all()
+    proxies = proxy_repository.get_many(ids, session=session)
     found_ids = {p.id for p in proxies if p.id is not None}
     for p in proxies:
-        session.delete(p)
-    session.commit()
+        proxy_repository.delete(p, session=session)
 
     return {
         "deleted": len(found_ids),
@@ -88,12 +80,12 @@ def batch_delete_proxies(body: ProxyBatchDelete, session: Session = Depends(get_
 
 @router.patch("/{proxy_id}/toggle")
 def toggle_proxy(proxy_id: int, session: Session = Depends(get_session)):
-    p = session.get(ProxyModel, proxy_id)
-    if not p:
+    found = proxy_repository.get_many([proxy_id], session=session)
+    if not found:
         raise HTTPException(404, "代理不存在")
+    p = found[0]
     p.is_active = not p.is_active
-    session.add(p)
-    session.commit()
+    proxy_repository.save(p, session=session)
     return {"is_active": p.is_active}
 
 

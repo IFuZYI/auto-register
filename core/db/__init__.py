@@ -159,3 +159,5 @@ def close_all() -> None:
         engine.dispose()
     except Exception:
         pass
+
+from .proxy_repository import proxy_repository  # noqa: F401

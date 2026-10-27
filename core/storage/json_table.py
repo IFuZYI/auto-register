@@ -168,7 +168,10 @@ __all__ = ["JsonTableStore", "META_TABLE"]
 #:   2. 把散落的 `session.exec(select(Model)...)` 改成仓储调用；
 #:   3. 把 `session.add(...)` 改成这里的 `save_model(...)`；
 #:   4. 最后把表名加进下面这个集合。
-JSON_TABLES: frozenset[str] = frozenset()
+JSON_TABLES: frozenset[str] = frozenset({
+    # 读写都走 `core.db.proxy_repository`（见该模块 docstring）
+    "proxies",
+})
 
 
 def _data_dir() -> Path:
@@ -188,11 +191,12 @@ def table_wants_json(table: str) -> bool:
     """该表当前是否走 JSON 后端。"""
     if table not in JSON_TABLES:
         return False
-    from core.paths import DATA_DIR
-    from core.storage import BACKEND_JSON, resolve_backend_name
+    from core.storage import BACKEND_JSON, resolve_backend_name, sqlite_db_exists
 
-    db_exists = (DATA_DIR / "account_manager.db").exists()
-    return resolve_backend_name(db_exists=db_exists) == BACKEND_JSON
+    # **用共享判据**（从 engine 的 URL 解析）。第一版用了固定路径
+    # `DATA_DIR/account_manager.db`，测试环境（库在临时目录）看不到它 →
+    # 判成「全新部署」→ 代理表静默切到 JSON，3 个无关测试变红。
+    return resolve_backend_name(db_exists=sqlite_db_exists()) == BACKEND_JSON
 
 
 def store_for(table: str) -> Optional[JsonTableStore]:

@@ -187,15 +187,60 @@ class TableWantsJsonTests(unittest.TestCase):
 
         with mock.patch.dict(os.environ, {"STORAGE_BACKEND": "json"}, clear=False):
             with mock.patch("core.storage.resolve_backend_name", lambda *a, **k: "json"):
-                # **当前集合是空的**：其余表还没接线（读写都要接才算）。
-                # 一旦有人把表加进来，这条会变红提醒他确认读路径也接了。
-                self.assertEqual(
-                    set(JSON_TABLES), set(),
-                    "有表进了白名单 —— 请确认它的**读路径**也走 store，"
-                    "否则会出现「写 JSON、读 SQLite」的静默不一致",
-                )
-                for table in ("proxies", "task_runs", "task_logs", "some_future_table"):
-                    self.assertFalse(
-                        table_wants_json(table),
-                        f"{table} 未完整接线却切到了 JSON",
+                # 已完整接线（读写都走 store）的表
+                self.assertIn("proxies", JSON_TABLES)
+                self.assertTrue(table_wants_json("proxies"))
+                # **未接线**的表不能切 —— 只有写接了的话会「写 JSON、读 SQLite」
+                for table in ("task_runs", "task_logs", "icloud_aliases",
+                              "outlook_accounts", "some_future_table"):
+                    self.assertNotIn(
+                        table, JSON_TABLES,
+                        f"{table} 进了白名单 —— 请确认它的**读路径**也走 store",
                     )
+                    self.assertFalse(
+                        table_wants_json(table), f"{table} 未完整接线却切到了 JSON"
+                    )
+
+
+class BackendJudgmentUsesTheEngineTests(unittest.TestCase):
+    """「有没有 SQLite 库」必须从 **engine 的 URL** 解析，不能用固定路径。
+
+    实测踩过两次（第一次在 `core/config_store`，第二次在这里）：用固定的
+    `DATA_DIR/account_manager.db` 判断时，测试环境（库在临时目录）看不到它 →
+    判成「全新部署」→ 表静默切到 JSON → 3 个无关测试变红。
+
+    所以判据抽到 `core.storage.sqlite_db_exists()` 共用，这条测试钉住它。
+    """
+
+    def test_uses_the_engine_not_a_fixed_path(self):
+        import tempfile
+        from pathlib import Path
+        from unittest import mock
+
+        from sqlmodel import SQLModel, create_engine
+
+        from core.storage import sqlite_db_exists
+
+        tmp = Path(tempfile.mkdtemp())
+        db = tmp / "custom-name.db"
+        engine = create_engine(f"sqlite:///{db}")
+
+        with mock.patch("core.db.engine", engine):
+            # 库还不存在 → False
+            self.assertFalse(sqlite_db_exists())
+            # 建了之后 → True（固定路径的判据在这里会一直是 False）
+            SQLModel.metadata.create_all(engine)
+            self.assertTrue(
+                sqlite_db_exists(),
+                "换了 engine 后判据没跟上 —— 会静默切到 JSON 后端",
+            )
+
+    def test_memory_db_counts_as_absent(self):
+        from unittest import mock
+
+        from sqlmodel import create_engine
+
+        from core.storage import sqlite_db_exists
+
+        with mock.patch("core.db.engine", create_engine("sqlite://")):
+            self.assertFalse(sqlite_db_exists(), "内存库不该算「已有数据」")

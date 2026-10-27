@@ -69,6 +69,41 @@ def resolve_backend_name(
     return BACKEND_SQLITE if db_exists else DEFAULT_BACKEND
 
 
+def sqlite_db_exists() -> bool:
+    """当前 engine 指向的 SQLite 库文件是否已存在。
+
+    **必须从 engine 的 URL 解析，不能用固定路径**。用固定路径会在两种场景
+    判错：
+
+    - 测试（以及任何换过 engine 的部署）：库在临时目录，固定路径看不到它，
+      于是判定成「全新部署」→ 静默切到 JSON（实测：代理表因此静默切了，
+      3 个无关测试变红）；
+    - 自定义 `DATABASE_URL`：同理。
+
+    这是本仓第二次踩同一个坑（第一次在 `core/config_store`），所以抽到这里
+    共用，不再各写一份。
+    """
+    try:
+        from core.db import current_engine
+
+        url = str(current_engine().url)
+    except Exception as exc:  # noqa: BLE001 - 取不到就当没有
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "解析当前 engine 失败（按「无库」处理）: %s", exc
+        )
+        return False
+    if not url.startswith("sqlite:///"):
+        return False
+    raw = url[len("sqlite:///"):]
+    if not raw or raw == ":memory:":
+        return False
+    from pathlib import Path
+
+    return Path(raw).exists()
+
+
 def accounts_backend_enabled(backend: str, env: Optional[Mapping[str, str]] = None) -> bool:
     """账号领域是否走该后端。
 

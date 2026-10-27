@@ -246,28 +246,10 @@ class ConfigStore:
         return resolve_backend_name(db_exists=self._sqlite_db_exists())
 
     def _sqlite_db_exists(self) -> bool:
-        """当前 engine 指向的 SQLite 库文件是否已存在。
+        """见 `core.storage.sqlite_db_exists` —— 共用一份，不再各写一遍。"""
+        from core.storage import sqlite_db_exists
 
-        非 SQLite（或取不到路径）时返回 False —— 那种部署本就该用 JSON。
-        """
-        try:
-            from core.db import current_engine
-
-            url = str(current_engine().url)
-        except Exception as exc:  # noqa: BLE001 - 取不到就当没有，不阻塞
-            # 绑定异常并记一笔：静默 `except Exception:` 会把「engine 坏了」
-            # 表现成「没有库」→ 静默切到 JSON 后端 → 用户数据看起来没了。
-            logger.warning("解析当前 engine 失败（按「无库」处理）: %s", exc)
-            return False
-        if not url.startswith("sqlite:///"):
-            return False
-        from pathlib import Path as _Path
-
-        raw = url[len("sqlite:///"):]
-        # 内存库（`:memory:`）不参与「已有数据」判定
-        if not raw or raw == ":memory:":
-            return False
-        return _Path(raw).exists()
+        return sqlite_db_exists()
 
     def _json_file(self):
         if self._json_path_override is not None:
