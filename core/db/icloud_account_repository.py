@@ -46,7 +46,13 @@ class ICloudAccountRepository:
     # ---------------------------------------------------------------- 读
 
     @staticmethod
-    def list_all() -> list[dict[str, Any]]:
+    def list_all(session: Any = None) -> list[dict[str, Any]]:
+        """全部主号。
+
+        **接受调用方的 session**：测试会用内存库替换 `platform_session`
+        （`tests/test_remote_account_alias_availability.py` 就是这么做的），
+        复用它的会话才能让那些测试看到自己造的数据。
+        """
         store = ICloudAccountRepository._store()
         if store is not None:
             rows = sorted(store.all(), key=lambda r: int(r.get("id") or 0))
@@ -54,13 +60,19 @@ class ICloudAccountRepository:
 
         from sqlmodel import select
 
-        from .registry import platform_session
-
-        with platform_session("icloud") as s:
+        def _run(s) -> list[dict[str, Any]]:
             rows = s.exec(
                 select(ICloudAccountModel).order_by(ICloudAccountModel.id)
             ).all()
             return [_from_model(r) for r in rows]
+
+        if session is not None:
+            return _run(session)
+
+        from .registry import platform_session
+
+        with platform_session("icloud") as s:
+            return _run(s)
 
     @staticmethod
     def get(account_id: Any) -> Optional[dict[str, Any]]:

@@ -32,10 +32,16 @@ _EXTRA_JSON_DOMAINS = (
 )
 
 #: 仍留在 SQLite 的表，以及为什么。
+#:
+#: **这张表必须与 `JSON_TABLES` 保持一致** —— 实测踩过：iCloud 两张表接完
+#: 后忘了更新这里，启动日志同时说「已走 json: icloud_accounts」和
+#: 「仍走 sqlite: icloud_accounts」，自相矛盾。
 _SQLITE_ONLY: tuple[tuple[str, str], ...] = (
-    ("icloud_accounts", "查询含 OR 条件与 lower() 归一，JSON 无查询层"),
-    ("icloud_aliases", "同上（取号是热路径，筛选条件多）"),
-    ("outlook_accounts", "同上"),
+    (
+        "outlook_accounts",
+        "取号查询含 OR + lower() + 账号类型匹配；谓词层已能表达（core/storage/query.py），"
+        "但 26 个访问点尚未改造",
+    ),
 )
 
 

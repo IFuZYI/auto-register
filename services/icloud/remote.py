@@ -302,7 +302,34 @@ def resolve_remote_account(
                 raise ICloudError("account_disabled", f"远程账号已停用: {row.email}")
             return row
 
-        row = _first_remote_account_with_aliases(session, platform)
+        # **按后端分派**：JSON 后端下没有可用的 ORM 会话（`platform_session`
+        # 拿到的是空的 SQLite），所以走仓储；SQLite 后端保持原路径 ——
+        # 它同时是测试的注入点（mock `platform_session` 喂内存库）。
+        from core.db.icloud_account_repository import icloud_account_repository
+
+        if icloud_account_repository._store() is not None:
+            candidates = [
+                r for r in icloud_account_repository.list_all()
+                if str(r.get("source") or "") == SOURCE_REMOTE and bool(r.get("enabled"))
+            ]
+            if not candidates:
+                row = None
+            else:
+                # 挑「有可用别名」的那个（规则与 SQLite 分支同源：查询层）
+                from core.db.icloud_alias_repository import icloud_alias_repository
+
+                usable = set(
+                    icloud_alias_repository.list_ids_for_pool(
+                        account_ids=[int(c["id"]) for c in candidates if c.get("id")],
+                        platform=str(platform or "").strip().lower(),
+                    )
+                )
+                picked = next(
+                    (c for c in candidates if int(c["id"] or 0) in usable), candidates[0]
+                )
+                row = _record_to_model(picked)
+        else:
+            row = _first_remote_account_with_aliases(session, platform)
     if row is None:
         raise ICloudError(
             "account_not_found", "还没有可用的远程 iCloud 账号，请先在「邮箱服务」里接入"

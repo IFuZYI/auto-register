@@ -210,8 +210,12 @@ JSON_TABLES: frozenset[str] = frozenset({
     # `services/log_cleanup.py` 都已接）
     "task_logs",
     # 读写都走 `core.db.icloud_alias_repository`（筛选走查询层）。
-    # 注意 `services/icloud/aliases.py` 里还有调用点用原生会话 —— 那些路径
-    # 在 JSON 后端下会落到 SQLite，所以**整条链路接通前不能进白名单**。
+    # 原生访问已清零（`grep -c "select(ICloudAliasModel" == 0`）。
+    "icloud_aliases",
+    # 读写都走 `core.db.icloud_account_repository`。
+    # 剩余的原生会话只在 `resolve_remote_account` / `_first_remote_account_with_aliases`
+    # —— 那两处是**测试注入点**，且已有 JSON 分支（见那两个函数的注释）。
+    "icloud_accounts",
 })
 
 

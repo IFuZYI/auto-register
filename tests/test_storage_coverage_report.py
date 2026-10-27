@@ -62,3 +62,33 @@ class CoverageReportTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CoverageReportMatchesTheWhitelistTests(unittest.TestCase):
+    """报告里「仍走 sqlite」的表**不能**同时出现在 `JSON_TABLES` 里。
+
+    实测踩过：iCloud 两张表接完后忘了更新 `_SQLITE_ONLY`，启动日志同时说
+
+        [storage]   已走 json: …、icloud_accounts（icloud_accounts.json）…
+        [storage]   仍走 sqlite: icloud_accounts、icloud_aliases…
+
+    自相矛盾 —— 用户会以为是 bug。这条把它钉住。
+    """
+
+    def test_no_table_is_reported_in_both_lists(self):
+        from core.storage.coverage import _SQLITE_ONLY
+        from core.storage.json_table import JSON_TABLES
+
+        both = {table for table, _why in _SQLITE_ONLY} & set(JSON_TABLES)
+        self.assertEqual(
+            both, set(),
+            f"这些表同时被报告为「走 json」和「走 sqlite」: {sorted(both)}",
+        )
+
+    def test_every_json_table_is_mentioned(self):
+        from core.storage.coverage import describe_coverage
+        from core.storage.json_table import JSON_TABLES
+
+        joined = "\n".join(describe_coverage("json"))
+        for table in JSON_TABLES:
+            self.assertIn(table, joined, f"报告里没提到已接线的表 {table}")

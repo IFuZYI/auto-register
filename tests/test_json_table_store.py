@@ -188,14 +188,14 @@ class TableWantsJsonTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"STORAGE_BACKEND": "json"}, clear=False):
             with mock.patch("core.storage.resolve_backend_name", lambda *a, **k: "json"):
                 # 已完整接线（读写都走 store）的表
-                for table in ("proxies", "task_runs", "task_logs"):
+                for table in ("proxies", "task_runs", "task_logs",
+                              "icloud_aliases", "icloud_accounts"):
                     self.assertIn(table, JSON_TABLES)
                     self.assertTrue(table_wants_json(table))
                 # **未接线**的表不能切 —— 只有写接了的话会「写 JSON、读 SQLite」。
-                # `icloud_aliases` 仓储已就绪，但 `services/icloud/aliases.py`
-                # 里还有原生会话调用点，链路未全通，所以仍在外面。
-                for table in ("icloud_aliases", "icloud_accounts",
-                              "outlook_accounts", "some_future_table"):
+                # 邮箱池（outlook_accounts）还没接：它的查询含 OR + lower() +
+                # 账号类型匹配，谓词已能表达，但 26 个访问点尚未改造。
+                for table in ("outlook_accounts", "some_future_table"):
                     self.assertNotIn(
                         table, JSON_TABLES,
                         f"{table} 进了白名单 —— 请确认它的**读路径**也走 store",
