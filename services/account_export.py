@@ -262,6 +262,48 @@ EXPORT_FORMATS: dict[str, ExportFormat] = {f.id: f for f in _FORMAT_LIST}
 DEFAULT_EXPORT_FORMAT = "email_pw_2fa"
 
 
+def formats_by_column_count(count: int) -> list["ExportFormat"]:
+    """列数对应的导出格式（**可能多个** —— 调用方必须处理歧义）。"""
+    return [f for f in _FORMAT_LIST if len(f.columns) == count]
+
+
+def parse_delimited_line(line: str, *, source_format: str = "") -> dict:
+    """把一行 `----` 分隔的文本解析成字段字典。
+
+    **列 → 字段的映射取自导出注册表**（`ExportFormat.columns`）—— 两边同一份
+    定义，不会漂移。
+
+    `source_format` 给定时按它解析；不给时按列数自动识别，**列数对应多个格式
+    就抛错** —— 不猜：猜错会把 AT 写进 `refresh_token`，那是静默的错误数据，
+    比报错严重得多。
+    """
+    parts = [p.strip() for p in str(line or "").split(SEPARATOR)]
+    if len(parts) < 2:
+        raise ValueError("不是合法的分隔行（列数不足）")
+
+    if source_format:
+        fmt = EXPORT_FORMATS.get(str(source_format).strip())
+        if fmt is None:
+            raise ValueError(f"未知的导入格式: {source_format}")
+        if len(fmt.columns) != len(parts):
+            raise ValueError(
+                f"行有 {len(parts)} 列，与格式 {source_format} 的 "
+                f"{len(fmt.columns)} 列不符"
+            )
+    else:
+        candidates = formats_by_column_count(len(parts))
+        if len(candidates) > 1:
+            names = "、".join(f.id for f in candidates)
+            raise ValueError(
+                f"{len(parts)} 列对应多个格式（{names}）—— 请在导入时指定来源格式"
+            )
+        if not candidates:
+            raise ValueError(f"没有 {len(parts)} 列的导出格式")
+        fmt = candidates[0]
+
+    return {name: value for name, value in zip(fmt.columns, parts)}
+
+
 def list_export_formats() -> list[dict]:
     """给前端下拉框用的元信息。"""
     return [

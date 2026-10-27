@@ -42,6 +42,12 @@ class ImportRequest(BaseModel):
     #: 导入格式：`text`（每行 `email password [cashier_url]`）或
     #: `json`（导出格式的数组，全字段）。
     format: str = "text"
+    #: 文本行的**来源格式**（导出格式 id，如 `email_pw` / `email_pw_2fa`）。
+    #:
+    #: `----` 分隔的行靠它决定「第 N 列是哪个字段」。默认 `email_pw`
+    #: —— 导出侧最常见的那个，让「导出 → 粘贴 → 导入」无需额外选择。
+    #: 解析器本身**拒绝猜**（列数歧义会抛），这里是显式的产品默认。
+    source_format: str = "email_pw"
 
 
 class BatchDeleteRequest(BaseModel):
@@ -465,29 +471,55 @@ def import_accounts(
     if str(body.format or "").strip().lower() == "json":
         return _import_json_accounts(body, session)
 
+    from services.account_export import SEPARATOR, parse_delimited_line
+
     created = 0
     updated = 0
     skipped = 0
     for line in body.lines:
-        parts = line.strip().split()
-        if len(parts) < 2:
-            # 行不成形（少于「邮箱 + 密码」两列）时计入 skipped —— 与 JSON 模式
-            # 口径一致，否则前端「导入了多少、跳过多少」在两种格式下对不上。
+        text = str(line or "").strip()
+        if not text:
             skipped += 1
             continue
-        email = normalize_email(parts[0])
+
+        fields: dict[str, str] = {}
+        if SEPARATOR in text:
+            # **导出格式的行**（`a@b.com----pw----…`）。按导出注册表的列映射
+            # 解析 —— 此前按空白切分，一行只会得到 1 段、直接 skipped，
+            # 「导出 → 编辑 → 导入」这条工作流对**所有**文本格式都不成立
+            # （实测）。
+            try:
+                fields = parse_delimited_line(text, source_format=body.source_format)
+            except ValueError as exc:
+                # 列数不符 / 未知格式：明确报错而不是静默跳过 —— 静默跳过会
+                # 让用户以为「导进去了」而账号一个都没进来。
+                raise HTTPException(400, str(exc)) from exc
+            email_raw = fields.get("email", "")
+            password = fields.get("password", "")
+            extra_dict = {
+                k: v for k, v in fields.items()
+                if k not in {"email", "password"} and v
+            }
+            extra = json.dumps(extra_dict, ensure_ascii=False) if extra_dict else "{}"
+        else:
+            # 老的空白分隔行（手输 / 老脚本）：`email password [json_extra]`
+            parts = text.split()
+            if len(parts) < 2:
+                skipped += 1
+                continue
+            email_raw = parts[0]
+            password = parts[1]
+            extra = parts[2] if len(parts) > 2 else ""
+            try:
+                json.loads(extra) if extra else None
+            except (json.JSONDecodeError, ValueError):
+                extra = "{}"
+            extra = extra or "{}"
+
+        email = normalize_email(email_raw)
         if not email:
             skipped += 1
             continue
-        password = parts[1]
-        extra = parts[2] if len(parts) > 2 else ""
-        if extra:
-            try:
-                json.loads(extra)
-            except (json.JSONDecodeError, ValueError):
-                extra = "{}"
-        else:
-            extra = "{}"
 
         existing = account_repository.find_by_email(body.platform, email)
         if existing is not None:

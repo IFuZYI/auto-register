@@ -398,6 +398,15 @@ export default function Accounts() {
   const [importText, setImportText] = useState('')
   // 导入格式：文本（email 密码）或 JSON（导出格式全字段）
   const [importFormat, setImportFormat] = useState<'text' | 'json'>('text')
+  /**
+   * 文本导入的**来源格式**（导出格式 id）。
+   *
+   * `----` 分隔的行靠它决定「第 N 列是哪个字段」。默认 `email_pw` ——
+   * 导出侧最常见的那个，让「导出 → 粘贴 → 导入」无需额外选择。
+   * 解析器本身拒绝猜（列数歧义会抛错），所以这里必须显式给一个。
+   */
+  const [importSourceFormat, setImportSourceFormat] = useState('email_pw')
+  const [exportFormats, setExportFormats] = useState<{ id: string; label: string }[]>([])
   const [importLoading, setImportLoading] = useState(false)
   const [taskId, setTaskId] = useState<string | null>(null)
   const [registerLoading, setRegisterLoading] = useState(false)
@@ -416,6 +425,27 @@ export default function Accounts() {
   useEffect(() => {
     if (platform) setCurrentPlatform(platform)
   }, [platform])
+
+  // 导出格式清单（导入侧的「来源格式」也用它）。
+  // 挂一次即可 —— 格式由后端注册表决定，运行期不变。
+  useEffect(() => {
+    let alive = true
+    apiFetch('/accounts/export-formats')
+      .then((data) => {
+        const list = Array.isArray(data) ? data : (data as { formats?: unknown[] })?.formats
+        if (!alive || !Array.isArray(list)) return
+        setExportFormats(
+          (list as { id?: string; label?: string }[])
+            .filter((f) => f?.id)
+            .map((f) => ({ id: String(f.id), label: String(f.label || f.id) })),
+        )
+      })
+      .catch(() => {
+        // 拿不到就退回内置的那一个默认格式（导入仍可用）
+        setExportFormats([{ id: 'email_pw', label: '邮箱----密码' }])
+      })
+    return () => { alive = false }
+  }, [])
 
   useEffect(() => {
     if (!detailModalOpen || !currentAccount) return
@@ -582,7 +612,13 @@ export default function Accounts() {
         : importText.trim().split('\n').filter(Boolean)
       const res = await apiFetch('/accounts/import', {
         method: 'POST',
-        body: JSON.stringify({ platform: currentPlatform, lines, format: importFormat }),
+        body: JSON.stringify({
+          platform: currentPlatform,
+          lines,
+          format: importFormat,
+          // 文本模式才带（JSON 模式走全字段，不需要列映射）
+          source_format: importFormat === 'text' ? importSourceFormat : '',
+        }),
       })
       const skipped = res.skipped ? `，跳过 ${res.skipped} 条` : ''
       message.success(`导入成功：新增 ${res.created}，更新 ${res.updated}${skipped}`)
@@ -1673,6 +1709,18 @@ export default function Accounts() {
               { value: 'json', label: 'JSON（全字段）' },
             ]}
           />
+          {importFormat === 'text' ? (
+            // 来源格式决定「第 N 列是哪个字段」。`----` 分隔的行靠它解析 ——
+            // 导出用 `----`，不选格式的话多列行会解析失败（导出注册表的列
+            // 映射是唯一来源）。
+            <Select
+              value={importSourceFormat}
+              onChange={setImportSourceFormat}
+              style={{ width: '100%' }}
+              options={exportFormats.map((f) => ({ value: f.id, label: f.label }))}
+              placeholder="来源格式（决定各列是什么字段）"
+            />
+          ) : null}
           <p style={{ margin: 0, fontSize: 12, color: 'var(--text-muted)' }}>
             {importFormat === 'json' ? (
               <>
@@ -1681,7 +1729,11 @@ export default function Accounts() {
               </>
             ) : (
               <>
-                每行格式: <code style={{ background: 'var(--bg-subtle)', padding: '2px 4px', borderRadius: 4 }}>email password [cashier_url]</code>
+                两种都收：
+                <br />· <strong>导出格式</strong>（按上面选的来源格式解析）：
+                <code style={{ background: 'var(--bg-subtle)', padding: '2px 4px', borderRadius: 4 }}>email----密码----…</code>
+                <br />· <strong>手输</strong>：
+                <code style={{ background: 'var(--bg-subtle)', padding: '2px 4px', borderRadius: 4 }}>email 密码</code>
               </>
             )}
           </p>
