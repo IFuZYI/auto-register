@@ -143,3 +143,109 @@ class JsonTableStore:
 
 
 __all__ = ["JsonTableStore", "META_TABLE"]
+
+
+# --------------------------------------------------------------------- 分派
+#
+# 一张表一张表地写 `save()` 的话，5 张表就是 5 份形状相同的代码。这里按
+# **表名**自动路由 —— 加一张表只需要往下面那个集合里加名字。
+
+#: 哪些表**已完整**接了 JSON 后端（读与写都走 store）。
+#:
+#: **现在是空的** —— 这不是遗漏，是刻意的。
+#:
+#: 判据是「读与写都接线」：只接写不接读会得到
+#:
+#:     写：save_model → JSON
+#:     读：session.exec(select(Model)) → SQLite → **看不到刚写的行**
+#:
+#: 与账号那轮踩的坑同型（读走 JSON、写走 SQLite），只是方向反过来。
+#: 账号表不在这个集合里，因为它的读写走的是 `AccountRepository` 自己的
+#: 分派（`_json_store`），不经过这里。
+#:
+#: 接线一张表的完整步骤（代理 / 任务 / iCloud / 邮箱池都还没做）：
+#:   1. 给该表加一个持有 `JsonTableStore` 的仓储，读也走它；
+#:   2. 把散落的 `session.exec(select(Model)...)` 改成仓储调用；
+#:   3. 把 `session.add(...)` 改成这里的 `save_model(...)`；
+#:   4. 最后把表名加进下面这个集合。
+JSON_TABLES: frozenset[str] = frozenset()
+
+
+def _data_dir() -> Path:
+    from core.paths import DATA_DIR
+
+    return DATA_DIR
+
+
+def table_path(table: str) -> Optional[Path]:
+    """该表在 JSON 后端下的文件路径；不在白名单时返回 None。"""
+    if table not in JSON_TABLES:
+        return None
+    return _data_dir() / f"{table}.json"
+
+
+def table_wants_json(table: str) -> bool:
+    """该表当前是否走 JSON 后端。"""
+    if table not in JSON_TABLES:
+        return False
+    from core.paths import DATA_DIR
+    from core.storage import BACKEND_JSON, resolve_backend_name
+
+    db_exists = (DATA_DIR / "account_manager.db").exists()
+    return resolve_backend_name(db_exists=db_exists) == BACKEND_JSON
+
+
+def store_for(table: str) -> Optional[JsonTableStore]:
+    path = table_path(table)
+    return JsonTableStore(path, table=table) if path is not None and table_wants_json(table) else None
+
+
+def model_to_record(model: Any) -> dict[str, Any]:
+    """把 SQLModel 实例转成可存的 dict（只取模型声明的字段）。
+
+    排掉 `__tablename__` 之类的类属性；`model_fields` 拿不到时退回
+    `__dict__`（鸭子类型的小对象）。
+    """
+    fields = getattr(type(model), "model_fields", None)
+    names = list(fields.keys()) if isinstance(fields, dict) else [
+        k for k in vars(model) if not k.startswith("_")
+    ]
+    return {name: getattr(model, name, None) for name in names}
+
+
+def save_model(model: Any, *, session: Any = None, commit: bool = True) -> Any:
+    """**通用**写回：按模型的表名选后端。
+
+    SQLite 后端下与原来的 `session.add(model)` 等价（调用方负责 commit，
+    除非 `commit=True` 且 session 是自己开的）。
+    """
+    if model is None:
+        return None
+    table = str(getattr(type(model), "__tablename__", "") or "")
+    store = store_for(table) if table else None
+
+    if store is None:
+        if session is not None:
+            session.add(model)
+            if commit:
+                session.commit()
+        return model
+
+    record = model_to_record(model)
+    row_id = record.get("id")
+    if row_id:
+        updated = store.update(row_id, record)
+        return updated if updated is not None else record
+    return store.insert(record)
+
+
+__all__ = [
+    "JSON_TABLES",
+    "JsonTableStore",
+    "META_TABLE",
+    "model_to_record",
+    "save_model",
+    "store_for",
+    "table_path",
+    "table_wants_json",
+]

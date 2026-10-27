@@ -104,3 +104,98 @@ class GenericTableStoreTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GenericModelSaveDispatchTests(unittest.TestCase):
+    """通用 `save_model()`：按 `__tablename__` 自动路由，不逐表写分派。
+
+    账号那轮给每张表都要加一个 `save()` 的话，5 张表就是 5 份形状相同的
+    代码。这里按模型的表名自动选 store —— 加一张表**不需要改这里**。
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name)
+
+    def test_sqlite_backend_uses_the_session(self):
+        """SQLite 后端下仍走原生 session（不改变既有行为）。"""
+        from unittest import mock
+
+        from core.storage.json_table import save_model
+
+        class _M:
+            __tablename__ = "proxies"
+            id = 1
+
+        session = mock.Mock()
+        with mock.patch("core.storage.json_table.table_wants_json", return_value=False):
+            save_model(_M(), session=session, commit=False)
+        session.add.assert_called_once()
+
+    def test_json_backend_writes_through_the_store(self):
+        from unittest import mock
+
+        from core.storage.json_table import save_model
+
+        class _M:
+            __tablename__ = "proxies"
+            model_fields = {"id": None, "url": None}
+
+            def __init__(self):
+                self.id = 0
+                self.url = "socks5h://a"
+
+        store_path = self.root / "t.json"
+        with mock.patch("core.storage.json_table.table_wants_json", return_value=True), \
+             mock.patch("core.storage.json_table.table_path", return_value=store_path):
+            saved = save_model(_M(), session=mock.Mock(), commit=True)
+        self.assertEqual(saved["url"], "socks5h://a")
+
+    def test_unknown_table_falls_back_to_session(self):
+        """没有 JSON 支持的表名 → 走 SQLite（不静默丢写）。"""
+        from unittest import mock
+
+        from core.storage.json_table import save_model
+
+        class _M:
+            __tablename__ = "some_future_table"
+            model_fields = {"id": None}
+
+            def __init__(self):
+                self.id = 1
+
+        session = mock.Mock()
+        with mock.patch("core.storage.json_table.table_path", return_value=None):
+            save_model(_M(), session=session, commit=False)
+        session.add.assert_called_once()
+
+
+class TableWantsJsonTests(unittest.TestCase):
+    def test_only_whitelisted_tables_switch(self):
+        """**白名单**控制哪些表走 JSON —— 没接线的表不能悄悄切过去。
+
+        这正是账号那轮踩过的坑：部分接线时跟着总开关走会得到「读 JSON、
+        写 SQLite」的静默不一致。
+        """
+        from core.storage.json_table import table_wants_json
+
+        import os
+        from unittest import mock
+
+        from core.storage.json_table import JSON_TABLES
+
+        with mock.patch.dict(os.environ, {"STORAGE_BACKEND": "json"}, clear=False):
+            with mock.patch("core.storage.resolve_backend_name", lambda *a, **k: "json"):
+                # **当前集合是空的**：其余表还没接线（读写都要接才算）。
+                # 一旦有人把表加进来，这条会变红提醒他确认读路径也接了。
+                self.assertEqual(
+                    set(JSON_TABLES), set(),
+                    "有表进了白名单 —— 请确认它的**读路径**也走 store，"
+                    "否则会出现「写 JSON、读 SQLite」的静默不一致",
+                )
+                for table in ("proxies", "task_runs", "task_logs", "some_future_table"):
+                    self.assertFalse(
+                        table_wants_json(table),
+                        f"{table} 未完整接线却切到了 JSON",
+                    )
