@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime
 from typing import Any, Iterable, Optional
 
@@ -70,6 +71,55 @@ def account_platform_keys(include: str = "") -> list[str]:
 _ACCOUNT_MERGE_FIELDS = (
     "password", "user_id", "region", "token", "status", "extra_json", "cashier_url",
 )
+
+
+def _sqlite_accounts_db_exists() -> bool:
+    """当前 engine 指向的 SQLite 库文件是否存在。
+
+    与 `core.config_store` 同一判据：**只看 SQLite**，不看 JSON 文件 ——
+    否则会形成自反馈（写了 JSON → 判定看到 JSON → 切回 sqlite）。
+    """
+    try:
+        from .base import current_engine
+
+        url = str(current_engine().url)
+    except Exception as exc:  # noqa: BLE001 - 取不到就当没有
+        # 绑定并记一笔：静默 `except Exception:` 会把「engine 坏了」表现成
+        # 「没有库」→ 静默切到 JSON 后端 → 用户数据看起来没了。
+        logger.warning("解析当前 engine 失败（按「无库」处理）: %s", exc)
+        return False
+    if not url.startswith("sqlite:///"):
+        return False
+    raw = url[len("sqlite:///"):]
+    if not raw or raw == ":memory:":
+        return False
+    from pathlib import Path as _Path
+
+    return _Path(raw).exists()
+
+
+#: 从 JSON 记录还原成 `AccountModel` 时要跳过的键（非列字段）
+_MODEL_SKIP_KEYS = frozenset({"provenance"})
+
+
+def json_record_to_model(record: dict[str, Any]) -> AccountModel:
+    """把 JSON 记录还原成 **detached 的** `AccountModel` 实例。
+
+    为什么还原成模型而不是返回裸 dict：调用方到处用 `row.get_extra()` /
+    `row.set_extra()` / `row.created_at.year`。返回 dict 会让那些调用点
+    在 JSON 后端下全炸 —— 而「换后端不换行为」正是这次工作的前提。
+
+    注意这是 **detached**（不属于任何 session）：在它上面改字段不会自动落库，
+    写路径必须走仓储方法（`upsert` / `delete`）。
+    """
+    kwargs: dict[str, Any] = {
+        key: value
+        for key, value in record.items()
+        if key not in _MODEL_SKIP_KEYS
+    }
+    columns = set(AccountModel.model_fields.keys())
+    kwargs = {k: v for k, v in kwargs.items() if k in columns}
+    return AccountModel(**kwargs)
 
 
 def merge_account_fields(
@@ -150,8 +200,32 @@ def merge_account_fields(
     return fields
 
 
+logger = logging.getLogger(__name__)
+
+
 class AccountRepository:
     """账号池读写。所有方法都接受可选 `session`（默认自动按平台选库）。"""
+
+    # ------------------------------------------------------------ 后端
+
+    @staticmethod
+    def _json_store():
+        """JSON 后端下的账号存储；SQLite 后端返回 None。
+
+        **只覆盖走仓储的路径**（`find_by_email` / `upsert` / `get` /
+        `delete` / `list_accounts` / `count_all_accounts` /
+        `platforms_by_email`）。仍直接用 `Session` 查 `AccountModel` 的代码
+        走 SQLite —— 见 `core.storage` 的覆盖说明。
+        """
+        from core.paths import DATA_DIR
+        from core.storage import resolve_backend_name
+
+        name = resolve_backend_name(db_exists=_sqlite_accounts_db_exists())
+        if name != "json":
+            return None
+        from core.storage.account_store_json import AccountStoreJson
+
+        return AccountStoreJson(DATA_DIR / "accounts.json")
 
     # ------------------------------------------------------------ 会话
 
@@ -182,6 +256,12 @@ class AccountRepository:
         key = normalize_email(email)
         if not key:
             return None
+
+        store = AccountRepository._json_store() if session is None else None
+        if store is not None:
+            record = store.find_by_email(platform, key)
+            return json_record_to_model(record) if record else None
+
         own = session is None
         sess = AccountRepository._session_for(platform, session)
         try:
@@ -266,6 +346,10 @@ class AccountRepository:
         if not platform or not email:
             raise ValueError("账号缺少 platform 或 email，无法落库")
 
+        store = AccountRepository._json_store() if session is None else None
+        if store is not None:
+            return AccountRepository._json_upsert(store, account, platform, email)
+
         own = session is None
         sess = AccountRepository._session_for(platform, session)
         try:
@@ -311,6 +395,30 @@ class AccountRepository:
             if own:
                 sess.close()
 
+    @staticmethod
+    def _json_upsert(store, account, platform: str, email: str) -> AccountModel:
+        """JSON 后端的 upsert：**共用 `merge_account_fields`**，规则只有一份。"""
+        existing_record = store.find_by_email(platform, email)
+        fields = merge_account_fields(
+            incoming=account,
+            existing=(
+                {
+                    "password": existing_record.get("password", ""),
+                    "user_id": existing_record.get("user_id", ""),
+                    "region": existing_record.get("region", ""),
+                    "token": existing_record.get("token", ""),
+                    "cashier_url": existing_record.get("cashier_url", ""),
+                }
+                if existing_record
+                else None
+            ),
+        )
+        if existing_record:
+            updated = store.update(existing_record["id"], fields)
+            return json_record_to_model(updated or {})
+        created = store.insert({**fields, "platform": platform, "email": email})
+        return json_record_to_model(created)
+
     # ------------------------------------------------------------ 查询
 
     @staticmethod
@@ -348,6 +456,16 @@ class AccountRepository:
         账号。所以指定 `platform` 时，默认库那一步必须再按 platform 过滤，否则
         会命中默认库里另一个平台的同 id 行（实测会把别的平台账号取出来）。
         """
+
+        store = AccountRepository._json_store() if session is None else None
+        if store is not None:
+            record = store.get(account_id)
+            if record is None:
+                return None
+            # 分库语义：指定平台时校验平台匹配（JSON 是单文件，没有分库）
+            if platform and str(record.get("platform") or "").strip().lower() != str(platform).strip().lower():
+                return None
+            return json_record_to_model(record)
         if session is not None:
             return session.get(AccountModel, account_id)
 
@@ -389,6 +507,10 @@ class AccountRepository:
         与 `get` 同样的 ID 撞号问题：指定 `platform` 时默认库那一步要再按
         platform 过滤，否则会删掉默认库里另一个平台的同 id 账号。
         """
+
+        store = AccountRepository._json_store() if session is None else None
+        if store is not None:
+            return store.delete(account_id)
         if session is not None:
             row = session.get(AccountModel, account_id)
             if row is None:
@@ -638,6 +760,14 @@ class AccountRepository:
         池库里没有 `accounts` 表（`account_platform_keys` 已把池键剔除），
         某个库缺表时跳过而不是抛错：缺表 = 这个库里没有账号记录。
         """
+
+        store = AccountRepository._json_store() if session is None else None
+        if store is not None:
+            wanted = [normalize_email(e) for e in (emails or [])]
+            wanted = [e for e in wanted if e]
+            if not wanted:
+                return {}
+            return {e: store.platforms_by_email(e) for e in wanted}
         wanted = {
             normalize_email(e)
             for e in (emails if emails is not None else [])
