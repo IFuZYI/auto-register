@@ -23,60 +23,97 @@ import unittest
 from unittest import mock
 
 
-class AccountsJsonNeedsItsOwnOptInTests(unittest.TestCase):
-    def test_repository_stays_on_sqlite_by_default(self):
-        """只设 `STORAGE_BACKEND=json` 时，仓储**不**切到 JSON。"""
+class AccountsFollowsTheMainSwitchTests(unittest.TestCase):
+    """账号跟随总开关（门槛已撤）。
+
+    历史上账号需要**单独**的显式开关，因为当时有约 60 处原生写路径
+    （`sess.add(model)`）未迁移，跟着总开关会得到「新建的账号查不到」
+    （读走 JSON、写走 SQLite）。
+
+    2026-10-27：写路径已全部收敛到 `AccountRepository.save()`（23 处），
+    原生账号写一个不剩，所以门槛撤掉 —— 直接跟随 `STORAGE_BACKEND`。
+    """
+
+    def test_accounts_follow_json_when_no_override(self):
         from core.db.repository import AccountRepository
 
-        with mock.patch.dict(
-            "os.environ", {"STORAGE_BACKEND": "json"}, clear=False
-        ), mock.patch(
-            "core.storage.resolve_backend_name", lambda *a, **k: "json"
-        ):
+        with mock.patch.dict("os.environ", {}, clear=False) as _env:
             import os
 
             os.environ.pop("STORAGE_BACKEND_ACCOUNTS", None)
-            self.assertIsNone(
-                AccountRepository._json_store(),
-                "账号在未显式开启时切到了 JSON —— 原生写路径会把数据写进 SQLite，"
-                "而读取走 JSON，新建的账号查不到",
-            )
+            with mock.patch("core.storage.resolve_backend_name", lambda *a, **k: "json"):
+                self.assertIsNotNone(
+                    AccountRepository._json_store(),
+                    "账号没跟随总开关 —— 门槛撤掉后应默认生效",
+                )
 
-    def test_explicit_opt_in_activates_json(self):
+    def test_explicit_sqlite_still_keeps_accounts_on_sqlite(self):
+        """`STORAGE_BACKEND_ACCOUNTS=sqlite`：配置走 JSON、账号留 SQLite。"""
+        from core.db.repository import AccountRepository
+
+        with mock.patch.dict(
+            "os.environ", {"STORAGE_BACKEND_ACCOUNTS": "sqlite"}, clear=False
+        ), mock.patch("core.storage.resolve_backend_name", lambda *a, **k: "json"):
+            self.assertIsNone(AccountRepository._json_store())
+
+    def test_opt_in_json_is_accepted(self):
         from core.db.repository import AccountRepository
 
         with mock.patch.dict(
             "os.environ", {"STORAGE_BACKEND_ACCOUNTS": "json"}, clear=False
-        ), mock.patch(
-            "core.storage.resolve_backend_name", lambda *a, **k: "json"
-        ):
-            self.assertIsNotNone(
-                AccountRepository._json_store(),
-                "显式开启后仍未生效",
-            )
+        ), mock.patch("core.storage.resolve_backend_name", lambda *a, **k: "json"):
+            self.assertIsNotNone(AccountRepository._json_store())
 
-    def test_explicit_opt_in_is_ignored_when_backend_is_sqlite(self):
-        """`STORAGE_BACKEND=sqlite` 时账号开关不生效（以总开关为准）。"""
+    def test_sqlite_backend_ignores_the_accounts_switch(self):
+        """总开关是 sqlite 时账号开关不生效（以总开关为准）。"""
         from core.db.repository import AccountRepository
 
         with mock.patch.dict(
             "os.environ",
             {"STORAGE_BACKEND": "sqlite", "STORAGE_BACKEND_ACCOUNTS": "json"},
             clear=False,
-        ), mock.patch(
-            "core.storage.resolve_backend_name", lambda *a, **k: "sqlite"
-        ):
+        ), mock.patch("core.storage.resolve_backend_name", lambda *a, **k: "sqlite"):
             self.assertIsNone(AccountRepository._json_store())
 
-    def test_wrong_value_is_ignored(self):
-        from core.db.repository import AccountRepository
 
-        with mock.patch.dict(
-            "os.environ", {"STORAGE_BACKEND_ACCOUNTS": "banana"}, clear=False
-        ), mock.patch(
-            "core.storage.resolve_backend_name", lambda *a, **k: "json"
-        ):
-            self.assertIsNone(AccountRepository._json_store())
+class NoRawAccountWritesRemainTests(unittest.TestCase):
+    """结构性：原生账号写必须一个不剩 —— 这是撤门槛的前提。
+
+    留一处就会重现「读走 JSON、写走 SQLite → 新建的账号查不到」。
+    """
+
+    def test_no_raw_account_session_add(self):
+        import re
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parents[1]
+        offenders: list[str] = []
+        #: 账号行在代码里的变量名（`save()` 之外的裸 add）
+        # 只认**明确的账号变量名**：`row` / `existing` 在多张表上复用
+        # （iCloud 别名、任务记录都用），按名字扫会大量误报 —— 第一版就
+        # 报了 `icloud/aliases.py:204 .add(existing)`（那是别名表）。
+        patterns = (
+            r"\.add\(acc_model\)",
+            r"\.add\(acc\)",
+            r"\.add\(account\)",
+        )
+        allow_row_files: set[str] = set()
+        for path in list((root / "api").rglob("*.py")) + list((root / "services").rglob("*.py")):
+            if "__pycache__" in path.parts:
+                continue
+            rel = str(path.relative_to(root))
+            text = path.read_text(encoding="utf-8", errors="replace")
+            for pat in patterns:
+                for m in re.finditer(pat, text):
+                    if pat == patterns[-1] and rel in allow_row_files:
+                        continue
+                    line = text[:m.start()].count("\n") + 1
+                    offenders.append(f"{rel}:{line} {m.group(0)}")
+        self.assertEqual(
+            offenders, [],
+            "仍有原生账号写 —— 撤门槛会让这些写落到 SQLite 而读走 JSON:\n  "
+            + "\n  ".join(offenders),
+        )
 
 
 if __name__ == "__main__":

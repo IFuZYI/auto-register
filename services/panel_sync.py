@@ -29,6 +29,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Optional
 
+from core.db import account_repository
 from core.credential_fields import (
     first_present as _first_present,
     sync_aliases,
@@ -191,7 +192,7 @@ def _persist_extra_only(
 ) -> None:
     """只写 `extra`（撤销登记用，不动凭证字段）。"""
     from core.credential_fields import sync_token_column
-    from core.db import platform_database_registry
+    from core.db import account_repository, platform_database_registry
     from core.db.models_account import AccountModel
     from sqlmodel import select
 
@@ -204,7 +205,7 @@ def _persist_extra_only(
             return
         model.set_extra(extra)
         sync_token_column(model, platform, extra)
-        session.add(model)
+        account_repository.save(model, session=session)
         if commit:
             session.commit()
 
@@ -287,7 +288,7 @@ def sync_local_from_remote(
 
 def _persist_local(row: dict[str, Any], merged_extra: dict[str, Any], platform: str, *, commit: bool) -> None:
     """把合并后的 extra 写回账号行（按平台选库）。"""
-    from core.db import platform_database_registry
+    from core.db import account_repository, platform_database_registry
     from core.db.models_account import AccountModel
 
     account_id = row.get("id")
@@ -306,7 +307,7 @@ def _persist_local(row: dict[str, Any], merged_extra: dict[str, Any], platform: 
         from datetime import datetime, timezone
 
         model.updated_at = datetime.now(timezone.utc)
-        session.add(model)
+        account_repository.save(model, session=session)
         if commit:
             session.commit()
     finally:

@@ -369,7 +369,7 @@ def _default_execute(account_id: int) -> dict[str, Any]:
                     extra = row.get_extra()
                     extra["register_proxy"] = chosen
                     row.set_extra(extra)
-                    s.add(row)
+                    account_repository.save(row, session=s)
                     s.commit()
         except Exception:  # noqa: BLE001
             pass
@@ -379,7 +379,7 @@ def _default_execute(account_id: int) -> dict[str, Any]:
         row = s.get(AccountModel, account_id)
         if row is not None:
             _apply_action_result("chatgpt", "refresh_token", row, result, s)
-            s.add(row)
+            account_repository.save(row, session=s)
             s.commit()
     return result
 
@@ -565,7 +565,7 @@ def run_auto_refresh_pass(
                     else:
                         state = record_auto_refresh_result(extra, ok=ok, now=now_s, row=row)
                     row.set_extra(extra)
-                    s.add(row)
+                    account_repository.save(row, session=s)
                     s.commit()
         except Exception as exc:  # noqa: BLE001 - 写回失败只记账，不毁整轮
             log_fn(f"账号 #{account_id} 结果写回失败（忽略）: {type(exc).__name__}: {exc}")
@@ -613,7 +613,7 @@ def _write_extra(account_id: int, extra: dict[str, Any]) -> None:
         row = s.get(AccountModel, account_id)
         if row is not None:
             row.set_extra(extra)
-            s.add(row)
+            account_repository.save(row, session=s)
             s.commit()
 
 
@@ -790,6 +790,7 @@ def _default_chatgpt2api_push() -> dict[str, Any]:
 
 # ── 周期任务自注册（core.scheduler 不认识具体业务，见其模块 docstring）──
 
+from core.db import account_repository
 from core.scheduler import register_job as _register_job  # noqa: E402
 
 _register_job(

@@ -235,3 +235,101 @@ class RepositoryContractTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RepositorySaveContractTests(unittest.TestCase):
+    """`save()` 是**写路径的统一入口** —— 两种后端都要正确落库。
+
+    加它的理由：账号写路径散落在 8 个文件、约 18 处，都长这样
+    `session.add(model); session.commit()`。JSON 后端下这些原生写会落到
+    SQLite，而读取走 JSON —— **新建的账号查不到**（静默的数据不一致）。
+
+    把写收敛到一个方法后，后端分派只有一处；调用方不再需要知道后端存在。
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name)
+
+    def _cases(self):
+        return (_SqliteBackendFixture(self.root), _JsonBackendFixture(self.root))
+
+    def _cleanup_sqlite(self):
+        from core.db import platform_session
+        from core.db.models_account import AccountModel
+        from sqlmodel import select
+
+        with platform_session("chatgpt") as s:
+            rows = s.exec(
+                select(AccountModel).where(AccountModel.email.like("save-%"))
+            ).all()
+            for row in rows:
+                s.delete(row)
+            s.commit()
+
+    def test_save_persists_modifications(self):
+        """改字段后 `save()`，再读回来要是新值。"""
+        for fixture in self._cases():
+            email = f"save-a-{fixture.name}@x.c"
+            with self.subTest(backend=fixture.name), fixture:
+                from core.base_platform import Account, AccountStatus
+                from core.db.repository import account_repository
+
+                row = account_repository.upsert(Account(
+                    platform="chatgpt", email=email, password="p1",
+                    status=AccountStatus.REGISTERED, extra={},
+                ))
+                row.password = "p2"
+                account_repository.save(row, session=None)
+
+                again = account_repository.find_by_email("chatgpt", email)
+                self.assertEqual(
+                    again.password, "p2",
+                    f"{fixture.name}: save 后读回来还是旧值",
+                )
+        self._cleanup_sqlite()
+
+    def test_save_works_inside_an_explicit_session(self):
+        """带 session 调用时也要按后端分派（调用方有自己的事务）。"""
+        for fixture in self._cases():
+            email = f"save-b-{fixture.name}@x.c"
+            with self.subTest(backend=fixture.name), fixture:
+                from core.base_platform import Account, AccountStatus
+                from core.db import platform_session
+                from core.db.repository import account_repository
+
+                row = account_repository.upsert(Account(
+                    platform="chatgpt", email=email, password="p1",
+                    status=AccountStatus.REGISTERED, extra={},
+                ))
+                # 带 session 时**由调用方提交** —— 本仓既有约定（`api/actions.py`
+                # 等都是 `s.add(...); s.commit()`）。`save` 不替调用方做这件事：
+                # 它可能正在一个更大的事务里。
+                with platform_session("chatgpt") as s:
+                    row.password = "p3"
+                    account_repository.save(row, session=s)
+                    s.commit()
+
+                again = account_repository.find_by_email("chatgpt", email)
+                self.assertEqual(
+                    again.password, "p3",
+                    f"{fixture.name}: 带 session 的 save 没落库",
+                )
+        self._cleanup_sqlite()
+
+    def test_save_returns_the_row(self):
+        for fixture in self._cases():
+            email = f"save-c-{fixture.name}@x.c"
+            with self.subTest(backend=fixture.name), fixture:
+                from core.base_platform import Account, AccountStatus
+                from core.db.repository import account_repository
+
+                row = account_repository.upsert(Account(
+                    platform="chatgpt", email=email, password="p1",
+                    status=AccountStatus.REGISTERED, extra={},
+                ))
+                saved = account_repository.save(row, session=None)
+                self.assertIsNotNone(saved)
+                self.assertEqual(saved.email, email)
+        self._cleanup_sqlite()

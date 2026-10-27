@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from sqlmodel import Session, select
 
 from core.base_mailbox import OutlookMailbox
-from core.db import AccountModel, OutlookAccountModel, current_engine, mailbox_pool_session
+from core.db import account_repository, AccountModel, OutlookAccountModel, current_engine, mailbox_pool_session
 
 from .base import BaseMailImportStrategy
 from .microsoft_import_rules import (
@@ -377,7 +377,7 @@ class MicrosoftMailImportStrategy(BaseMailImportStrategy):
                         created_at=_utcnow(),
                         updated_at=_utcnow(),
                     )
-                    session.add(account)
+                    account_repository.save(account, session=session)
                     session.commit()
                     session.refresh(account)
                     existing_emails.add(normalize_import_email(record.email))

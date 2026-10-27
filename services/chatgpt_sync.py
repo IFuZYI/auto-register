@@ -8,7 +8,7 @@ from typing import Any
 
 from sqlmodel import Session
 
-from core.db import AccountModel, platform_session
+from core.db import account_repository, AccountModel, platform_session
 from services.chatgpt_account_state import apply_chatgpt_status_policy
 
 logger = logging.getLogger(__name__)
@@ -211,7 +211,7 @@ def update_account_model_cpa_sync(
     account.set_extra(extra)
     account.updated_at = _utcnow()
     if session is not None:
-        session.add(account)
+        account_repository.save(account, session=session)
         if commit:
             session.commit()
             session.refresh(account)
@@ -230,7 +230,7 @@ def update_account_model_sub2api_sync(
     account.set_extra(extra)
     account.updated_at = _utcnow()
     if session is not None:
-        session.add(account)
+        account_repository.save(account, session=session)
         if commit:
             session.commit()
             session.refresh(account)
@@ -250,7 +250,7 @@ def update_account_model_chatgpt2api_sync(
     account.set_extra(extra)
     account.updated_at = _utcnow()
     if session is not None:
-        session.add(account)
+        account_repository.save(account, session=session)
         if commit:
             session.commit()
             session.refresh(account)
@@ -269,7 +269,7 @@ def update_account_model_cliproxy_sync(
     apply_chatgpt_status_policy(account, remote_sync=sync_result)
     account.updated_at = _utcnow()
     if session is not None:
-        session.add(account)
+        account_repository.save(account, session=session)
         if commit:
             session.commit()
             session.refresh(account)
@@ -288,7 +288,7 @@ def update_account_model_local_probe(
     apply_chatgpt_status_policy(account, local_probe=probe)
     account.updated_at = _utcnow()
     if session is not None:
-        session.add(account)
+        account_repository.save(account, session=session)
         if commit:
             session.commit()
             session.refresh(account)

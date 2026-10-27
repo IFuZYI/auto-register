@@ -5,7 +5,7 @@ from sqlmodel import Session, select
 from pydantic import BaseModel
 import json
 from typing import Any, Optional
-from core.db import AccountModel, platform_session_from_path
+from core.db import account_repository, AccountModel, platform_session_from_path
 from core.registry import get
 from core.base_platform import RegisterConfig
 from core.config_store import config_store
@@ -173,7 +173,7 @@ def _apply_action_result(
             from datetime import datetime, timezone
 
             acc_model.updated_at = datetime.now(timezone.utc)
-            session.add(acc_model)
+            account_repository.save(acc_model, session=session)
     elif platform == "grok":
         # grok 的探测/刷新动作同样要落状态（对齐 grok2api 的失效判定）——
         # 此前只有 chatgpt 有状态策略，grok 测活失败不会改状态。
@@ -219,7 +219,7 @@ def _apply_action_result(
             from datetime import datetime, timezone
 
             acc_model.updated_at = datetime.now(timezone.utc)
-            session.add(acc_model)
+            account_repository.save(acc_model, session=session)
     if isinstance(result.get("account_extra_patch"), dict):
         patch = result["account_extra_patch"]
         extra = acc_model.get_extra()
@@ -234,7 +234,7 @@ def _apply_action_result(
         sync_token_column(acc_model, platform, extra)
         from datetime import datetime, timezone
         acc_model.updated_at = datetime.now(timezone.utc)
-        session.add(acc_model)
+        account_repository.save(acc_model, session=session)
     _record_upload_sync(platform, action_id, acc_model, result, session)
     if result.get("ok") and result.get("data", {}) and isinstance(result["data"], dict):
         data = result["data"]
@@ -254,7 +254,7 @@ def _apply_action_result(
             from datetime import datetime, timezone
 
             acc_model.updated_at = datetime.now(timezone.utc)
-            session.add(acc_model)
+            account_repository.save(acc_model, session=session)
 
 
 def _resolve_action_proxy(acc_model: AccountModel) -> str:
@@ -392,7 +392,7 @@ def _execute_batch_panel_status(
             from datetime import datetime, timezone
 
             acc_model.updated_at = datetime.now(timezone.utc)
-            session.add(acc_model)
+            account_repository.save(acc_model, session=session)
         items.append(
             {
                 "id": acc_model.id,

@@ -14,7 +14,7 @@ from typing import Any, Callable, Iterable, Optional
 
 from sqlmodel import Session
 
-from core.db import AccountModel
+from core.db import account_repository, AccountModel
 from platforms.chatgpt.device_id import resolve_device_id
 from platforms.chatgpt.rt_backfill import BackfillResult, RefreshTokenBackfiller
 from services.chatgpt_account_selection import select_chatgpt_accounts
@@ -188,7 +188,7 @@ def apply_backfill_result(
         apply_chatgpt_status_policy(model, banned=True)
     model.updated_at = datetime.now(timezone.utc)
     if session is not None:
-        session.add(model)
+        account_repository.save(model, session=session)
         if commit:
             session.commit()
     return patch

@@ -336,7 +336,7 @@ def _persist_push_results(panel_key: str, items: list[dict]) -> None:
                     if writer is None:
                         continue
                     writer(row, ok, message, session=session, commit=False)
-                session.add(row)
+                account_repository.save(row, session=session)
                 session.commit()
         except Exception as exc:  # noqa: BLE001 - 落库失败不该毁整批结果
             logger.warning("push 结果落库失败 %s/%s: %s", panel_key, email, exc)

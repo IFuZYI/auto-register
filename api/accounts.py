@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from fastapi.responses import StreamingResponse
 from sqlmodel import Session, select, func
 from pydantic import BaseModel
-from core.db import AccountModel, get_session
+from core.db import account_repository, AccountModel, get_session
 from services.account_export import (
     DEFAULT_EXPORT_FORMAT,
     export_filename,
@@ -352,7 +352,7 @@ def create_account(body: AccountCreate, session: Session = Depends(get_session))
         existing.cashier_url = body.cashier_url or existing.cashier_url
         existing.updated_at = datetime.now(timezone.utc)
         with account_repository.session_for(body.platform) as sess:
-            sess.add(existing)
+            account_repository.save(existing, session=sess)
             sess.commit()
             sess.refresh(existing)
         return existing
@@ -366,7 +366,7 @@ def create_account(body: AccountCreate, session: Session = Depends(get_session))
         cashier_url=body.cashier_url,
     )
     with account_repository.session_for(body.platform) as sess:
-        sess.add(acc)
+        account_repository.save(acc, session=sess)
         sess.commit()
         sess.refresh(acc)
     return acc

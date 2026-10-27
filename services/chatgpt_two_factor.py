@@ -22,7 +22,7 @@ from typing import Any, Callable, Iterable, Optional
 from sqlmodel import Session, select
 
 from core.base_platform import resolve_mailbox_otp_timeout
-from core.db import AccountModel
+from core.db import account_repository, AccountModel
 from platforms.chatgpt.device_id import resolve_device_id
 from platforms.chatgpt.protocol import AuthFlow, Config
 from platforms.chatgpt.protocol.two_factor import (
@@ -208,7 +208,7 @@ def apply_two_factor_result(
         apply_chatgpt_status_policy(model, banned=True)
     model.updated_at = datetime.now(timezone.utc)
     if session is not None:
-        session.add(model)
+        account_repository.save(model, session=session)
         if commit:
             session.commit()
     return patch
@@ -361,7 +361,7 @@ def _apply_journal_entry(email: str, secret: str) -> str:
         extra["totp_secret"] = secret
         row.set_extra(extra)
         row.updated_at = datetime.now(timezone.utc)
-        s.add(row)
+        account_repository.save(row, session=s)
         s.commit()
     return "applied"
 

@@ -72,24 +72,30 @@ def resolve_backend_name(
 def accounts_backend_enabled(backend: str, env: Optional[Mapping[str, str]] = None) -> bool:
     """账号领域是否走该后端。
 
-    **账号的 JSON 后端要单独显式开启**（`STORAGE_BACKEND_ACCOUNTS=json`）。
-
-    为什么不能跟着总开关一起生效：账号有约 60 处原生写路径
-    （`sess.add(model); sess.commit()`），而仓储只覆盖了读写的一部分。
-    直接生效会得到：
+    历史上这里是一道**显式门槛**（`STORAGE_BACKEND_ACCOUNTS=json`）：当时账号
+    有约 60 处原生写路径（`sess.add(model); sess.commit()`），而仓储只覆盖了
+    读写的一部分。直接跟着总开关生效会得到：
 
         create_account：仓储**读**（JSON）→ 没找到 → 原生 session **写**（SQLite）
         下一次 find_by_email：仓储**读**（JSON）→ 仍然没找到
 
-    **新建的账号查不到** —— 静默的数据不一致，比报错严重得多。
+    也就是**新建的账号查不到** —— 静默的数据不一致，比报错严重得多。
 
-    所以默认只让**配置**走 JSON（那条路径完整），账号留给显式开关。
+    **2026-10-27：门槛已撤。** 账号的写路径已全部收敛到
+    `AccountRepository.save()`（23 处），原生 `session.add(账号)` 一个不剩，
+    所以跟着总开关生效是安全的。
+
+    `STORAGE_BACKEND_ACCOUNTS=sqlite` 仍可用于「配置用 JSON、账号留 SQLite」
+    的混合部署 —— 门槛从「必须显式开启」变成「可以显式关掉」。
     """
     if backend != BACKEND_JSON:
         return False
     source = os.environ if env is None else env
     raw = str(source.get(ENV_ACCOUNTS_BACKEND, "") or "").strip().lower()
-    return raw == BACKEND_JSON
+    # 显式关掉：配置走 JSON、账号留 SQLite
+    if raw == BACKEND_SQLITE:
+        return False
+    return True
 
 
 __all__ = [

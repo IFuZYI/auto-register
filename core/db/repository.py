@@ -400,6 +400,79 @@ class AccountRepository:
                 sess.close()
 
     @staticmethod
+    def save(model, *, session: Session | None = None) -> Optional[AccountModel]:
+        """写回一个账号行 —— **写路径的统一入口**。
+
+        为什么要它：账号写路径散落在 8 个文件、约 18 处，都长这样
+        `session.add(model); session.commit()`。JSON 后端下这些原生写会落到
+        SQLite，而读取走 JSON —— **新建的账号查不到**（静默的数据不一致）。
+
+        收敛到一处后，后端分派只有一份；调用方不再需要知道后端存在。
+
+        **不看 `session` 是否为 None**：调用方带 session 是它有自己的事务，
+        不代表该走 SQLite。后端由 `_json_store()` 统一决定。
+        """
+        if model is None:
+            return None
+        store = AccountRepository._json_store()
+        if store is not None:
+            return AccountRepository._json_save(store, model)
+
+        # SQLite：沿用原生语义（调用方给 session 就用它的，否则自己开）
+        own = session is None
+        sess = session if session is not None else AccountRepository._session_for(
+            str(getattr(model, "platform", "") or "")
+        )
+        try:
+            sess.add(model)
+            if own:
+                sess.commit()
+                # 提交后刷新，否则关闭会话时模型变成 detached，
+                # 调用方读 `.email` 会抛 DetachedInstanceError（实测）。
+                sess.refresh(model)
+            return model
+        finally:
+            if own:
+                sess.close()
+
+    @staticmethod
+    def _json_save(store, model) -> AccountModel:
+        """把模型按 JSON 后端落盘。**走 `merge_account_fields` 之外的字段直写**。
+
+        这里不加业务规则：调用方已经改好了模型，`save` 的语义是「把当前状态
+        存下来」，不是「按 incoming 合并」。加规则会让「改某几个字段」被
+        旧值覆盖。
+        """
+        payload = {
+            "id": getattr(model, "id", None),
+            "platform": str(getattr(model, "platform", "") or ""),
+            "email": normalize_email(getattr(model, "email", "") or ""),
+            "password": str(getattr(model, "password", "") or ""),
+            "user_id": str(getattr(model, "user_id", "") or ""),
+            "region": str(getattr(model, "region", "") or ""),
+            "token": str(getattr(model, "token", "") or ""),
+            "status": str(getattr(model, "status", "") or ""),
+            "extra_json": str(getattr(model, "extra_json", "") or "{}"),
+            "cashier_url": str(getattr(model, "cashier_url", "") or ""),
+        }
+        for name in ("created_at", "updated_at"):
+            value = getattr(model, name, None)
+            if isinstance(value, datetime):
+                payload[name] = value
+
+        if payload["id"]:
+            updated = store.update(payload["id"], payload)
+            return json_record_to_model(updated or payload)
+
+        # 没有 id：要么按唯一键更新，要么新建 —— 与 upsert 同语义
+        existing = store.find_by_email(payload["platform"], payload["email"])
+        if existing:
+            updated = store.update(existing["id"], {**payload, "id": existing["id"]})
+            return json_record_to_model(updated or {})
+        created = store.insert(payload)
+        return json_record_to_model(created)
+
+    @staticmethod
     def _json_upsert(store, account, platform: str, email: str) -> AccountModel:
         """JSON 后端的 upsert：**共用 `merge_account_fields`**，规则只有一份。"""
         existing_record = store.find_by_email(platform, email)

@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Callable, Optional
 
 from sqlmodel import Session, select
 
-from core.db import TaskLog, current_engine
+from core.db import account_repository, TaskLog, current_engine
 from core.environment import EnvironmentNotReadyError, is_environment_error_message
 from core.task_runtime import (
     AttemptOutcome,
@@ -731,7 +731,7 @@ def _run_probe_status(task_id: str, account_ids: list[int], req: "ProbeStatusTas
             account = s.get(AccountModel, account_id)
             if account is not None:
                 _apply_action_result("chatgpt", "probe_local_status", account, result, s)
-                s.add(account)
+                account_repository.save(account, session=s)
                 s.commit()
 
         if result.get("ok"):
@@ -817,7 +817,7 @@ def _run_batch_action(task_id: str, account_ids: list[int], req: "BatchActionTas
             account = s.get(AccountModel, account_id)
             if account is not None:
                 _apply_action_result(platform, action_id, account, result, s)
-                s.add(account)
+                account_repository.save(account, session=s)
                 s.commit()
 
         if result.get("ok"):
@@ -891,7 +891,7 @@ def _run_refresh_token(task_id: str, account_ids: list[int], req: RefreshTokenTa
             account = s.get(AccountModel, account_id)
             if account is not None:
                 _apply_action_result("chatgpt", "refresh_token", account, result, s)
-                s.add(account)
+                account_repository.save(account, session=s)
                 s.commit()
 
         if result.get("ok"):
