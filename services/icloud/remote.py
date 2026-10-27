@@ -227,34 +227,52 @@ def _first_remote_account_with_aliases(
 
     wanted_platform = str(platform or "").strip().lower()
 
-    for account in accounts:
-        stmt = (
-            select(ICloudAliasModel.id)
-            .where(ICloudAliasModel.account_id == account.id)
-            .where(ICloudAliasModel.status == ALIAS_STATUS_ACTIVE)
-            .where(
-                or_(
-                    ICloudAliasModel.pool_status == "available",
-                    ICloudAliasModel.pool_status.is_(None),
-                    ICloudAliasModel.pool_status == "",
-                )
+    # 候选判定：条件用**查询层**写一份（`core/storage/query.py`），
+    # 在当前 session 上执行 —— 与 `claim_alias` 的筛选规则同源。
+    #
+    # 刻意**不**调仓储：这里已经有一个正确的 session（测试会用内存库替换
+    # `platform_session`），而仓储的 JSON 分支会去读 `_store()`、SQLite 分支
+    # 自己开会话 —— 那样就读到了真实库，挑错主号（实测：测试全量跑时红）。
+    from core.storage.query import any_of, eq, to_sql
+
+    wanted = [int(a.id) for a in accounts if a.id is not None]
+    if not wanted:
+        return accounts[0]
+
+    clauses = [
+        any_of(*(eq("account_id", a) for a in wanted)),
+        eq("status", "active"),
+        any_of(
+            eq("pool_status", "available"),
+            eq("pool_status", None),
+            eq("pool_status", ""),
+        ),
+    ]
+    stmt = select(ICloudAliasModel.id).where(to_sql(ICloudAliasModel, clauses[0]))
+    stmt = stmt.where(to_sql(ICloudAliasModel, clauses[1]))
+    stmt = stmt.where(to_sql(ICloudAliasModel, clauses[2]))
+    if wanted_platform:
+        # 还要看这个地址有没有被该平台用掉（代码审查 2026-10-27 I3）：
+        # 真正取号时会按 `used_platforms` 过滤，这里不同步的话会挑到
+        # 「别名都已被本平台用完」的主号 → 领不到 → 回落生成 → 远程拒绝
+        # 生成 → 仍是用户报的那个失败。
+        stmt = stmt.where(
+            or_(
+                ICloudAliasModel.used_platforms.is_(None),
+                ICloudAliasModel.used_platforms == "",
+                ~ICloudAliasModel.used_platforms.contains(f",{wanted_platform},"),
             )
-            .limit(1)
         )
-        if wanted_platform:
-            # **还要看这个地址有没有被该平台用掉**（代码审查 2026-10-27 I3）：
-            # 真正取号的 `services/icloud/aliases.py` 会按 `used_platforms`
-            # 过滤。只看 pool_status 的话，可能挑到一个「别名都已被本平台
-            # 用完」的主号 → claim 领不到 → 回落生成 → 远程拒绝生成 →
-            # 仍是用户报的那个失败。
-            stmt = stmt.where(
-                or_(
-                    ICloudAliasModel.used_platforms.is_(None),
-                    ICloudAliasModel.used_platforms == "",
-                    ~ICloudAliasModel.used_platforms.contains(f",{wanted_platform},"),
-                )
-            )
-        if session.exec(stmt).first() is not None:
+    # **查出来的是别名 id，不是主号 id** —— 第一版把它们当主号 id 比较，
+    # 于是每个主号都「没有可用别名」，全都回落到 accounts[0]（实测：3 个
+    # 相关测试变红）。要的是「这个主号名下有没有能领的别名」。
+    # 用别名表的 account_id 反查（`with_only_columns` 换列，条件不变）
+    stmt_accounts = stmt.with_only_columns(ICloudAliasModel.account_id).distinct()
+    usable_account_ids = {
+        int(v) for v in session.exec(stmt_accounts).all() if v is not None
+    }
+    for account in accounts:
+        if int(account.id or 0) in usable_account_ids:
             return account
     return accounts[0]
 
@@ -373,43 +391,26 @@ def sync_remote_account(account_id: int, *, proxy: str | None = None) -> dict[st
         status = _remote_status(item)
         created_at = _parse_remote_datetime(item.get("createdAt"))
 
-        with platform_session("icloud") as session:
-            existing = session.exec(
-                select(ICloudAliasModel).where(ICloudAliasModel.address == address)
-            ).first()
-            if existing is None:
-                fresh = ICloudAliasModel(
-                    account_id=int(account_id),
-                    address=address,
-                    label=label,
-                    status=status,
-                    provider_id=provider_id,
-                    source=SOURCE_REMOTE,
-                )
-                # 与本地语义一致：同步下来的别名默认「未入池」，
-                # 必须在池页面勾选「导入邮箱池」才可领。
-                fresh.pool_status = POOL_STATUS_UNPOOLED
-                if created_at is not None:
-                    fresh.created_at = created_at
-                session.add(fresh)
-                session.commit()
-                created += 1
-                continue
-            if str(getattr(existing, "source", "") or "") == SOURCE_LOCAL:
-                # 本地优先：同地址本地已有，远程镜像不建行、不改本地行。
-                skipped_local += 1
-                continue
-            if existing.account_id == int(account_id):
-                # 本账号的远程行：更新镜像字段（不动池记账 —— 用户可能已标 used/in_use）。
-                existing.label = label or existing.label
-                existing.status = status
-                if provider_id:
-                    existing.provider_id = provider_id
-                existing.updated_at = _utcnow()
-                session.add(existing)
-                session.commit()
-                updated += 1
-            # 其它远程账号持有的同地址：保留现有行（地址全局唯一，不重复建）。
+        # 四条分支（新建 / 本地优先跳过 / 本账号更新 / 其它账号保留）都在
+        # 仓储里，两种后端共用一份规则。
+        from core.db.icloud_alias_repository import icloud_alias_repository
+
+        outcome = icloud_alias_repository.mirror_remote(
+            account_id=int(account_id),
+            address=address,
+            label=label,
+            status=status,
+            provider_id=provider_id,
+            source=SOURCE_REMOTE,
+            created_at=created_at,
+        )
+        if outcome == "created":
+            created += 1
+        elif outcome == "skipped_local":
+            skipped_local += 1
+        elif outcome == "updated":
+            updated += 1
+        # foreign / noop：保留现有行，不计数
 
     _record_sync_error(account_id, "")
     return {
@@ -447,32 +448,20 @@ def generate_remote_alias(
         # 列表拉不到不阻断创建结果；provider_id 留空，下次同步会补上。
         provider_id = ""
 
-    with platform_session("icloud") as session:
-        existing = session.exec(
-            select(ICloudAliasModel).where(ICloudAliasModel.address == address)
-        ).first()
-        if existing is None:
-            fresh = ICloudAliasModel(
-                account_id=int(account_id),
-                address=address,
-                label=str(created.get("label") or label),
-                status=ALIAS_STATUS_ACTIVE,
-                provider_id=provider_id,
-                source=SOURCE_REMOTE,
-            )
-            fresh.pool_status = POOL_STATUS_UNPOOLED
-            session.add(fresh)
-            session.commit()
-            session.refresh(fresh)
-            return _alias_to_dict(fresh, row.email)
-        # 地址已存在（本地优先）：只补 provider_id，不动来源与标签。
-        if provider_id and not str(existing.provider_id or "").strip():
-            existing.provider_id = provider_id
-            existing.updated_at = _utcnow()
-            session.add(existing)
-            session.commit()
-            session.refresh(existing)
-        return _alias_to_dict(existing, row.email)
+    from core.db.icloud_alias_repository import icloud_alias_repository
+
+    icloud_alias_repository.mirror_remote(
+        account_id=int(account_id),
+        address=address,
+        label=str(created.get("label") or label),
+        status=ALIAS_STATUS_ACTIVE,
+        provider_id=provider_id,
+        source=SOURCE_REMOTE,
+        # 地址已存在时只补空的 provider_id，不动来源与标签（本地优先）
+        backfill_provider_only=True,
+    )
+    fresh = icloud_alias_repository.get_by_address(address)
+    return _alias_to_dict(fresh, row.email)
 
 
 # ------------------------------------------------------------------ 收件

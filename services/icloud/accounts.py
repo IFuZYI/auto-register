@@ -97,12 +97,11 @@ def resolve_account(email: str = "") -> ICloudAccountModel:
 
 
 def list_accounts() -> list[dict[str, Any]]:
+    from core.db.icloud_alias_repository import icloud_alias_repository
+
     with platform_session("icloud") as session:
         rows = session.exec(select(ICloudAccountModel).order_by(ICloudAccountModel.id)).all()
-        aliases = session.exec(select(ICloudAliasModel)).all()
-    counts: dict[int, int] = {}
-    for alias in aliases:
-        counts[alias.account_id] = counts.get(alias.account_id, 0) + 1
+    counts = icloud_alias_repository.count_by_account()
     return [_account_to_dict(row, alias_count=counts.get(row.id or 0, 0)) for row in rows]
 
 
@@ -141,14 +140,14 @@ def _account_to_dict(row: ICloudAccountModel, *, alias_count: int = 0) -> dict[s
 def alias_quota(account_id: int) -> dict[str, Any]:
     """按滚动一小时窗口统计剩余生成额度。"""
     since = _utcnow() - timedelta(hours=1)
-    with platform_session("icloud") as session:
-        recent = session.exec(
-            select(ICloudAliasModel)
-            .where(ICloudAliasModel.account_id == int(account_id))
-            .where(ICloudAliasModel.created_at >= since)
-        ).all()
+    from core.db.icloud_alias_repository import icloud_alias_repository
+
+    recent = icloud_alias_repository.list_created_since(account_id, since)
     used = len(recent)
-    earliest = min((_as_utc(item.created_at) for item in recent), default=None)
+    earliest = min(
+        (_as_utc(item.get("created_at")) for item in recent if item.get("created_at")),
+        default=None,
+    )
     return {
         "limit": HOURLY_ALIAS_LIMIT,
         "used": used,
@@ -317,9 +316,9 @@ def delete_account(account_id: int) -> None:
         row = session.get(ICloudAccountModel, int(account_id))
         if row is None:
             raise ICloudError("account_not_found", "iCloud 主号不存在")
-        for alias in session.exec(
-            select(ICloudAliasModel).where(ICloudAliasModel.account_id == row.id)
-        ).all():
-            session.delete(alias)
         session.delete(row)
         session.commit()
+    # 别名表的级联删除走仓储（按后端分派）
+    from core.db.icloud_alias_repository import icloud_alias_repository
+
+    icloud_alias_repository.delete_by_account(int(account_id))

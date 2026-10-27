@@ -116,11 +116,12 @@ def fetch_alias_messages(
 def fetch_alias_messages_detailed(
     alias_id: int, *, limit: int = DEFAULT_MESSAGE_LIMIT
 ) -> tuple[list[MailMessage], str, str]:
-    with platform_session("icloud") as session:
-        alias = session.get(ICloudAliasModel, int(alias_id))
-        if alias is None:
-            raise ICloudError("alias_not_found", "隐私邮箱不存在")
-        account_id, address = alias.account_id, alias.address
+    from core.db.icloud_alias_repository import icloud_alias_repository
+
+    alias = icloud_alias_repository.get(alias_id)
+    if alias is None:
+        raise ICloudError("alias_not_found", "隐私邮箱不存在")
+    account_id, address = alias.get("account_id"), alias.get("address")
     return fetch_account_messages_detailed(account_id, limit=limit, recipient=address)
 
 
@@ -134,12 +135,11 @@ def fetch_latest_shared_message(
     token = str(share_token or "").strip()
     if not token:
         raise ICloudError("alias_not_found", "隐私邮箱不存在")
-    with platform_session("icloud") as session:
-        alias = session.exec(
-            select(ICloudAliasModel).where(ICloudAliasModel.share_token == token)
-        ).first()
-        if alias is None:
-            raise ICloudError("alias_not_found", "隐私邮箱不存在")
-        account_id, address = alias.account_id, alias.address
+    from core.db.icloud_alias_repository import icloud_alias_repository
+
+    alias = icloud_alias_repository.get_by_share_token(token)
+    if alias is None:
+        raise ICloudError("alias_not_found", "隐私邮箱不存在")
+    account_id, address = alias.get("account_id"), alias.get("address")
     messages = _facade.fetch_account_messages(account_id, limit=limit, recipient=address)
     return address, messages[0] if messages else None

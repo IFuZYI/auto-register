@@ -70,9 +70,12 @@ class ICloudAliasRepository:
         # 操作不复杂，直接写在这里。
         from sqlmodel import select
 
-        from .registry import platform_database_registry
+        from .registry import platform_session
 
-        with platform_database_registry.session_for("icloud") as s:
+        # **用 `platform_session` 而不是 `registry.session_for`**：前者是
+        # 模块级函数，测试可以 patch 它（`tests/test_remote_account_alias_availability.py`
+        # 就是这么喂内存库的）。用后者会让那些测试读到真实库 → 挑错主号（实测）。
+        with platform_session("icloud") as s:
             stmt = select(ICloudAliasModel)
             if account_id is not None:
                 stmt = stmt.where(ICloudAliasModel.account_id == int(account_id))
@@ -89,9 +92,12 @@ class ICloudAliasRepository:
 
         # **必须走 icloud 平台库**：`icloud_aliases` 是分库表，用默认库的
         # `current_engine()` 会撞 `no such table: icloud_aliases`（实测）。
-        from .registry import platform_database_registry
+        from .registry import platform_session
 
-        with platform_database_registry.session_for("icloud") as s:
+        # **用 `platform_session` 而不是 `registry.session_for`**：前者是
+        # 模块级函数，测试可以 patch 它（`tests/test_remote_account_alias_availability.py`
+        # 就是这么喂内存库的）。用后者会让那些测试读到真实库 → 挑错主号（实测）。
+        with platform_session("icloud") as s:
             row = s.get(ICloudAliasModel, int(alias_id))
             return _from_model(row) if row is not None else None
 
@@ -119,9 +125,12 @@ class ICloudAliasRepository:
 
         from sqlmodel import select
 
-        from .registry import platform_database_registry
+        from .registry import platform_session
 
-        with platform_database_registry.session_for("icloud") as s:
+        # **用 `platform_session` 而不是 `registry.session_for`**：前者是
+        # 模块级函数，测试可以 patch 它（`tests/test_remote_account_alias_availability.py`
+        # 就是这么喂内存库的）。用后者会让那些测试读到真实库 → 挑错主号（实测）。
+        with platform_session("icloud") as s:
             rows = s.exec(
                 select(ICloudAliasModel)
                 .where(ICloudAliasModel.account_id == int(account_id))
@@ -214,9 +223,12 @@ class ICloudAliasRepository:
 
         from sqlalchemy import update as _update
 
-        from .registry import platform_database_registry
+        from .registry import platform_session
 
-        with platform_database_registry.session_for("icloud") as s:
+        # **用 `platform_session` 而不是 `registry.session_for`**：前者是
+        # 模块级函数，测试可以 patch 它（`tests/test_remote_account_alias_availability.py`
+        # 就是这么喂内存库的）。用后者会让那些测试读到真实库 → 挑错主号（实测）。
+        with platform_session("icloud") as s:
             stmt = _update(ICloudAliasModel)
             for key, value in match.items():
                 stmt = stmt.where(getattr(ICloudAliasModel, key) == value)
@@ -264,9 +276,12 @@ class ICloudAliasRepository:
 
         from sqlalchemy import update as _update
 
-        from .registry import platform_database_registry
+        from .registry import platform_session
 
-        with platform_database_registry.session_for("icloud") as s:
+        # **用 `platform_session` 而不是 `registry.session_for`**：前者是
+        # 模块级函数，测试可以 patch 它（`tests/test_remote_account_alias_availability.py`
+        # 就是这么喂内存库的）。用后者会让那些测试读到真实库 → 挑错主号（实测）。
+        with platform_session("icloud") as s:
             result = s.exec(
                 _update(ICloudAliasModel)
                 .where(ICloudAliasModel.pool_status == "in_use")
@@ -296,9 +311,12 @@ class ICloudAliasRepository:
             updated = store.update(alias_id, payload)
             return {k: (updated or {}).get(k) for k in _FIELDS} if updated else None
 
-        from .registry import platform_database_registry
+        from .registry import platform_session
 
-        with platform_database_registry.session_for("icloud") as s:
+        # **用 `platform_session` 而不是 `registry.session_for`**：前者是
+        # 模块级函数，测试可以 patch 它（`tests/test_remote_account_alias_availability.py`
+        # 就是这么喂内存库的）。用后者会让那些测试读到真实库 → 挑错主号（实测）。
+        with platform_session("icloud") as s:
             row = s.get(ICloudAliasModel, int(alias_id))
             if row is None:
                 return None
@@ -316,9 +334,12 @@ class ICloudAliasRepository:
             updated = store.update(alias_id, {"pool_status": str(pool_status)})
             return {k: (updated or {}).get(k) for k in _FIELDS} if updated else None
 
-        from .registry import platform_database_registry
+        from .registry import platform_session
 
-        with platform_database_registry.session_for("icloud") as s:
+        # **用 `platform_session` 而不是 `registry.session_for`**：前者是
+        # 模块级函数，测试可以 patch 它（`tests/test_remote_account_alias_availability.py`
+        # 就是这么喂内存库的）。用后者会让那些测试读到真实库 → 挑错主号（实测）。
+        with platform_session("icloud") as s:
             row = s.get(ICloudAliasModel, int(alias_id))
             if row is None:
                 return None
@@ -327,6 +348,323 @@ class ICloudAliasRepository:
             s.commit()
             s.refresh(row)
             return _from_model(row)
+
+    @staticmethod
+    def get_by_share_token(token: str) -> Optional[dict[str, Any]]:
+        """按分享令牌查（分享链接打开时用）。"""
+        wanted = str(token or "")
+        if not wanted:
+            return None
+        store = ICloudAliasRepository._store()
+        if store is not None:
+            record = store.first(share_token=wanted)
+            return {k: record.get(k) for k in _FIELDS} if record else None
+
+        from sqlmodel import select
+
+        from .registry import platform_session
+
+        # **用 `platform_session` 而不是 `registry.session_for`**：前者是
+        # 模块级函数，测试可以 patch 它（`tests/test_remote_account_alias_availability.py`
+        # 就是这么喂内存库的）。用后者会让那些测试读到真实库 → 挑错主号（实测）。
+        with platform_session("icloud") as s:
+            row = s.exec(
+                select(ICloudAliasModel).where(ICloudAliasModel.share_token == wanted)
+            ).first()
+            return _from_model(row) if row is not None else None
+
+    @staticmethod
+    def list_ids_for_pool(
+        *, account_ids: list[int], only_available: bool = True, platform: str = "",
+        session: Any = None,
+    ) -> list[int]:
+        """筛出可用于取号的别名 id（按主号集合 + 状态）。
+
+        `only_available` 为真时只认「可用 / 空」—— `used` 不在内（与
+        `remote.py` 原来那条查询一致）。
+        """
+        from core.storage.query import any_of, eq, matches_all, to_sql
+
+        wanted_accounts = [int(a) for a in account_ids]
+        wanted_platform = str(platform or "").strip().lower()
+        clauses = [
+            any_of(*(eq("account_id", a) for a in wanted_accounts)),
+            eq("status", "active"),
+        ]
+        if only_available:
+            clauses.append(
+                any_of(
+                    eq("pool_status", "available"),
+                    eq("pool_status", None),
+                    eq("pool_status", ""),
+                )
+            )
+
+        store = ICloudAliasRepository._store()
+        if store is not None:
+            def _ok(row: dict) -> bool:
+                if not matches_all(clauses, row):
+                    return False
+                if not wanted_platform:
+                    return True
+                # 还要看这个地址有没有被该平台用掉（代码审查 2026-10-27 I3）：
+                # 真正取号时会按 `used_platforms` 过滤，这里不同步的话会挑到
+                # 「别名都已被本平台用完」的主号 → 领不到 → 回落生成 → 远程
+                # 拒绝生成 → 仍是用户报的那个失败。
+                used = str(row.get("used_platforms") or "")
+                return f",{wanted_platform}," not in used
+
+            return sorted(
+                int(r.get("id") or 0) for r in store.all() if _ok(r)
+            )
+
+        from sqlmodel import select
+
+        def _run(s) -> list[int]:
+            stmt = (
+                select(ICloudAliasModel.id)
+                .where(ICloudAliasModel.account_id.in_(wanted_accounts))
+                .where(ICloudAliasModel.status == "active")
+            )
+            if only_available:
+                stmt = stmt.where(to_sql(ICloudAliasModel, clauses[2]))
+            if wanted_platform:
+                from sqlalchemy import or_ as _or
+
+                stmt = stmt.where(
+                    _or(
+                        ICloudAliasModel.used_platforms.is_(None),
+                        ICloudAliasModel.used_platforms == "",
+                        ~ICloudAliasModel.used_platforms.contains(f",{wanted_platform},"),
+                    )
+                )
+            return [int(v) for v in s.exec(stmt).all() if v is not None]
+
+        # **接受调用方的 session**：调用方（`resolve_remote_account`）已经开好
+        # 了一个会话，复用它既省连接、也让测试能喂内存库
+        # （`tests/test_remote_account_alias_availability.py` 就是这么做的）。
+        if session is not None:
+            return _run(session)
+
+        from .registry import platform_session
+
+        with platform_session("icloud") as s:
+            return _run(s)
+
+    @staticmethod
+    def count_by_account() -> dict[int, int]:
+        """每个主号下的别名数（列表页显示用）。"""
+        store = ICloudAliasRepository._store()
+        if store is not None:
+            counts: dict[int, int] = {}
+            for row in store.all():
+                key = int(row.get("account_id") or 0)
+                counts[key] = counts.get(key, 0) + 1
+            return counts
+
+        from sqlmodel import select
+
+        from .registry import platform_session
+
+        # **用 `platform_session` 而不是 `registry.session_for`**：前者是
+        # 模块级函数，测试可以 patch 它（`tests/test_remote_account_alias_availability.py`
+        # 就是这么喂内存库的）。用后者会让那些测试读到真实库 → 挑错主号（实测）。
+        with platform_session("icloud") as s:
+            counts = {}
+            for row in s.exec(select(ICloudAliasModel)).all():
+                key = int(getattr(row, "account_id", 0) or 0)
+                counts[key] = counts.get(key, 0) + 1
+            return counts
+
+    @staticmethod
+    def list_created_since(account_id: int, since: Any) -> list[dict[str, Any]]:
+        """本主号在 `since` 之后创建的别名（每小时生成额度判定用）。"""
+        store = ICloudAliasRepository._store()
+        if store is not None:
+            out = []
+            for row in store.all():
+                if int(row.get("account_id") or 0) != int(account_id):
+                    continue
+                stamp = row.get("created_at")
+                try:
+                    if stamp is not None and stamp >= since:
+                        out.append({k: row.get(k) for k in _FIELDS})
+                except TypeError:
+                    continue  # naive 与 aware 混用：跳过而不是炸
+            return out
+
+        from sqlmodel import select
+
+        from .registry import platform_session
+
+        # **用 `platform_session` 而不是 `registry.session_for`**：前者是
+        # 模块级函数，测试可以 patch 它（`tests/test_remote_account_alias_availability.py`
+        # 就是这么喂内存库的）。用后者会让那些测试读到真实库 → 挑错主号（实测）。
+        with platform_session("icloud") as s:
+            rows = s.exec(
+                select(ICloudAliasModel)
+                .where(ICloudAliasModel.account_id == int(account_id))
+                .where(ICloudAliasModel.created_at >= since)
+            ).all()
+            return [_from_model(r) for r in rows]
+
+    @staticmethod
+    def delete_by_account(account_id: int) -> int:
+        """删掉某主号下的全部别名，返回条数（主号删除时级联）。"""
+        store = ICloudAliasRepository._store()
+        if store is not None:
+            doomed = [
+                r.get("id") for r in store.all()
+                if int(r.get("account_id") or 0) == int(account_id)
+            ]
+            return store.delete_many(doomed)
+
+        from sqlmodel import select
+
+        from .registry import platform_session
+
+        # **用 `platform_session` 而不是 `registry.session_for`**：前者是
+        # 模块级函数，测试可以 patch 它（`tests/test_remote_account_alias_availability.py`
+        # 就是这么喂内存库的）。用后者会让那些测试读到真实库 → 挑错主号（实测）。
+        with platform_session("icloud") as s:
+            rows = s.exec(
+                select(ICloudAliasModel).where(
+                    ICloudAliasModel.account_id == int(account_id)
+                )
+            ).all()
+            removed = 0
+            for row in rows:
+                s.delete(row)
+                removed += 1
+            if removed:
+                s.commit()
+            return removed
+
+    @staticmethod
+    def get_by_address(address: str) -> Optional[dict[str, Any]]:
+        wanted = str(address or "").strip().lower()
+        if not wanted:
+            return None
+        store = ICloudAliasRepository._store()
+        if store is not None:
+            record = store.first(address=wanted)
+            return {k: record.get(k) for k in _FIELDS} if record else None
+
+        from sqlmodel import select
+
+        from .registry import platform_session
+
+        # **用 `platform_session` 而不是 `registry.session_for`**：前者是
+        # 模块级函数，测试可以 patch 它（`tests/test_remote_account_alias_availability.py`
+        # 就是这么喂内存库的）。用后者会让那些测试读到真实库 → 挑错主号（实测）。
+        with platform_session("icloud") as s:
+            row = s.exec(
+                select(ICloudAliasModel).where(ICloudAliasModel.address == wanted)
+            ).first()
+            return _from_model(row) if row is not None else None
+
+    @staticmethod
+    def mirror_remote(
+        *, account_id: int, address: str, label: str = "", status: str = "",
+        provider_id: str = "", source: str = "remote", created_at: Any = None,
+        backfill_provider_only: bool = False,
+    ) -> str:
+        """远程镜像的别名写入，返回 `created` / `updated` / `skipped_local` /
+        `foreign` / `noop`。
+
+        **本地优先**（ADR-0001）：
+        - 同地址本地已有行 → `skipped_local`，不建行不改本地行；
+        - 本账号的远程行 → 更新镜像字段，**不动池记账**（用户可能已标
+          used/in_use）；
+        - 其它远程账号持有的同地址 → `foreign`，保留现有行（地址全局唯一）；
+        - `backfill_provider_only`：只补空的 `provider_id`，不动来源与标签。
+        """
+        wanted = str(address or "").strip().lower()
+        store = ICloudAliasRepository._store()
+
+        if store is not None:
+            existing = store.first(address=wanted)
+            if existing is None:
+                payload = {
+                    "account_id": int(account_id), "address": wanted,
+                    "label": str(label or ""), "status": str(status or "active"),
+                    "provider_id": str(provider_id or ""), "source": str(source or "remote"),
+                    "pool_status": "unpooled",
+                }
+                if created_at is not None:
+                    payload["created_at"] = created_at
+                store.insert(payload)
+                return "created"
+
+            if str(existing.get("source") or "") == "local":
+                return "skipped_local"
+
+            if backfill_provider_only:
+                if provider_id and not str(existing.get("provider_id") or "").strip():
+                    store.update(existing.get("id"), {"provider_id": str(provider_id)})
+                    return "updated"
+                return "noop"
+
+            if int(existing.get("account_id") or 0) != int(account_id):
+                return "foreign"
+
+            patch = {"status": str(status or "active")}
+            if label:
+                patch["label"] = str(label)
+            if provider_id:
+                patch["provider_id"] = str(provider_id)
+            store.update(existing.get("id"), patch)
+            return "updated"
+
+        from sqlmodel import select
+
+        from .registry import platform_session
+
+        # **用 `platform_session` 而不是 `registry.session_for`**：前者是
+        # 模块级函数，测试可以 patch 它（`tests/test_remote_account_alias_availability.py`
+        # 就是这么喂内存库的）。用后者会让那些测试读到真实库 → 挑错主号（实测）。
+        with platform_session("icloud") as s:
+            existing = s.exec(
+                select(ICloudAliasModel).where(ICloudAliasModel.address == wanted)
+            ).first()
+
+            if existing is None:
+                fresh = ICloudAliasModel(
+                    account_id=int(account_id), address=wanted,
+                    label=str(label or ""), status=str(status or "active"),
+                    provider_id=str(provider_id or ""), source=str(source or "remote"),
+                )
+                fresh.pool_status = "unpooled"
+                if created_at is not None:
+                    fresh.created_at = created_at
+                s.add(fresh)
+                s.commit()
+                return "created"
+
+            if str(getattr(existing, "source", "") or "") == "local":
+                return "skipped_local"
+
+            if backfill_provider_only:
+                if provider_id and not str(existing.provider_id or "").strip():
+                    existing.provider_id = str(provider_id)
+                    s.add(existing)
+                    s.commit()
+                    return "updated"
+                return "noop"
+
+            if int(getattr(existing, "account_id", 0) or 0) != int(account_id):
+                return "foreign"
+
+            existing.label = label or existing.label
+            existing.status = str(status or "active")
+            if provider_id:
+                existing.provider_id = str(provider_id)
+            from datetime import datetime, timezone
+
+            existing.updated_at = datetime.now(timezone.utc)
+            s.add(existing)
+            s.commit()
+            return "updated"
 
     @staticmethod
     def find_candidates(*, account_id: int, active_status: str = "active") -> list[dict[str, Any]]:
@@ -361,9 +699,12 @@ class ICloudAliasRepository:
 
         from core.storage.query import to_sql
 
-        from .registry import platform_database_registry
+        from .registry import platform_session
 
-        with platform_database_registry.session_for("icloud") as s:
+        # **用 `platform_session` 而不是 `registry.session_for`**：前者是
+        # 模块级函数，测试可以 patch 它（`tests/test_remote_account_alias_availability.py`
+        # 就是这么喂内存库的）。用后者会让那些测试读到真实库 → 挑错主号（实测）。
+        with platform_session("icloud") as s:
             rows = s.exec(
                 select(ICloudAliasModel)
                 .where(ICloudAliasModel.account_id == int(account_id))
@@ -431,9 +772,12 @@ class ICloudAliasRepository:
         # SQLite：与 JSON 分支同样的三条规则，用原生会话实现
         from sqlmodel import select
 
-        from .registry import platform_database_registry
+        from .registry import platform_session
 
-        with platform_database_registry.session_for("icloud") as s:
+        # **用 `platform_session` 而不是 `registry.session_for`**：前者是
+        # 模块级函数，测试可以 patch 它（`tests/test_remote_account_alias_availability.py`
+        # 就是这么喂内存库的）。用后者会让那些测试读到真实库 → 挑错主号（实测）。
+        with platform_session("icloud") as s:
             row = s.exec(
                 select(ICloudAliasModel).where(ICloudAliasModel.address == wanted)
             ).first()
@@ -468,9 +812,12 @@ class ICloudAliasRepository:
         if store is not None:
             return store.delete(alias_id)
 
-        from .registry import platform_database_registry
+        from .registry import platform_session
 
-        with platform_database_registry.session_for("icloud") as s:
+        # **用 `platform_session` 而不是 `registry.session_for`**：前者是
+        # 模块级函数，测试可以 patch 它（`tests/test_remote_account_alias_availability.py`
+        # 就是这么喂内存库的）。用后者会让那些测试读到真实库 → 挑错主号（实测）。
+        with platform_session("icloud") as s:
             row = s.get(ICloudAliasModel, int(alias_id))
             if row is None:
                 return False

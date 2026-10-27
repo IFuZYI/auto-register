@@ -220,13 +220,10 @@ def _prime(provider: MailProvider) -> None:
 def _build_icloud_provider(address: str, *, log_fn=None, **_kwargs):
     from sqlmodel import select
 
-    from core.db import ICloudAliasModel, mailbox_pool_session
+    from core.db.icloud_alias_repository import icloud_alias_repository
 
-    with mailbox_pool_session("icloud") as session:
-        alias = session.exec(
-            select(ICloudAliasModel).where(ICloudAliasModel.address == address)
-        ).first()
-        alias_id = alias.id if alias else None
+    alias = icloud_alias_repository.get_by_address(address)
+    alias_id = alias.get("id") if alias else None
 
     if alias_id is None:
         return None, ""
