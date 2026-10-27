@@ -261,31 +261,30 @@ def mark_alias_used(alias_id: int, *, platform: str = "") -> None:
     `used` 是**单向**的：想再用它得去池页面手动改回 `available`
     （`set_alias_pool_status`）。
     """
-    with platform_session("icloud") as session:
-        alias = session.get(ICloudAliasModel, int(alias_id))
-        if alias is None:
-            return
-        alias.pool_status = POOL_STATUS_USED
-        alias.used_platforms = mark_email_used_by(
-            getattr(alias, "used_platforms", ""), platform
-        )
-        alias.updated_at = _utcnow()
-        session.add(alias)
-        session.commit()
+    from core.db.icloud_alias_repository import icloud_alias_repository
+
+    alias = icloud_alias_repository.get(alias_id)
+    if alias is None:
+        return
+    icloud_alias_repository.set_fields(
+        alias_id,
+        pool_status=POOL_STATUS_USED,
+        used_platforms=mark_email_used_by(
+            str(alias.get("used_platforms") or ""), platform
+        ),
+    )
 
 
 def release_alias_claim(alias_id: int) -> None:
     """把没跑完就被放弃的 `in_use` 别名放回 `available`。"""
-    with platform_session("icloud") as session:
-        alias = session.get(ICloudAliasModel, int(alias_id))
-        if alias is None:
-            return
-        if (getattr(alias, "pool_status", "") or "") != POOL_STATUS_IN_USE:
-            return
-        alias.pool_status = POOL_STATUS_AVAILABLE
-        alias.updated_at = _utcnow()
-        session.add(alias)
-        session.commit()
+    from core.db.icloud_alias_repository import icloud_alias_repository
+
+    alias = icloud_alias_repository.get(alias_id)
+    if alias is None:
+        return
+    if (alias.get("pool_status") or "") != POOL_STATUS_IN_USE:
+        return
+    icloud_alias_repository.set_fields(alias_id, pool_status=POOL_STATUS_AVAILABLE)
 
 
 def renew_alias_claim(alias_id: int) -> int:
@@ -300,17 +299,13 @@ def renew_alias_claim(alias_id: int) -> int:
     真正崩掉（没续约）的那些。条件 UPDATE（`WHERE pool_status='in_use'`）
     保证不碰并发改过的行 —— 与回收同一套并发纪律。
     """
-    result = None
-    with platform_session("icloud") as session:
-        result = session.exec(
-            update(ICloudAliasModel)
-            .where(ICloudAliasModel.id == int(alias_id))
-            .where(ICloudAliasModel.pool_status == POOL_STATUS_IN_USE)
-            .values(updated_at=_utcnow())
-        )
-        if int(result.rowcount or 0):
-            session.commit()
-    return int(getattr(result, "rowcount", 0) or 0)
+    from core.db.icloud_alias_repository import icloud_alias_repository
+
+    # 条件 UPDATE：只碰「仍处于 in_use」的那一行 —— 与回收同一套并发纪律
+    return icloud_alias_repository.update_where(
+        match={"id": int(alias_id), "pool_status": POOL_STATUS_IN_USE},
+        values={},
+    )
 
 
 def release_stale_claims(*, older_than_minutes: int = 120) -> int:
@@ -332,22 +327,14 @@ def release_stale_claims(*, older_than_minutes: int = 120) -> int:
     设计成**由调用方按需触发**（而不是起后台定时器）：这个模块是纯服务层，
     起线程会让它的生命周期变得难讲；需要兜底时在任务开始处调一次即可。
     """
-    cutoff = _utcnow() - timedelta(minutes=max(int(older_than_minutes), 1))
-    with platform_session("icloud") as session:
-        # 用条件 UPDATE 而不是「SELECT 出来改对象再 commit」：
-        # 读-改-写之间若有人手动改了这个号的状态（`set_alias_pool_status`，
-        # 池页面可点），ORM 的整行写回会把对方的结果静默覆盖 —— 包括把刚标好的
-        # `used` 又打回 `available`。WHERE 里带上 `pool_status = 'in_use'`
-        # 后，这类并发变更会被数据库层挡掉（UPDATE 不命中就是没改）。
-        result = session.exec(
-            update(ICloudAliasModel)
-            .where(ICloudAliasModel.pool_status == POOL_STATUS_IN_USE)
-            .where(ICloudAliasModel.updated_at < cutoff)
-            .values(pool_status=POOL_STATUS_AVAILABLE, updated_at=_utcnow())
-        )
-        released = int(result.rowcount or 0)
-        if released:
-            session.commit()
+    from core.db.icloud_alias_repository import icloud_alias_repository
+
+    # 用条件 UPDATE 而不是「SELECT 出来改对象再 commit」：读-改-写之间若有人
+    # 手动改了这个号的状态（池页面可点），整行写回会把对方的结果静默覆盖 ——
+    # 包括把刚标好的 `used` 又打回 `available`。
+    released = icloud_alias_repository.release_stale(
+        older_than_minutes=max(int(older_than_minutes), 1)
+    )
     if released:
         logger.info("iCloud 号池：%d 个超时未落定的别名已放回 available", released)
     return released
@@ -358,17 +345,18 @@ def set_alias_pool_status(alias_id: int, pool_status: str) -> dict[str, Any]:
     value = str(pool_status or "").strip().lower()
     if value not in POOL_STATUSES:
         raise ICloudError("invalid_pool_status", f"无效的号池状态: {pool_status}")
+    from core.db.icloud_alias_repository import icloud_alias_repository
+
+    alias = icloud_alias_repository.get(alias_id)
+    if alias is None:
+        raise ICloudError("alias_not_found", "隐私邮箱不存在")
+    updated = icloud_alias_repository.set_fields(alias_id, pool_status=value)
+    # 主号邮箱仍查本平台库（它不在别名表里）
+    account_email = ""
     with platform_session("icloud") as session:
-        alias = session.get(ICloudAliasModel, int(alias_id))
-        if alias is None:
-            raise ICloudError("alias_not_found", "隐私邮箱不存在")
-        account = session.get(ICloudAccountModel, alias.account_id)
-        alias.pool_status = value
-        alias.updated_at = _utcnow()
-        session.add(alias)
-        session.commit()
-        session.refresh(alias)
-        return _alias_to_dict(alias, str(account.email if account else ""))
+        account = session.get(ICloudAccountModel, int(alias.get("account_id") or 0))
+        account_email = str(account.email if account else "")
+    return _alias_to_dict(updated or alias, account_email)
 
 
 def import_aliases_to_pool(alias_ids: list[int]) -> dict[str, Any]:
@@ -406,27 +394,25 @@ def _set_pool_status_many(
     返回 `changed` / `skipped`：跳过的是「不在原状态」的那些（比如用户勾了一
     个正在用的号想入池）。前端据此提示，而不是假装全都成功。
     """
+    from core.db.icloud_alias_repository import icloud_alias_repository
+
     changed: list[int] = []
     skipped: list[int] = []
     seen: set[int] = set()
-    with platform_session("icloud") as session:
-        for raw_id in alias_ids:
-            alias_id = int(raw_id)
-            if alias_id in seen:
-                continue
-            seen.add(alias_id)
-            result = session.exec(
-                update(ICloudAliasModel)
-                .where(ICloudAliasModel.id == alias_id)
-                .where(ICloudAliasModel.pool_status == from_status)
-                .values(pool_status=to_status, updated_at=_utcnow())
-            )
-            if int(result.rowcount or 0):
-                changed.append(alias_id)
-            else:
-                skipped.append(alias_id)
-        if changed:
-            session.commit()
+    for raw_id in alias_ids:
+        alias_id = int(raw_id)
+        if alias_id in seen:
+            continue
+        seen.add(alias_id)
+        # 条件 UPDATE（不命中就是没改）—— 并发纪律靠数据库层
+        hit = icloud_alias_repository.update_where(
+            match={"id": alias_id, "pool_status": from_status},
+            values={"pool_status": to_status},
+        )
+        if hit:
+            changed.append(alias_id)
+        else:
+            skipped.append(alias_id)
     return {
         "changed": changed,
         "skipped": skipped,
@@ -446,16 +432,14 @@ def pool_summary(account_id: Optional[int] = None) -> dict[str, int]:
     前端把它和另两个分开显示，否则用户会把「未入池 168 个」误读成「有 168 个
     可用号」，然后奇怪为什么注册取不到号。
     """
-    with platform_session("icloud") as session:
-        query = select(ICloudAliasModel)
-        if account_id is not None:
-            query = query.where(ICloudAliasModel.account_id == int(account_id))
-        rows = session.exec(query).all()
+    from core.db.icloud_alias_repository import icloud_alias_repository
+
+    rows = icloud_alias_repository.list_aliases(account_id)
 
     summary = {status: 0 for status in POOL_STATUSES}
     summary[POOL_STATUS_UNPOOLED] = 0
     for row in rows:
-        value = getattr(row, "pool_status", "") or POOL_STATUS_AVAILABLE
+        value = str(row.get("pool_status") or "") or POOL_STATUS_AVAILABLE
         # 未知值（脏数据/跨版本残留）并入 available：行级展示折叠（前端
         # `poolDisplayStatus`）把未知值归「已入池」，这里不兜底的话统计条
         # 会出现「共 N 个 ≠ 三个 Tag 之和」、筛选数与统计数对不上。
@@ -537,12 +521,15 @@ def sync_aliases(account_id: int, *, proxy: str | None = None) -> dict[str, Any]
 
 
 def delete_alias(alias_id: int, *, remote: bool = True, proxy: str | None = None) -> None:
+    from core.db.icloud_alias_repository import icloud_alias_repository
+
+    alias = icloud_alias_repository.get(alias_id)
+    if alias is None:
+        raise ICloudError("alias_not_found", "隐私邮箱不存在")
+    # 主号对象要拿去做远端操作（它不在别名表里，仍查本平台库）
     with platform_session("icloud") as session:
-        alias = session.get(ICloudAliasModel, int(alias_id))
-        if alias is None:
-            raise ICloudError("alias_not_found", "隐私邮箱不存在")
-        account = session.get(ICloudAccountModel, alias.account_id)
-        snapshot = (alias.address, alias.provider_id, alias.status)
+        account = session.get(ICloudAccountModel, int(alias.get("account_id") or 0))
+    snapshot = (alias.get("address"), alias.get("provider_id"), alias.get("status"))
 
     if remote and account is not None:
         if str(getattr(account, "source", "") or "local") == "remote":
@@ -556,11 +543,7 @@ def delete_alias(alias_id: int, *, remote: bool = True, proxy: str | None = None
                     credentials, address=snapshot[0], provider_id=snapshot[1], status=snapshot[2]
                 )
 
-    with platform_session("icloud") as session:
-        alias = session.get(ICloudAliasModel, int(alias_id))
-        if alias is not None:
-            session.delete(alias)
-            session.commit()
+    icloud_alias_repository.delete(alias_id)
 
 
 def set_alias_active(
@@ -573,12 +556,14 @@ def set_alias_active(
 
     远程行走远程分支：让 icloud-hme 服务停用/激活（它再对 Apple 操作）。
     """
+    from core.db.icloud_alias_repository import icloud_alias_repository
+
+    alias = icloud_alias_repository.get(alias_id)
+    if alias is None:
+        raise ICloudError("alias_not_found", "隐私邮箱不存在")
     with platform_session("icloud") as session:
-        alias = session.get(ICloudAliasModel, int(alias_id))
-        if alias is None:
-            raise ICloudError("alias_not_found", "隐私邮箱不存在")
-        account = session.get(ICloudAccountModel, alias.account_id)
-        address, provider_id = alias.address, alias.provider_id
+        account = session.get(ICloudAccountModel, int(alias.get("account_id") or 0))
+    address, provider_id = alias.get("address"), alias.get("provider_id")
 
     if account is None:
         raise ICloudError("account_not_found", "隐私邮箱所属主号不存在")
@@ -593,16 +578,13 @@ def set_alias_active(
                 credentials, address=address, provider_id=provider_id, active=active
             )
 
-    with platform_session("icloud") as session:
-        alias = session.get(ICloudAliasModel, int(alias_id))
-        if alias is not None:
-            alias.status = ALIAS_STATUS_ACTIVE if active else ALIAS_STATUS_DISABLED
-            alias.updated_at = _utcnow()
-            session.add(alias)
-            session.commit()
-            account_email = str(account.email or "")
-            return _alias_to_dict(alias, account_email)
-    raise ICloudError("alias_not_found", "隐私邮箱不存在")
+    updated = icloud_alias_repository.set_fields(
+        alias_id,
+        status=ALIAS_STATUS_ACTIVE if active else ALIAS_STATUS_DISABLED,
+    )
+    if updated is None:
+        raise ICloudError("alias_not_found", "隐私邮箱不存在")
+    return _alias_to_dict(updated, str(account.email or ""))
 
 
 def delete_aliases(

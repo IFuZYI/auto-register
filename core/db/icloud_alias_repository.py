@@ -177,6 +177,131 @@ class ICloudAliasRepository:
 
 
     @staticmethod
+    def update_where(
+        *, match: dict[str, Any], values: dict[str, Any]
+    ) -> int:
+        """**条件 UPDATE**：只改满足 `match` 的行，返回命中数。
+
+        为什么必须支持它：`renew_alias_claim` / `release_stale_claims` 靠
+        「读-改-写」会有并发窗口 —— 池页面手动改过状态后，整行写回会把对方
+        的结果静默覆盖（包括把刚标好的 `used` 打回 `available`）。条件更新
+        让数据库层挡掉这类竞争。
+
+        JSON 后端下 `JsonStore.update` 已在锁内完成「读-判-写」，语义等价。
+        """
+        from datetime import datetime, timezone
+
+        now = datetime.now(timezone.utc)
+        payload = {k: v for k, v in values.items() if k in _FIELDS}
+        payload.setdefault("updated_at", now)
+
+        store = ICloudAliasRepository._store()
+        if store is not None:
+            hit = 0
+            for row in store.all():
+                if all(str(row.get(k)) == str(v) for k, v in match.items()):
+                    store.update(row.get("id"), payload)
+                    hit += 1
+            return hit
+
+        from sqlalchemy import update as _update
+
+        from .registry import platform_database_registry
+
+        with platform_database_registry.session_for("icloud") as s:
+            stmt = _update(ICloudAliasModel)
+            for key, value in match.items():
+                stmt = stmt.where(getattr(ICloudAliasModel, key) == value)
+            result = s.exec(stmt.values(**payload))
+            hit = int(getattr(result, "rowcount", 0) or 0)
+            if hit:
+                s.commit()
+            return hit
+
+    @staticmethod
+    def release_stale(*, older_than_minutes: int = 120) -> int:
+        """把「领了但一直没落定」的 `in_use` 别名放回 `available`。
+
+        阈值与 `renew_alias_claim` 的续约配合：活着的长任务会续约，
+        所以这里只回收真正崩掉的那些。
+        """
+        from datetime import datetime, timedelta, timezone
+
+        cutoff = datetime.now(timezone.utc) - timedelta(
+            minutes=max(int(older_than_minutes), 1)
+        )
+
+        store = ICloudAliasRepository._store()
+        if store is not None:
+            hit = 0
+            for row in store.all():
+                if str(row.get("pool_status")) != "in_use":
+                    continue
+                stamp = row.get("updated_at")
+                if not isinstance(stamp, datetime):
+                    continue
+                # 一侧 naive 一侧 aware 时跳过（不炸整个回收）
+                try:
+                    stale = stamp < cutoff
+                except TypeError:
+                    continue
+                if stale:
+                    store.update(
+                        row.get("id"),
+                        {"pool_status": "available",
+                         "updated_at": datetime.now(timezone.utc)},
+                    )
+                    hit += 1
+            return hit
+
+        from sqlalchemy import update as _update
+
+        from .registry import platform_database_registry
+
+        with platform_database_registry.session_for("icloud") as s:
+            result = s.exec(
+                _update(ICloudAliasModel)
+                .where(ICloudAliasModel.pool_status == "in_use")
+                .where(ICloudAliasModel.updated_at < cutoff)
+                .values(pool_status="available",
+                        updated_at=datetime.now(timezone.utc))
+            )
+            hit = int(getattr(result, "rowcount", 0) or 0)
+            if hit:
+                s.commit()
+            return hit
+
+    @staticmethod
+    def set_fields(alias_id: Any, **fields: Any) -> Optional[dict[str, Any]]:
+        """改若干字段（含 `updated_at` 自动刷新）。
+
+        比 `set_pool_status` 通用：`mark_alias_used` 要同时改
+        `pool_status` 与 `used_platforms`。
+        """
+        from datetime import datetime, timezone
+
+        payload = {k: v for k, v in fields.items() if k in _FIELDS}
+        payload["updated_at"] = datetime.now(timezone.utc)
+
+        store = ICloudAliasRepository._store()
+        if store is not None:
+            updated = store.update(alias_id, payload)
+            return {k: (updated or {}).get(k) for k in _FIELDS} if updated else None
+
+        from .registry import platform_database_registry
+
+        with platform_database_registry.session_for("icloud") as s:
+            row = s.get(ICloudAliasModel, int(alias_id))
+            if row is None:
+                return None
+            for key, value in payload.items():
+                setattr(row, key, value)
+            s.add(row)
+            s.commit()
+            s.refresh(row)
+            return _from_model(row)
+
+    @staticmethod
     def set_pool_status(alias_id: Any, pool_status: str) -> Optional[dict[str, Any]]:
         store = ICloudAliasRepository._store()
         if store is not None:
