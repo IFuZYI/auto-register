@@ -366,10 +366,15 @@ def create_account(body: AccountCreate, session: Session = Depends(get_session))
         cashier_url=body.cashier_url,
     )
     with account_repository.session_for(body.platform) as sess:
-        account_repository.save(acc, session=sess)
+        saved = account_repository.save(acc, session=sess)
         sess.commit()
-        sess.refresh(acc)
-    return acc
+        # **只在行确实被这个 session 持久化时才 refresh**：JSON 后端下
+        # `save` 直接写文件、`acc` 从未进过 session，`refresh` 会抛
+        # `InvalidRequestError: not persistent within this Session`（实测，
+        # 表现为建账号 500）。
+        if sess.object_session(saved) is not None:
+            sess.refresh(saved)
+        return saved
 
 
 @router.get("/stats")

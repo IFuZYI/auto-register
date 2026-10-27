@@ -57,7 +57,7 @@ class ProxyRepository:
 
     @staticmethod
     def list_all(*, session: Session | None = None) -> list[Any]:
-        store = ProxyRepository._store() if session is None else None
+        store = ProxyRepository._store()
         if store is not None:
             return [_JsonProxy(r) for r in store.all()]
         own = session is None
@@ -73,7 +73,7 @@ class ProxyRepository:
         wanted = str(url or "").strip()
         if not wanted:
             return None
-        store = ProxyRepository._store() if session is None else None
+        store = ProxyRepository._store()
         if store is not None:
             record = store.first(url=wanted)
             return _JsonProxy(record) if record else None
@@ -89,7 +89,7 @@ class ProxyRepository:
 
     @staticmethod
     def add(*, url: str, region: str = "", session: Session | None = None) -> Any:
-        store = ProxyRepository._store() if session is None else None
+        store = ProxyRepository._store()
         if store is not None:
             return _JsonProxy(store.insert({"url": str(url or ""), "region": str(region or "")}))
         own = session is None
@@ -150,7 +150,7 @@ class ProxyRepository:
         wanted = [int(i) for i in ids]
         if not wanted:
             return []
-        store = ProxyRepository._store() if session is None else None
+        store = ProxyRepository._store()
         if store is not None:
             return [
                 _JsonProxy(r) for r in store.all() if int(r.get("id") or 0) in wanted

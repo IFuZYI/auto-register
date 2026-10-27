@@ -118,3 +118,52 @@ class NoRawAccountWritesRemainTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SessionArgumentDoesNotSelectTheBackendTests(unittest.TestCase):
+    """**带 `session` 不代表该走 SQLite** —— 后端只看配置。
+
+    ## 这个 bug 的实际后果
+
+    `api/proxies.py` 每个端点都由 FastAPI 注入 `session`。我早先的写法是
+
+        store = ProxyRepository._store() if session is None else None
+
+    于是 JSON 部署下：**写进 SQLite、读走 JSON** → 界面「加了又没了」。
+    实测复现（全新 `DATA_DIR` + `STORAGE_BACKEND=json`）：建代理成功、
+    列表能查到（同一次请求内），但**没有 `proxies.json`**，重启后消失。
+
+    全库同型写法 9 处（代理 4 + 账号 5），都已改掉。
+    """
+
+    def test_repositories_never_gate_the_store_on_session(self):
+        import re
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parents[1] / "core" / "db"
+        offenders: list[str] = []
+        # 任何「session 为 None 才用 store」的写法都是这个 bug
+        pattern = re.compile(r"_store\(\)\s*if\s+session\s+is\s+None|"
+                             r"_json_store\(\)\s*if\s+session\s+is\s+None")
+        for path in root.glob("*.py"):
+            text = path.read_text(encoding="utf-8", errors="replace")
+            for match in pattern.finditer(text):
+                line = text[: match.start()].count("\n") + 1
+                offenders.append(f"{path.name}:{line}")
+        self.assertEqual(
+            offenders, [],
+            "仓储把后端判定和 session 绑在一起 —— JSON 部署下会写进 SQLite：\n  "
+            + "\n  ".join(offenders),
+        )
+
+    def test_store_is_returned_even_with_a_session(self):
+        """直接验证：带 session 调用时 `_store()` 仍按配置返回。"""
+        from unittest import mock
+
+        from core.db.proxy_repository import ProxyRepository
+        from core.db.repository import AccountRepository
+
+        with mock.patch("core.storage.resolve_backend_name", lambda *a, **k: "json"), \
+             mock.patch("core.storage.json_table.table_wants_json", return_value=True):
+            self.assertIsNotNone(ProxyRepository._store())
+            self.assertIsNotNone(AccountRepository._json_store())

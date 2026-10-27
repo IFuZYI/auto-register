@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Iterable, Optional
 
 from sqlalchemy import func
@@ -261,7 +261,7 @@ class AccountRepository:
         if not key:
             return None
 
-        store = AccountRepository._json_store() if session is None else None
+        store = AccountRepository._json_store()
         if store is not None:
             record = store.find_by_email(platform, key)
             return json_record_to_model(record) if record else None
@@ -350,7 +350,7 @@ class AccountRepository:
         if not platform or not email:
             raise ValueError("账号缺少 platform 或 email，无法落库")
 
-        store = AccountRepository._json_store() if session is None else None
+        store = AccountRepository._json_store()
         if store is not None:
             return AccountRepository._json_upsert(store, account, platform, email)
 
@@ -411,6 +411,11 @@ class AccountRepository:
 
         **不看 `session` 是否为 None**：调用方带 session 是它有自己的事务，
         不代表该走 SQLite。后端由 `_json_store()` 统一决定。
+
+        > 这条不是理论洁癖：`api/proxies.py` 每个端点都由 FastAPI 注入
+        > `session`，我早先的写法是「带 session 就跳过 JSON」→ **JSON 部署下
+        > 代理全写进 SQLite 而读走 JSON**，界面看起来「加了又没了」。
+        > 全库同型写法共 9 处，都已改掉（2026-10-27）。
         """
         if model is None:
             return None
@@ -507,6 +512,15 @@ class AccountRepository:
         session: Session | None = None,
     ) -> list[AccountModel]:
         """列出账号。给了 platform 就查该平台的库，否则查默认库。"""
+        store = AccountRepository._json_store()
+        if store is not None:
+            # `AccountStoreJson.list_all` 自带同样的筛选（过滤→排序→切片），
+            # 不必在这里再写一遍条件
+            rows = store.list_all(
+                platform=platform or "", status=status or "", email=email_contains or ""
+            )
+            return [json_record_to_model(r) for r in rows]
+
         own = session is None
         sess = AccountRepository._session_for(platform or "", session)
         try:
@@ -534,7 +548,7 @@ class AccountRepository:
         会命中默认库里另一个平台的同 id 行（实测会把别的平台账号取出来）。
         """
 
-        store = AccountRepository._json_store() if session is None else None
+        store = AccountRepository._json_store()
         if store is not None:
             record = store.get(account_id)
             if record is None:
@@ -585,7 +599,7 @@ class AccountRepository:
         platform 过滤，否则会删掉默认库里另一个平台的同 id 账号。
         """
 
-        store = AccountRepository._json_store() if session is None else None
+        store = AccountRepository._json_store()
         if store is not None:
             return store.delete(account_id)
         if session is not None:
@@ -749,6 +763,7 @@ class AccountRepository:
         total = 0
         seen: set[str] = set()
 
+
         def _accumulate(rows: Iterable[AccountModel]) -> None:
             nonlocal total
             for acc in rows:
@@ -763,6 +778,11 @@ class AccountRepository:
                 # 让它归属真实 platform 字段，而不是被重复统计
                 rows = [r for r in rows if str(r.platform or "").lower() == platform_key]
             _accumulate(rows)
+
+        store = AccountRepository._json_store()
+        if store is not None:
+            _accumulate(json_record_to_model(r) for r in store.list_all())
+            return {"total": total, "by_platform": by_platform, "by_status": by_status}
 
         if session is not None:
             _scan("", session)
@@ -838,7 +858,7 @@ class AccountRepository:
         某个库缺表时跳过而不是抛错：缺表 = 这个库里没有账号记录。
         """
 
-        store = AccountRepository._json_store() if session is None else None
+        store = AccountRepository._json_store()
         if store is not None:
             wanted = [normalize_email(e) for e in (emails or [])]
             wanted = [e for e in wanted if e]
@@ -911,6 +931,20 @@ class AccountRepository:
           而列表接口按 (platform, email) 去重，所以改按唯一键去重计数
           （只取两列，不加载整行）。
         """
+        store = AccountRepository._json_store()
+        if store is not None:
+            # 与 `list_all_accounts` 的 JSON 分支用同一组规则（条件 + 时间范围
+            # + 按 (platform, email) 去重）—— 直接复用它的结果长度，不重写一遍。
+            return len(
+                AccountRepository.list_all_accounts(
+                    platform=platform,
+                    status=status,
+                    email_contains=email_contains,
+                    created_at_start=created_at_start,
+                    created_at_end=created_at_end,
+                )
+            )
+
         conds = AccountRepository._list_filters(
             platform=platform,
             status=status,
@@ -1021,6 +1055,34 @@ class AccountRepository:
                 return
             seen_keys.add(key)
             rows.append(row)
+
+        store = AccountRepository._json_store()
+        if store is not None:
+            # JSON 后端：一张文件就是全部账号，没有「跨库合并」这回事。
+            # 但**筛选与排序规则要与 SQLite 版一致**（时间范围 + created_at 倒序）。
+            candidates = store.list_all(
+                platform=platform or "", status=status or "", email=email_contains or ""
+            )
+            for record in candidates:
+                model = json_record_to_model(record)
+                stamp = getattr(model, "created_at", None)
+                if created_at_start is not None and (
+                    stamp is None or stamp < created_at_start
+                ):
+                    continue
+                if created_at_end is not None and (
+                    stamp is None or stamp > created_at_end
+                ):
+                    continue
+                _add(model)
+            rows.sort(
+                key=lambda r: getattr(r, "created_at", None) or datetime.min.replace(
+                    tzinfo=timezone.utc
+                ),
+                reverse=True,
+            )
+            start = max(0, int(offset))
+            return rows[start : start + int(limit)] if limit is not None else rows[start:]
 
         # 每库最多需要 offset+limit 行（跨库合并后可能全被前面的库占满）
         per_db = None if limit is None else max(0, int(offset)) + int(limit)
