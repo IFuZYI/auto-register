@@ -66,6 +66,90 @@ def account_platform_keys(include: str = "") -> list[str]:
     ]
 
 
+#: 账号行里由 `merge_account_fields` 负责计算的字段。
+_ACCOUNT_MERGE_FIELDS = (
+    "password", "user_id", "region", "token", "status", "extra_json", "cashier_url",
+)
+
+
+def merge_account_fields(
+    *,
+    incoming: Any,
+    existing: Optional[dict],
+) -> dict[str, Any]:
+    """算出一个账号行**该落库的字段**（纯函数，不碰数据库）。
+
+    抽出来的理由：这段规则原来埋在 `AccountRepository.upsert` 里，与 SQL
+    机制交织。接第二种存储后端（JSON，见 `core/storage`）时照抄一遍，这些
+    规则会立刻漂移 —— 而每一条都是踩过坑才写出来的：
+
+    - **状态归一**：旧客户端/旧导入文件会提交已删值（`trial` /
+      `subscribed`），写侧必须收敛，否则历史行被写回废弃状态。
+    - **`cashier_url` 优先级**：列上有值以列为准。旧实现无条件用
+      `extra.get("cashier_url")` 重算，而 JSON 导入把该字段写在列上、又把它
+      排除在 extra 之外 —— 刚导入的值被就地抹掉。
+    - **沉默不等于清空**：两个来源都没提这个字段时保持原值。
+    - **`extra_json` 原样保留**：`AccountModel` 输入时不解析再序列化，否则
+      会丢掉仓储不认识的键。
+    - **`created_at` 只认 datetime**：插件产出的是 unix 秒（int），塞进
+      datetime 列会抛 `'int' object has no attribute 'utcoffset'`。
+
+    `existing` 为 None 表示新建行。
+    """
+    is_model = isinstance(incoming, AccountModel)
+    if is_model:
+        extra_json = str(getattr(incoming, "extra_json", "") or "{}")
+        try:
+            extra = json.loads(extra_json) if extra_json else {}
+        except (json.JSONDecodeError, TypeError):
+            extra = {}
+    else:
+        extra = getattr(incoming, "extra", None) or {}
+        extra_json = json.dumps(extra, ensure_ascii=False)
+
+    status = getattr(incoming, "status", None)
+    status_value = getattr(status, "value", None) or str(status or "registered")
+    from core.base_platform import AccountStatus
+
+    status_value = AccountStatus.normalize(status_value)
+
+    old = existing or {}
+
+    def _keep(field: str) -> str:
+        """空串不覆盖已有值（密码等字段的既有语义）。"""
+        value = str(getattr(incoming, field, "") or "")
+        return value or str(old.get(field, "") or "")
+
+    incoming_cashier = str(getattr(incoming, "cashier_url", "") or "")
+    fallback_cashier = (
+        str(extra.get("cashier_url") or "") if isinstance(extra, dict) else ""
+    )
+    if incoming_cashier.strip():
+        cashier_url = incoming_cashier
+    elif isinstance(extra, dict) and "cashier_url" in extra:
+        # 显式在 extra 里给了（哪怕是空串）→ 用它
+        cashier_url = fallback_cashier
+    else:
+        # 两个来源都没提 → 保持原值
+        cashier_url = str(old.get("cashier_url", "") or "")
+
+    fields: dict[str, Any] = {
+        "password": _keep("password"),
+        "user_id": _keep("user_id"),
+        "region": _keep("region"),
+        "token": _keep("token"),
+        "status": status_value,
+        "extra_json": extra_json,
+        "cashier_url": cashier_url,
+    }
+
+    # 只在是 datetime 时保留 `created_at`（见 docstring）
+    created_at = getattr(incoming, "created_at", None)
+    if isinstance(created_at, datetime):
+        fields["created_at"] = created_at
+    return fields
+
+
 class AccountRepository:
     """账号池读写。所有方法都接受可选 `session`（默认自动按平台选库）。"""
 
@@ -182,18 +266,6 @@ class AccountRepository:
         if not platform or not email:
             raise ValueError("账号缺少 platform 或 email，无法落库")
 
-        # 区分两种输入：AccountModel 自带 extra_json，Account 用 extra 字典
-        is_model = isinstance(account, AccountModel)
-        if is_model:
-            extra_json = str(getattr(account, "extra_json", "") or "{}")
-            try:
-                extra = json.loads(extra_json) if extra_json else {}
-            except (json.JSONDecodeError, TypeError):
-                extra = {}
-        else:
-            extra = getattr(account, "extra", None) or {}
-            extra_json = json.dumps(extra, ensure_ascii=False)
-
         own = session is None
         sess = AccountRepository._session_for(platform, session)
         try:
@@ -202,63 +274,35 @@ class AccountRepository:
                 .where(AccountModel.platform == platform)
                 .where(AccountModel.email == email)
             ).first()
-            status = getattr(account, "status", None)
-            status_value = getattr(status, "value", None) or str(status or "registered")
-            # 状态精简的写侧兜底：旧客户端/旧导入文件可能提交已删除的
-            # trial / subscribed —— 落库前统一归一。历史行由启动迁移
-            # （`_normalize_removed_account_statuses`）收敛；写侧（创建/导入/
-            # 更新）在这里归一，防止旧客户端/旧导入文件把已删值写回库。
-            from core.base_platform import AccountStatus
 
-            status_value = AccountStatus.normalize(status_value)
-            # cashier_url 有两个来源：账号表的列（API 层导入/创建写这里）与
-            # extra（插件形态的账号走这里）。**列上有值时以列为准** —— 旧实现
-            # 无条件用 `extra.get("cashier_url")` 重算，而 JSON 导入恰好把该字段
-            # 写在列上、又把它排除在 extra 之外，于是刚导入的值被就地抹掉
-            # （带值导入丢失、不带值导入清空旧值，实测两端都中）。
-            # 两个来源都没提这个字段时保持原值：沉默不等于清空。
-            incoming_cashier = str(getattr(account, "cashier_url", "") or "")
-            fallback_cashier = (
-                str(extra.get("cashier_url") or "") if isinstance(extra, dict) else ""
+            # **业务规则走纯函数**（`merge_account_fields`）：状态归一、
+            # `cashier_url` 优先级、extra 保留、created_at 判定都只写一份 ——
+            # 两种存储后端共用，规则不会漂移（见该函数的 docstring）。
+            fields = merge_account_fields(
+                incoming=account,
+                existing=(
+                    {
+                        "password": existing.password,
+                        "user_id": existing.user_id,
+                        "region": existing.region,
+                        "token": existing.token,
+                        "cashier_url": existing.cashier_url,
+                    }
+                    if existing is not None
+                    else None
+                ),
             )
+
             if existing is not None:
-                existing.password = getattr(account, "password", "") or existing.password
-                existing.user_id = getattr(account, "user_id", "") or ""
-                existing.region = getattr(account, "region", "") or ""
-                existing.token = getattr(account, "token", "") or ""
-                existing.status = status_value
-                existing.extra_json = extra_json
-                if incoming_cashier.strip():
-                    existing.cashier_url = incoming_cashier
-                elif isinstance(extra, dict) and "cashier_url" in extra:
-                    existing.cashier_url = fallback_cashier
+                for name, value in fields.items():
+                    setattr(existing, name, value)
                 existing.updated_at = _utcnow()
                 sess.add(existing)
                 sess.commit()
                 sess.refresh(existing)
                 return existing
 
-            row = AccountModel(
-                platform=platform,
-                email=email,
-                password=getattr(account, "password", "") or "",
-                user_id=getattr(account, "user_id", "") or "",
-                region=getattr(account, "region", "") or "",
-                token=getattr(account, "token", "") or "",
-                status=status_value,
-                extra_json=extra_json,
-                cashier_url=incoming_cashier if incoming_cashier.strip() else fallback_cashier,
-            )
-            # 调用方显式带 `created_at` 时保留它（导入导出往返要留住注册时间；
-            # 排序与筛选都依赖这个值）。不带则用模型的默认（当前时间）。
-            #
-            # **只认 datetime**：插件产出的 `core.base_platform.Account.created_at`
-            # 是 unix 秒（int），直接塞进 datetime 列会让 SQLAlchemy 在绑定参数时
-            # 抛 `'int' object has no attribute 'utcoffset'`。那条路本来就该用
-            # 当前时间，不该被覆盖。
-            created_at = getattr(account, "created_at", None)
-            if isinstance(created_at, datetime):
-                row.created_at = created_at
+            row = AccountModel(platform=platform, email=email, **fields)
             sess.add(row)
             sess.commit()
             sess.refresh(row)
