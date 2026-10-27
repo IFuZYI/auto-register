@@ -95,6 +95,22 @@ class JsonTableStore:
         self._store.put(self.table, row["id"], row)
         return _from_storage(row)
 
+    def put(self, row_id: Any, record: dict[str, Any]) -> dict[str, Any]:
+        """用**显式主键**写入（幂等）。
+
+        任务 id 是字符串（`task_1793...` / `backfill_rt_...`），不是自增整数 ——
+        `insert` 只支持自增。显式主键**不碰自增游标**：两者互不干扰。
+        """
+        row = _to_storage(dict(record))
+        row["id"] = row_id
+        now = datetime.now(timezone.utc).isoformat()
+        # **不覆盖调用方给的时间**：任务快照自带 `created_at` / `updated_at`
+        # （它们描述任务本身的时间线），覆盖会丢掉真实时间。缺了才补。
+        row.setdefault("created_at", now)
+        row.setdefault("updated_at", now)
+        self._store.put(self.table, row_id, row)
+        return _from_storage(row)
+
     def get(self, row_id: Any) -> Optional[dict[str, Any]]:
         record = self._store.get(self.table, row_id)
         return _from_storage(record) if isinstance(record, dict) else None
@@ -122,8 +138,19 @@ class JsonTableStore:
     # ---------------------------------------------------------------- 查询
 
     def all(self) -> list[dict[str, Any]]:
+        """全部行。
+
+        排序键要**同时容忍字符串与整数主键**：任务 id 是 `task_1793...`，
+        `int(...)` 会直接炸（实测）。数字在前、字符串按字典序在后 ——
+        与「自增表」的直觉顺序一致。
+        """
         rows = [_from_storage(r) for r in self._store.all(self.table)]
-        rows.sort(key=lambda r: int(r.get("id") or 0))
+
+        def _key(row: dict[str, Any]) -> tuple[int, Any]:
+            raw = str(row.get("id") or "")
+            return (0, int(raw)) if raw.isdigit() else (1, raw)
+
+        rows.sort(key=_key)
         return rows
 
     def find(self, **equals: Any) -> list[dict[str, Any]]:
@@ -133,6 +160,12 @@ class JsonTableStore:
             if all(str(row.get(k)) == str(v) for k, v in equals.items()):
                 out.append(row)
         return out
+
+    def find_in(self, field: str, values: Iterable[Any]) -> list[dict[str, Any]]:
+        """按 `field IN (values)` 过滤 —— 任务列表要按状态集合筛。"""
+        # 空集合天然不匹配任何行，不需要额外的守卫分支
+        wanted = {str(v) for v in values}
+        return [r for r in self.all() if str(r.get(field)) in wanted]
 
     def first(self, **equals: Any) -> Optional[dict[str, Any]]:
         found = self.find(**equals)
@@ -171,6 +204,9 @@ __all__ = ["JsonTableStore", "META_TABLE"]
 JSON_TABLES: frozenset[str] = frozenset({
     # 读写都走 `core.db.proxy_repository`（见该模块 docstring）
     "proxies",
+    # 读写都走 `core.db.task_repository` + `services.task_store_io` 的分派。
+    # 注意 `task_logs` **不在**这里：它由 `api/tasks.py` 直接读写，尚未收敛。
+    "task_runs",
 })
 
 

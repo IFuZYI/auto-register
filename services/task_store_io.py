@@ -117,6 +117,14 @@ def _upsert_task_run(snapshot: dict) -> None:
     normalized = _normalize_snapshot(snapshot)
     if not normalized["id"]:
         return
+
+    # **分派放在这里**（上层）：`core` 不许 import `services`，所以仓储只提供
+    # JSON 那一支，由本模块决定用谁。写反会让架构约束测试变红（实测）。
+    from core.db.task_repository import task_repository
+
+    if task_repository.put_json(normalized):
+        return
+
     with Session(current_engine()) as s:
         row = s.get(TaskRunModel, normalized["id"])
         if row is None:
@@ -173,6 +181,14 @@ def _persist_task_snapshot(task_id: str) -> None:
 
 
 def _get_persisted_task(task_id: str) -> Optional[dict]:
+    from core.db.task_repository import task_repository
+
+    from_json = task_repository.get_json(str(task_id or ""))
+    if from_json is not None:
+        return from_json
+    if task_repository._store() is not None:
+        return None  # JSON 后端下确实没有这个任务
+
     with Session(current_engine()) as s:
         row = s.get(TaskRunModel, task_id)
         if row is None:
@@ -226,6 +242,40 @@ def _list_persisted_tasks(*, include_logs: bool = False) -> list[dict]:
 
     仍在跑/等待的任务**保留**两者：那是实时面板要用的，裁掉就没得看了。
     """
+    # JSON 后端：读全表后在 Python 里做同样的裁剪与排序。
+    #
+    # 取舍与 SQLite 版不同：那边靠「SQL 层不取大字段」省内存（十几 MB 的
+    # errors_json 只读轻量列，快 6–10 倍）；JSON 版只能整份读进来 —— 但
+    # **裁剪规则与排序必须一致**，否则同一个任务在两种后端下显示不同。
+    from core.db.task_repository import task_repository as _task_repo
+
+    _json_rows = _task_repo.list_json_by_status(
+        # 空集合会被 find_in 判成「什么都不匹配」；这里要的是「全部」，
+        # 所以用「非空状态集合」表达不了时退回自取。
+        ["pending", "running", "done", "failed", "stopped"]
+    )
+    _json_store = _task_repo._store()
+    if _json_store is not None:
+        rows = _json_store.all()
+        snapshots = []
+        for record in rows:
+            item = dict(record)
+            status = str(item.get("status") or "")
+            if (not include_logs) and status not in _LIVE_STATUSES:
+                # 与 SQLite 版同一口径：已结束任务的明细只留计数
+                item["logs"] = []
+                item["errors"] = []
+            snapshots.append(_normalize_snapshot(item))
+        snapshots.sort(
+            key=lambda item: (
+                {"running": 0, "pending": 1, "done": 2, "failed": 3, "stopped": 4}.get(
+                    str(item.get("status") or ""), 9
+                ),
+                -_to_epoch_seconds(item.get("created_at")),
+            )
+        )
+        return snapshots
+
     # **SQL 层就不取大字段**：`logs_json` / `errors_json` 在 763 行上合计
     # 十几 MB，`SELECT *` 会先全读进内存再在 Python 里清空 —— 实测查询本身
     # 86–518ms、序列化再 200–320ms。只取轻量列后降到 42–82ms（快 6–10 倍）。

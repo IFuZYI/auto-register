@@ -188,10 +188,11 @@ class TableWantsJsonTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"STORAGE_BACKEND": "json"}, clear=False):
             with mock.patch("core.storage.resolve_backend_name", lambda *a, **k: "json"):
                 # 已完整接线（读写都走 store）的表
-                self.assertIn("proxies", JSON_TABLES)
-                self.assertTrue(table_wants_json("proxies"))
+                for table in ("proxies", "task_runs"):
+                    self.assertIn(table, JSON_TABLES)
+                    self.assertTrue(table_wants_json(table))
                 # **未接线**的表不能切 —— 只有写接了的话会「写 JSON、读 SQLite」
-                for table in ("task_runs", "task_logs", "icloud_aliases",
+                for table in ("task_logs", "icloud_aliases",
                               "outlook_accounts", "some_future_table"):
                     self.assertNotIn(
                         table, JSON_TABLES,
@@ -244,3 +245,88 @@ class BackendJudgmentUsesTheEngineTests(unittest.TestCase):
 
         with mock.patch("core.db.engine", create_engine("sqlite://")):
             self.assertFalse(sqlite_db_exists(), "内存库不该算「已有数据」")
+
+
+class ExplicitKeyAndFilterCapabilitiesTests(unittest.TestCase):
+    """任务表需要两个通用存储还没有的能力。
+
+    - **显式主键**：任务 id 是字符串（`task_1793...` / `backfill_rt_...`），
+      不是自增整数。通用存储原来只支持自增 id。
+    - **集合过滤**：任务列表要按 `status IN (...)` 筛（`_LIVE_STATUSES`
+      这类），等值过滤不够。
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.path = Path(self._tmp.name) / "tasks.json"
+
+    def _store(self):
+        from core.storage.json_table import JsonTableStore
+
+        return JsonTableStore(self.path, table="task_runs")
+
+    def test_put_with_explicit_string_key(self):
+        store = self._store()
+        store.put("task_1793000000000", {"status": "running", "total": 5})
+        got = store.get("task_1793000000000")
+        self.assertIsNotNone(got, "显式字符串主键取不到")
+        self.assertEqual(got["status"], "running")
+
+    def test_put_keeps_the_caller_supplied_timestamps(self):
+        """`put` **不覆盖**调用方给的时间。
+
+        任务快照自带 `created_at` / `updated_at`（描述任务本身的时间线）——
+        覆盖会丢掉真实时间（任务页显示的「已运行时长」就靠它）。
+        """
+        store = self._store()
+        store.put("k", {
+            "status": "done",
+            "created_at": "2026-01-02T03:04:05+00:00",
+            "updated_at": "2026-01-02T04:05:06+00:00",
+        })
+        got = store.get("k")
+        self.assertEqual(got["updated_at"].isoformat(), "2026-01-02T04:05:06+00:00")
+        self.assertEqual(got["created_at"].isoformat(), "2026-01-02T03:04:05+00:00")
+
+    def test_put_fills_missing_timestamps(self):
+        store = self._store()
+        got = store.put("k2", {"status": "done"})
+        self.assertIsNotNone(got.get("created_at"))
+        self.assertIsNotNone(got.get("updated_at"))
+
+    def test_put_is_idempotent(self):
+        store = self._store()
+        store.put("k1", {"status": "running"})
+        store.put("k1", {"status": "done"})
+        self.assertEqual(store.get("k1")["status"], "done")
+        self.assertEqual(store.count(), 1, "put 建了重复行")
+
+    def test_explicit_key_does_not_bump_the_auto_cursor(self):
+        """显式主键与自增游标互不干扰。"""
+        store = self._store()
+        store.put("task_x", {"status": "done"})
+        auto = store.insert({"status": "auto"})
+        self.assertEqual(auto["id"], 1, "显式主键把自增游标顶走了")
+
+    def test_find_in(self):
+        store = self._store()
+        store.put("a", {"status": "running"})
+        store.put("b", {"status": "done"})
+        store.put("c", {"status": "pending"})
+        found = store.find_in("status", ["running", "pending"])
+        self.assertEqual(sorted(r["status"] for r in found), ["pending", "running"])
+
+    def test_find_in_empty_values_returns_nothing(self):
+        store = self._store()
+        store.put("a", {"status": "running"})
+        self.assertEqual(store.find_in("status", []), [])
+
+    def test_all_accepts_string_keys(self):
+        """字符串主键不能被当成数字排序而炸。"""
+        store = self._store()
+        store.put("task_2", {"status": "x"})
+        store.put("task_10", {"status": "y"})
+        store.insert({"status": "z"})
+        rows = store.all()
+        self.assertEqual(len(rows), 3)
