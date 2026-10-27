@@ -32,6 +32,14 @@ _FIELDS = (
 )
 
 
+def new_alias_share_token() -> str:
+    """分享令牌（别名行的 `share_token`）。与 `services/icloud/aliases.py`
+    里的同名函数保持一致 —— 那边是唯一实现，这里只是避免循环 import。"""
+    import secrets
+
+    return secrets.token_urlsafe(16)
+
+
 def _from_model(row: ICloudAliasModel) -> dict[str, Any]:
     return {key: getattr(row, key, None) for key in _FIELDS}
 
@@ -319,6 +327,140 @@ class ICloudAliasRepository:
             s.commit()
             s.refresh(row)
             return _from_model(row)
+
+    @staticmethod
+    def find_candidates(*, account_id: int, active_status: str = "active") -> list[dict[str, Any]]:
+        """取号候选：本主号下「启用中 + 池状态可用/已用/空」的别名，按 id 升序。
+
+        筛选条件用**查询层**写一份（`OR` 状态 + 状态等值），两种后端各自执行。
+        与 `claim_alias` 原查询等价 —— 那里是 `status == active AND
+        pool_status IN (available, used, NULL, "") ORDER BY id`。
+        """
+        from core.storage.query import any_of, eq, matches_all
+
+        clauses = [
+            eq("account_id", int(account_id)),
+            eq("status", active_status),
+            any_of(
+                eq("pool_status", "available"),
+                eq("pool_status", "used"),
+                eq("pool_status", None),
+                eq("pool_status", ""),
+            ),
+        ]
+
+        store = ICloudAliasRepository._store()
+        if store is not None:
+            rows = [
+                r for r in store.all() if matches_all(clauses, r)
+            ]
+            rows.sort(key=lambda r: int(r.get("id") or 0))
+            return [{k: r.get(k) for k in _FIELDS} for r in rows]
+
+        from sqlmodel import select
+
+        from core.storage.query import to_sql
+
+        from .registry import platform_database_registry
+
+        with platform_database_registry.session_for("icloud") as s:
+            rows = s.exec(
+                select(ICloudAliasModel)
+                .where(ICloudAliasModel.account_id == int(account_id))
+                .where(ICloudAliasModel.status == active_status)
+                # **必须经 `to_sql`**：`where()` 要的是 SQL 表达式，直接传
+                # Clause 会 ArgumentError（实测）。
+                .where(to_sql(ICloudAliasModel, clauses[2]))
+                .order_by(ICloudAliasModel.id)
+            ).all()
+            return [_from_model(r) for r in rows]
+
+    @staticmethod
+    def upsert_from_sync(
+        *, account_id: int, address: str, payload: dict[str, Any], account_email: str,
+        return_flag: bool = False,
+    ):
+        """同步下来的别名写入（`_upsert_alias` 的仓储版）。
+
+        三条业务规则原样保留（都是踩过坑的）：
+        1. **新建的默认 `unpooled`** —— 必须用户勾选才进池（用户明确要求）；
+        2. **已存在的行不动 `pool_status`** —— 用户可能已标成 used/in_use，
+           一次同步不该把记账打回；
+        3. **同地址的远程行、归属不同账号时跳过** —— 抢走它的 account_id 会让
+           远程行归到另一个本地账号名下而 source 仍是 remote，之后删除/停用
+           会按远程分支调远端服务，账实不符（ADR-0001）。
+        """
+        wanted = str(address or "").strip().lower()
+        store = ICloudAliasRepository._store()
+
+        if store is not None:
+            existing = store.first(address=wanted)
+            is_new = existing is None
+            if existing is None:
+                created = store.insert({
+                    "account_id": int(account_id),
+                    "address": wanted,
+                    "label": str(payload.get("label") or ""),
+                    "note": str(payload.get("note") or ""),
+                    "status": str(payload.get("status") or "active"),
+                    "provider_id": str(payload.get("provider_id") or ""),
+                    "share_token": new_alias_share_token(),
+                    "pool_status": "unpooled",
+                })
+                result = {k: created.get(k) for k in _FIELDS}
+                return (result, True) if return_flag else result
+
+            if str(existing.get("source") or "") == "remote" and int(
+                existing.get("account_id") or 0
+            ) != int(account_id):
+                result = {k: existing.get(k) for k in _FIELDS}
+                return (result, False) if return_flag else result
+
+            merged = {
+                "account_id": int(account_id),
+                "label": str(payload.get("label") or "") or existing.get("label") or "",
+                "note": str(payload.get("note") or "") or existing.get("note") or "",
+                "status": str(payload.get("status") or "active"),
+                "provider_id": str(payload.get("provider_id") or "") or existing.get("provider_id") or "",
+                "share_token": existing.get("share_token") or new_alias_share_token(),
+            }
+            updated = store.update(existing.get("id"), merged)
+            result = {k: (updated or {}).get(k) for k in _FIELDS}
+            return (result, False) if return_flag else result
+
+        # SQLite：与 JSON 分支同样的三条规则，用原生会话实现
+        from sqlmodel import select
+
+        from .registry import platform_database_registry
+
+        with platform_database_registry.session_for("icloud") as s:
+            row = s.exec(
+                select(ICloudAliasModel).where(ICloudAliasModel.address == wanted)
+            ).first()
+            is_new = row is None
+            if row is None:
+                row = ICloudAliasModel(account_id=int(account_id), address=wanted)
+                row.pool_status = "unpooled"
+            elif str(getattr(row, "source", "") or "") == "remote" and int(
+                getattr(row, "account_id", 0) or 0
+            ) != int(account_id):
+                result = _from_model(row)
+                return (result, False) if return_flag else result
+
+            row.account_id = int(account_id)
+            row.label = str(payload.get("label") or "") or row.label
+            row.note = str(payload.get("note") or "") or row.note
+            row.status = str(payload.get("status") or "active")
+            row.provider_id = str(payload.get("provider_id") or "") or row.provider_id
+            row.share_token = row.share_token or new_alias_share_token()
+            from datetime import datetime, timezone
+
+            row.updated_at = datetime.now(timezone.utc)
+            s.add(row)
+            s.commit()
+            s.refresh(row)
+            result = _from_model(row)
+            return (result, is_new) if return_flag else result
 
     @staticmethod
     def delete(alias_id: Any) -> bool:

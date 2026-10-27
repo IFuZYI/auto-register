@@ -10,7 +10,6 @@ import logging
 from datetime import timedelta
 from typing import Any, Optional
 
-from sqlalchemy import or_, update
 from sqlmodel import select
 
 from core.db import (
@@ -152,99 +151,84 @@ def claim_alias(
             raise ICloudError("account_disabled", f"iCloud 主号已停用: {row.email}")
 
         # 1) 先捞池里没用过的（且没被停用、没出错的）
-        with platform_session("icloud") as session:
-            candidates = session.exec(
-                select(ICloudAliasModel)
-                .where(ICloudAliasModel.account_id == int(account_id))
-                .where(ICloudAliasModel.status == ALIAS_STATUS_ACTIVE)
-                .where(
-                    or_(
-                        ICloudAliasModel.pool_status == POOL_STATUS_AVAILABLE,
-                        ICloudAliasModel.pool_status == POOL_STATUS_USED,
-                        ICloudAliasModel.pool_status == None,  # noqa: E711 - SQL 里要 IS NULL
-                        ICloudAliasModel.pool_status == "",
+        # 候选查询走**仓储**（筛选条件用查询层写一份，两种后端各自执行）
+        from core.db.icloud_alias_repository import icloud_alias_repository
+
+        candidates = icloud_alias_repository.find_candidates(
+            account_id=account_id, active_status=ALIAS_STATUS_ACTIVE
+        )
+
+        # 权威证据：`accounts` 表里这些地址注册过哪些平台（跨库）。池里的
+        # `used_platforms` 只是记账，任务中途崩掉会缺项 —— 只信记账就会把
+        # 一个其实已经注册过的地址再发出去，白跑一轮还撞「邮箱已被占用」。
+        # 这一步就是「先判断，再和平台已注册账号里进行比对，确保没注册
+        # 才能开始注册」。
+        registered = _facade._registered_platforms_for([c["address"] for c in candidates])
+
+        existing = None
+        for candidate in candidates:
+            status = str(candidate.get("pool_status") or "") or POOL_STATUS_AVAILABLE
+            address_key = str(candidate.get("address") or "").strip().lower()
+            hit_platforms = registered.get(address_key, set())
+            if wanted_platform and wanted_platform in hit_platforms:
+                # 本平台已经在 `accounts` 表里有这个地址的账号 —— 绝不能
+                # 再发给本平台（重复注册必然失败）。顺手把记账补上，
+                # 让它下次一眼可见。
+                if not email_used_by_platform(
+                    str(candidate.get("used_platforms") or ""), wanted_platform
+                ):
+                    icloud_alias_repository.set_fields(
+                        candidate["id"],
+                        used_platforms=mark_email_used_by(
+                            str(candidate.get("used_platforms") or ""), wanted_platform
+                        ),
                     )
-                )
-                .order_by(ICloudAliasModel.id)
-            ).all()
-
-            # 权威证据：`accounts` 表里这些地址注册过哪些平台（跨库）。池里的
-            # `used_platforms` 只是记账，任务中途崩掉会缺项 —— 只信记账就会把
-            # 一个其实已经注册过的地址再发出去，白跑一轮还撞「邮箱已被占用」。
-            # 这一步就是「先判断，再和平台已注册账号里进行比对，确保没注册
-            # 才能开始注册」。
-            registered = _facade._registered_platforms_for([row.address for row in candidates])
-
-            existing = None
-            backfilled = False
-            for candidate in candidates:
-                status = getattr(candidate, "pool_status", "") or POOL_STATUS_AVAILABLE
-                address_key = str(candidate.address or "").strip().lower()
-                hit_platforms = registered.get(address_key, set())
-                if wanted_platform and wanted_platform in hit_platforms:
-                    # 本平台已经在 `accounts` 表里有这个地址的账号 —— 绝不能
-                    # 再发给本平台（重复注册必然失败）。顺手把记账补上，
-                    # 让它下次一眼可见。
-                    if not email_used_by_platform(
-                        getattr(candidate, "used_platforms", ""), wanted_platform
-                    ):
-                        candidate.used_platforms = mark_email_used_by(
-                            getattr(candidate, "used_platforms", ""), wanted_platform
-                        )
-                        candidate.updated_at = _utcnow()
-                        session.add(candidate)
-                        backfilled = True
-                        logger.info(
-                            "iCloud 号池：%s 已注册过 %s（accounts 表有记录），跳过",
-                            candidate.address,
-                            wanted_platform,
-                        )
+                    logger.info(
+                        "iCloud 号池：%s 已注册过 %s（accounts 表有记录），跳过",
+                        candidate.get("address"),
+                        wanted_platform,
+                    )
+                continue
+            if status == POOL_STATUS_USED:
+                # `used` = 至少有一个平台用掉了它。只有**本平台**没用过
+                # 才允许复用；`platform` 未知时保守跳过（宁可去生成，
+                # 也不要把一个已注册过的地址再发给同一个平台）。
+                if not wanted_platform:
                     continue
-                if status == POOL_STATUS_USED:
-                    # `used` = 至少有一个平台用掉了它。只有**本平台**没用过
-                    # 才允许复用；`platform` 未知时保守跳过（宁可去生成，
-                    # 也不要把一个已注册过的地址再发给同一个平台）。
-                    if not wanted_platform:
-                        continue
-                    if email_used_by_platform(
-                        getattr(candidate, "used_platforms", ""), wanted_platform
-                    ):
-                        continue
-                existing = candidate
-                break
-            if existing is not None:
-                existing.pool_status = POOL_STATUS_IN_USE
-                existing.updated_at = _utcnow()
-                session.add(existing)
-                session.commit()
-                session.refresh(existing)
-                logger.info("iCloud 号池：复用已入池的隐私邮箱 %s", existing.address)
-                return _alias_to_dict(
-                    existing,
-                    str(row.email or ""),
-                    registered=registered.get(str(existing.address or "").strip().lower()),
-                )
-            # 一个都没领到，但比对时补过记账 —— 单独提交。会话上下文只管
-            # close 不管 commit，不提交的话这些补写会被丢掉（实测）。
-            if backfilled:
-                session.commit()
+                if email_used_by_platform(
+                    str(candidate.get("used_platforms") or ""), wanted_platform
+                ):
+                    continue
+            existing = candidate
+            break
+
+        if existing is not None:
+            icloud_alias_repository.set_fields(
+                existing["id"], pool_status=POOL_STATUS_IN_USE
+            )
+            logger.info("iCloud 号池：复用已入池的隐私邮箱 %s", existing.get("address"))
+            refreshed = icloud_alias_repository.get(existing["id"]) or existing
+            return _alias_to_dict(
+                refreshed,
+                str(row.email or ""),
+                registered=registered.get(
+                    str(refreshed.get("address") or "").strip().lower()
+                ),
+            )
 
         # 2) 池里没有可用的，才向 Apple 新生成
         created = _facade.generate_alias(account_id, label=label, note=note, proxy=proxy)
-        with platform_session("icloud") as session:
-            alias = session.get(ICloudAliasModel, int(created["id"]))
-            if alias is not None:
-                alias.pool_status = POOL_STATUS_IN_USE
-                alias.updated_at = _utcnow()
-                session.add(alias)
-                session.commit()
-                session.refresh(alias)
-                return _alias_to_dict(
-                    alias,
-                    str(row.email or ""),
-                    registered=_facade._registered_platforms_one(str(alias.address or "")),
-                )
-        return created
+        icloud_alias_repository.set_fields(
+            created["id"], pool_status=POOL_STATUS_IN_USE
+        )
+        refreshed = icloud_alias_repository.get(created["id"]) or created
+        return _alias_to_dict(
+            refreshed,
+            str(row.email or ""),
+            registered=_facade._registered_platforms_one(
+                str(refreshed.get("address") or "")
+            ),
+        )
 
 
 def mark_alias_used(alias_id: int, *, platform: str = "") -> None:
@@ -622,47 +606,19 @@ def _upsert_alias(
     *,
     return_flag: bool = False,
 ):
-    address = str(payload.get("address") or "").strip().lower()
-    with platform_session("icloud") as session:
-        row = session.exec(
-            select(ICloudAliasModel).where(ICloudAliasModel.address == address)
-        ).first()
-        is_new = row is None
-        if row is None:
-            row = ICloudAliasModel(account_id=int(account_id), address=address)
-            # 新建的别名默认「未入池」：必须由用户在面板上勾选「导入邮箱池」
-            # 才转成 available 供注册取号。用户明确要求「账号邮箱要选择导入
-            # 才能导入邮箱池，不是全部导入邮箱池」。
-            #
-            # 已存在的行不动它的 pool_status —— 用户可能已经把它标成 used 或
-            # 正在 in_use，一次同步不该把记账打回。
-            row.pool_status = POOL_STATUS_UNPOOLED
-        elif str(getattr(row, "source", "") or "") == "remote":
-            # 同地址已有**远程行**：本地同步跳过它（ADR-0001「反向同理跳过，
-            # 不把远程行改成本地」）。抢走它的 account_id 会让这条远程行归到
-            # 另一个本地账号名下，而 source 仍是 remote —— 之后删除/停用会按
-            # 远程分支去调远端服务，账实不符。返回既有行、不改任何字段。
-            #
-            # 只在「归属不同账号」时跳过：远程账号自己同步（remote.py）也走
-            # 这里，它的 account_id 与行上一致，需要继续走更新分支。
-            #
-            # 用字面量而不是 `SOURCE_REMOTE`：那常量在 remote.py，而 remote.py
-            # 反向 import 本模块（循环）。本文件其它 source 比较也用字面量。
-            if int(getattr(row, "account_id", 0) or 0) != int(account_id):
-                result = _alias_to_dict(row, account_email)
-                return (result, False) if return_flag else result
-        row.account_id = int(account_id)
-        row.label = str(payload.get("label") or "") or row.label
-        row.note = str(payload.get("note") or "") or row.note
-        row.status = str(payload.get("status") or ALIAS_STATUS_ACTIVE)
-        row.provider_id = str(payload.get("provider_id") or "") or row.provider_id
-        row.share_token = row.share_token or new_alias_share_token()
-        row.updated_at = _utcnow()
-        session.add(row)
-        session.commit()
-        session.refresh(row)
-        result = _alias_to_dict(row, account_email)
-    return (result, is_new) if return_flag else result
+    """同步下来的别名写入 —— 规则在仓储里（三条业务规则，见那个方法）。
+
+    这里只做参数适配：既有调用方传 `(account_id, payload, account_email)`。
+    """
+    from core.db.icloud_alias_repository import icloud_alias_repository
+
+    return icloud_alias_repository.upsert_from_sync(
+        account_id=account_id,
+        address=str(payload.get("address") or ""),
+        payload=payload,
+        account_email=account_email,
+        return_flag=return_flag,
+    )
 
 
 def _record_sync_error(account_id: int, message: str) -> None:
