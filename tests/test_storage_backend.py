@@ -138,3 +138,86 @@ class JsonStoreRoundTripTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ConfigStoreWorksOnBothBackendsTests(unittest.TestCase):
+    """配置存储必须两种后端都能跑 —— 这是业务层接线的第一个领域。
+
+    配置是最小、最独立的领域（只有 get/set/get_all/delete 四个操作），
+    适合作为「业务层改调后端」的第一个验证点。
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name)
+
+    def test_config_roundtrip_on_json_backend(self):
+        from core.storage.config_store_json import JsonConfigStore
+
+        store = JsonConfigStore(self.root / "config.json")
+        store.set("cpa_api_url", "http://x")
+        self.assertEqual(store.get("cpa_api_url"), "http://x")
+        self.assertEqual(store.get_all().get("cpa_api_url"), "http://x")
+
+    def test_missing_key_returns_default(self):
+        from core.storage.config_store_json import JsonConfigStore
+
+        store = JsonConfigStore(self.root / "c.json")
+        self.assertEqual(store.get("nope", "fallback"), "fallback")
+        self.assertEqual(store.get("nope"), "")
+
+    def test_overwrite_is_idempotent(self):
+        from core.storage.config_store_json import JsonConfigStore
+
+        store = JsonConfigStore(self.root / "c2.json")
+        store.set("k", "v1")
+        store.set("k", "v1")
+        self.assertEqual(store.get("k"), "v1")
+        store.set("k", "v2")
+        self.assertEqual(store.get("k"), "v2")
+
+    def test_delete(self):
+        from core.storage.config_store_json import JsonConfigStore
+
+        store = JsonConfigStore(self.root / "c3.json")
+        store.set("k", "v")
+        store.delete("k")
+        self.assertEqual(store.get("k"), "")
+
+    def test_persists_across_instances(self):
+        from core.storage.config_store_json import JsonConfigStore
+
+        path = self.root / "c4.json"
+        JsonConfigStore(path).set("k", "v")
+        self.assertEqual(JsonConfigStore(path).get("k"), "v")
+
+    def test_values_are_strings_like_the_sqlite_version(self):
+        """SQLite 版存的是字符串列 —— JSON 版要保持同一语义。
+
+        调用方到处做 `str(...)` / `.strip()` / 比较 `"1"`，值类型漂移会让
+        那些判断静默失效（例如 `bool("0")` 是 True）。
+
+        **断言要看落盘内容**，不能只看 `get()` 的返回 —— `get` 里有
+        `str(value)` 兜底，值存成 bool/int 也会被转回来，那样测试就抓不到
+        「存的时候没转字符串」这个变异（第一版就是这样漏掉的）。
+        """
+        import json as _json
+
+        from core.storage.config_store_json import JsonConfigStore
+
+        path = self.root / "c5.json"
+        store = JsonConfigStore(path)
+        store.set("k", "1")
+        store.set("n", 42)
+        store.set("b", True)
+
+        self.assertIsInstance(store.get("k"), str)
+        self.assertEqual(store.get_all()["k"], "1")
+
+        # 落盘内容必须全是字符串
+        raw = _json.loads(path.read_text(encoding="utf-8"))
+        for key, expected in (("k", "1"), ("n", "42"), ("b", "True")):
+            stored = raw["configs"][key]["value"]
+            self.assertIsInstance(stored, str, f"{key} 落盘成了 {type(stored).__name__}")
+            self.assertEqual(stored, expected)
