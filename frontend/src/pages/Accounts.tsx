@@ -701,37 +701,6 @@ export default function Accounts() {
     load()
   }
 
-  const showBatchActionResult = (title: string, result: any) => {
-    const lines = (result.items || [])
-      .filter((item: any) => !item.ok)
-      .map((item: any) => `[${item.id || '-'}] ${item.email || '-'}: ${item.message || '失败'}`)
-
-    if (lines.length === 0) return
-
-    Modal.info({
-      title,
-      width: 760,
-      content: (
-        <pre
-          style={{
-            margin: 0,
-            maxHeight: 360,
-            overflow: 'auto',
-            padding: 12,
-            borderRadius: 8,
-            background: 'var(--bg-subtle)',
-            fontSize: 12,
-            lineHeight: 1.5,
-            whiteSpace: 'pre-wrap',
-            wordBreak: 'break-word',
-          }}
-        >
-          {lines.join('\n')}
-        </pre>
-      ),
-    })
-  }
-
   const handleBatchStatusSync = async (kind: 'probe' | 'plus', scope: 'selected' | 'all') => {
     if (currentPlatform !== 'chatgpt') return
 
@@ -766,15 +735,22 @@ export default function Accounts() {
 
     setStatusSyncLoading(loadingKey)
 
-    // 「检测本地状态」跑成**任务**（用户要求「检测本地状态这种也变成任务」）：
-    // 每个号要真打一次上游探测，几百个号同步跑会把请求挂住几分钟且界面无
-    // 反馈。走 /tasks/probe-status 后能在「任务运行」页看实时日志、可停止。
-    // Plus 试用检测仍是同步批量（单次请求，量小）。
-    if (kind === 'probe') {
+    // 批量动作跑成**任务**（用户要求「整个项目大部分功能都统一基于任务」）：
+    // 每个号都要打一次上游请求，几百个号同步跑会把请求挂住几分钟且界面无
+    // 反馈。走通用任务端点后能在「任务运行」页看实时日志、可停止/跳过。
+    //
+    // 用**通用**端点（`/tasks/batch-action`）而不是逐个动作写专用端点：
+    // 新增动作时前端不需要再改。
+    {
       try {
-        const created = (await apiFetch('/tasks/probe-status', {
+        const created = (await apiFetch('/tasks/batch-action', {
           method: 'POST',
-          body: JSON.stringify(body),
+          body: JSON.stringify({
+            ...body,
+            platform: currentPlatform,
+            action_id: actionId,
+            action_label: `${scopeLabel}${actionLabel}`,
+          }),
         })) as { task_id: string; total: number }
         message.success({
           content: `${scopeLabel}${actionLabel}已开始（${created.total} 个），可在「任务运行」查看进度`,
@@ -793,30 +769,6 @@ export default function Accounts() {
       }
     }
 
-    message.loading({ content: `${scopeLabel}${actionLabel}进行中...`, key: toastKey, duration: 0 })
-    try {
-      const result = await apiFetch(`/actions/${currentPlatform}/${actionId}/batch`, {
-        method: 'POST',
-        body: JSON.stringify(body),
-      })
-
-      if (!result.total) {
-        message.info({ content: '没有可处理的账号', key: toastKey })
-      } else if (!result.failed) {
-        message.success({ content: `${scopeLabel}${actionLabel}完成：成功 ${result.success} / ${result.total}`, key: toastKey })
-      } else if (!result.success) {
-        message.error({ content: `${scopeLabel}${actionLabel}失败：成功 ${result.success} / ${result.total}`, key: toastKey })
-      } else {
-        message.warning({ content: `${scopeLabel}${actionLabel}部分完成：成功 ${result.success} / ${result.total}`, key: toastKey })
-      }
-
-      showBatchActionResult(`${scopeLabel}${actionLabel}结果`, result)
-      await load()
-    } catch (e: any) {
-      message.error({ content: `${actionLabel}失败: ${e.message}`, key: toastKey })
-    } finally {
-      setStatusSyncLoading('')
-    }
   }
 
   const missingRtCount = accounts.filter((item) => !getRefreshToken(item)).length
@@ -851,14 +803,20 @@ export default function Accounts() {
 
     setPanelUploadRunning(true)
     try {
-      const result = (await apiFetch(`/actions/${currentPlatform}/${actionId}/batch`, {
+      // 上传也跑成**任务**：一次可能推几百个账号，同步跑会把请求挂住几分钟
+      // 且界面无反馈。走通用任务端点后可在「任务运行」看实时日志、可停止。
+      const created = (await apiFetch('/tasks/batch-action', {
         method: 'POST',
-        body: JSON.stringify(body),
-      })) as { total?: number; success?: number; failed?: number }
-      const okCount = Number(result?.success) || 0
-      const badCount = Number(result?.failed) || 0
-      if (badCount > 0) message.warning(`上传完成：成功 ${okCount}，失败 ${badCount}`)
-      else message.success(`已上传 ${okCount} 个账号到 ${panelUploadTarget}`)
+        body: JSON.stringify({
+          ...body,
+          platform: currentPlatform,
+          action_id: actionId,
+          action_label: `上传到 ${panelUploadTarget}`,
+        }),
+      })) as { task_id: string; total: number }
+      message.success(
+        `已开始上传 ${created.total} 个账号到 ${panelUploadTarget}，可在「任务运行」查看进度`,
+      )
       setPanelUploadOpen(false)
       load()
     } catch (error) {

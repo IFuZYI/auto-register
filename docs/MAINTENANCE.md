@@ -432,8 +432,9 @@ python -m pytest tests/ -q
 cd frontend && npx tsc -b && npm run lint && npm run build
 ```
 
-**eslint 的基线是 55 problems（50 errors + 5 warnings）** —— 这是历史存量，
+**eslint 的基线是 51 problems（46 errors + 5 warnings）** —— 这是历史存量，
 不是「0 才算过」。改动不应让这个数字变大；顺手修可以，但别为了清零做大改。
+（2026-10-27：55 → 51，清理账号页的同步批量死代码时顺带删掉 4 处 `any`。）
 
 ### 4.2 测试没有覆盖到的（要人工确认）
 

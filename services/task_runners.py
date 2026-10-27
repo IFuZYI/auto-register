@@ -764,6 +764,86 @@ def _run_probe_status(task_id: str, account_ids: list[int], req: "ProbeStatusTas
     )
 
 
+def _run_batch_action(task_id: str, account_ids: list[int], req: "BatchActionTaskRequest"):
+    """**通用**批量动作：逐号跑 `execute_action`，结果走共享落库路径。
+
+    一个机制覆盖所有「批量点按钮」的场景（上传 / 状态同步 / Plus 检测 …），
+    新增动作时不需要再写任务端点 —— 任务化是默认行为而不是逐个补齐。
+
+    与 `_run_refresh_token` 的差别只在动作 id 是参数化的：那边是为刷新单独
+    优化过（状态策略、token 列镜像），这里走通用 `_apply_action_result`。
+    """
+    from api import tasks as _api  # 延迟 import：patch 打在 api.tasks 上必须被看到
+    from core.config_store import config_store
+
+    base_config = config_store.get_all() or {}
+    action_id = str(req.action_id or "")
+    platform = str(req.platform or "").strip().lower()
+
+    def _handle(*, account_id, fields, proxy, control, attempt_id) -> AttemptResult:
+        from api.actions import _apply_action_result, _result_message, _to_platform_account
+        from core.base_platform import RegisterConfig
+        from core.db import AccountModel, platform_session
+        from core.registry import get
+
+        email = fields["email"]
+        control.checkpoint(attempt_id=attempt_id)
+
+        PlatformCls = get(platform)
+        instance = PlatformCls(config=RegisterConfig(extra=base_config))
+        if proxy:
+            instance.config.proxy = proxy
+        instance._log_fn = lambda msg: _api._log(task_id, f"  {msg}")
+        instance.bind_task_control(control)
+        instance._task_attempt_token = attempt_id
+
+        # 网络链不占数据库连接：先读成纯数据、归还连接，跑完再开短会话落库
+        with platform_session(platform) as s:
+            row = s.get(AccountModel, account_id)
+            if row is None:
+                _api._log(task_id, f"[SKIP] 账号 #{account_id} 不存在")
+                return AttemptResult.skipped("账号不存在")
+            # 禁用账号不参与面板上传（与 `_UPLOAD_ACTIONS` 的既有口径一致）
+            from api.actions import _UPLOAD_ACTIONS, _is_banned_status
+
+            if action_id in _UPLOAD_ACTIONS and _is_banned_status(row.status):
+                _api._log(task_id, f"[SKIP] {email} 已禁用，不参与面板凭据上传")
+                return AttemptResult.skipped("账号已禁用")
+            plat_account = _to_platform_account(row)
+
+        result = instance.execute_action(action_id, plat_account, dict(req.params or {}))
+
+        with platform_session(platform) as s:
+            account = s.get(AccountModel, account_id)
+            if account is not None:
+                _apply_action_result(platform, action_id, account, result, s)
+                s.add(account)
+                s.commit()
+
+        if result.get("ok"):
+            message = _result_message(result) or "完成"
+            _api._log(task_id, f"[OK] {email} {message}")
+            _api._save_task_log(platform, email, "success", detail={"action": action_id})
+            return AttemptResult.success()
+
+        message = str(result.get("error") or _result_message(result) or "失败")
+        _api._log(task_id, f"[FAIL] {email} {message}")
+        _api._save_task_log(
+            platform, email, "failed", error=message, detail={"action": action_id}
+        )
+        return AttemptResult.failed(f"{email}: {message}")
+
+    _run_account_batch_task(
+        task_id,
+        account_ids,
+        label=req.action_label or "批量操作",
+        concurrency=req.concurrency,
+        delay_seconds=req.delay_seconds,
+        proxy=req.proxy,
+        handle_account=_handle,
+    )
+
+
 def _run_refresh_token(task_id: str, account_ids: list[int], req: RefreshTokenTaskRequest):
     """批量刷新 Token。逐号跑，可停可跳，进度和日志复用注册任务那套。
 

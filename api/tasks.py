@@ -160,6 +160,36 @@ class RefreshTokenTaskRequest(BaseModel):
     proxy: Optional[str] = None
 
 
+class BatchActionTaskRequest(BaseModel):
+    """**通用**批量动作任务参数。
+
+    一个入口覆盖所有「批量点按钮」的场景：上传到面板、同步面板状态、
+    Plus 试用检测……不必为每个动作再写一个任务端点。
+
+    与 `_run_refresh_token` 那类专用任务的区别：这里不内置任何动作知识，
+    动作 id 与参数都由调用方给，执行走 `execute_action`（与单账号按钮
+    同一条实现）。
+    """
+
+    platform: str
+    action_id: str
+    #: 动作参数（面板地址 / 口令等；留空时动作自己回落全局配置）
+    params: dict = Field(default_factory=dict)
+    #: 任务页显示的标签（缺省时用动作 id）
+    action_label: str = ""
+
+    account_ids: list[int] = Field(default_factory=list)
+    all_filtered: bool = False
+    email: str = ""
+    status: str = ""
+    plus_status: str = ""
+    created_at_start: Optional[UtcDatetime] = None
+    created_at_end: Optional[UtcDatetime] = None
+    concurrency: int = 1
+    delay_seconds: float = 1
+    proxy: Optional[str] = None
+
+
 class ProbeStatusTaskRequest(BaseModel):
     """批量检测本地状态的任务参数。
 
@@ -202,6 +232,7 @@ from services.task_runners import (  # noqa: E402,F401
     _load_account_fields,
     _run_account_batch_task,
     _run_backfill_rt,
+    _run_batch_action,
     _run_bind_2fa,
     _run_probe_status,
     _run_refresh_token,
@@ -382,6 +413,90 @@ def create_backfill_rt_task(req: BackfillRtTaskRequest, background_tasks: Backgr
     if missing_ids:
         _log(task_id, f"忽略不存在的账号: {missing_ids}")
     background_tasks.add_task(_run_backfill_rt, task_id, account_ids, req)
+    return {"task_id": task_id, "total": len(account_ids), "missing_ids": missing_ids}
+
+
+@router.post("/batch-action")
+def create_batch_action_task(
+    req: BatchActionTaskRequest, background_tasks: BackgroundTasks
+):
+    """**通用**批量动作任务：把任意「批量点按钮」的动作跑成任务。
+
+    覆盖上传到面板、同步面板状态、Plus 试用检测等 —— 新增动作不必再写任务
+    端点。执行走 `execute_action`（与单账号按钮同一条实现），结果经
+    `_apply_action_result` 落库，状态策略只有一份。
+
+    校验：平台必须已注册、动作必须在该平台上存在（否则明确 400/404，
+    而不是建一个跑起来只会全部失败的任务）。
+    """
+    from core.base_platform import RegisterConfig
+    from core.config_store import config_store as _cfg
+    from core.db import platform_session
+    from core.registry import get, list_platforms
+    from services.chatgpt_rt_backfill import select_backfill_targets
+
+    platform = str(req.platform or "").strip().lower()
+    action_id = str(req.action_id or "").strip()
+    if not platform or not action_id:
+        raise HTTPException(400, "缺少 platform 或 action_id")
+
+    if not any(str(p.get("name") or "").strip().lower() == platform for p in list_platforms()):
+        raise HTTPException(404, f"平台 {platform} 未注册")
+
+    try:
+        PlatformCls = get(platform)
+    except Exception as exc:  # noqa: BLE001 - 平台加载失败按未知处理
+        raise HTTPException(404, f"平台 {platform} 不可用: {exc}") from exc
+
+    instance = PlatformCls(config=RegisterConfig(extra=_cfg.get_all()))
+    known = {str(a.get("id") or "") for a in instance.get_platform_actions()}
+    if action_id not in known:
+        raise HTTPException(
+            400,
+            f"平台 {platform} 不支持操作 {action_id}（可用: {sorted(known)}）",
+        )
+
+    with platform_session(platform) as s:
+        try:
+            accounts, missing_ids = select_backfill_targets(
+                s,
+                account_ids=req.account_ids,
+                all_filtered=req.all_filtered,
+                email=req.email,
+                status=req.status,
+                plus_status=req.plus_status,
+                created_at_start=req.created_at_start,
+                created_at_end=req.created_at_end,
+                # 批量动作与「有没有 RT」无关 —— 全量都要处理
+                only_missing_rt=False,
+            )
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+    account_ids = [int(row.id) for row in accounts if row.id]
+    if not account_ids:
+        raise HTTPException(400, "所选账号不存在" if missing_ids else "没有匹配的账号")
+
+    label = str(req.action_label or action_id)
+    task_id = f"action_{int(time.time() * 1000)}"
+    _task_store.create(
+        task_id,
+        platform=platform,
+        total=len(account_ids),
+        source=f"action:{action_id}",
+        meta={
+            "kind": "batch_action",
+            "action_id": action_id,
+            "action_label": label,
+            "concurrency": req.concurrency,
+            "delay_seconds": req.delay_seconds,
+            "missing_ids": missing_ids,
+        },
+    )
+    _persist_task_snapshot(task_id)
+    _log(task_id, f"{label}：待处理账号 {len(account_ids)} 个")
+    if missing_ids:
+        _log(task_id, f"忽略不存在的账号: {missing_ids}")
+    background_tasks.add_task(_run_batch_action, task_id, account_ids, req)
     return {"task_id": task_id, "total": len(account_ids), "missing_ids": missing_ids}
 
 
