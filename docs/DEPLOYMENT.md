@@ -140,7 +140,7 @@ docker run -d \
 | `OPENAI_SENTINEL_NODE_PATH` | `node` | Sentinel PoW 求解器用的 Node 可执行文件（不在 `PATH` 时填绝对路径） |
 | `APP_JWT_SECRET` | 自动生成并存库 | 面板登录态 JWT 签名密钥 |
 | `APP_MEMORY_LIMIT` | `4g` | 容器内存上限（compose 的 `mem_limit`），防止浏览器泄漏拖垮宿主机 |
-| `STORAGE_BACKEND` | 见下 | `sqlite`（默认）或 `json`。不填时：全新部署用 `json`，已有 SQLite 库则继续 `sqlite` —— **不静默换库**，否则已有数据会「看起来消失」。**覆盖配置、账号、代理、任务**；任务日志/iCloud/邮箱池仍走 SQLite（会建 `account_manager.db`，属已知且一致的状态） |
+| `STORAGE_BACKEND` | 见下 | `sqlite`（默认）或 `json`。不填时：全新部署用 `json`，已有 SQLite 库则继续 `sqlite` —— **不静默换库**，否则已有数据会「看起来消失」。**覆盖配置、账号、代理、任务、任务日志**；iCloud/邮箱池仍走 SQLite（会建 `account_manager.db`，属已知且一致的状态） |
 | `STORAGE_BACKEND_ACCOUNTS` | 跟随总开关 | 设 `sqlite` 可让「配置走 JSON、账号留 SQLite」，便于迁移时先切配置、后切账号 |
 | `panel_tls_ca_bundle` | — | 面板 TLS 的 CA bundle（自签名面板用这个，而不是关校验） |
 | `panel_tls_insecure` | — | 设为 `1` 完全关闭面板 TLS 校验，**仅临时排障** |

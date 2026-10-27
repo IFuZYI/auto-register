@@ -316,17 +316,44 @@ def _save_task_log(
 ):
     """Write a TaskLog record to the database (fire-and-forget, non-blocking)."""
     def _write():
-        with Session(current_engine()) as s:
-            log = TaskLog(
-                platform=platform,
-                email=email,
-                status=status,
-                error=error,
-                detail_json=json.dumps(detail or {}, ensure_ascii=False),
-            )
-            s.add(log)
-            s.commit()
+        _save_task_log_sync(platform, email, status, error=error, detail=detail)
     threading.Thread(target=_write, daemon=True).start()
+
+
+def _save_task_log_sync(
+    platform: str, email: str, status: str, error: str = "", detail: dict = None
+) -> dict:
+    """同步写一条任务历史（测试与 JSON 后端用；生产走线程版）。
+
+    抽出来的理由：JSON 后端下写路径要能**同步**返回刚写的行（调用方拿 id），
+    而 `_save_task_log` 是 fire-and-forget（起线程、不返回）。
+    """
+    payload = {
+        "platform": platform, "email": email, "status": status,
+        "error": error, "detail": detail or {},
+    }
+    from core.db.task_log_repository import task_log_repository
+
+    written = task_log_repository.add_json(payload)
+    if written is not None:
+        return written
+
+    with Session(current_engine()) as s:
+        log = TaskLog(
+            platform=platform,
+            email=email,
+            status=status,
+            error=error,
+            detail_json=json.dumps(detail or {}, ensure_ascii=False),
+        )
+        s.add(log)
+        s.commit()
+        s.refresh(log)
+        return {
+            "id": log.id, "platform": log.platform, "email": log.email,
+            "status": log.status, "error": log.error,
+            "detail_json": log.detail_json, "created_at": log.created_at,
+        }
 
 
 def _account_already_registered(platform: str, email: str) -> bool:
@@ -693,6 +720,18 @@ def stop_task(task_id: str):
 
 @router.get("/logs")
 def get_logs(platform: str = None, page: int = 1, page_size: int = 50):
+    # **两种后端返回同一形状**（dict 列表）。SQLite 版原来返回 `TaskLog`
+    # 模型、JSON 版返回 dict —— 上层要按后端写两套取值逻辑，很容易漏。
+    from core.db.task_log_repository import task_log_repository
+
+    from_json = task_log_repository.list_json(
+        page=page, page_size=page_size, platform=platform or ""
+    )
+    if from_json is not None:
+        return from_json
+
+    from core.db.task_log_repository import _from_sqlite
+
     with Session(current_engine()) as s:
         q = select(TaskLog)
         if platform:
@@ -700,7 +739,7 @@ def get_logs(platform: str = None, page: int = 1, page_size: int = 50):
         q = q.order_by(TaskLog.id.desc())
         total = len(s.exec(q).all())
         items = s.exec(q.offset((page - 1) * page_size).limit(page_size)).all()
-    return {"total": total, "items": items}
+    return {"total": total, "items": [_from_sqlite(row) for row in items]}
 
 
 @router.post("/logs/batch-delete")
@@ -711,6 +750,13 @@ def batch_delete_logs(body: TaskLogBatchDeleteRequest):
     unique_ids = list(dict.fromkeys(body.ids))
     if len(unique_ids) > 1000:
         raise HTTPException(400, "单次最多删除 1000 条任务历史")
+
+    from core.db.task_log_repository import task_log_repository
+
+    from_json = task_log_repository.delete_many_json(unique_ids)
+    if from_json is not None:
+        logger.info("批量删除任务历史成功: %s 条", from_json["deleted"])
+        return from_json
 
     with Session(current_engine()) as s:
         try:

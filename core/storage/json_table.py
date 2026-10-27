@@ -204,9 +204,11 @@ __all__ = ["JsonTableStore", "META_TABLE"]
 JSON_TABLES: frozenset[str] = frozenset({
     # 读写都走 `core.db.proxy_repository`（见该模块 docstring）
     "proxies",
-    # 读写都走 `core.db.task_repository` + `services.task_store_io` 的分派。
-    # 注意 `task_logs` **不在**这里：它由 `api/tasks.py` 直接读写，尚未收敛。
+    # 读写都走 `core.db.task_repository` + `services.task_store_io` 的分派
     "task_runs",
+    # 读写都走 `core.db.task_log_repository`（`api/tasks.py` 与
+    # `services/log_cleanup.py` 都已接）
+    "task_logs",
 })
 
 

@@ -39,6 +39,13 @@ def retention_cutoff(older_than_days: int) -> datetime:
 def cleanup_task_logs(older_than_days: int) -> int:
     """删除超过保留期的任务历史，返回删除条数。"""
     cutoff = retention_cutoff(older_than_days)
+
+    from core.db.task_log_repository import task_log_repository
+
+    from_json = task_log_repository.cleanup_json(cutoff)
+    if from_json is not None:
+        return int(from_json)
+
     with Session(current_engine()) as session:
         result = session.exec(delete(TaskLog).where(TaskLog.created_at < cutoff))
         session.commit()
