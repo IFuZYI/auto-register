@@ -36,13 +36,20 @@ class CoverageReportTests(unittest.TestCase):
         for table in ("proxies", "task_runs", "task_logs"):
             self.assertIn(table, joined, f"没提到 {table}")
 
-    def test_lists_sqlite_only_tables(self):
-        """仍然留在 SQLite 的表要说出来 —— 这本该看见。"""
-        from core.storage.coverage import describe_coverage
+    def test_says_so_when_nothing_is_left_on_sqlite(self):
+        """全部接线后要**明说**没有表留在 SQLite —— 而不是让那行消失。
+
+        那行消失会让用户以为报告坏了；明说「全部表都已接入 json」才是
+        可读的结论。
+        """
+        from core.storage.coverage import _SQLITE_ONLY, describe_coverage
 
         joined = "\n".join(describe_coverage(backend="json"))
-        for table in ("icloud_aliases", "outlook_accounts"):
-            self.assertIn(table, joined, f"没提到 {table}")
+        if not _SQLITE_ONLY:
+            self.assertIn("全部表都已接入 json", joined)
+        else:
+            for table, _why in _SQLITE_ONLY:
+                self.assertIn(table, joined, f"没提到仍走 sqlite 的表 {table}")
 
     def test_sqlite_backend_says_so_plainly(self):
         from core.storage.coverage import describe_coverage

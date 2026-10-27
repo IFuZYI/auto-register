@@ -216,6 +216,11 @@ JSON_TABLES: frozenset[str] = frozenset({
     # 剩余的原生会话只在 `resolve_remote_account` / `_first_remote_account_with_aliases`
     # —— 那两处是**测试注入点**，且已有 JSON 分支（见那两个函数的注释）。
     "icloud_accounts",
+    # 读写都走 `core.db.outlook_repository`（筛选走查询层）。
+    # `services/mail_imports/providers.py` 与 `services/chatgpt_otp_mailbox.py`
+    # 里还有原生会话 —— 那些路径在 JSON 后端下会落到 SQLite，**接线前
+    # 先确认它们是否已被仓储覆盖**。
+    "outlook_accounts",
 })
 
 

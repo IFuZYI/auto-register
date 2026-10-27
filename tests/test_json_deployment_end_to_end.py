@@ -116,6 +116,30 @@ class JsonDeploymentEndToEndTests(unittest.TestCase):
             f"没生成 proxies.json —— 代理没落在 JSON 里（session 门控 bug？）",
         )
 
+        # **SQLite 里不该有数据**：文件可能因 schema 初始化而存在，但每张表
+        # 都必须是空的 —— 有数据就说明某条路径还在写 SQLite。
+        import sqlite3
+
+        for db_file in self.data.rglob("*.db"):
+            conn = sqlite3.connect(db_file)
+            try:
+                tables = [
+                    r[0]
+                    for r in conn.execute(
+                        "select name from sqlite_master where type='table' "
+                        "and name not like 'sqlite_%'"
+                    )
+                ]
+                for table in tables:
+                    count = conn.execute(f"select count(*) from {table}").fetchone()[0]
+                    self.assertEqual(
+                        count, 0,
+                        f"{db_file.name}:{table} 有 {count} 行 —— "
+                        f"JSON 部署下不该有数据落到 SQLite",
+                    )
+            finally:
+                conn.close()
+
         stored = json.loads(accounts_file.read_text(encoding="utf-8"))
         emails = {
             row.get("email") for row in (stored.get("accounts") or {}).values()

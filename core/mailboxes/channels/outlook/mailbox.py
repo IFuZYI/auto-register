@@ -176,32 +176,19 @@ class OutlookMailbox(BaseMailbox):
                 # 那条由上面的 `registered_emails` 过滤兜住，所以这里放开
                 # `used` 是安全的；本平台没用过的 `used` 行会在下面按
                 # `used_platforms` 再筛一遍。
-                query = (
-                    select(OutlookAccountModel)
-                    .where(OutlookAccountModel.enabled == True)
-                    .where(
-                        or_(
-                            OutlookAccountModel.status == "available",
-                            OutlookAccountModel.status == "used",
-                            OutlookAccountModel.status == None,
-                            OutlookAccountModel.status == "",
-                        )
-                    )
-                    .order_by(OutlookAccountModel.id)
+                # 候选查询走**仓储**（筛选条件用查询层写一份，两种后端各自
+                # 执行）。原来的 SQL 里有 `enabled` + 状态 OR + `lower() NOT IN`
+                # + 类型匹配 —— 全部已用中立 clause 表达。
+                from core.db.outlook_repository import outlook_repository
+
+                candidates = outlook_repository.find_claimable(
+                    registered_emails=registered_emails,
+                    wanted_type=wanted_type,
+                    session=session,
                 )
-                if registered_emails:
-                    query = query.where(
-                        func.lower(OutlookAccountModel.email).notin_(registered_emails)
-                    )
-                if wanted_type:
-                    query = query.where(
-                        self._account_type_matches(
-                            OutlookAccountModel.account_type, wanted_type
-                        )
-                    )
                 account = None
-                for candidate in session.exec(query).all():
-                    status = str(getattr(candidate, "status", "") or "").strip().lower()
+                for candidate in candidates:
+                    status = str(candidate.get("status") or "").strip().lower()
                     if status == "used":
                         # 至少有一个平台用掉了它；只有本平台没用过才复用。
                         # 平台未知时保守跳过（宁可少发，也不要把一个已经
@@ -209,7 +196,7 @@ class OutlookMailbox(BaseMailbox):
                         if not wanted_platform:
                             continue
                         if email_used_by_platform(
-                            getattr(candidate, "used_platforms", ""), wanted_platform
+                            str(candidate.get("used_platforms") or ""), wanted_platform
                         ):
                             continue
                     account = candidate
@@ -268,19 +255,18 @@ class OutlookMailbox(BaseMailbox):
                     raise RuntimeError("微软邮箱账号池为空，请先在设置页批量导入")
 
                 payload = {
-                    "id": account.id,
-                    "email": account.email,
-                    "password": account.password,
-                    "client_id": account.client_id,
-                    "refresh_token": account.refresh_token,
-                    "account_type": getattr(account, "account_type", "microsoft_oauth"),
-                    "mailapi_url": getattr(account, "mailapi_url", ""),
+                    "id": account.get("id"),
+                    "email": account.get("email"),
+                    "password": account.get("password"),
+                    "client_id": account.get("client_id"),
+                    "refresh_token": account.get("refresh_token"),
+                    "account_type": account.get("account_type") or "microsoft_oauth",
+                    "mailapi_url": account.get("mailapi_url") or "",
                 }
-                account.status = "in_use"
-                account.last_used = _utcnow()
-                account.updated_at = _utcnow()
-                session.add(account)
-                session.commit()
+                # 标记领取走仓储（按后端分派），不再 `session.add`
+                outlook_repository.set_fields(
+                    account.get("id"), status="in_use", last_used=_utcnow()
+                )
                 return payload
 
     def get_email(self) -> MailboxAccount:
@@ -339,19 +325,18 @@ class OutlookMailbox(BaseMailbox):
 
         with self._lock:
             with mailbox_pool_session("outlook") as session:
-                existing = session.exec(
-                    select(OutlookAccountModel).where(OutlookAccountModel.email == email)
-                ).first()
+                existing = outlook_repository.find_by_email(email)
                 if existing:
-                    existing.password = password
-                    existing.client_id = client_id
-                    existing.refresh_token = refresh_token
-                    existing.account_type = account_type
-                    existing.mailapi_url = mailapi_url
-                    existing.enabled = True
-                    existing.status = "available"
-                    existing.updated_at = _utcnow()
-                    session.add(existing)
+                    outlook_repository.set_fields(
+                        existing["id"],
+                        password=password,
+                        client_id=client_id,
+                        refresh_token=refresh_token,
+                        account_type=account_type,
+                        mailapi_url=mailapi_url,
+                        enabled=True,
+                        status="available",
+                    )
                 else:
                     session.add(
                         OutlookAccountModel(
@@ -391,24 +376,20 @@ class OutlookMailbox(BaseMailbox):
             with mailbox_pool_session("outlook") as session:
                 row = None
                 if account_id.isdigit():
-                    row = session.get(OutlookAccountModel, int(account_id))
+                    row = outlook_repository.get(int(account_id))
                 if row is None and email:
-                    row = session.exec(
-                        select(OutlookAccountModel).where(OutlookAccountModel.email == email)
-                    ).first()
+                    row = outlook_repository.find_by_email(email)
                 if row is None:
                     return
-                row.status = normalized
+                patch = {"status": normalized}
                 if normalized == "used":
                     # 记下「被哪个平台用掉的」—— 邮箱只对用掉它的那个平台
                     # 一次性，别的平台取号时还能再领它（`used_platforms`
                     # 见 core/db/base.py）。
-                    row.used_platforms = mark_email_used_by(
-                        getattr(row, "used_platforms", ""), wanted_platform
+                    patch["used_platforms"] = mark_email_used_by(
+                        str(row.get("used_platforms") or ""), wanted_platform
                     )
-                row.updated_at = _utcnow()
-                session.add(row)
-                session.commit()
+                outlook_repository.set_fields(row["id"], **patch)
 
     @staticmethod
     def import_accounts_to_pool(account_ids: list[int]) -> dict:

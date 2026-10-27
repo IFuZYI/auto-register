@@ -37,11 +37,11 @@ _EXTRA_JSON_DOMAINS = (
 #: 后忘了更新这里，启动日志同时说「已走 json: icloud_accounts」和
 #: 「仍走 sqlite: icloud_accounts」，自相矛盾。
 _SQLITE_ONLY: tuple[tuple[str, str], ...] = (
-    (
-        "outlook_accounts",
-        "取号查询含 OR + lower() + 账号类型匹配；谓词层已能表达（core/storage/query.py），"
-        "但 26 个访问点尚未改造",
-    ),
+    # 全部 7 张表都已接入 JSON —— 没有表留在 SQLite 了。
+    #
+    # 注意 `sqlite_db_exists()` 仍可能为真（已有部署的历史库），所以启动时
+    # 后端判定为 sqlite 是正常的；这里说的是「设了 STORAGE_BACKEND=json 时
+    # 哪些表还会落到 .db」。
 )
 
 
@@ -67,6 +67,10 @@ def describe_coverage(backend: str) -> list[str]:
         )
         # 只把第一张表的理由展开，避免日志过长
         lines.append(f"[storage]   原因: {_SQLITE_ONLY[0][1]}")
+    else:
+        lines.append(
+            "[storage]   全部表都已接入 json（不再有表落到 sqlite）"
+        )
     return lines
 
 
