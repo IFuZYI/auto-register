@@ -42,6 +42,13 @@ class _JsonBackendFixture:
     def __enter__(self):
         from core.storage.account_store_json import AccountStoreJson
 
+        # 设**真实门槛环境变量**（`STORAGE_BACKEND_ACCOUNTS=json`），而不是
+        # 只 mock `_json_store` —— 那样会绕过门槛，测不到「显式开启才生效」
+        # 这条规则。
+        self._env = mock.patch.dict(
+            "os.environ", {"STORAGE_BACKEND_ACCOUNTS": "json"}, clear=False
+        )
+        self._env.start()
         self._patches = [
             mock.patch("core.storage.resolve_backend_name", lambda *a, **k: "json"),
             # `_json_store` 是 **staticmethod**，调用时不传 self —— 桩也不接。
@@ -60,6 +67,7 @@ class _JsonBackendFixture:
     def __exit__(self, *exc):
         for p in reversed(self._patches):
             p.stop()
+        self._env.stop()
         return False
 
 

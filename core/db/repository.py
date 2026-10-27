@@ -221,7 +221,11 @@ class AccountRepository:
         from core.storage import resolve_backend_name
 
         name = resolve_backend_name(db_exists=_sqlite_accounts_db_exists())
-        if name != "json":
+        # **账号的 JSON 后端要单独显式开启**（见 `accounts_backend_enabled`）：
+        # 原生写路径尚未迁移，跟着总开关一起生效会导致「新建的账号查不到」。
+        from core.storage import accounts_backend_enabled
+
+        if not accounts_backend_enabled(name):
             return None
         from core.storage.account_store_json import AccountStoreJson
 

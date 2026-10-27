@@ -37,6 +37,9 @@ SUPPORTED_BACKENDS = (BACKEND_SQLITE, BACKEND_JSON)
 #: 环境变量名
 ENV_BACKEND = "STORAGE_BACKEND"
 
+#: 账号领域的**独立开关**。理由见 `accounts_backend_enabled`。
+ENV_ACCOUNTS_BACKEND = "STORAGE_BACKEND_ACCOUNTS"
+
 #: 用户要求的默认（全新部署时）
 DEFAULT_BACKEND = BACKEND_JSON
 
@@ -64,6 +67,29 @@ def resolve_backend_name(
     # 没配置 / 配置非法：已有库就保住 sqlite（不静默换库 = 不丢数据），
     # 全新部署才用用户要求的默认。
     return BACKEND_SQLITE if db_exists else DEFAULT_BACKEND
+
+
+def accounts_backend_enabled(backend: str, env: Optional[Mapping[str, str]] = None) -> bool:
+    """账号领域是否走该后端。
+
+    **账号的 JSON 后端要单独显式开启**（`STORAGE_BACKEND_ACCOUNTS=json`）。
+
+    为什么不能跟着总开关一起生效：账号有约 60 处原生写路径
+    （`sess.add(model); sess.commit()`），而仓储只覆盖了读写的一部分。
+    直接生效会得到：
+
+        create_account：仓储**读**（JSON）→ 没找到 → 原生 session **写**（SQLite）
+        下一次 find_by_email：仓储**读**（JSON）→ 仍然没找到
+
+    **新建的账号查不到** —— 静默的数据不一致，比报错严重得多。
+
+    所以默认只让**配置**走 JSON（那条路径完整），账号留给显式开关。
+    """
+    if backend != BACKEND_JSON:
+        return False
+    source = os.environ if env is None else env
+    raw = str(source.get(ENV_ACCOUNTS_BACKEND, "") or "").strip().lower()
+    return raw == BACKEND_JSON
 
 
 __all__ = [
