@@ -91,11 +91,9 @@ def list_aliases(account_id: Optional[int] = None) -> list[dict[str, Any]]:
 
     rows = icloud_alias_repository.list_aliases(account_id)
 
-    with platform_session("icloud") as session:
-        emails = {
-            row.id: row.email
-            for row in session.exec(select(ICloudAccountModel)).all()
-        }
+    from core.db.icloud_account_repository import icloud_account_repository
+
+    emails = {row["id"]: row["email"] for row in icloud_account_repository.list_all()}
     # 「这个地址注册过哪些平台」的权威证据在 `accounts` 表（跨库），不是池里的
     # `used_platforms` 记账。界面要按平台筛选、也要在取号前比对，所以列表接口
     # 一并把它算出来；一次批量查询，不是每行一次。
@@ -335,11 +333,11 @@ def set_alias_pool_status(alias_id: int, pool_status: str) -> dict[str, Any]:
     if alias is None:
         raise ICloudError("alias_not_found", "隐私邮箱不存在")
     updated = icloud_alias_repository.set_fields(alias_id, pool_status=value)
-    # 主号邮箱仍查本平台库（它不在别名表里）
-    account_email = ""
-    with platform_session("icloud") as session:
-        account = session.get(ICloudAccountModel, int(alias.get("account_id") or 0))
-        account_email = str(account.email if account else "")
+    # 主号邮箱走主号仓储（不在别名表里）
+    from core.db.icloud_account_repository import icloud_account_repository
+
+    account = icloud_account_repository.get(alias.get("account_id") or 0)
+    account_email = str((account or {}).get("email") or "")
     return _alias_to_dict(updated or alias, account_email)
 
 
@@ -510,9 +508,13 @@ def delete_alias(alias_id: int, *, remote: bool = True, proxy: str | None = None
     alias = icloud_alias_repository.get(alias_id)
     if alias is None:
         raise ICloudError("alias_not_found", "隐私邮箱不存在")
-    # 主号对象要拿去做远端操作（它不在别名表里，仍查本平台库）
-    with platform_session("icloud") as session:
-        account = session.get(ICloudAccountModel, int(alias.get("account_id") or 0))
+    # 主号对象要拿去做远端操作（`load_credentials` / `remote_client` 要模型）。
+    # 走 `get_account`（它已改走仓储），拿不到就按 None 处理。
+    account = None
+    try:
+        account = get_account(int(alias.get("account_id") or 0))
+    except ICloudError:
+        account = None
     snapshot = (alias.get("address"), alias.get("provider_id"), alias.get("status"))
 
     if remote and account is not None:
@@ -545,8 +547,11 @@ def set_alias_active(
     alias = icloud_alias_repository.get(alias_id)
     if alias is None:
         raise ICloudError("alias_not_found", "隐私邮箱不存在")
-    with platform_session("icloud") as session:
-        account = session.get(ICloudAccountModel, int(alias.get("account_id") or 0))
+    account = None
+    try:
+        account = get_account(int(alias.get("account_id") or 0))
+    except ICloudError:
+        account = None
     address, provider_id = alias.get("address"), alias.get("provider_id")
 
     if account is None:
@@ -622,13 +627,11 @@ def _upsert_alias(
 
 
 def _record_sync_error(account_id: int, message: str) -> None:
-    with platform_session("icloud") as session:
-        row = session.get(ICloudAccountModel, int(account_id))
-        if row is None:
-            return
-        row.sync_error = message
-        row.status = "error" if message else "active"
-        row.last_sync_at = _utcnow()
-        row.updated_at = _utcnow()
-        session.add(row)
-        session.commit()
+    from core.db.icloud_account_repository import icloud_account_repository
+
+    icloud_account_repository.set_fields(
+        account_id,
+        sync_error=message,
+        status="error" if message else "active",
+        last_sync_at=_utcnow(),
+    )

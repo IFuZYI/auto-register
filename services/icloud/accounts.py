@@ -44,32 +44,44 @@ def load_credentials(row: ICloudAccountModel) -> ICloudCredentials:
 
 
 def get_account(account_id: int) -> ICloudAccountModel:
-    with platform_session("icloud") as session:
-        row = session.get(ICloudAccountModel, int(account_id))
-        if row is None:
-            raise ICloudError("account_not_found", "iCloud 主号不存在")
-        return row
+    """取主号（**返回模型**，调用方到处读属性 / 解密凭据）。
+
+    走仓储拿 dict 再包成模型：既保留既有调用方的用法，也让后端分派只有一处。
+    加密列原样搬运（解密在 `load_credentials`）。
+    """
+    from core.db.icloud_account_repository import icloud_account_repository
+
+    record = icloud_account_repository.get(account_id)
+    if record is None:
+        raise ICloudError("account_not_found", "iCloud 主号不存在")
+    return _record_to_model(record)
+
+
+def _record_to_model(record: dict) -> ICloudAccountModel:
+    """仓储 dict → 模型（只填字段，不碰会话）。"""
+    row = ICloudAccountModel()
+    for key, value in record.items():
+        if hasattr(row, key):
+            setattr(row, key, value)
+    return row
 
 
 def find_account_by_email(email: str) -> Optional[ICloudAccountModel]:
     normalized = str(email or "").strip().lower()
     if not normalized:
         return None
-    with platform_session("icloud") as session:
-        # 本地优先：同邮箱两边都有时（远程账号与本地主号同地址）取本地行。
-        row = session.exec(
-            select(ICloudAccountModel)
-            .where(ICloudAccountModel.email == normalized)
-            .where(ICloudAccountModel.source == "local")
-            .order_by(ICloudAccountModel.id)
-        ).first()
-        if row is not None:
-            return row
-        return session.exec(
-            select(ICloudAccountModel)
-            .where(ICloudAccountModel.email == normalized)
-            .order_by(ICloudAccountModel.id)
-        ).first()
+    from core.db.icloud_account_repository import icloud_account_repository
+
+    # 本地优先：同邮箱两边都有时（远程账号与本地主号同地址）取本地行。
+    rows = [
+        r for r in icloud_account_repository.list_all()
+        if str(r.get("email") or "").strip().lower() == normalized
+    ]
+    if not rows:
+        return None
+    rows.sort(key=lambda r: (0 if str(r.get("source") or "") == "local" else 1,
+                             int(r.get("id") or 0)))
+    return _record_to_model(rows[0])
 
 
 def resolve_account(email: str = "") -> ICloudAccountModel:
@@ -82,15 +94,16 @@ def resolve_account(email: str = "") -> ICloudAccountModel:
             raise ICloudError("account_disabled", f"iCloud 主号已停用: {row.email}")
         return row
 
-    with platform_session("icloud") as session:
-        # 自动挑选只考虑**本地**主号：本地链路（生成/同步/收件直连 Apple）需要
-        # 本机凭据，远程账号要走各自的远程分支。远程账号由注册渠道显式指定。
-        row = session.exec(
-            select(ICloudAccountModel)
-            .where(ICloudAccountModel.enabled == True)  # noqa: E712 - SQLModel 需要值比较
-            .where(ICloudAccountModel.source == "local")
-            .order_by(ICloudAccountModel.id)
-        ).first()
+    from core.db.icloud_account_repository import icloud_account_repository
+
+    # 自动挑选只考虑**本地**主号：本地链路（生成/同步/收件直连 Apple）需要
+    # 本机凭据，远程账号要走各自的远程分支。远程账号由注册渠道显式指定。
+    candidates = [
+        r for r in icloud_account_repository.list_all()
+        if bool(r.get("enabled")) and str(r.get("source") or "local") == "local"
+    ]
+    candidates.sort(key=lambda r: int(r.get("id") or 0))
+    row = _record_to_model(candidates[0]) if candidates else None
     if row is None:
         raise ICloudError("account_not_found", "还没有可用的 iCloud 主号，请先完成 Apple ID 登录")
     return row
@@ -99,10 +112,14 @@ def resolve_account(email: str = "") -> ICloudAccountModel:
 def list_accounts() -> list[dict[str, Any]]:
     from core.db.icloud_alias_repository import icloud_alias_repository
 
-    with platform_session("icloud") as session:
-        rows = session.exec(select(ICloudAccountModel).order_by(ICloudAccountModel.id)).all()
+    from core.db.icloud_account_repository import icloud_account_repository
+
+    rows = icloud_account_repository.list_all()
     counts = icloud_alias_repository.count_by_account()
-    return [_account_to_dict(row, alias_count=counts.get(row.id or 0, 0)) for row in rows]
+    return [
+        _account_to_dict(_record_to_model(row), alias_count=counts.get(row.get("id") or 0, 0))
+        for row in rows
+    ]
 
 
 def _account_to_dict(row: ICloudAccountModel, *, alias_count: int = 0) -> dict[str, Any]:
@@ -284,41 +301,31 @@ def check_account(account_id: int, *, proxy: str | None = None) -> dict[str, Any
     with _facade.web_client(proxy=proxy) as client:
         client.list_private_emails(credentials)
 
-    with platform_session("icloud") as session:
-        fresh = session.get(ICloudAccountModel, int(account_id))
-        if fresh is not None:
-            fresh.status = "active"
-            fresh.sync_error = ""
-            fresh.last_sync_at = _utcnow()
-            fresh.updated_at = _utcnow()
-            session.add(fresh)
-            session.commit()
-            session.refresh(fresh)
-            return _account_to_dict(fresh)
-    raise ICloudError("account_not_found", "iCloud 主号不存在")
+    from core.db.icloud_account_repository import icloud_account_repository
+
+    fresh = icloud_account_repository.set_fields(
+        account_id, status="active", sync_error="", last_sync_at=_utcnow()
+    )
+    if fresh is None:
+        raise ICloudError("account_not_found", "iCloud 主号不存在")
+    return _account_to_dict(_record_to_model(fresh))
 
 
 def set_account_enabled(account_id: int, enabled: bool) -> dict[str, Any]:
-    with platform_session("icloud") as session:
-        row = session.get(ICloudAccountModel, int(account_id))
-        if row is None:
-            raise ICloudError("account_not_found", "iCloud 主号不存在")
-        row.enabled = bool(enabled)
-        row.updated_at = _utcnow()
-        session.add(row)
-        session.commit()
-        session.refresh(row)
-        return _account_to_dict(row)
+    from core.db.icloud_account_repository import icloud_account_repository
+
+    row = icloud_account_repository.set_fields(account_id, enabled=bool(enabled))
+    if row is None:
+        raise ICloudError("account_not_found", "iCloud 主号不存在")
+    return _account_to_dict(_record_to_model(row))
 
 
 def delete_account(account_id: int) -> None:
-    with platform_session("icloud") as session:
-        row = session.get(ICloudAccountModel, int(account_id))
-        if row is None:
-            raise ICloudError("account_not_found", "iCloud 主号不存在")
-        session.delete(row)
-        session.commit()
-    # 别名表的级联删除走仓储（按后端分派）
+    from core.db.icloud_account_repository import icloud_account_repository
     from core.db.icloud_alias_repository import icloud_alias_repository
 
+    if icloud_account_repository.get(account_id) is None:
+        raise ICloudError("account_not_found", "iCloud 主号不存在")
+    # 先删别名（级联），再删主号 —— 反过来会让别名短暂指向不存在的行
     icloud_alias_repository.delete_by_account(int(account_id))
+    icloud_account_repository.delete(account_id)
