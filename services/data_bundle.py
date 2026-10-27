@@ -234,6 +234,25 @@ def _collect_export_files() -> tuple[list[tuple[Path, str]], list[tuple[Path, st
         for path in sorted(PLATFORM_DB_DIR.glob("*.db")):
             dbs.append((path, f"{PLATFORM_DIR_NAME}/{path.name}"))
 
+    # **JSON 后端的数据也要进备份**（`STORAGE_BACKEND=json`）。
+    #
+    # 不加这段的话：导出包里没有 JSON 文件 → 换机器导入后配置/账号全空，
+    # 而用户以为备份是完整的。实测症状是 `config_store.get("rt_marker")`
+    # 导入后返回旧值（data_bundle 的往返测试抓到）。
+    from core.paths import DATA_DIR
+
+    # JSON 后端的状态文件（`STORAGE_BACKEND=json`）走 **others** 通道，
+    # 不能进 `dbs` —— `dbs` 里的每个文件都会经过 `_sqlite_snapshot`（用
+    # `sqlite3` 打开），把 JSON 塞进去会炸
+    # `file is not a database`（实测）。
+    #
+    # 不带子目录前缀：导入侧是 `DATA_DIR / name`，带前缀会落到
+    # `data/json/config.json`，而读取方找的是 `data/config.json`。
+    for path in sorted(DATA_DIR.glob("*.json")):
+        if path.name.endswith(".tmp"):
+            continue
+        others.append((path, path.name))
+
     key_file = _credential_key_file()
     if key_file.exists():
         others.append((key_file, f"secrets/{KEY_FILE_NAME}"))
@@ -252,8 +271,12 @@ def build_export_bundle() -> tuple[bytes, str]:
     from core.paths import DATA_DIR
 
     dbs, others = _collect_export_files()
-    if not dbs:
-        raise BundleError("没有可导出的数据库 —— data/ 下没有 account_manager.db")
+    # **JSON 后端下没有 `.db` 文件**，只有状态文件（走 `others`）——
+    # 只看 `dbs` 会在纯 JSON 部署上误报「没有可导出的数据库」（实测）。
+    has_json_state = any(str(arc).endswith(".json") for _src, arc in others)
+    if not dbs and not has_json_state:
+        raise BundleError("没有可导出的数据 —— data/ 下既没有 account_manager.db，"
+                          "也没有 JSON 状态文件")
 
     manifest_dbs: list[dict[str, Any]] = []
     # 与导入共用互斥锁：导出读一致快照，导入会换库文件，并行时包里可能
@@ -627,6 +650,39 @@ def apply_import_bundle(bundle_bytes: bytes, *, filename: str = "") -> dict[str,
                     target = DATA_DIR / name
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.move(str(staging / name), str(target))
+                imported.append(name)
+
+            # **恢复 JSON 状态文件**（`STORAGE_BACKEND=json` 部署）。
+            #
+            # 只处理 `verified` 与密钥的话，纯 JSON 部署导入后配置全空 ——
+            # 用户以为备份完整（`data_bundle` 的往返测试抓到）。
+            # 只认 manifest 里 `includes` 列出的、且是 `.json` 的成员，
+            # 避免把包里任意文件写到 DATA_DIR 根下。
+            json_members = [
+                arc
+                for arc in (manifest.get("includes") or [])
+                if isinstance(arc, str)
+                and arc.endswith(".json")
+                and arc in zf.namelist()
+            ]
+            staged_json: list[tuple[Path, str]] = []
+            for arc in json_members:
+                # 只要纯文件名（不带子目录），与导出侧一致
+                name = Path(arc).name
+                if not name or name in {".", ".."}:
+                    continue
+                info = zf.getinfo(arc)
+                if info.file_size > MAX_DB_BYTES:
+                    raise BundleError(f"{arc} 超过大小上限（{info.file_size} 字节）")
+                staged = staging / f"json-state-{name}"
+                staged.write_bytes(zf.read(arc))
+                staged_json.append((staged, name))
+
+            # JSON 状态文件落位（导出侧走 `others`，这里对应恢复）
+            for staged, name in staged_json:
+                target = DATA_DIR / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(staged), str(target))
                 imported.append(name)
 
             if staged_key is not None:

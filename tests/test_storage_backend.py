@@ -221,3 +221,236 @@ class ConfigStoreWorksOnBothBackendsTests(unittest.TestCase):
             stored = raw["configs"][key]["value"]
             self.assertIsInstance(stored, str, f"{key} 落盘成了 {type(stored).__name__}")
             self.assertEqual(stored, expected)
+
+
+class ConfigStoreSwitchesBackendTests(unittest.TestCase):
+    """`ConfigStore` 要能按后端切换，且**业务逻辑不受影响**。
+
+    `core/config_store.py` 的 `get_all()` 里挂着三件与存储无关的事：
+    环境变量回落、已删除 provider 名收敛、旧值迁移。它们必须在两种后端下
+    都生效 —— 否则切了后端，用户已保存的配置会「看起来丢了」。
+
+    **测试要点**：必须证明数据真的落在 JSON 文件里，而不是「`_backend` 被
+    忽略、实际还走 SQLite」—— 第一版就是这样假通过的（三条测试全绿，
+    因为根本没切）。
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name)
+        self.json_path = self.root / "config.json"
+
+    def _store(self, backend: str):
+        from core.config_store import ConfigStore
+
+        return ConfigStore(backend=backend, json_path=self.json_path)
+
+    def test_json_backend_writes_to_the_json_file(self):
+        """落盘证据：数据必须在 JSON 文件里，不在 SQLite。"""
+        import json as _json
+
+        store = self._store("json")
+        store.set("cpa_api_url", "http://x")
+
+        self.assertTrue(self.json_path.exists(), "JSON 后端没写文件 —— 实际还在用 SQLite")
+        raw = _json.loads(self.json_path.read_text(encoding="utf-8"))
+        self.assertEqual(raw["configs"]["cpa_api_url"]["value"], "http://x")
+        self.assertEqual(store.get("cpa_api_url"), "http://x")
+
+    def test_json_backend_reads_only_from_json(self):
+        """只写 JSON 文件、不经 set，也要能读到 —— 证明读路径走的是 JSON。"""
+        import json as _json
+
+        self.json_path.write_text(
+            _json.dumps({"configs": {"only_json": {"key": "only_json", "value": "yes"}}}),
+            encoding="utf-8",
+        )
+        store = self._store("json")
+        self.assertEqual(store.get("only_json"), "yes",
+                         "读不到只在 JSON 文件里的键 —— 读路径仍走 SQLite")
+
+    def test_get_all_still_normalizes_legacy_provider_on_json(self):
+        """已删除的 provider 名要收敛（`normalize_mail_provider`）。"""
+        store = self._store("json")
+        store.set("mail_provider", "applemail")
+        self.assertNotEqual(store.get_all().get("mail_provider"), "applemail")
+
+    def test_delete_works_on_json(self):
+        store = self._store("json")
+        store.set("k", "v")
+        store.delete("k")
+        self.assertEqual(store.get("k"), "")
+
+    def test_set_many_on_json(self):
+        store = self._store("json")
+        store.set_many({"a": "1", "b": "2"})
+        self.assertEqual(store.get("a"), "1")
+        self.assertEqual(store.get("b"), "2")
+
+    def test_backend_choice_does_not_feed_back_on_its_own_writes(self):
+        """后端判定不能看 JSON 文件是否存在 —— 那会形成自反馈。
+
+        实测过的 bug：`set()` 写了 JSON → 下次判定看到 JSON 存在 →
+        `db_exists=True` → 返回 sqlite → `get()` 去查不存在的表
+        （`no such table: configs`）。写入后读不回来。
+
+        这条测试用**没有 override** 的实例，走真实判定逻辑。
+        """
+        from unittest import mock
+
+        from core.config_store import ConfigStore
+
+        self.json_path.parent.mkdir(parents=True, exist_ok=True)
+        # **不改 os.environ**：`mock.patch.dict` 恢复时会把 DATA_DIR 还原成
+        # 「进入 with 之前」的值，而 core.paths 的 DATA_DIR 是 import 时算好的
+        # 模块常量 —— 一旦被别的测试改过，后续测试就会拿到错的目录
+        # （实测：12 个无关测试因此红）。
+        #
+        # 这里只替换两个方法：JSON 文件路径、SQLite 存在性。
+        with mock.patch.object(
+            type(ConfigStore), "_json_file", lambda self: self.json_path
+        ), mock.patch(
+            "core.paths.DATA_DIR", self.root
+        ):
+            store = ConfigStore()
+            first = store._backend_name()
+            store.set("k", "v")
+            second = store._backend_name()
+            self.assertEqual(first, second,
+                             f"写入前后后端变了（{first} → {second}）—— 判定依赖了自身写入")
+            self.assertEqual(store.get("k"), "v")
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+class ConfigStoreWorksOnBothBackendsTests(unittest.TestCase):
+    """配置存储必须两种后端都能跑 —— 这是业务层接线的第一个领域。
+
+    配置是最小、最独立的领域（只有 get/set/get_all/delete 四个操作），
+    适合作为「业务层改调后端」的第一个验证点。
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name)
+
+    def test_config_roundtrip_on_json_backend(self):
+        from core.storage.config_store_json import JsonConfigStore
+
+        store = JsonConfigStore(self.root / "config.json")
+        store.set("cpa_api_url", "http://x")
+        self.assertEqual(store.get("cpa_api_url"), "http://x")
+        self.assertEqual(store.get_all().get("cpa_api_url"), "http://x")
+
+    def test_missing_key_returns_default(self):
+        from core.storage.config_store_json import JsonConfigStore
+
+        store = JsonConfigStore(self.root / "c.json")
+        self.assertEqual(store.get("nope", "fallback"), "fallback")
+        self.assertEqual(store.get("nope"), "")
+
+    def test_overwrite_is_idempotent(self):
+        from core.storage.config_store_json import JsonConfigStore
+
+        store = JsonConfigStore(self.root / "c2.json")
+        store.set("k", "v1")
+        store.set("k", "v1")
+        self.assertEqual(store.get("k"), "v1")
+        store.set("k", "v2")
+        self.assertEqual(store.get("k"), "v2")
+
+    def test_delete(self):
+        from core.storage.config_store_json import JsonConfigStore
+
+        store = JsonConfigStore(self.root / "c3.json")
+        store.set("k", "v")
+        store.delete("k")
+        self.assertEqual(store.get("k"), "")
+
+    def test_persists_across_instances(self):
+        from core.storage.config_store_json import JsonConfigStore
+
+        path = self.root / "c4.json"
+        JsonConfigStore(path).set("k", "v")
+        self.assertEqual(JsonConfigStore(path).get("k"), "v")
+
+    def test_values_are_strings_like_the_sqlite_version(self):
+        """SQLite 版存的是字符串列 —— JSON 版要保持同一语义。
+
+        调用方到处做 `str(...)` / `.strip()` / 比较 `"1"`，值类型漂移会让
+        那些判断静默失效（例如 `bool("0")` 是 True）。
+
+        **断言要看落盘内容**，不能只看 `get()` 的返回 —— `get` 里有
+        `str(value)` 兜底，值存成 bool/int 也会被转回来，那样测试就抓不到
+        「存的时候没转字符串」这个变异（第一版就是这样漏掉的）。
+        """
+        import json as _json
+
+        from core.storage.config_store_json import JsonConfigStore
+
+        path = self.root / "c5.json"
+        store = JsonConfigStore(path)
+        store.set("k", "1")
+        store.set("n", 42)
+        store.set("b", True)
+
+        self.assertIsInstance(store.get("k"), str)
+        self.assertEqual(store.get_all()["k"], "1")
+
+        # 落盘内容必须全是字符串
+        raw = _json.loads(path.read_text(encoding="utf-8"))
+        for key, expected in (("k", "1"), ("n", "42"), ("b", "True")):
+            stored = raw["configs"][key]["value"]
+            self.assertIsInstance(stored, str, f"{key} 落盘成了 {type(stored).__name__}")
+            self.assertEqual(stored, expected)
+
+
+class ConfigStoreSwitchesBackendTests(unittest.TestCase):
+    """`ConfigStore` 要能按后端切换，且**业务逻辑不受影响**。
+
+    `core/config_store.py` 的 `get_all()` 里挂着三件与存储无关的事：
+    环境变量回落、已删除 provider 名收敛、旧值迁移。它们必须在两种后端下
+    都生效 —— 否则切了后端，用户已保存的配置会「看起来丢了」。
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name)
+
+    def _store(self, backend: str):
+        from core.config_store import ConfigStore
+
+        store = ConfigStore()
+        store._json_path = self.root / "config.json"  # type: ignore[attr-defined]
+        store._backend = backend  # type: ignore[attr-defined]
+        return store
+
+    def test_json_backend_roundtrip_through_config_store(self):
+        store = self._store("json")
+        store.set("cpa_api_url", "http://x")
+        self.assertEqual(store.get("cpa_api_url"), "http://x")
+        self.assertEqual(store.get_all().get("cpa_api_url"), "http://x")
+
+    def test_get_all_still_normalizes_legacy_provider_on_json(self):
+        """已删除的 provider 名要收敛（`normalize_mail_provider`）。"""
+        store = self._store("json")
+        store.set("mail_provider", "applemail")
+        # applemail 是已删除的渠道名，get_all 应把它收敛掉
+        self.assertNotEqual(store.get_all().get("mail_provider"), "applemail")
+
+    def test_delete_works_on_json(self):
+        store = self._store("json")
+        store.set("k", "v")
+        store.delete("k")
+        self.assertEqual(store.get("k"), "")
+
+    def test_set_many_on_json(self):
+        store = self._store("json")
+        store.set_many({"a": "1", "b": "2"})
+        self.assertEqual(store.get("a"), "1")
+        self.assertEqual(store.get("b"), "2")

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 """全局配置持久化 - 存储在 SQLite，并在缺省时回退到环境变量/.env。"""
 import os
 import re
@@ -199,19 +201,107 @@ class ConfigItem(SQLModel, table=True):
 
 
 class ConfigStore:
-    """简单 key-value 配置存储"""
+    """简单 key-value 配置存储。
+
+    支持两种后端（`STORAGE_BACKEND=sqlite|json`，见 `core.storage`）：
+
+    - `sqlite`（默认）：`configs` 表；
+    - `json`：`data/config.json`。
+
+    **业务逻辑与存储无关**：`get()` 的环境变量回落、`get_all()` 的 provider
+    名收敛与旧值迁移都挂在读取之后，两种后端共用 —— 否则切了后端，用户已
+    保存的配置会「看起来丢了」。
+    """
+
+    # 类级默认：有些测试用 `ConfigStore.__new__` 绕过 `__init__`（直接塞
+    # monkeypatch 的 session），实例上不会有这两个属性 —— 给默认值免得
+    # 每次访问都要 `getattr`。
+    _backend_override: str = ""
+    _json_path_override = None
+
+    def __init__(self, *, backend: str = "", json_path=None):
+        """`backend` / `json_path` 只给测试用；生产走 `resolve_backend_name`。"""
+        self._backend_override = str(backend or "").strip().lower()
+        self._json_path_override = json_path
+
+    # ---------------------------------------------------------------- 后端
+
+    def _backend_name(self) -> str:
+        if self._backend_override:
+            return self._backend_override
+        from core.paths import DATA_DIR
+        from core.storage import BACKEND_JSON, resolve_backend_name
+
+        # 判据是「**当前生效的 SQLite 库**是否已存在」，而不是固定路径。
+        #
+        # 两条踩过的坑：
+        # 1. 把 `json_path.exists()` 也算进去 → 自反馈：`set()` 写了 JSON →
+        #    下次判定看到 JSON → 返回 sqlite → `get()` 查不存在的表
+        #    （`no such table: configs`）。JSON 存在只说明「用过 JSON 后端」。
+        # 2. 用固定的 `DATA_DIR/account_manager.db` → 测试（以及任何换过
+        #    engine 的部署）把 engine 指向临时库时，判定看不到它，于是走
+        #    JSON 而数据在 SQLite 里，读回为空。
+        #
+        # 所以从当前 engine 的 URL 解析真实路径。
+        return resolve_backend_name(db_exists=self._sqlite_db_exists())
+
+    def _sqlite_db_exists(self) -> bool:
+        """当前 engine 指向的 SQLite 库文件是否已存在。
+
+        非 SQLite（或取不到路径）时返回 False —— 那种部署本就该用 JSON。
+        """
+        try:
+            from core.db import current_engine
+
+            url = str(current_engine().url)
+        except Exception as exc:  # noqa: BLE001 - 取不到就当没有，不阻塞
+            # 绑定异常并记一笔：静默 `except Exception:` 会把「engine 坏了」
+            # 表现成「没有库」→ 静默切到 JSON 后端 → 用户数据看起来没了。
+            logger.warning("解析当前 engine 失败（按「无库」处理）: %s", exc)
+            return False
+        if not url.startswith("sqlite:///"):
+            return False
+        from pathlib import Path as _Path
+
+        raw = url[len("sqlite:///"):]
+        # 内存库（`:memory:`）不参与「已有数据」判定
+        if not raw or raw == ":memory:":
+            return False
+        return _Path(raw).exists()
+
+    def _json_file(self):
+        if self._json_path_override is not None:
+            return self._json_path_override
+        from core.paths import DATA_DIR
+
+        return DATA_DIR / "config.json"
+
+    def _json_store(self):
+        from core.storage.config_store_json import JsonConfigStore
+
+        return JsonConfigStore(self._json_file())
+
+    # ---------------------------------------------------------------- 读写
 
     def get(self, key: str, default: str = "") -> str:
         env_values = _runtime_env_values()
-        with Session(current_engine()) as s:
-            item = s.get(ConfigItem, key)
-            value = str(item.value if item else "" or "").strip()
+        if self._backend_name() == "json":
+            value = self._json_store().get(key, "").strip()
             if value:
                 return value
+        else:
+            with Session(current_engine()) as s:
+                item = s.get(ConfigItem, key)
+                value = str(item.value if item else "" or "").strip()
+                if value:
+                    return value
         fallback = _get_env_fallback_value(key, env_values=env_values)
         return fallback or default
 
     def set(self, key: str, value: str) -> None:
+        if self._backend_name() == "json":
+            self._json_store().set(key, value)
+            return
         with Session(current_engine()) as s:
             item = s.get(ConfigItem, key)
             if item:
@@ -221,10 +311,25 @@ class ConfigStore:
             s.add(item)
             s.commit()
 
-    def get_all(self) -> dict:
+    def delete(self, key: str) -> bool:
+        """删一个配置键。JSON 与 SQLite 两种后端都支持。"""
+        if self._backend_name() == "json":
+            return self._json_store().delete(key)
         with Session(current_engine()) as s:
-            items = s.exec(select(ConfigItem)).all()
-            values = {i.key: i.value for i in items}
+            item = s.get(ConfigItem, key)
+            if item is None:
+                return False
+            s.delete(item)
+            s.commit()
+            return True
+
+    def get_all(self) -> dict:
+        if self._backend_name() == "json":
+            values = self._json_store().get_all()
+        else:
+            with Session(current_engine()) as s:
+                items = s.exec(select(ConfigItem)).all()
+                values = {i.key: i.value for i in items}
         merged = _merge_env_fallback(values)
         # 已删除的 provider 名在这里收敛（applemail → 空串，见
         # `core.mail_import_sources`）。放在 get_all 而不是各个调用点：这是
@@ -241,6 +346,11 @@ class ConfigStore:
         return merged
 
     def set_many(self, data: dict) -> None:
+        if self._backend_name() == "json":
+            store = self._json_store()
+            for key, value in data.items():
+                store.set(key, value)
+            return
         with Session(current_engine()) as s:
             for key, value in data.items():
                 item = s.get(ConfigItem, key)
@@ -251,5 +361,7 @@ class ConfigStore:
                 s.add(item)
             s.commit()
 
+
+logger = logging.getLogger(__name__)
 
 config_store = ConfigStore()
