@@ -163,6 +163,17 @@ async def lifespan(app: FastAPI):
     migrate_stored_accounts(log=lambda msg: print(msg))
     from core.registry import list_platforms
     print(f"[OK] 已加载平台: {[p['name'] for p in list_platforms()]}")
+
+    # 存储后端覆盖情况打一次：设了 json 的部署**照样会建 account_manager.db**
+    # （iCloud / 邮箱池仍走 SQLite），不说清楚的话用户会去查一个不存在的问题。
+    from core.storage import resolve_backend_name, sqlite_db_exists
+    from core.storage.coverage import describe_coverage
+
+    # 用**共享判据**（从 engine 的 URL 解析）—— 固定路径会判错
+    # （本仓已因这个坑踩过两次）
+    _backend = resolve_backend_name(db_exists=sqlite_db_exists())
+    for _line in describe_coverage(_backend):
+        print(_line)
     # 业务周期任务自注册（core.scheduler 不认识具体业务，见其模块 docstring）
     from services import chatgpt_maintenance  # noqa: F401  注册自动维护任务
     from core.scheduler import registered_jobs, scheduler
