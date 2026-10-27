@@ -32,7 +32,7 @@ from platforms.icloud import (
 from platforms.icloud.remote_client import RemoteHMEClient
 from services.icloud._locks import _utcnow
 from services.icloud._facade import _facade
-from services.icloud.accounts import get_account
+from services.icloud.accounts import _record_to_model, get_account
 from services.icloud.aliases import _alias_to_dict, _record_sync_error, _upsert_alias
 
 SOURCE_LOCAL = "local"
@@ -126,18 +126,15 @@ def add_remote_account(
     if not target:
         raise ICloudError("invalid_config", "请选择要接入的远端账号")
 
-    with platform_session("icloud") as session:
-        existing = session.exec(
-            select(ICloudAccountModel)
-            .where(ICloudAccountModel.source == SOURCE_REMOTE)
-            .where(ICloudAccountModel.base_url == url)
-            .where(ICloudAccountModel.remote_account_id == target)
-        ).first()
-        if existing is not None:
-            raise ICloudError(
-                "invalid_config",
-                f"该远端账号已接入（{existing.email}），同一服务里的同一个账号只能接入一次",
-            )
+    from core.db.icloud_account_repository import icloud_account_repository
+
+    # 查重走仓储（同一服务里的同一个远端账号只能接入一次）
+    existing = icloud_account_repository.find_remote(base_url=url, remote_account_id=target)
+    if existing is not None:
+        raise ICloudError(
+            "invalid_config",
+            f"该远端账号已接入（{existing.get('email')}），同一服务里的同一个账号只能接入一次",
+        )
 
     client = RemoteHMEClient(url, password, proxy=str(proxy or "").strip())
     summary = client.account_summary(target)  # 登录 + 校验账号存在；失败抛错
@@ -148,23 +145,26 @@ def add_remote_account(
     if not email:
         raise ICloudError("invalid_config", "远端账号没有可用的邮箱地址，无法接入")
 
-    with platform_session("icloud") as session:
-        row = ICloudAccountModel(
-            email=email,
-            display_name=str(name or "").strip() or str(summary.get("name") or ""),
-            region="global",
-            status="active",
-            enabled=True,
-            source=SOURCE_REMOTE,
-            base_url=url,
-            remote_account_id=target,
-            proxy=str(proxy or "").strip(),
-        )
-        row.remote_password_cipher = _facade.secret_box.encrypt(password.encode("utf-8"))
-        session.add(row)
-        session.commit()
-        session.refresh(row)
-        return _account_public_dict(row)
+    icloud_account_repository.add(
+        email=email,
+        display_name=str(name or "").strip() or str(summary.get("name") or ""),
+        region="global",
+        status="active",
+        enabled=True,
+        source=SOURCE_REMOTE,
+        base_url=url,
+        remote_account_id=target,
+        proxy=str(proxy or "").strip(),
+        # 密文原样存（加解密留在本模块，仓储只搬运）
+        remote_password_cipher=_facade.secret_box.encrypt(password.encode("utf-8")),
+    )
+    # 重新读一次拿到完整行（仓储返回的就是落库后的形状）
+    created = icloud_account_repository.find_remote(
+        base_url=url, remote_account_id=target
+    )
+    return _account_public_dict(
+        _record_to_model(created) if created else ICloudAccountModel()
+    )
 
 
 def _account_public_dict(row: ICloudAccountModel) -> dict[str, Any]:
@@ -190,13 +190,14 @@ def _account_public_dict(row: ICloudAccountModel) -> dict[str, Any]:
 
 
 def list_remote_accounts() -> list[dict[str, Any]]:
-    with platform_session("icloud") as session:
-        rows = session.exec(
-            select(ICloudAccountModel)
-            .where(ICloudAccountModel.source == SOURCE_REMOTE)
-            .order_by(ICloudAccountModel.id)
-        ).all()
-    return [_account_public_dict(row) for row in rows]
+    from core.db.icloud_account_repository import icloud_account_repository
+
+    rows = [
+        r for r in icloud_account_repository.list_all()
+        if str(r.get("source") or "") == SOURCE_REMOTE
+    ]
+    rows.sort(key=lambda r: int(r.get("id") or 0))
+    return [_account_public_dict(_record_to_model(r)) for r in rows]
 
 
 def _first_remote_account_with_aliases(
@@ -517,18 +518,14 @@ def check_remote_account(account_id: int, *, proxy: str | None = None) -> dict[s
     client = remote_client(row, proxy=proxy)
     summary = client.check_account(row.remote_account_id)
     status = str(summary.get("status") or "").strip()
-    with platform_session("icloud") as session:
-        fresh = session.get(ICloudAccountModel, int(account_id))
-        if fresh is not None:
-            fresh.status = status or "active"
-            fresh.sync_error = ""
-            fresh.last_sync_at = _utcnow()
-            fresh.updated_at = _utcnow()
-            session.add(fresh)
-            session.commit()
-            session.refresh(fresh)
-            return _account_public_dict(fresh)
-    raise ICloudError("account_not_found", "远程账号不存在")
+    from core.db.icloud_account_repository import icloud_account_repository
+
+    fresh = icloud_account_repository.set_fields(
+        account_id, status=status or "active", sync_error="", last_sync_at=_utcnow()
+    )
+    if fresh is None:
+        raise ICloudError("account_not_found", "远程账号不存在")
+    return _account_public_dict(_record_to_model(fresh))
 
 
 __all__ = [

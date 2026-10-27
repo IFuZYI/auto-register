@@ -95,6 +95,35 @@ class ICloudAccountRepository:
             ).first()
             return _from_model(row) if row is not None else None
 
+    @staticmethod
+    def find_remote(*, base_url: str, remote_account_id: str) -> Optional[dict[str, Any]]:
+        """按 `(base_url, remote_account_id)` 找已接入的远程账号（查重用）。"""
+        wanted_url = str(base_url or "").strip()
+        wanted_id = str(remote_account_id or "").strip()
+        if not wanted_url or not wanted_id:
+            return None
+
+        store = ICloudAccountRepository._store()
+        if store is not None:
+            for row in store.all():
+                if (str(row.get("base_url") or "").strip() == wanted_url
+                        and str(row.get("remote_account_id") or "").strip() == wanted_id):
+                    return {k: row.get(k) for k in _FIELDS}
+            return None
+
+        from sqlmodel import select
+
+        from .registry import platform_session
+
+        with platform_session("icloud") as s:
+            row = s.exec(
+                select(ICloudAccountModel)
+                .where(ICloudAccountModel.source == "remote")
+                .where(ICloudAccountModel.base_url == wanted_url)
+                .where(ICloudAccountModel.remote_account_id == wanted_id)
+            ).first()
+            return _from_model(row) if row is not None else None
+
     # ---------------------------------------------------------------- 写
 
     @staticmethod
