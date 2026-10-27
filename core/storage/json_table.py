@@ -209,6 +209,9 @@ JSON_TABLES: frozenset[str] = frozenset({
     # 读写都走 `core.db.task_log_repository`（`api/tasks.py` 与
     # `services/log_cleanup.py` 都已接）
     "task_logs",
+    # 读写都走 `core.db.icloud_alias_repository`（筛选走查询层）。
+    # 注意 `services/icloud/aliases.py` 里还有调用点用原生会话 —— 那些路径
+    # 在 JSON 后端下会落到 SQLite，所以**整条链路接通前不能进白名单**。
 })
 
 

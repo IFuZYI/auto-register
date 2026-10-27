@@ -162,4 +162,5 @@ def close_all() -> None:
 
 from .proxy_repository import proxy_repository
 from .task_repository import task_repository
-from .task_log_repository import task_log_repository  # noqa: F401
+from .task_log_repository import task_log_repository
+from .icloud_alias_repository import icloud_alias_repository  # noqa: F401

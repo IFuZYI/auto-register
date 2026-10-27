@@ -191,8 +191,10 @@ class TableWantsJsonTests(unittest.TestCase):
                 for table in ("proxies", "task_runs", "task_logs"):
                     self.assertIn(table, JSON_TABLES)
                     self.assertTrue(table_wants_json(table))
-                # **未接线**的表不能切 —— 只有写接了的话会「写 JSON、读 SQLite」
-                for table in ("icloud_aliases",
+                # **未接线**的表不能切 —— 只有写接了的话会「写 JSON、读 SQLite」。
+                # `icloud_aliases` 仓储已就绪，但 `services/icloud/aliases.py`
+                # 里还有原生会话调用点，链路未全通，所以仍在外面。
+                for table in ("icloud_aliases", "icloud_accounts",
                               "outlook_accounts", "some_future_table"):
                     self.assertNotIn(
                         table, JSON_TABLES,
