@@ -147,6 +147,12 @@ def test_fake_http_drives_real_redirect_chain_without_network() -> None:
     ):
         flow = AuthFlow(Config())
         warmed = flow.warmup()
+        # 先钉「warmup 没重建 session」：否则后面只是碰巧把响应耗尽，
+        # 报错会变成「没准备响应」，看不出真正的病根是逃到了网络。
+        assert len(factory_calls) == 1, (
+            f"warmup 之后 create_http_session 被调用 {len(factory_calls)} 次 —— "
+            "线路重建了 session，说明测试逃到了真实网络"
+        )
         callback, final = flow.follow_redirect_chain("https://auth.openai.com/authorize")
         session_token, access_token = flow.get_auth_session()
 
