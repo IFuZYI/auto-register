@@ -55,8 +55,11 @@ class ICloudRemoteMailbox(BaseMailbox):
         self._account_id = str(account_id or "").strip()
         self._label = str(label or "").strip()
         self._note = str(note or "").strip()
-        if platform_name:
-            self._platform_name = str(platform_name).strip().lower()
+        # **总是设置**（空串也要有）：下面 `_resolve_account_row` 读的是
+        # `self._platform_name`，属性不存在时 `getattr(..., "")` 会静默拿到
+        # 空串 —— 而空 platform 会让 `claim_alias` 跳过所有 `used` 状态的
+        # 别名（保守策略），于是**一个现成号都领不到**、每次回落到新生成。
+        self._platform_name = str(platform_name or "").strip().lower()
 
     # ---------------------------------------------------------------- 内部
 
@@ -73,8 +76,11 @@ class ICloudRemoteMailbox(BaseMailbox):
         if not self._account_id:
             # 带上平台：挑主号时要排除「别名已被本平台用尽」的那些，
             # 否则会挑到领不到号的主号（代码审查 2026-10-27 I3）。
+            # 属性名带下划线。写成 `platform_name` 会永远取到空串 ——
+            # 于是挑主号时不排除「别名已被本平台用尽」的号，取号时也不按
+            # 平台过滤 `used` 别名，**领不到现成号**（实测踩过）。
             return service.resolve_remote_account(
-                "", getattr(self, "platform_name", "") or ""
+                "", self._platform_name or ""
             )
 
         raw = self._account_id

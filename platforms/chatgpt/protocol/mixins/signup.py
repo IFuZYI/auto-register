@@ -582,7 +582,19 @@ class SignupMixin:
         )
         self._trace_http("login_password_verify", resp)
         if resp.status_code != 200:
-            raise RuntimeError(f"密码登录失败: {resp.status_code} - {describe_error(resp.text)}")
+            # **不要 raise**：401 不是致命错误，而是「这个号不能用密码登」
+            # 的信号 —— 已有账号的正确路径是 OTP。
+            #
+            # 实测（2026-10-28 用户日志）：`page_type=login_password` 时密码
+            # 是猜的（新号没设过），必然 401；原来这里 raise 直接让整条注册
+            # 流水线失败，**第 50-53 个账号全挂、每个还重试 2 轮**，而 OTP
+            # 分支（`WEBUI_ALLOW_LOGIN=1` 正是为它准备的）根本没机会跑。
+            logger.info(
+                "密码校验被拒（HTTP %s: %s），降级走 OTP 登录",
+                resp.status_code,
+                describe_error(resp.text),
+            )
+            return {}
         try:
             return resp.json()
         except Exception:
