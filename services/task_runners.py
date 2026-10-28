@@ -381,8 +381,12 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
     _api._task_store.cleanup()
 
 
-def _load_account_fields(account_id: int) -> Optional[dict]:
+def _load_account_fields(account_id: int, platform: str = "chatgpt") -> Optional[dict]:
     """把一行账号读成纯数据（含它注册时用的代理）。
+
+    ``platform`` 必须由调用方传入：这里原来**两处**硬编码 ``"chatgpt"``
+    （库名与 platform 过滤），于是 Grok 的批量动作虽然任务能建起来，
+    执行时每个号都报「账号不存在」（实测 2026-10-28）。
 
     后面那几十秒网络请求期间不能占着数据库连接不放：连接池就那么几条，攥在手里
     会把面板其它请求一起拖住。代理字段也一并读出来 —— 复用账号时要优先回到
@@ -391,9 +395,9 @@ def _load_account_fields(account_id: int) -> Optional[dict]:
     from api import tasks as _api  # 延迟 import：patch 打在 api.tasks 上必须被看到
     from core.db import AccountModel, platform_session
 
-    with platform_session("chatgpt") as s:
+    with platform_session(platform) as s:
         account = s.get(AccountModel, account_id)
-        if account is None or account.platform != "chatgpt":
+        if account is None or account.platform != platform:
             return None
         extra = account.get_extra()
         return {
@@ -414,8 +418,12 @@ def _run_account_batch_task(
     delay_seconds: float = 0,
     proxy: Optional[str] = None,
     handle_account: Callable[..., AttemptResult],
+    platform: str = "chatgpt",
 ) -> None:
     """「逐个号跑一遍」这类后台任务的调度骨架（补 RT、绑 2FA 都走这里）。
+
+    ``platform`` 决定从哪个库读账号 —— Grok 的批量动作要靠它（原来硬编码
+    chatgpt，任务建得起来但每个号都「不存在」）。
 
     排队限速、可停可跳、计数收尾这些每个批量任务都一样，只有每个号具体做什么
     不同 —— 那部分由 ``handle_account`` 提供，进度和日志复用注册任务那套。
@@ -514,7 +522,7 @@ def _run_account_batch_task(
             _wait_turn(attempt_id)
             control.checkpoint(attempt_id=attempt_id)
 
-            fields = _load_account_fields(account_id)
+            fields = _load_account_fields(account_id, platform)
             if fields is None:
                 _api._log(task_id, f"[SKIP] 账号 #{account_id} 不存在")
                 return AttemptResult.skipped("账号不存在")
@@ -841,6 +849,7 @@ def _run_batch_action(task_id: str, account_ids: list[int], req: "BatchActionTas
         delay_seconds=req.delay_seconds,
         proxy=req.proxy,
         handle_account=_handle,
+        platform=platform,
     )
 
 

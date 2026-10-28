@@ -487,6 +487,9 @@ def create_batch_action_task(
         try:
             accounts, missing_ids = select_backfill_targets(
                 s,
+                # **必须传 platform**：选择函数原来硬编码 chatgpt，grok 的
+                # 批量动作永远「所选账号不存在」（实测 2026-10-28）。
+                platform=platform,
                 account_ids=req.account_ids,
                 all_filtered=req.all_filtered,
                 email=req.email,

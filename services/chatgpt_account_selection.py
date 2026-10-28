@@ -46,8 +46,16 @@ def select_chatgpt_accounts(
     created_at_end: Optional[datetime] = None,
     keep: Optional[Callable[[AccountModel], bool]] = None,
     max_accounts: int = MAX_BATCH_ACCOUNTS,
+    platform: str = "chatgpt",
 ) -> tuple[list[AccountModel], list[int]]:
-    """挑出要处理的 ChatGPT 账号，返回 ``(账号列表, 找不到的 id)``。
+    """挑出要处理的账号，返回 ``(账号列表, 找不到的 id)``。
+
+    ``platform`` **必须由调用方传入**：这里原来硬编码 ``"chatgpt"``，于是
+    Grok 账号永远被判成「不存在」—— `POST /api/tasks/batch-action` 传
+    ``platform="grok"`` 时一个任务都建不起来（实测 2026-10-28：grok 平台库
+    里 id=1 明明存在，端点返回「所选账号不存在」）。
+
+    默认值 ``"chatgpt"`` 只为兼容既有调用方；新调用方一律显式传。
 
     `created_at_start/end` 与列表接口（`/accounts`）的日期筛选同口径 ——
     页面显示「处理当前筛选的 N 个账号」时，N 包含日期筛选，任务也必须
@@ -66,7 +74,7 @@ def select_chatgpt_accounts(
             chunk = ids[i : i + 500]
             rows = session.exec(
                 select(AccountModel)
-                .where(AccountModel.platform == "chatgpt")
+                .where(AccountModel.platform == platform)
                 .where(AccountModel.id.in_(chunk))
             ).all()
             for row in rows:
@@ -74,7 +82,7 @@ def select_chatgpt_accounts(
         accounts = [row_map[account_id] for account_id in ids if account_id in row_map]
         missing_ids = [account_id for account_id in ids if account_id not in row_map]
     elif all_filtered:
-        query = select(AccountModel).where(AccountModel.platform == "chatgpt")
+        query = select(AccountModel).where(AccountModel.platform == platform)
         if status:
             query = query.where(AccountModel.status == status)
         if email:

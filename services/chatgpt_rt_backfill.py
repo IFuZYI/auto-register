@@ -43,6 +43,7 @@ def select_backfill_targets(
     created_at_start: Optional[datetime] = None,
     created_at_end: Optional[datetime] = None,
     only_missing_rt: bool = True,
+    platform: str = "chatgpt",
 ) -> tuple[list[AccountModel], list[int]]:
     """挑出要补 RT 的号，返回 ``(账号列表, 找不到的 id)``。
 
@@ -53,6 +54,7 @@ def select_backfill_targets(
     """
     return select_chatgpt_accounts(
         session,
+        platform=platform,
         account_ids=account_ids,
         all_filtered=all_filtered,
         email=email,

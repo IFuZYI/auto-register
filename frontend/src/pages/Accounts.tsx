@@ -91,78 +91,51 @@ const COPY_TOTP_ACTION_ID = '__copy_totp_secret'
 
 // 这些动作要跑几十秒的协议链（还可能停下来等一封验证码），同步等只能看见一个
 // 转圈。改走后台任务，和注册一样用日志弹窗把每一步显示出来。
-const TASK_BACKED_ACTIONS: Record<
-  string,
-  { endpoint: string; kind: TaskKind; body: (accountId: number) => Record<string, unknown> }
-> = {
-  backfill_refresh_token: {
-    endpoint: '/tasks/backfill-rt',
-    kind: 'backfill_rt',
-    body: (accountId) => ({ account_ids: [accountId], only_missing_rt: false, delay_seconds: 0 }),
-  },
-  bind_2fa: {
-    endpoint: '/tasks/bind-2fa',
-    kind: 'bind_2fa',
-    body: (accountId) => ({ account_ids: [accountId], only_missing_2fa: false, delay_seconds: 0 }),
-  },
-}
 
-
-
-function ActionMenu({ acc, onRefresh, actions }: { acc: any; onRefresh: () => void; actions: any[] }) {
-  const [resultOpen, setResultOpen] = useState(false)
-  const [resultTitle, setResultTitle] = useState('')
-  const [resultStatus, setResultStatus] = useState<'success' | 'error'>('success')
-  const [resultText, setResultText] = useState('')
-  const [resultUrl, setResultUrl] = useState('')
-  const [resultProbe, setResultProbe] = useState<any>(null)
-  const [resultSecret, setResultSecret] = useState('')
+function ActionMenu({ acc, onRefresh, actions, platform }: { acc: any; onRefresh: () => void; actions: any[]; platform: string }) {
   const [runningActionId, setRunningActionId] = useState<string | null>(null)
   const [taskModalTitle, setTaskModalTitle] = useState('')
   const [taskModalKind, setTaskModalKind] = useState<TaskKind>('backfill_rt')
   const [actionTaskId, setActionTaskId] = useState<string | null>(null)
 
-  const showResult = (
-    title: string,
-    status: 'success' | 'error',
-    text: string,
-    url = '',
-    probe: any = null,
-    secret = '',
-  ) => {
-    setResultTitle(title)
-    setResultStatus(status)
-    setResultText(text)
-    setResultUrl(url)
-    setResultProbe(probe)
-    setResultSecret(secret)
-    setResultOpen(true)
-  }
-
-  const copyResultUrl = async () => {
-    if (!resultUrl) return
-    try {
-      await navigator.clipboard.writeText(resultUrl)
-      message.success('链接已复制')
-    } catch {
-      message.error('复制失败')
-    }
-  }
-
+  /**
+   * 跑一个动作 —— **一律作为任务**。
+   *
+   * 用户要求（2026-10-28）：「所有作业都是任务，包括刷新token，检测状态，
+   * 包括单个的也是。都会弹出任务日志窗口，在任务日志中显示。」
+   *
+   * 所以这里不再有「哪些动作走任务」的白名单：单个账号的动作也走通用任务
+   * 端点 `/tasks/batch-action`（account_ids 只有一个），跑完弹出任务日志
+   * 窗口。同步端点 `/actions/{platform}/{id}/{actionId}` 只保留给后端内部
+   * 与老客户端，前端不再调用。
+   *
+   * 为什么不用 Toast 报结果：任务可能跑几十秒（刷新要打上游、检测要探测），
+   * Toast 一闪而过，用户既看不到过程也没法在任务页里追踪 —— 任务日志窗口
+   * 才是正确的呈现。
+   */
   const runAsTask = async (actionId: string, actionLabel: string) => {
-    const task = TASK_BACKED_ACTIONS[actionId]
     setRunningActionId(actionId)
     try {
-      const result = await apiFetch(task.endpoint, {
+      const created = await apiFetch('/tasks/batch-action', {
         method: 'POST',
-        body: JSON.stringify(task.body(acc.id)),
+        body: JSON.stringify({
+          platform: acc.platform || platform,
+          action_id: actionId,
+          action_label: actionLabel,
+          params: {},
+          account_ids: [acc.id],
+          concurrency: 1,
+          delay_seconds: 0,
+        }),
       })
       setTaskModalTitle(`${actionLabel} - ${acc.email}`)
-      setTaskModalKind(task.kind)
-      setActionTaskId(result.task_id)
+      // 通用动作统一用 batch_action 的日志视图
+      setTaskModalKind('batch_action')
+      setActionTaskId(created.task_id)
     } catch (e) {
       const detail = e instanceof Error ? e.message : String(e)
-      message.error(`${actionLabel}失败: ${detail}`)
+      // 只有「任务都没建成」才用 Toast —— 这是请求层的失败，没有任务日志可看
+      message.error(`${actionLabel}启动失败: ${detail}`)
     } finally {
       setRunningActionId(null)
     }
@@ -171,11 +144,16 @@ function ActionMenu({ acc, onRefresh, actions }: { acc: any; onRefresh: () => vo
   const handleAction = async (actionId: string) => {
     if (runningActionId) return
     const actionLabel = actions.find((item) => item.id === actionId)?.label || actionId
-    const toastKey = `account-action:${acc?.id}:${actionId}`
 
+    // 「复制 2FA 密钥」是纯前端剪贴板操作，不是作业 —— 保持原样。
     if (actionId === COPY_TOTP_ACTION_ID) {
+      const secret = String(acc.totpSecret || '')
+      if (!secret) {
+        message.warning('该账号没有 2FA 密钥（列表行不含密钥，请打开详情再复制）')
+        return
+      }
       try {
-        await navigator.clipboard.writeText(acc.totpSecret)
+        await navigator.clipboard.writeText(secret)
         message.success('2FA 密钥已复制')
       } catch {
         message.error('复制失败，请在账号详情里手动复制')
@@ -183,61 +161,8 @@ function ActionMenu({ acc, onRefresh, actions }: { acc: any; onRefresh: () => vo
       return
     }
 
-    if (TASK_BACKED_ACTIONS[actionId]) {
-      await runAsTask(actionId, actionLabel)
-      return
-    }
-
-    setRunningActionId(actionId)
-    message.loading({ content: `${actionLabel}运行中...`, key: toastKey, duration: 0 })
-
-    try {
-      const r = await apiFetch(`/actions/${acc.platform}/${acc.id}/${actionId}`, {
-        method: 'POST',
-        body: JSON.stringify({ params: {} }),
-      })
-      if (!r.ok) {
-        const data = r.data || {}
-        const probe = typeof data === 'object' && data ? data.probe || null : null
-        message.error({ content: `${actionLabel}失败`, key: toastKey })
-        showResult(actionLabel, 'error', r.error || data.message || '操作失败', '', probe)
-        onRefresh()
-        return
-      }
-      const data = r.data || {}
-      // 绑 2FA 只在这一次响应里下发密钥，弹窗里必须能一键复制，关掉就没了
-      const secret = typeof data === 'object' && data ? String(data.totp_secret || '') : ''
-      if (secret) {
-        message.success({ content: data.message || `${actionLabel}完成`, key: toastKey })
-        showResult(actionLabel, 'success', String(data.message || '操作成功'), '', null, secret)
-        onRefresh()
-        return
-      }
-      if (data.url || data.checkout_url || data.cashier_url) {
-        const targetUrl = data.url || data.checkout_url || data.cashier_url
-        message.success({ content: `${actionLabel}完成`, key: toastKey })
-        showResult(actionLabel, 'success', '操作成功，请在弹窗中打开或复制链接。', targetUrl)
-      } else {
-        message.success({ content: data.message || `${actionLabel}完成`, key: toastKey })
-        const probe = typeof data === 'object' && data ? data.probe || null : null
-        const text =
-          probe
-            ? String(data.message || '操作成功')
-            : typeof data === 'string'
-            ? data
-            : Object.keys(data).length > 0
-              ? JSON.stringify(data, null, 2)
-              : '操作成功'
-        showResult(actionLabel, 'success', text, '', probe)
-      }
-      onRefresh()
-    } catch (e: any) {
-      const detail = e?.message ? String(e.message) : '请求失败'
-      message.error({ content: detail, key: toastKey })
-      showResult(actionLabel, 'error', detail)
-    } finally {
-      setRunningActionId(null)
-    }
+    // 其余全部作为任务跑。
+    await runAsTask(actionId, actionLabel)
   }
 
   const menuItems: MenuProps['items'] = [
@@ -287,68 +212,6 @@ function ActionMenu({ acc, onRefresh, actions }: { acc: any; onRefresh: () => vo
           </div>
         ) : null}
         {actionTaskId ? <TaskLogPanel taskId={actionTaskId} kind={taskModalKind} onDone={onRefresh} /> : null}
-      </Modal>
-      <Modal
-        title={resultTitle}
-        open={resultOpen}
-        onCancel={() => setResultOpen(false)}
-        footer={[
-          resultUrl ? (
-            <Button key="copy" onClick={copyResultUrl}>
-              复制链接
-            </Button>
-          ) : null,
-          resultUrl ? (
-            <Button
-              key="open"
-              type="primary"
-              onClick={() => window.open(resultUrl, '_blank', 'noopener,noreferrer')}
-            >
-              打开链接
-            </Button>
-          ) : null,
-          <Button key="ok" type={resultUrl ? 'default' : 'primary'} onClick={() => setResultOpen(false)}>
-            确定
-          </Button>,
-        ].filter(Boolean)}
-        maskClosable={false}
-      >
-        <Alert
-          type={resultStatus}
-          showIcon
-          message={resultStatus === 'success' ? '操作完成' : '操作失败'}
-          style={{ marginBottom: 12 }}
-        />
-        {resultProbe ? (
-          <div style={{ marginBottom: 12 }}>
-            <LocalProbeSummary probe={resultProbe} />
-          </div>
-        ) : null}
-        {resultSecret ? (
-          <div style={{ marginBottom: 12 }}>
-            <TotpSecretAlert secret={resultSecret} />
-          </div>
-        ) : null}
-        {resultUrl ? (
-          <Space direction="vertical" style={{ width: '100%' }}>
-            <Text copyable={{ text: resultUrl }} style={{ wordBreak: 'break-all' }}>
-              {resultUrl}
-            </Text>
-          </Space>
-        ) : null}
-        {resultText ? (
-          <pre
-            style={{
-              margin: 0,
-              whiteSpace: 'pre-wrap',
-              wordBreak: 'break-word',
-              fontFamily: 'monospace',
-              fontSize: 12,
-            }}
-          >
-            {resultText}
-          </pre>
-        ) : null}
       </Modal>
     </>
   )
@@ -1204,7 +1067,7 @@ export default function Accounts() {
               删除
             </Button>
           </Popconfirm>
-          <ActionMenu acc={record} onRefresh={load} actions={platformActions} />
+          <ActionMenu acc={record} onRefresh={load} actions={platformActions} platform={currentPlatform} />
         </Space>
       ),
     },
