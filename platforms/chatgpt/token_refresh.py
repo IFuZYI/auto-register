@@ -58,10 +58,73 @@ class TokenRefreshResult:
     #: 登录链顺带换到的其它凭证（只有走登录流程时才有）
     session_token: str = ""
     id_token: str = ""
+    #: 失败**分类**（空串 = 没分类）。与 Grok 侧同一套语义
+    #: （`services/grok_account_state.py` 的 `refresh_kind`）：
+    #:
+    #: - `permanent`：`invalid_grant` 等终局结论 —— RT 已废，只能重新登录。
+    #:   调用方应落「失效」并停止重试（实测：失效的号被反复重试，每次白打一轮）。
+    #: - `configuration`：`invalid_client` / client_id 为空 —— **我们的**配错，
+    #:   不是账号问题。归 permanent 会误杀一批好号。
+    #: - `retryable`：5xx / 429 / 网络 —— 瞬时，重试即可，不动状态。
+    kind: str = ""
     cookie_header: str = ""
     #: 设备标识（oai-did）：登录链沿用/收敛到的值。落库后后续登录可复用
     #: （用户问题 2026-10-07「指纹能复用吗」）。
     device_id: str = ""
+
+#: 失败分类的取值。与 Grok 侧对齐（`services/grok_account_state.py`）。
+REFRESH_KIND_PERMANENT = "permanent"
+REFRESH_KIND_CONFIGURATION = "configuration"
+REFRESH_KIND_RETRYABLE = "retryable"
+
+#: 终局：RT 已废，只能重新登录。
+#:
+#: 服务端原话（实测 2026-10-28）：
+#: `invalid_grant The refresh token has been invalidated. A fresh sign-in is required.`
+_PERMANENT_MARKERS = (
+    "invalid_grant",
+    "has been invalidated",
+    "a fresh sign-in is required",
+    "refresh_token_invalidated",
+    "token_expired",
+)
+
+#: 配置问题：我们的 client 不对，不是账号坏了。归 permanent 会误杀好号。
+_CONFIGURATION_MARKERS = (
+    "invalid_client",
+    "invalid client",
+    "invalid 'client_id'",
+    "empty string",
+)
+
+
+def classify_refresh_error(status: int, text: str) -> str:
+    """把刷新失败分成 permanent / configuration / retryable / 空串。
+
+    为什么要分：调用方要据此决定「落失效并停手」还是「重试」还是「修配置」。
+    只看一个错误字符串的话，失效的号会被反复重试（实测：5 个真实账号里 2 个
+    永久失效，每次刷新都白打一轮上游），而界面一直显示正常。
+
+    判据顺序：先 configuration 再 permanent —— `invalid_client` 的响应体里
+    也可能出现别的词，而**配错 client 比 RT 失效更可能是我们的问题**，
+    误判成 permanent 会静默把好号标失效。
+    """
+    body = str(text or "").lower()
+
+    for marker in _CONFIGURATION_MARKERS:
+        if marker in body:
+            return REFRESH_KIND_CONFIGURATION
+
+    for marker in _PERMANENT_MARKERS:
+        if marker in body:
+            return REFRESH_KIND_PERMANENT
+
+    code = int(status or 0)
+    if code in (408, 425, 429) or code >= 500:
+        return REFRESH_KIND_RETRYABLE
+
+    return ""
+
 
 
 class TokenRefreshManager:
@@ -254,6 +317,10 @@ class TokenRefreshManager:
                     result.error_message = f"账号已封禁（OAuth 端点拒绝: HTTP {response.status_code}）"
                 else:
                     result.error_message = f"OAuth token 刷新失败: HTTP {response.status_code}"
+                # 分类：调用方据此决定「落失效并停手」还是「重试」还是「修配置」
+                result.kind = classify_refresh_error(
+                    response.status_code, str(getattr(response, "text", "") or "")
+                )
                 logger.warning(f"{result.error_message}, 服务端说: {describe_error(response.text)}")
                 return result
 

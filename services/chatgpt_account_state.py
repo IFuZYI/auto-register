@@ -187,6 +187,7 @@ def apply_chatgpt_status_policy(
     remote_sync: dict[str, Any] | None = None,
     banned: bool = False,
     usable: bool = False,
+    refresh_kind: str = "",
 ) -> str:
     """按探测/同步结论落账号状态，返回判定理由（空串 = 没判定）。
 
@@ -219,6 +220,18 @@ def apply_chatgpt_status_policy(
     reason = classify_local_probe_state(local_probe) or classify_remote_sync_state(remote_sync)
     if banned:
         reason = reason or "refresh_banned"
+
+    # 刷新的失败分类（`platforms/chatgpt/token_refresh.classify_refresh_error`）：
+    # - `permanent`（invalid_grant 等终局结论）→ 落失效，与其它「需要重新登录」
+    #   的信号同侧。**必须**落，否则失效的号会被反复重试、界面一直显示正常
+    #   （实测：5 个真实账号里 2 个永久失效，每次刷新白打一轮上游）。
+    # - `configuration`（invalid_client / client_id 为空）→ **不动状态**：那是
+    #   我们的配错，账号可能是好的（实测：正确 client 下同一批号 4/12 刷新成功）。
+    #   落状态会误杀一批好号。
+    # - `retryable` / 空 → 不动。
+    kind = str(refresh_kind or "").strip().lower()
+    if kind == "permanent":
+        reason = reason or "refresh_permanent"
 
     if reason:
         if banned or _is_banned_reason(reason):

@@ -57,6 +57,15 @@ class AuthResult:
         # 手机号注册链路专用：账号身份是手机号，邮箱是后来绑上去的（可能没绑上）
         self.phone_number: str = ""
         self.bound_email: str = ""
+        #: **实际签发 refresh_token 的那个 OAuth client_id**。
+        #:
+        #: 两条路线用的 client 不同（Codex / platform 密码登录），刷新时必须
+        #: 拿「签发它的那个」去换 —— 用错会 `401 invalid_client`，而错误信息
+        #: 看起来像「令牌失效」（实测 2026-10-28）。
+        #:
+        #: 来源：服务端 `client_auth_session` dump 的 `openai_client_id`
+        #: （`mixins/trace.py:301` 同步到 `flow._oauth_client_id`）。
+        self.client_id: str = ""
 
     def is_valid(self) -> bool:
         return bool(self.session_token and self.access_token)
@@ -75,6 +84,7 @@ class AuthResult:
             "totp_secret": self.totp_secret,
             "phone_number": self.phone_number,
             "bound_email": self.bound_email,
+            "client_id": self.client_id,
         }
 
 
@@ -894,6 +904,17 @@ class AuthFlow(
             # 最终再拉一次 session（Codex 流程可能更新 cookie/access_token）
             if not refresh_only_mode:
                 self.get_auth_session()
+
+        # **记下签发 RT 的那个 client_id**：两条路线（Codex / platform 登录）
+        # 用的是不同 client，刷新必须拿对的那个。`_oauth_client_id` 已由
+        # trace 从服务端 dump 的 `openai_client_id` 同步过（更权威），
+        # Codex 路线也会在 `_build_codex_authorize` 后写入。
+        if self.result.refresh_token and not self.result.client_id:
+            self.result.client_id = str(
+                getattr(self, "_oauth_client_id", "") or ""
+            ).strip()
+            if self.result.client_id:
+                logger.info("RT 签发 client_id: %s", self.result.client_id)
 
         if refresh_only_mode:
             if not (self.result.refresh_token or self.result.access_token):

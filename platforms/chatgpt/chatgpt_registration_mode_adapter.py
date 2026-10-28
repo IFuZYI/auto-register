@@ -260,14 +260,39 @@ class ChatGPTRegistrationContext:
 
 
 def _default_client_id() -> str:
-    """ChatGPT 的 OAuth client_id（刷新要用）。
+    """兜底的 OAuth client_id。
 
-    从 `constants` 取，不在这里写第二份字面量 —— 那个值改过一次，
-    两份定义必然漂移。
+    **只在账号自己的 client_id 拿不到时才用**（老号、或服务端没给 dump）。
+    刷新要用「签发这个 RT 的那个 client」，不是任意一个常量 —— 见
+    `resolve_client_id_for_patch` 的 docstring。
     """
-    from platforms.chatgpt.constants import OAUTH_CLIENT_ID
+    from platforms.chatgpt.protocol.mixins.platform_rt import PLATFORM_CLIENT_ID
 
-    return OAUTH_CLIENT_ID
+    return PLATFORM_CLIENT_ID
+
+
+def resolve_client_id_for_patch(flow_client_id: str, *, default: str = "") -> str:
+    """决定**落库**用哪个 client_id。
+
+    优先 `flow_client_id` —— 它是服务端 `client_auth_session` dump 里的
+    `openai_client_id`，也就是「这个 RT 到底是谁签的」的权威答案
+    （`protocol/mixins/trace.py:301` 把它同步到 `flow._oauth_client_id`）。
+    拿不到才回落默认值。
+
+    为什么不能写死一个常量：本仓有**两条**产出 RT 的路线，client 不同 ——
+
+    | 路线 | client_id |
+    | --- | --- |
+    | Codex OAuth | `app_EMoamEEZ73f0CkXaXp7hrann` |
+    | platform 密码登录 | `app_2SKx67EdpoN0G6j64rFvigXD` |
+
+    写死任一个，另一条路线的号刷新时都会 `401 invalid_client`
+    （实测 2026-10-28）—— 而错误信息看起来像「令牌失效」，极易误判。
+    """
+    got = str(flow_client_id or "").strip()
+    if got:
+        return got
+    return str(default or "").strip() or _default_client_id()
 
 
 class ChatGPTRegistrationModeAdapter:
@@ -350,7 +375,10 @@ class ChatGPTRegistrationModeAdapter:
             # 实测（2026-10-28）：663 个 chatgpt 账号 **0 个** 有 client_id，
             # OAuth 刷新全部 401 → 回落 session → AT 未到期时原样返回旧值
             # （`refreshed=False`）→ 用户看到「刷不出新的」。
-            "client_id": str(result.metadata.get("client_id") or "") or _default_client_id(),
+            "client_id": resolve_client_id_for_patch(
+                str(getattr(result, "client_id", "") or ""),
+                default=str(result.metadata.get("client_id") or ""),
+            ),
             **{k: v for k, v in (result.metadata or {}).items() if v not in (None, "", False)},
         }
 

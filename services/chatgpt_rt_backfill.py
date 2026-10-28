@@ -149,10 +149,17 @@ def build_extra_patch(result: BackfillResult) -> dict[str, Any]:
     # `invalid_client`（HTTP 401），而不是「参数缺失」那种能自查的错误 ——
     # 排查时极易误判成「RT 失效」（实测 2026-10-28：663 个账号 0 个有它，
     # OAuth 刷新全部 401 后回落 session，AT 拿不回新的）。
-    from platforms.chatgpt.constants import OAUTH_CLIENT_ID
+    # **记签发这个 RT 的那个 client**，不是写死一个常量 —— 两条路线
+    # （Codex / platform 登录）client 不同，写错会让刷新 401 invalid_client。
+    from platforms.chatgpt.chatgpt_registration_mode_adapter import (
+        resolve_client_id_for_patch,
+    )
 
-    if OAUTH_CLIENT_ID:
-        patch["client_id"] = OAUTH_CLIENT_ID
+    resolved_client_id = resolve_client_id_for_patch(
+        str(getattr(result, "client_id", "") or "")
+    )
+    if resolved_client_id:
+        patch["client_id"] = resolved_client_id
 
     if result.refresh_token:
         # 号已经有 RT 了，别再被当成 access_token_only 方案的产物

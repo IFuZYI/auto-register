@@ -433,12 +433,16 @@ export default function Accounts() {
    */
   const openDetail = async (record: { id: number; platform?: string }) => {
     setDetailModalOpen(true)
-    setCurrentAccount(record)          // 先用列表行占位，避免抽屉空白
+    setCurrentAccount(normalizeAccount(record))  // 先用列表行占位，避免抽屉空白
     try {
       const full = await apiFetch(
         `/accounts/${record.id}?platform=${encodeURIComponent(record.platform || currentPlatform)}`,
       )
-      if (full && typeof full === 'object') setCurrentAccount(full)
+      // **必须归一化**：详情弹窗读的是驼峰字段（`totpSecret` /
+      // `registerProxy` / `chatgptLocal`），而它们由 `normalizeAccount`
+      // 从 `extra_json` 解出来。直接塞原始响应 → 那些字段全是 undefined →
+      // 详情里看不到 2FA 密钥、代理、本地状态（实测 2026-10-28）。
+      if (full && typeof full === 'object') setCurrentAccount(normalizeAccount(full))
     } catch {
       // 拉不到就继续用列表行：抽屉里其它字段仍可用，只是 token 部分为空
     }
@@ -1582,6 +1586,23 @@ export default function Accounts() {
                     { value: 'banned', label: '禁用' },
                   ]}
                 />
+              </Form.Item>
+              {/* 密码：**只读展示 + 一键复制**。详情端点返回明文（列表响应
+                  里已裁成 `has_password` 布尔，安全加固），要看/复制原文只能
+                  在这里。用户要求「账号详细信息查看要完整，账号密码2FA等」。 */}
+              <Form.Item label="密码">
+                {currentAccount.password ? (
+                  <Text
+                    style={{ fontFamily: 'monospace', fontSize: 12, wordBreak: 'break-all' }}
+                    copyable={{ text: String(currentAccount.password), tooltips: ['复制密码', '已复制'] }}
+                  >
+                    {String(currentAccount.password)}
+                  </Text>
+                ) : (
+                  <Text type="secondary">
+                    无密码（手机号注册的号没有邮箱密码，或该号未设过密码）
+                  </Text>
+                )}
               </Form.Item>
               <Form.Item name="token" label={currentPlatform === 'grok' ? 'SSO（token 列）' : 'Access Token'}>
                 <Input.TextArea rows={2} style={{ fontFamily: 'monospace' }} />

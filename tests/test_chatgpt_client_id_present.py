@@ -40,10 +40,15 @@ class ClientIdIsPersistedTests(unittest.TestCase):
             root / "platforms" / "chatgpt" / "registration_engine.py",
         ]
         combined = "\n".join(p.read_text(encoding="utf-8") for p in sources)
+        # 落库要走**解析器**（按实际签发者选 client），不是写死一个常量 ——
+        # 两条路线 client 不同，写死会让另一条的号 401 invalid_client。
         self.assertIn(
-            "OAUTH_CLIENT_ID", combined,
-            "注册链没有引用 OAUTH_CLIENT_ID —— 落库的 client_id 会是空的，"
-            "OAuth 刷新必然 invalid_client",
+            "resolve_client_id_for_patch", combined,
+            "注册链没有经解析器决定 client_id —— 落库的值可能与签发者不符",
+        )
+        self.assertIn(
+            "client_id", combined,
+            "注册链没有写 client_id —— 刷新必然 invalid_client",
         )
 
     def test_refresh_uses_the_platform_client_id(self):

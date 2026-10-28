@@ -502,6 +502,10 @@ class ChatGPTPlatform(BasePlatform):
                     # 只放 banned 的话那一行会显示成 JSON
                     "data": {
                         "banned": bool(result.banned),
+                        # 失败分类（permanent / configuration / retryable）：
+                        # 状态策略据此决定要不要落「失效」—— 没有它，永久失效的
+                        # RT 会被反复重试且状态一直显示正常（实测 2026-10-28）。
+                        "refresh_kind": str(getattr(result, "kind", "") or ""),
                         "message": result.error_message or result.verify_message or "刷新失败",
                     },
                     "account_extra_patch": {"chatgpt_token_refresh": stamp},
@@ -533,12 +537,17 @@ class ChatGPTPlatform(BasePlatform):
                 text = str(value or "").strip()
                 if text:
                     patch[key] = text
-            # **client_id 必须落库**（同 build_extra_patch 的理由）：OAuth
-            # 刷新要它，空值换来 `invalid_client`（HTTP 401）。
-            from platforms.chatgpt.constants import OAUTH_CLIENT_ID
+            # **client_id 必须落库**，且必须是**签发这个 RT 的那个** client
+            # （两条路线不同，见 `resolve_client_id_for_patch`）。
+            from platforms.chatgpt.chatgpt_registration_mode_adapter import (
+                resolve_client_id_for_patch,
+            )
 
-            if OAUTH_CLIENT_ID:
-                patch["client_id"] = OAUTH_CLIENT_ID
+            resolved_client_id = resolve_client_id_for_patch(
+                str(getattr(result, "client_id", "") or "")
+            )
+            if resolved_client_id:
+                patch["client_id"] = resolved_client_id
             if patch.get("refresh_token"):
                 patch["chatgpt_has_refresh_token_solution"] = True
 

@@ -161,6 +161,10 @@ def _apply_action_result(
                 acc_model,
                 banned=bool(data.get("banned")),
                 usable=bool(result.get("ok")),
+                # 失败分类：`permanent`（invalid_grant 等）落「失效」并停止重试；
+                # `configuration`（invalid_client）**不动状态** —— 那是我们的
+                # 配错，账号可能是好的。
+                refresh_kind=str(data.get("refresh_kind") or ""),
             )
         elif action_id in ("backfill_refresh_token", "bind_2fa"):
             # 补 RT / 绑 2FA 的登录链同样会发掘「号没了」（用户要求：禁用
