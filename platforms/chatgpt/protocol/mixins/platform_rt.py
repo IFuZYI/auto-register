@@ -21,7 +21,8 @@ import base64
 import hashlib
 import logging
 import secrets
-from typing import Optional
+import time
+from typing import Any, Optional
 from urllib.parse import urlencode
 
 logger = logging.getLogger(__name__)
@@ -145,6 +146,7 @@ class PlatformRtMixin:
         email: str,
         password: str,
         totp_secret: str = "",
+        mail_provider: Any = None,
     ) -> bool:
         """走 platform 密码登录路线换 refresh_token。成功时 `self.result.refresh_token` 有值。
 
@@ -219,6 +221,44 @@ class PlatformRtMixin:
                 return False
             mfa_resp = self.submit_mfa_totp(_totp_now(totp_secret), challenge_id)
             continue_url = self._normalize_continue_url(self._extract_continue_url_from_step(mfa_resp))
+
+        # **邮箱验证码**：服务端要 email OTP 时不能直接放弃 —— 这条路是 RT
+        # 的最后兜底（Codex 也失败时），它一放弃 RT 就彻底拿不到。
+        #
+        # 实测 2026-10-28（真实注册 task_1793184821307）：走到
+        # `page_type=email_otp_verification` 后原实现直接返回 False，
+        # 账号落库 AT 有 / session 有 / **RT 空**、totp_secret 空，
+        # `partial=True missing=refresh_token`。
+        if page_type == "email_otp_verification" or "/email-verification" in (continue_url or ""):
+            if mail_provider is None:
+                self.last_platform_route_error = (
+                    "服务端要求邮箱验证码，但没提供收件渠道 —— 该路线不可用"
+                )
+                logger.warning(self.last_platform_route_error)
+                return False
+            try:
+                otp_timeout = max(10, int(self._get_env("OTP_TIMEOUT", "60")))
+                # 时间戳在发码**之前**取：邮件是服务端在这次请求里发出的，
+                # 先发再取会让 otp_sent_at 晚于邮件时间戳、被 issued_after 过滤掉。
+                otp_sent_at = time.time()
+                self.kickoff_otp_delivery("platform_rt_login")
+                otp_code = mail_provider.wait_for_otp(
+                    email, timeout=otp_timeout, issued_after=otp_sent_at
+                )
+                if not otp_code:
+                    self.last_platform_route_error = "登录链等邮箱验证码超时"
+                    logger.warning(self.last_platform_route_error)
+                    return False
+                otp_resp = self.verify_otp(otp_code)
+                page_type = self._extract_page_type(otp_resp)
+                continue_url = self._normalize_continue_url(
+                    self._extract_continue_url_from_step(otp_resp)
+                )
+                logger.info("platform 登录链已通过邮箱验证码（page_type=%s）", page_type)
+            except Exception as exc:  # noqa: BLE001 - 等码失败要能回退到 Codex
+                self.last_platform_route_error = f"登录链等邮箱验证码失败: {exc}"
+                logger.warning(self.last_platform_route_error)
+                return False
 
         code = ""
         if continue_url:

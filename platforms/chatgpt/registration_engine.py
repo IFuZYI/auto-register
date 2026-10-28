@@ -347,6 +347,10 @@ class ChatGPTRegistrationEngine:
         try:
             ok = flow.acquire_rt_via_platform_login(
                 email=email, password=password, totp_secret=totp_secret,
+                # **必须传收件渠道**：登录链撞上邮箱验证码时要等码 ——
+                # 不传的话它会直接放弃，RT 就彻底拿不到（实测
+                # task_1793184821307：AT/session 都有，RT 空）。
+                mail_provider=self.mail_provider,
             )
         except Exception as exc:  # noqa: BLE001 - 同上，失败要可回退
             self.log(f"登录链换 RT 报错: {type(exc).__name__}: {exc}")

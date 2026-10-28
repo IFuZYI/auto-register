@@ -229,3 +229,52 @@ class PasswordRejectionNeedsAFreshAuthorizeTests(unittest.TestCase):
             "密码被拒后没有重开 authorize 的路径 —— 在死掉的 state 上发码必然 "
             "400 invalid_auth_step / 409 invalid_state（实测）",
         )
+
+
+class PlatformRtHandlesEmailOtpTests(unittest.TestCase):
+    """RT 登录链撞上邮箱验证码时必须**等码并验码**，不能直接放弃。
+
+    ## 实测（2026-10-28 真实注册，task_1793184821307）
+
+    注册本身成功了，但 RT 是空的：
+
+        [协议] [10/10] 获取认证 Session...     session: st=有 at=有
+        [协议] 登录链没给出 authorization code
+                （page_type=email_otp_verification, 落点=/email-verification）
+        [协议] 尝试 Codex OAuth 直连换取 refresh_token ...
+        [协议] 注册流程完成!
+        ⚠ 本模式要求 refresh_token，但 Codex OAuth 交换没拿到
+
+    账号落库结果：AT 有（1988）、session_token 有（4119）、**RT 空**、
+    id_token 空、totp_secret 空，`partial=True / missing=refresh_token`。
+
+    ## 为什么
+
+    `platform_rt` 的登录链只有「密码 → 2FA」两段，走到
+    `email_otp_verification`（服务端要邮箱验证码）就直接返回 False ——
+    **没有等码、验码的步骤**。而这条路是 RT 的最后兜底（Codex 也失败时），
+    它一放弃，RT 就彻底拿不到。
+    """
+
+    def _platform_rt_source(self) -> str:
+        from platforms.chatgpt.protocol.mixins import platform_rt
+
+        import inspect
+
+        return inspect.getsource(platform_rt)
+
+    def test_platform_rt_waits_for_email_otp(self):
+        src = self._platform_rt_source()
+        self.assertTrue(
+            "wait_for_otp" in src or "verify_otp" in src,
+            "platform_rt 的登录链没有等码/验码步骤 —— 撞上 "
+            "email_otp_verification 时 RT 永远拿不到（实测 partial=True）",
+        )
+
+    def test_platform_rt_accepts_a_mail_provider(self):
+        """要等码就得能拿到邮箱（收件渠道）。"""
+        src = self._platform_rt_source()
+        self.assertTrue(
+            "mail_provider" in src,
+            "platform_rt 没有接收 mail_provider —— 无法等邮箱验证码",
+        )
