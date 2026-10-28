@@ -179,3 +179,53 @@ class AllRtCallSitesGoThroughTheHelperTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PasswordRejectionNeedsAFreshAuthorizeTests(unittest.TestCase):
+    """`login_password` 分支密码 401 后，**必须重新走 authorize** 才能发 OTP。
+
+    ## 实测（2026-10-28 真实注册冒烟，task_1793181677181）
+
+        密码校验被拒（HTTP 401: ... invalid_username_or_password）   ← 我上轮修的降级生效
+        重发 OTP 失败: 400 - Invalid authorization step. invalid_auth_step
+        已有账号 resend 失败, 兜底 send_otp 新建 challenge
+        已有账号发码全 fail: 409 - Your sign-in session is no longer valid.
+
+    ## 为什么必然失败
+
+    `/password/verify` 返回 401 之后，**服务端把这个 authorize 会话作废了**。
+    同一个 state 上再调 `email-otp/resend`（400 invalid_auth_step）或
+    `email-otp/send`（409 invalid_state）都会被拒 —— 不是参数问题，是
+    state 本身已经死了。
+
+    所以降级到 OTP 的唯一可行路径是：**重开一条 authorize 链路**（新的
+    state / csrf / sentinel），在它上面直接走「已有账号 → 发码」。
+
+    这也解释了用户日志里第 50-53 个账号为什么每个都重试 2 轮全失败：
+    401 之后所有发码尝试都打在同一个死掉的 state 上。
+    """
+
+    def test_password_branch_reauthors_before_sending_otp(self):
+        from platforms.chatgpt.protocol.auth_flow import AuthFlow
+        import inspect
+
+        src = inspect.getsource(AuthFlow.run_register)
+        # 找到 login_password 分支：从分支开头到下一个**同缩进的** elif/else。
+        # 不能用 `src.find("elif")` —— 注释里就有 "elif" 字样，会提前截断
+        # （第一版就是这么红的）。
+        start = src.index('if page_type == "login_password":')
+        indent = " " * (len(src[:start].split("\n")[-1]) - len(src[:start].split("\n")[-1].lstrip()))
+        marker = f"\n{indent}elif "
+        end = src.find(marker, start)
+        block = src[start:end] if end != -1 else src[start:]
+
+        self.assertIn(
+            "login_password_verify", block,
+            "找不到密码校验调用 —— 分支结构变了，这条测试需要跟着更新",
+        )
+        # 401 之后（返回空 dict）要能重开 authorize
+        self.assertIn(
+            "_restart_authorize_for_otp", block,
+            "密码被拒后没有重开 authorize 的路径 —— 在死掉的 state 上发码必然 "
+            "400 invalid_auth_step / 409 invalid_state（实测）",
+        )

@@ -530,6 +530,42 @@ class AuthFlow(
 
 
     # ── 完整注册流程 ──
+    def _restart_authorize_for_otp(self, email: str) -> bool:
+        """密码被拒后**重开一条 authorize 链**，用于在活着的 state 上发 OTP。
+
+        ## 为什么必须重开（实测 2026-10-28 真实注册）
+
+            /password/verify → 401 invalid_username_or_password
+            /email-otp/resend → 400 Invalid authorization step. invalid_auth_step
+            /email-otp/send   → 409 Your sign-in session is no longer valid.
+
+        401 之后服务端把这个 authorize 会话**作废了**。同一个 state 上再发码
+        必然被拒 —— 不是参数问题，state 本身死了。所以降级到 OTP 的唯一可行
+        路径是重走 csrf → auth_url → oauth_init → sentinel → signup，
+        在新 state 上直接走「已有账号 → 发码」。
+
+        `signup()` 本身就是新链的第一步：它会返回 `is_new=False` 并把
+        `_existing_email_verification_mode` / `_existing_page_type` 重新填好，
+        后续 OTP 分支据此工作。
+
+        返回 True = 新链就绪（且确认是已有账号）。
+        """
+        try:
+            csrf_token = self.get_csrf_token()
+            auth_url = self.get_auth_url(csrf_token, email=email)
+            device_id = self.auth_oauth_init(auth_url)
+            sentinel = self.get_sentinel_token(device_id)
+            is_new = self.signup(email, sentinel)
+            if is_new:
+                # 重开后变成新号了（服务端状态可能已推进）—— 交给调用方按新号走
+                logger.info("重开 authorize 后服务端判定为新账号")
+                return False
+            logger.info("已重开 authorize（新 state），可以在它上面发 OTP")
+            return True
+        except Exception as e:  # noqa: BLE001 - 重开失败要能回退到原有报错
+            logger.warning(f"重开 authorize 失败: {type(e).__name__}: {e}")
+            return False
+
     def run_register(self, mail_provider: MailProvider) -> AuthResult:
         """执行完整注册流程"""
         # 检查网络
@@ -721,6 +757,18 @@ class AuthFlow(
 
                 # 部分账号密码校验后仍需 email otp（二次校验）
                 elif not continue_url or "/email-verification" in continue_url:
+                    # **密码被拒（401）后 state 已作废**，必须先重开一条 authorize
+                    # 链再发码。实测 2026-10-28：401 之后在同一个 state 上
+                    # `email-otp/resend` → 400 invalid_auth_step、
+                    # `email-otp/send` → 409 invalid_state，两条都死。
+                    # 用户日志里第 50-53 个账号每个都重试 2 轮全失败，就是这个原因。
+                    if not login_resp:
+                        logger.info("密码校验未通过，重开 authorize 后再发 OTP")
+                        if not self._restart_authorize_for_otp(email):
+                            logger.warning(
+                                "重开 authorize 未成功，仍在旧 state 上尝试发码"
+                                "（大概率仍会 invalid_state）"
+                            )
                     # password/verify 后推荐使用 resend，而不是 /email-otp/send
                     otp_sent_at = time.time()
                     self.kickoff_otp_delivery("existing_login_password")
