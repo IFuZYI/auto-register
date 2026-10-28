@@ -243,7 +243,7 @@ function ActionMenu({ acc, onRefresh, actions }: { acc: any; onRefresh: () => vo
   const menuItems: MenuProps['items'] = [
     ...(acc.totpSecret
       ? [{ key: COPY_TOTP_ACTION_ID, label: '复制 2FA 密钥' }]
-      : []),
+      : []),  // 只有详情行带正文（列表行没有），所以这里仍用正文判断
     // 面板动作（`scope: "panel"`，上传 CPA / Sub2API / grok2api、同步远端状态）
     // 不在账号页出现 —— 它们的目标是外部面板，操作面在「面板管理」页。
     // 后端仍声明它们（批量端点与面板注册表按 id 找），只是这里不渲染。
@@ -494,15 +494,6 @@ export default function Accounts() {
     message.success('已复制')
   }
 
-  const copySecret = (label: string, text: string) => {
-    if (!text) {
-      message.warning(`该账号没有${label}`)
-      return
-    }
-    navigator.clipboard.writeText(text)
-    message.success(`${label}已复制`)
-  }
-
   /**
    * 列表里是否「有 RT」。
    *
@@ -512,6 +503,27 @@ export default function Accounts() {
    */
   //: 列表行不带 token 正文时的占位串。**只用于判有无**，绝不可展示/复制。
   const HAS_TOKEN_PLACEHOLDER = '__has_token__'
+
+  /**
+   * 读一行账号的 `extra`（列表行与详情行都能用）。
+   *
+   * 列表响应把凭证正文换成了 `has_*` 布尔（见 `api/accounts.py` 的
+   * `_slim_extra_for_list`），详情端点给全量。所以**判断「有没有」要读布尔，
+   * 展示/复制才读正文** —— 混着用就会出现「明明绑了却显示没有」。
+   */
+  const rowExtra = (record: { extra_json?: string } | null | undefined): Record<string, unknown> => {
+    try {
+      return JSON.parse(record?.extra_json || '{}') || {}
+    } catch {
+      return {}
+    }
+  }
+
+  /** 这一行有没有绑 2FA（列表读布尔，详情读正文）。 */
+  const hasTotpSecret = (record: { extra_json?: string } | null | undefined): boolean => {
+    const extra = rowExtra(record)
+    return Boolean(extra.totp_secret) || extra.has_totp_secret === true
+  }
 
   const getRefreshToken = (record: any): string => {
     try {
@@ -931,23 +943,6 @@ export default function Accounts() {
     gap: 6,
     minWidth: 0,
   }
-  // 复制按钮紧跟在截断后的密文右边，别被超长 token 顶到列的最右侧。
-  const secretCellStyle: React.CSSProperties = {
-    display: 'flex',
-    alignItems: 'center',
-    gap: 6,
-    minWidth: 0,
-  }
-  const secretPreviewStyle: React.CSSProperties = {
-    ...monospaceStyle,
-    flex: 1,
-    minWidth: 0,
-    filter: 'blur(4px)',
-    whiteSpace: 'nowrap',
-    overflow: 'hidden',
-    textOverflow: 'ellipsis',
-    opacity: 0.9,
-  }
   const compactPanelStyle: React.CSSProperties = {
     padding: '8px 10px',
     borderRadius: token.borderRadiusLG,
@@ -980,17 +975,20 @@ export default function Accounts() {
     },
     {
       title: '密码',
-      dataIndex: 'password',
+      dataIndex: 'has_password',
       key: 'password',
       width: 120,
-      render: (text: string) => (
-        <div style={secretCellStyle}>
-          <Text style={secretPreviewStyle} title={text}>
-            {text}
+      // **列表响应不含密码正文**（安全加固：换成 `has_password` 布尔）。
+      // 原来绑 `dataIndex: 'password'` → 该键不存在 → 整列恒空（用户报
+      // 「账号信息有问题」）。正文的复制入口在详情抽屉里。
+      render: (_: unknown, record: { has_password?: boolean }) =>
+        record?.has_password ? (
+          <Text type="success" style={{ fontSize: 11 }}>
+            有（详情可复制）
           </Text>
-          <Button type="text" size="small" icon={<CopyOutlined />} onClick={() => copyText(text)} />
-        </div>
-      ),
+        ) : (
+          <span style={{ color: 'var(--text-muted)' }}>-</span>
+        ),
     },
     {
       title: 'RT',
@@ -1097,17 +1095,11 @@ export default function Accounts() {
                 <Tag color={codexMeta.color}>Codex {codexMeta.label}</Tag>
               </div>
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-                {record.totpSecret ? (
-                  <Tag
-                    color="purple"
-                    title="点击复制 TOTP 密钥，可直接导入验证器"
-                    style={{ cursor: 'pointer', marginInlineEnd: 0 }}
-                    onClick={() => copySecret('2FA 密钥', record.totpSecret)}
-                  >
-                    <Space size={4}>
-                      2FA 已绑
-                      <CopyOutlined />
-                    </Space>
+                {hasTotpSecret(record) ? (
+                  // 列表行只有 `has_totp_secret` 布尔（密钥正文被安全加固
+                  // 裁掉了）。复制入口在详情抽屉，那里拿的是全量。
+                  <Tag color="purple" style={{ marginInlineEnd: 0 }}>
+                    2FA 已绑
                   </Tag>
                 ) : null}
               </div>

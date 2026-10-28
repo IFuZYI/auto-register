@@ -82,6 +82,16 @@ def all_tables_use_json() -> bool:
     只要有一张表没接线就返回 False —— 那种情况下必须建库，否则未接线的表
     会直接报「no such table」。
     """
+    # **显式给了 `DATABASE_URL` 就必须建表**：那是调用方（测试、或自建部署）
+    # 明确要求用这个 SQLite 库。只看「文件存不存在」会把「库还没建」误判成
+    # 「这是全新部署、该用 JSON」—— 测试环境正是如此（`conftest.py` 把
+    # `DATABASE_URL` 指向临时文件），结果 `init_db` 跳过建表，41 个用例
+    # 报 `no such table`（实测）。
+    import os as _os
+
+    if str(_os.environ.get("DATABASE_URL", "") or "").strip():
+        return False
+
     if resolve_backend_name(db_exists=sqlite_db_exists()) != BACKEND_JSON:
         return False
 

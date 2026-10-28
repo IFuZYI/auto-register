@@ -533,6 +533,12 @@ class ChatGPTPlatform(BasePlatform):
                 text = str(value or "").strip()
                 if text:
                     patch[key] = text
+            # **client_id 必须落库**（同 build_extra_patch 的理由）：OAuth
+            # 刷新要它，空值换来 `invalid_client`（HTTP 401）。
+            from platforms.chatgpt.constants import OAUTH_CLIENT_ID
+
+            if OAUTH_CLIENT_ID:
+                patch["client_id"] = OAUTH_CLIENT_ID
             if patch.get("refresh_token"):
                 patch["chatgpt_has_refresh_token_solution"] = True
 

@@ -143,6 +143,15 @@ def build_extra_patch(result: BackfillResult) -> dict[str, Any]:
     device_id = str(getattr(result, "device_id", "") or "").strip()
     if device_id:
         patch["device_id"] = device_id
+    # **client_id 必须落库**：OAuth 刷新要它，空值换来的是
+    # `invalid_client`（HTTP 401），而不是「参数缺失」那种能自查的错误 ——
+    # 排查时极易误判成「RT 失效」（实测 2026-10-28：663 个账号 0 个有它，
+    # OAuth 刷新全部 401 后回落 session，AT 拿不回新的）。
+    from platforms.chatgpt.constants import OAUTH_CLIENT_ID
+
+    if OAUTH_CLIENT_ID:
+        patch["client_id"] = OAUTH_CLIENT_ID
+
     if result.refresh_token:
         # 号已经有 RT 了，别再被当成 access_token_only 方案的产物
         patch["chatgpt_has_refresh_token_solution"] = True

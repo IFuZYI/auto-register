@@ -259,6 +259,17 @@ class ChatGPTRegistrationContext:
     mailbox_kind: str = "mailbox"
 
 
+def _default_client_id() -> str:
+    """ChatGPT 的 OAuth client_id（刷新要用）。
+
+    从 `constants` 取，不在这里写第二份字面量 —— 那个值改过一次，
+    两份定义必然漂移。
+    """
+    from platforms.chatgpt.constants import OAUTH_CLIENT_ID
+
+    return OAUTH_CLIENT_ID
+
+
 class ChatGPTRegistrationModeAdapter:
     """按模式跑注册引擎，并把结果转成平台层的 ``Account``。"""
 
@@ -332,6 +343,14 @@ class ChatGPTRegistrationModeAdapter:
             "chatgpt_register_flow": self.register_flow,
             "chatgpt_bind_2fa": self.bind_2fa,
             "chatgpt_token_source": result.source,
+            # **client_id 必须落库**：OAuth 刷新要它。空值换来的是
+            # `invalid_client`（HTTP 401），而不是能自查的「参数缺失」——
+            # 排查时极易误判成「RT 失效」。
+            #
+            # 实测（2026-10-28）：663 个 chatgpt 账号 **0 个** 有 client_id，
+            # OAuth 刷新全部 401 → 回落 session → AT 未到期时原样返回旧值
+            # （`refreshed=False`）→ 用户看到「刷不出新的」。
+            "client_id": str(result.metadata.get("client_id") or "") or _default_client_id(),
             **{k: v for k, v in (result.metadata or {}).items() if v not in (None, "", False)},
         }
 

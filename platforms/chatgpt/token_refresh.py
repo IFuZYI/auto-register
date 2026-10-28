@@ -84,9 +84,26 @@ class TokenRefreshManager:
             proxy_url: 代理 URL
         """
         self.proxy_url = proxy_url
-        from .constants import OAUTH_CLIENT_ID, OAUTH_REDIRECT_URI
-        self._oauth_client_id = OAUTH_CLIENT_ID
-        self._oauth_redirect_uri = OAUTH_REDIRECT_URI
+        # **刷新要用 platform 的 client_id，不是 Codex 的**。
+        #
+        # 实测（2026-10-28，真实账号 + 真实 RT）：
+        #   Codex `app_EMoamEEZ73f0CkXaXp7hrann`      → 401 invalid_client
+        #   platform `app_2SKx67EdpoN0G6j64rFvigXD`   → ✅ 拿到新 AT + 新 RT
+        #
+        # 原因：本仓注册链走的是 platform 密码登录路线
+        # （`protocol/mixins/platform_rt.py`），签发 RT 的就是那个 client。
+        # 用 Codex 的 client_id 去刷别人签发的 RT，服务端只会回
+        # `invalid_client` —— 而不是「RT 失效」那种能自查的错误，所以很容易
+        # 误判成「RT 不对」。
+        from .protocol.mixins.platform_rt import (
+            PLATFORM_CLIENT_ID,
+            PLATFORM_REDIRECT_URI,
+            PLATFORM_TOKEN_URL,
+        )
+
+        self._oauth_client_id = PLATFORM_CLIENT_ID
+        self._oauth_redirect_uri = PLATFORM_REDIRECT_URI
+        self._oauth_token_url = PLATFORM_TOKEN_URL
 
     def _create_session(self) -> cffi_requests.Session:
         """创建 HTTP 会话"""
@@ -218,7 +235,9 @@ class TokenRefreshManager:
             }
 
             response = session.post(
-                self.TOKEN_URL,
+                # platform 的换 token 端点（与 authorize 时用的 client_id
+                # / redirect_uri 绑定；混用必然 invalid_grant）
+                getattr(self, "_oauth_token_url", self.TOKEN_URL),
                 headers={
                     "content-type": "application/x-www-form-urlencoded",
                     "accept": "application/json"
