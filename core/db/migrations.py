@@ -304,6 +304,14 @@ def _migrate_icloud_aliases_schema(engine: Engine | None = None) -> None:
                 conn.exec_driver_sql(
                     "ALTER TABLE icloud_aliases ADD COLUMN pool_status TEXT DEFAULT 'unpooled'"
                 )
+            if "consecutive_failures" not in columns:
+                # 老库补列：默认 0（从没失败过）。
+                # 这个计数让取号能**轮换** —— 被 OpenAI 反复拒绝的地址不再
+                # 永远排在队首（实测 2026-10-28：两次冒烟都取到同一个地址、
+                # 两次都 429，池子里另外 24 个可用号从未被尝试）。
+                conn.exec_driver_sql(
+                    "ALTER TABLE icloud_aliases ADD COLUMN consecutive_failures INTEGER DEFAULT 0"
+                )
 
     with Session(engine) as session:
         pending = session.exec(

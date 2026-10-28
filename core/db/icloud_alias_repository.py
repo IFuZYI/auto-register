@@ -28,8 +28,15 @@ TABLE = "icloud_aliases"
 _FIELDS = (
     "id", "account_id", "address", "label", "note", "status",
     "pool_status", "source", "used_platforms", "provider_id",
-    "share_token", "created_at", "updated_at",
+    "share_token", "created_at", "updated_at", "consecutive_failures",
 )
+
+#: 连续失败到这个次数后，取号跳过该别名。
+#:
+#: 为什么是 3：一次失败可能是网络抖动或 OpenAI 的瞬时风控；两次仍可能巧合。
+#: 三次连续失败基本可以确定这个地址被标记了（实测：同一地址两次冒烟都撞
+#: 429）。阈值太大则被拒的号还会被派很多次，太小则一次抖动就废掉一个号。
+MAX_CONSECUTIVE_FAILURES = 3
 
 
 def new_alias_share_token() -> str:
@@ -38,6 +45,14 @@ def new_alias_share_token() -> str:
     import secrets
 
     return secrets.token_urlsafe(16)
+
+
+def _too_many_failures(record: dict[str, Any]) -> bool:
+    """连续失败到阈值 → 取号跳过它。"""
+    try:
+        return int(record.get("consecutive_failures") or 0) >= MAX_CONSECUTIVE_FAILURES
+    except (TypeError, ValueError):
+        return False
 
 
 def _from_model(row: ICloudAliasModel) -> dict[str, Any]:
@@ -293,6 +308,30 @@ class ICloudAliasRepository:
             if hit:
                 s.commit()
             return hit
+
+    @staticmethod
+    def mark_failed(alias_id: Any, *, reset: bool = False) -> int:
+        """记一次失败（或清零），返回累加后的失败次数。
+
+        **为什么要记账**：取号按 id 升序，失败时把号放回 `available` 会让它
+        回到队首 —— 下次任务还是它，每次都撞同一堵墙（实测 2026-10-28：两次
+        冒烟都取到同一个地址、两次都 429，池子里另外 24 个可用号从未被尝试）。
+
+        连续失败到 `MAX_CONSECUTIVE_FAILURES` 后 `find_candidates` 会跳过它。
+        领取成功时用 `reset=True` 清零（这个号能用了）。
+        """
+        current = ICloudAliasRepository.get(alias_id)
+        if current is None:
+            return 0
+        if reset:
+            nxt = 0
+        else:
+            try:
+                nxt = int(current.get("consecutive_failures") or 0) + 1
+            except (TypeError, ValueError):
+                nxt = 1
+        ICloudAliasRepository.set_fields(alias_id, consecutive_failures=nxt)
+        return nxt
 
     @staticmethod
     def set_fields(alias_id: Any, **fields: Any) -> Optional[dict[str, Any]]:
@@ -690,11 +729,17 @@ class ICloudAliasRepository:
         store = ICloudAliasRepository._store()
         if store is not None:
             rows = [
-                r for r in store.all() if matches_all(clauses, r)
+                r for r in store.all()
+                if matches_all(clauses, r) and not _too_many_failures(r)
             ]
-            rows.sort(key=lambda r: int(r.get("id") or 0))
+            # **按 (失败次数, id) 排序**：失败过的号排到后面，让任务换一个试。
+            # 只按 id 排的话，失败的号释放回 available 后又回到队首（实测：
+            # 两次冒烟都取到同一个地址）。
+            rows.sort(key=lambda r: (int(r.get("consecutive_failures") or 0),
+                                     int(r.get("id") or 0)))
             return [{k: r.get(k) for k in _FIELDS} for r in rows]
 
+        from sqlalchemy import or_ as _or
         from sqlmodel import select
 
         from core.storage.query import to_sql
@@ -712,7 +757,17 @@ class ICloudAliasRepository:
                 # **必须经 `to_sql`**：`where()` 要的是 SQL 表达式，直接传
                 # Clause 会 ArgumentError（实测）。
                 .where(to_sql(ICloudAliasModel, clauses[2]))
-                .order_by(ICloudAliasModel.id)
+                # 同 JSON 分支：失败过的排后面，跳过连续失败的
+                .where(
+                    _or(
+                        ICloudAliasModel.consecutive_failures.is_(None),
+                        ICloudAliasModel.consecutive_failures < MAX_CONSECUTIVE_FAILURES,
+                    )
+                )
+                .order_by(
+                    ICloudAliasModel.consecutive_failures,
+                    ICloudAliasModel.id,
+                )
             ).all()
             return [_from_model(r) for r in rows]
 

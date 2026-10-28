@@ -109,6 +109,15 @@ class ICloudAliasModel(SQLModel, table=True):
     #: 池页面勾选「导入邮箱池」才转成 available。老库补列时同样补 unpooled
     #: （见 core/db/migrations.py）。
     pool_status: str = Field(default="unpooled", index=True)
+    #: **连续失败次数**（注册链路被 OpenAI 拒绝时累加，成功领取时清零）。
+    #:
+    #: 为什么需要它：`claim_alias` 按 id 升序取号，失败时 `release_alias_claim`
+    #: 把号放回 `available` —— 于是它**又回到队首**，下次任务还是它。实测
+    #: 2026-10-28 两次冒烟都取到同一个地址、两次都撞 429，池子里另外 24 个
+    #: 可用号从未被尝试。「号池」在事实上退化成单号重试。
+    #:
+    #: 连续失败到 `MAX_CONSECUTIVE_FAILURES` 后取号跳过它；成功时清零。
+    consecutive_failures: int = Field(default=0, index=True)
     #: 来源：local（本机直连 Apple 生成/同步）/ remote（从远程 icloud-hme 仓库同步）。
     #: 与 `pool_status` / `status` 都是正交维度：来源回答「这个地址从哪来」。
     #: 同地址去重时**本地优先**：远程同步遇到本地已有的地址不建行

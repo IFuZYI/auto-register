@@ -267,6 +267,15 @@ def release_alias_claim(alias_id: int) -> None:
     if (alias.get("pool_status") or "") != POOL_STATUS_IN_USE:
         return
     icloud_alias_repository.set_fields(alias_id, pool_status=POOL_STATUS_AVAILABLE)
+    # **记一次失败**：只放回 available 而不记账，等于把「这个号刚失败过」
+    # 丢掉 —— 它回到队首，下次任务还是它，每次都撞同一堵墙（实测 2026-10-28：
+    # 两次冒烟都取到同一个地址、两次都 429）。
+    failures = icloud_alias_repository.mark_failed(alias_id)
+    if failures >= 3:
+        logger.warning(
+            "iCloud 号池：%s 连续失败 %d 次，取号将跳过它（疑似被 OpenAI 标记）",
+            alias.get("address"), failures,
+        )
 
 
 def renew_alias_claim(alias_id: int) -> int:
