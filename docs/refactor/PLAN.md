@@ -31,7 +31,8 @@
 |---|---|---|
 | T0.1 注释抽取 | `docs/field-notes/` 10–12 篇（见 [FIELD-NOTES.md](./FIELD-NOTES.md)） | 每篇能独立读懂，含 file:line 出处 |
 | T0.2 测试三分类 | A 契约 / B 实现锁定 / C 事故回归，三份清单 | B 类清单进 issue，标注"阶段 3 前置" |
-| T0.3 Alembic 基线 | `alembic stamp head`，以现有 schema 为 baseline | 空库 `upgrade head` 通；现有库 `upgrade head` 通 |
+| T0.3 Alembic 基线 | `alembic.ini` + `migrations/env.py` + baseline revision（`render_item` 把 SQLModel 类型渲染成 `sa.String`） | 空库 `upgrade head` 通（9 表）；现有库 `stamp head` 后 `alembic check` 无变更 |
+| T0.3b（推迟） | `migrations.py` 改 no-op | 需先改写 `tests/test_icloud_remote_columns.py` 的 7 个测试（11 次调 `run_migrations(engine)`，直接断言旧补列逻辑）；与阶段 1 首个真实 revision 一并做 |
 | T0.4 数据快照 | `data/` 全量 tar + 账号表 JSON 导出 | 快照可在 5 分钟内还原 |
 | T0.5 去重 + 唯一索引 | 清重复行 + `uq_accounts_platform_email` | 并发 20 线程注册同邮箱只产生 1 行 |
 | T0.6 **删除手机号注册** | 见下方清单，约 −2,100 行 | 全量测试绿；`grep run_phone_register` = 0；前端注册流程只剩「邮箱」 |
