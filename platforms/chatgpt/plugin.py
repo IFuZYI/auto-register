@@ -62,17 +62,6 @@ class ChatGPTPlatform(BasePlatform):
                 {"value": "access_token_only", "label": "无 RT"},
             ],
         },
-        {
-            "key": "chatgpt_register_flow",
-            "label": "注册流程",
-            "desc": "邮箱注册用邮箱池收码；手机注册进 add-phone 后自动租号、等短信。任务页可临时覆盖",
-            "default": "email",
-            "options": [
-                {"value": "email", "label": "邮箱注册（默认）"},
-                {"value": "phone", "label": "手机注册（需要接码）"},
-                {"value": "phone_with_email", "label": "手机 + 邮箱（需要接码）"},
-            ],
-        },
     ]
 
     def __init__(self, config: RegisterConfig = None, mailbox: BaseMailbox = None):

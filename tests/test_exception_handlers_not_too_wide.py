@@ -57,7 +57,6 @@ BASELINE: dict[str, int] = {
     "platforms/chatgpt/protocol/mixins/redirect.py": 12,
     "platforms/chatgpt/protocol/mixins/signup.py": 5,
     "platforms/chatgpt/protocol/mixins/trace.py": 8,
-    "platforms/chatgpt/protocol/phone_flow.py": 14,
     "platforms/chatgpt/protocol/two_factor.py": 3,
     "platforms/chatgpt/protocol_log_relay.py": 1,
     "platforms/chatgpt/registration_engine.py": 1,

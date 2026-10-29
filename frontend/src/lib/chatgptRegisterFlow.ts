@@ -1,12 +1,14 @@
 export const CHATGPT_REGISTER_FLOW_EMAIL = 'email'
-export const CHATGPT_REGISTER_FLOW_PHONE = 'phone'
-export const CHATGPT_REGISTER_FLOW_PHONE_WITH_EMAIL = 'phone_with_email'
 export const CHATGPT_REGISTER_FLOW_STORAGE_KEY = 'chatgpt-register-flow'
 
-export type ChatGPTRegisterFlow =
-  | typeof CHATGPT_REGISTER_FLOW_EMAIL
-  | typeof CHATGPT_REGISTER_FLOW_PHONE
-  | typeof CHATGPT_REGISTER_FLOW_PHONE_WITH_EMAIL
+/**
+ * 注册身份只剩邮箱 —— 手机号注册已删除（见 docs/adr/0007-email-only-registration.md）。
+ *
+ * 类型收成单字面量而不是 `string`：旧的 `'phone'` / `'phone_with_email'`
+ * 会在编译期报错，而不是静默落到默认值。存量任务提交旧值时由
+ * `normalizeChatGPTRegisterFlow` 归一成邮箱。
+ */
+export type ChatGPTRegisterFlow = typeof CHATGPT_REGISTER_FLOW_EMAIL
 
 export const DEFAULT_CHATGPT_REGISTER_FLOW: ChatGPTRegisterFlow =
   CHATGPT_REGISTER_FLOW_EMAIL
@@ -19,32 +21,14 @@ export const CHATGPT_REGISTER_FLOW_OPTIONS: {
   {
     value: CHATGPT_REGISTER_FLOW_EMAIL,
     label: '邮箱注册',
-    hint: '用邮箱池里的地址注册，收邮件验证码完成验证。',
-  },
-  {
-    value: CHATGPT_REGISTER_FLOW_PHONE,
-    label: '手机注册',
-    hint: '用接码平台的号码注册，收短信验证码完成验证，不占用邮箱。',
-  },
-  {
-    value: CHATGPT_REGISTER_FLOW_PHONE_WITH_EMAIL,
-    label: '手机注册 + 绑定邮箱',
-    hint: '先用号码注册，再把邮箱池里的地址绑到账号上，收一次邮件验证码。',
+    hint: '用邮箱池里的地址注册，收邮件验证码完成验证。手机号只在 Codex 授权要求绑定时才会用到。',
   },
 ]
 
 export function normalizeChatGPTRegisterFlow(
-  value: unknown,
+  _value: unknown,
 ): ChatGPTRegisterFlow {
-  if (value === CHATGPT_REGISTER_FLOW_PHONE) return CHATGPT_REGISTER_FLOW_PHONE
-  if (value === CHATGPT_REGISTER_FLOW_PHONE_WITH_EMAIL) {
-    return CHATGPT_REGISTER_FLOW_PHONE_WITH_EMAIL
-  }
   return DEFAULT_CHATGPT_REGISTER_FLOW
-}
-
-export function registerFlowUsesPhone(flow: ChatGPTRegisterFlow): boolean {
-  return flow !== CHATGPT_REGISTER_FLOW_EMAIL
 }
 
 export function loadChatGPTRegisterFlow(): ChatGPTRegisterFlow {

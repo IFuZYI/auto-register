@@ -38,10 +38,9 @@ logger = logging.getLogger(__name__)
 REGISTRATION_MODE_REFRESH_TOKEN = "refresh_token"
 REGISTRATION_MODE_ACCESS_TOKEN_ONLY = "access_token_only"
 
-# 注册身份用什么：邮箱、手机号、手机号注册完再把邮箱绑上去
+# 注册身份只用邮箱（手机号注册已删除，见 ADR-0007）。
+# 手机号仍用于 Codex RT 的 add-phone 绑定，那条路径在 `mixins/add_phone.py`。
 REGISTER_FLOW_EMAIL = "email"
-REGISTER_FLOW_PHONE = "phone"
-REGISTER_FLOW_PHONE_WITH_EMAIL = "phone_with_email"
 
 _PASSWORD_ALPHABET = string.ascii_letters + string.digits + "!@#$"
 
@@ -125,8 +124,6 @@ class ChatGPTRegistrationEngine:
         self.two_factor: Optional[TwoFactorBindResult] = None
 
     def run(self) -> RegistrationResult:
-        if self.register_flow in (REGISTER_FLOW_PHONE, REGISTER_FLOW_PHONE_WITH_EMAIL):
-            return self._run_phone()
         return self._run_email()
 
     def _run_email(self) -> RegistrationResult:
@@ -175,43 +172,6 @@ class ChatGPTRegistrationEngine:
             "add-phone：OpenAI 要绑手机号才发 RT）。账号已注册、access_token 可用；"
             "要 RT 请配置接码平台后走「补 RT」，或改用「无 RT」模式。"
         )
-
-    def _run_phone(self) -> RegistrationResult:
-        """手机号注册。邮箱只在「手机注册 + 绑定邮箱」模式下才会去池子里领。"""
-        bind_email = self.register_flow == REGISTER_FLOW_PHONE_WITH_EMAIL
-        sms_callback = self._build_sms_callback()
-        if sms_callback is None:
-            return RegistrationResult(
-                success=False,
-                error_message=(
-                    "手机注册需要接码平台：请先在「设置 → 接码」里启用接码并填好 API Key"
-                ),
-            )
-
-        provider = self._build_mail_provider() if bind_email else None
-        flow = self._build_flow(sms_callback=sms_callback)
-
-        # 手机链路的每一步都只写在协议层的 logger 上，不镜像出来的话任务日志里
-        # 只有"开始/失败"两行，出事了连服务端回的是哪个 page 都看不见。
-        try:
-            with mirror_protocol_logs(self.log):
-                result = flow.run_phone_register(mail_provider=provider, bind_email=bind_email)
-        except Exception as exc:
-            registration = self._salvage(flow, exc)
-            self._set_mailbox_status(provider, "used" if registration.success else "failed")
-            return self._attach_mailbox_credentials(registration, provider)
-
-        self._ensure_two_factor(flow, provider)
-        registration = self._attach_two_factor(
-            RegistrationResult.from_auth_result(result, source="phone_register")
-        )
-        self._set_mailbox_status(provider, "used")
-        registration = self._attach_mailbox_credentials(registration, provider)
-        bind_error = getattr(flow, "_bind_email_error", "")
-        if bind_email and not registration.metadata.get("bound_email"):
-            registration.metadata["bind_email_error"] = bind_error or "未绑定邮箱"
-            self.log(f"手机号注册成功但邮箱未绑上：{bind_error or '服务端未提供 add-email 步骤'}")
-        return registration
 
     def _build_mail_provider(self) -> MailboxProviderAdapter:
         return MailboxProviderAdapter(

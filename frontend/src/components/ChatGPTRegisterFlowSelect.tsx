@@ -1,10 +1,8 @@
-import { Select, Space, Tag, Tooltip } from 'antd'
+import { Select, Space, Tooltip } from 'antd'
 
 import {
   CHATGPT_REGISTER_FLOW_OPTIONS,
-  CHATGPT_REGISTER_FLOW_EMAIL,
   normalizeChatGPTRegisterFlow,
-  registerFlowUsesPhone,
   type ChatGPTRegisterFlow,
 } from '@/lib/chatgptRegisterFlow'
 
@@ -20,13 +18,9 @@ export function ChatGPTRegisterFlowSelect({
   const current =
     CHATGPT_REGISTER_FLOW_OPTIONS.find((option) => option.value === flow) ??
     CHATGPT_REGISTER_FLOW_OPTIONS[0]
-  const usesPhone = registerFlowUsesPhone(flow)
-
   // 说明文字进 tooltip：常驻两三行会把相邻表单项的基线拉歪（与全局配置页
   // `RegisterSettingsPanel` 的处理一致）。标签旁的 ⓘ 是唯一入口。
-  const hint = usesPhone
-    ? `${current.hint} 手机号来自「设置 → 接码」，未启用接码时任务会报错。`
-    : current.hint
+  const hint = current.hint
 
   return (
     <Space align="center" wrap size={8}>
@@ -39,9 +33,6 @@ export function ChatGPTRegisterFlowSelect({
           label,
         }))}
       />
-      <Tag color={flow === CHATGPT_REGISTER_FLOW_EMAIL ? 'default' : 'processing'}>
-        {flow === CHATGPT_REGISTER_FLOW_EMAIL ? '默认' : '需要接码'}
-      </Tag>
       <Tooltip title={hint}>
         <span
           aria-label="说明"

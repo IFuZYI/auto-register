@@ -393,16 +393,6 @@ class EmailPathMirrorsProtocolLogsTests(unittest.TestCase):
             "邮箱链路的协议日志必须镜像出来（否则任务日志里什么都看不见）",
         )
 
-    def test_run_phone_also_mirrors(self):
-        """反向对照：手机链路本来就有，别在重构里丢掉。"""
-        import inspect
-
-        from platforms.chatgpt import registration_engine as engine_mod
-
-        src = inspect.getsource(engine_mod.ChatGPTRegistrationEngine._run_phone)
-        self.assertIn("mirror_protocol_logs(", src)
-
-
 class SpeculativeCodexAttemptTests(unittest.TestCase):
     """抢跑（speculative）失败不能占掉本轮的尝试名额。
 
