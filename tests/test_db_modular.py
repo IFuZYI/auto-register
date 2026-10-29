@@ -271,6 +271,12 @@ def test_migration_creates_unique_index(tmp_path):
 
     SQLModel.metadata.create_all(engine, tables=ACCOUNT_TABLES)
 
+    # **模拟老库**：`AccountModel` 现在自带表达式唯一索引（新部署/测试库都有），
+    # 而这条测试要验证的正是「没有约束的老库怎么被迁移修好」。不先删掉索引，
+    # 下面的脏数据根本插不进去 —— 那测的就不是迁移了。
+    with engine.begin() as conn:
+        conn.exec_driver_sql("DROP INDEX IF EXISTS uq_accounts_platform_email")
+
     # 造历史脏数据：大小写不同 + 完全重复
     with engine.begin() as conn:
         conn.exec_driver_sql(

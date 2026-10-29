@@ -51,6 +51,11 @@ def upgrade() -> None:
         )
     )
 
+    # 老库可能已被手写迁移 `_ensure_account_email_unique` 建过**同名但不同定义**
+    # 的索引（`(platform, email)` 裸列版）。同名索引不先删掉，下面这条表达式
+    # 索引会直接 `index already exists`。
+    conn.execute(sa.text(f"DROP INDEX IF EXISTS {INDEX_NAME}"))
+
     op.create_index(
         INDEX_NAME,
         "accounts",

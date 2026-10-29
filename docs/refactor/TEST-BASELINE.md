@@ -13,7 +13,7 @@ cd /data/workspace/Register/.worktrees/refactor
 ## 结果
 
 ```
-2929 passed, 11 failed, 16 skipped, 186 subtests passed  (约 150 秒)
+2933 passed, 11 failed, 16 skipped, 186 subtests passed  (约 150 秒)
 ```
 
 ## 这 11 个失败是**既有环境问题**，不是回归

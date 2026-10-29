@@ -68,7 +68,10 @@ def run_migrations_offline() -> None:
         target_metadata=target_metadata,
         literal_binds=True,
         render_as_batch=True,
-        compare_type=True,
+        # 显式 False：Alembic 1.20 起 `compare_type` 默认是 True。
+        # `core.time_utils.UtcDatetime` 是映射到 VARCHAR 的 TypeDecorator，
+        # 开着它每张表的时间列都会被误报成类型漂移，`alembic check` 永远不干净。
+        compare_type=False,
         render_item=render_item,
     )
     with context.begin_transaction():
@@ -84,7 +87,7 @@ def run_migrations_online() -> None:
             connection=connection,
             target_metadata=target_metadata,
             render_as_batch=True,
-            compare_type=True,
+            compare_type=False,
             render_item=render_item,
         )
         with context.begin_transaction():

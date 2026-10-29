@@ -16,6 +16,7 @@ import json
 from datetime import datetime
 from typing import Any, Optional
 
+from sqlalchemy import Index, text
 from sqlmodel import Field, SQLModel
 
 from .base import _utcnow
@@ -23,6 +24,21 @@ from .base import _utcnow
 
 class AccountModel(SQLModel, table=True):
     __tablename__ = "accounts"
+    #: 唯一业务键：同一平台同一邮箱只允许一行。
+    #:
+    #: 用**表达式索引** `(platform, lower(email))` 而不是裸列索引：大小写不同的
+    #: 同一地址在 SQL 层是两个值，裸索引放得过去（实测 `USER@X.AI` 能插进
+    #: `user@x.ai` 旁边）。生产库由 Alembic revision `b7c1e4a92d30` 创建；
+    #: 这里声明是为了让 `create_all`（测试与全新部署）带上同一条约束 ——
+    #: 测试库与生产库的约束不一致，等于没测。
+    __table_args__ = (
+        Index(
+            "uq_accounts_platform_email",
+            "platform",
+            text("lower(email)"),
+            unique=True,
+        ),
+    )
 
     id: Optional[int] = Field(default=None, primary_key=True)
     platform: str = Field(index=True)

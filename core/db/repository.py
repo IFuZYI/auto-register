@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from typing import Any, Iterable, Optional
 
 from sqlalchemy import func
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
 from .base import _utcnow, normalize_email
@@ -392,7 +393,40 @@ class AccountRepository:
 
             row = AccountModel(platform=platform, email=email, **fields)
             sess.add(row)
-            sess.commit()
+            try:
+                sess.commit()
+            except IntegrityError:
+                # 唯一索引 `uq_accounts_platform_email` 撞了：另一个线程/进程
+                # 在我们 select 与 insert 之间插了同一 (platform, email)。
+                #
+                # 加索引之前这里是「静默插两行」，加之后变成抛异常 —— 不能让
+                # 并发注册因为一个索引直接失败，所以回滚后按「已存在」重做一次，
+                # 与串行语义一致（后写的那份字段胜出）。
+                sess.rollback()
+                existing = sess.exec(
+                    select(AccountModel)
+                    .where(AccountModel.platform == platform)
+                    .where(AccountModel.email == email)
+                ).first()
+                if existing is None:
+                    raise
+                retry_fields = merge_account_fields(
+                    incoming=account,
+                    existing={
+                        "password": existing.password,
+                        "user_id": existing.user_id,
+                        "region": existing.region,
+                        "token": existing.token,
+                        "cashier_url": existing.cashier_url,
+                    },
+                )
+                for name, value in retry_fields.items():
+                    setattr(existing, name, value)
+                existing.updated_at = _utcnow()
+                sess.add(existing)
+                sess.commit()
+                sess.refresh(existing)
+                return existing
             sess.refresh(row)
             return row
         finally:
