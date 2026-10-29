@@ -14,14 +14,20 @@ HTTP 端点     102
 真死代码      92 行（0.18%）
 ```
 
+> **基线口径**：以下数字于 2026-11 在 base commit `5ba4bac` 的独立 worktree 上用
+> 本节命令实测。此前的 12 / 480 是另一套路径集（少了 `modules/`、只匹配
+> `from api import`），已作废。M2 拆成两个口径：**声明数**（阶段 2 的目标）与
+> **散落数**（真实耦合面）。
+
 | # | 指标 | 基线 | 阶段 1 后 | 阶段 2 后 | 阶段 3 后 |
 |---|---|---:|---:|---:|---:|
-| M1 | `from api import` 违规 | 12 | 12 | 12 | **0** |
-| M2 | 字符串动作 id 散落点 | 17 | 17 | **≤ 8** | ≤ 8 |
+| M1 | `from api import` 违规 | 14 | 14 | 14 | **0** |
+| M2a | 动作声明数（plugin `"id": "`） | 17 | 17 | **7** | 7 |
+| M2b | 动作 id 字符串散落 | 97 | 97 | ≤ 40 | ≤ 20 |
 | M3 | 鸭子类型 shim | 13 | **3** | 3 | 3 |
 | M4 | 账号表示模型 | 2 | **1** | 1 | 1 |
-| M5 | `except Exception` | 480 | ≤ 440 | ≤ 400 | ≤ 360 |
-| M6 | 其中静默 `pass` | 80 | ≤ 60 | ≤ 40 | ≤ 20 |
+| M5 | `except Exception` | 471 | ≤ 450 | ≤ 420 | ≤ 380 |
+| M6 | 其中静默 `pass` | 80 | ≤ 65 | ≤ 45 | ≤ 25 |
 
 M1–M4 是**结构性**的，必须达标；M5/M6 是渐进的，不达标不阻塞阶段推进。
 
@@ -31,7 +37,10 @@ M1–M4 是**结构性**的，必须达标；M5/M6 是渐进的，不达标不�
 # M1 分层倒置
 grep -rn "from api import\|import api" --include=*.py services/ platforms/ core/ | wc -l
 
-# M2 字符串动作 id（同一 id 在 api/平台/services 各算一处）
+# M2a 动作声明数（阶段 2 的目标：17 → 7 个能力）
+grep -rn '"id": "' platforms/chatgpt/plugin.py platforms/grok/plugin.py | wc -l
+
+# M2b 动作 id 字符串散落（真实耦合面）
 grep -rn '"probe_local_status"\|"refresh_token"\|"upload_cpa"\|"sync_cliproxyapi_status"' \
   --include=*.py api platforms services | wc -l
 
