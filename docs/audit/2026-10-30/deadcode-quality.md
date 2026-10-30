@@ -392,7 +392,7 @@ except Exception:
 
 ---
 
-## 5. 注释与代码是否漂移（10 处「实测/踩过」核对）
+## 5. 注释与代码是否漂移（12 处核对：要求的 10 处「实测/踩过」+ 追加 2 处）
 
 | # | 位置 | 注释主张 | 现状 | 判定 |
 |---|---|---|---|---|
@@ -437,13 +437,13 @@ except Exception:
 **附带（不算越界，但同类味道）**
 
 - `api/tasks.py:216-233` 从 `services.task_store_io` / `services.task_runners` 导入 **23 个私有函数**（`_ensure_task_exists`、`_run_register`…），只为让测试按老名字 patch。这是「测试耦合倒逼生产 API 形状」，比分层越界更难拆；建议后续把 patch 目标改到服务模块本身。
-- `platforms/chatgpt/plugin.py` 等 4 处 `from .oauth_device import _decode_jwt_payload`（跨模块私有 import）—— 并入 P1 后自然消失。
+- `platforms/grok/plugin.py:1029` 的 `from .oauth_device import _decode_jwt_payload`（跨模块私有 import）—— 并入 P1 后自然消失。
 
 ---
 
 ## 7. 建议的处置顺序
 
-**第一批（低风险、纯删，~500 行）**
+**第一批（低风险、纯删，约 450 行）**
 
 1. 删 D1 `core/storage_separator.py`、D2 `platforms/chatgpt/constants.py`（删前把 `auth.openai.com` 等端点表搬进去复活它，见 M3）。
 2. 删 D14 `sso_to_token` / `token_to_auth_entry`（约 280 行）+ `oauth_device.py` 里三个 CPA 常量 import。
@@ -453,7 +453,7 @@ except Exception:
 
 **第二批（重复收敛，风险中）**
 
-6. P1 JWT 解码 7→1、P2 时间工具 11→2、P3 `_get_config_value` 5→1（顺手修 strip 不一致）、P4 banned 谓词 6→1。
+6. P1 JWT 解码 7→1、P2 时间工具 12→2、P3 `_get_config_value` 5→1（顺手修 strip 不一致）、P4 banned 谓词 6→1。
 7. P5 同步写回 9→2、P10 HTTP 解析 6→2、P11 `_extract_auth` 2→1。
 8. P7 两个 56 行闭包 → 委托 `_run_batch_action`（约 -110 行）。
 9. P8/P9 两对分类器各自合一。

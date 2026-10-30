@@ -420,7 +420,8 @@ export default function Accounts() {
       // ignore，退回列
     }
     if (currentPlatform === 'grok') return ''
-    return String(record?.token || '').trim()
+    // 列表已不下发 token 正文（只给 has_token），正文在详情端点里
+    return record?.has_token ? HAS_TOKEN_PLACEHOLDER : ''
   }
 
   /**

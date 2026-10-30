@@ -2,7 +2,7 @@
 
 [MODE: SANDBOX]
 
-- **仓库**：`/data/workspace/Register`，分支 `main`，HEAD `4680c8d`
+- **仓库**：`/data/workspace/Register`，分支 `main`，审计目标 HEAD `4680c8d`（审计期间仓库被其他 agent 推进到 `c93b71f`，见"审计前提"第 3 条）
 - **解释器**：`.venv/bin/python`（3.12.3）
 - **机器**：2 vCPU / 1967 MB RAM / 4095 MB swap（审计时已用 2048 MB）/ 内核 6.8.0
 - **数据**：真实库 `data/account_manager.db`（33.7 MB）的 **只读副本**（`sqlite3.Connection.backup()` 复制到 scratch，全程 `mode=ro` 打开源库，未写入一行）。规模：`accounts` 1057（chatgpt 667 / grok 390）、`task_runs` 837、`task_logs` 1661、`configs` 143、`proxies` 5、`icloud_aliases` 1941（平台库）
@@ -19,7 +19,9 @@ File "/data/workspace/Register/core/db/models_infra.py", line 21, in TaskLog
 NameError: name 'Index' is not defined
 ```
 
-   这是"改到一半"的瞬时状态（`from sqlalchemy import Index` 还没落盘），一分钟后再 import 就正常了。为了让数字可复现、且不受别人继续改文件影响，**全部测量基于 `git archive 4680c8d` 的冻结快照**；下文所有 `path:line` 都与该 commit 对齐（工作树那 3 个文件的改动不影响本报告引用的任何一行）。
+   这是"改到一半"的瞬时状态（`from sqlalchemy import Index` 还没落盘），一分钟后再 import 就正常了。为了让数字可复现、且不受别人继续改文件影响，**全部测量基于 `git archive 4680c8d` 的冻结快照**。
+
+3. **审计期间仓库被并发推进**：其他 agent 在 18:10–18:37 之间提交了 `c2c502b`（模型/迁移索引）、`9630980`（actions UUID）、`c93b71f`（auth 加固，**把回环判定搬到 `core/net_utils.py`，`main.py` 因此整体上移 15 行**）。本报告的性能结论全部来自 `4680c8d` 的冻结快照；为了让 `path:line` 现在还能点得开，**下文 `main.py` 的行号已按当前 HEAD `c93b71f` 重新核对**（`231→216`、`411→401`、`330→320`、`269→258`、`588→573`），其余文件（`api/accounts.py`、`api/tasks.py`、`core/db/repository.py`、`core/proxy_pool.py`、`services/*`）在两次 commit 之间未变，行号与 `4680c8d` 一致。三个 commit 都不改本报告描述的任何热路径逻辑（只改了索引声明、UUID 转换、鉴权分支与 CORS 头）。
 
 ---
 
@@ -117,7 +119,7 @@ jsonable_encoder      0.055 ms/行
 
 #### F-04（中）`/api/proxies/balance` — 213 ms 只为返回 999 B
 
-- **位置**：`api/proxies.py:141-142` → `core/proxy_pool.py:108-128` `bound_counts()` → `core/proxy_pool.py:120` `account_repository.list_all_accounts()`（**无 limit**）
+- **位置**：`api/proxies.py:128-142` → `core/proxy_pool.py:108-128` `bound_counts()` → `core/proxy_pool.py:120` `account_repository.list_all_accounts()`（**无 limit**）
 - **证据**：ORM 物化 **1057 个 AccountModel + 5 个 ProxyModel**，逐行 `account.get_extra()`（json.loads 7.7 KB）→ 只为统计"每个代理挂了几个号"。cProfile：`bound_counts` 623 ms（含 profiler 开销）/ curl 213 ms。
 - **建议**：`SELECT json_extract(extra_json,'$.register_proxy') AS url, platform, count(*) FROM accounts GROUP BY 1,2`（SQLite JSON1，本库可用），或建一张 `account_proxy_binding(account_id, proxy_url)` 索引表。这个端点被代理页每次打开都调。
 
@@ -164,7 +166,7 @@ jsonable_encoder      0.055 ms/行
 - **位置**：`core/db/repository.py:1169-1181`，注释自己写明了："每库最多需要 offset+limit 行"；`:1197-1200` 再 `rows.sort()` + 切片。
 - **证据**：`page=21&page_size=50` → `per_db = 1000 + 50 = 1050` → ORM 物化 1050 行，只为返回 50 行（p50 132 ms，p95 2068 ms）。`page=1` 只物化 50 行（107 ms）。
 - **代价**：第 N 页的成本是 O(N×page_size)，翻到第 100 页 = 5000 行 + 排序。1057 行的库现在还不致命，但这是**线性放大**，账号到 1 万时第 100 页就是 10 万行。
-- **建议**：跨库合并场景用**键集分页**（`WHERE (created_at, id) < (:last_created, :last_id) ORDER BY created_at DESC LIMIT :n`），或先只在默认库分页（当前 1057 行全在默认库，平台库是空的——见下）。
+- **建议**：跨库合并场景用**键集分页**（`WHERE (created_at, id) < (:last_created, :last_id) ORDER BY created_at DESC LIMIT :n`），或先只在默认库分页（当前 1057 行账号全在默认库）。
 
 > 顺带一个事实：本部署 `platform_database_registry.configured_platforms() == []`（没有配任何 `DATABASE_URL_<平台>`），所以 `account_platform_keys()` 返回空列表，列表请求实际**只查默认库**（实测 `/api/accounts` 全请求 3 条 SQL：鉴权配置 1 + 去重键 1 + 取数 1）。`data/platforms/*.db` 里只有 `icloud.db` 有数据（1941 条别名）。**但这条跨库路径一旦按文档配上 `DATABASE_URL_GROK` 等就会立刻生效**：每多一个平台库，列表/计数/均衡各多一次连接 + 一次查询（`core/db/repository.py:1173-1175`、`:1087-1089`、`:873-876`），届时深分页的 `offset+limit` 会按库数再乘一遍。现在不改，等分库上线就是 N 倍。
 
@@ -184,7 +186,7 @@ jsonable_encoder      0.055 ms/行
 
 - **位置**：`core/db/repository.py:856-857`（`rows = list(sess.exec(select(AccountModel)).all())`）
 - **证据**：1057 行 ORM 物化 → 返回 124 B，p50 105 ms。每次打开账号页都会调。
-- **建议**：`select(AccountModel.platform, AccountModel.status, func.count()).group_by(...)`，三个库各一条，合计 < 5 ms。
+- **建议**：`select(AccountModel.platform, AccountModel.status, func.count()).group_by(...)`，每个库一条（当前只有默认库），合计 < 5 ms。
 
 ### F-11（中）`/api/icloud/accounts`：`count_by_account` 全表
 
@@ -204,7 +206,7 @@ jsonable_encoder      0.055 ms/行
 
 ### F-13（高）鉴权中间件：每个 `/api/*` 请求多 1 条 SQL
 
-- **位置**：`main.py:230-231` → `core/config_store.py:287-300`（每次 `get()` 都 `with Session(...)` + `s.get(ConfigItem, key)`，**无缓存**）
+- **位置**：`main.py:215-216` → `core/config_store.py:287-300`（每次 `get()` 都 `with Session(...)` + `s.get(ConfigItem, key)`，**无缓存**）
 - **证据**：微基准 `config_store.get('auth_password_hash')` **0.85 ms/次**（p50，200 次）；cProfile 里每个端点的 `auth_middleware` 都占 3–7 ms（含 `_runtime_env_values()` 0.16 ms 的 `.env` 重读）。
 - **影响**：`/api/config` 总耗时 9.7 ms，其中 0.85 ms 是"查自己有没有设密码"；轮询类端点（2.5 s 一次）每年多跑 1260 万条无用 SQL。
 - **建议**：`auth_password_hash` 在进程内缓存（`config_store.set()` 时失效），或中间件只在启动时读一次 + `PUT /api/config` 后刷新。
@@ -235,7 +237,7 @@ jsonable_encoder      0.055 ms/行
 
 ### F-18（高）`_upsert_task_run`：每写一行日志全量重写整个日志数组 → O(n²)
 
-- **位置**：`services/task_store_io.py:159-178`（`:170-171` `row.logs_json = _json_dumps(normalized["logs"])`、`errors_json` 同理），由 `services/task_store_io.py:181-188` `persist_task_snapshot()` 在**每条日志**后调用（`services/task_runners.py` 的 `_api.log` 路径）
+- **位置**：`services/task_store_io.py:159-178`（`:170-171` `row.logs_json = _json_dumps(normalized["logs"])`、`errors_json` 同理），由 `services/task_store_io.py:181-188` `persist_task_snapshot()` 触发；而 **`services/task_service.py:95` 的 `log()` 每追加一行日志就调一次 `persist_task_snapshot()`**（`task_store.append_log` 之后紧跟）
 - **证据（实测）**：取库里日志最多的任务 `task_1793122095317`（2266 条日志 / 146 KB）：
 
 ```
@@ -243,7 +245,7 @@ _upsert_task_run(该任务) p50 = 9.6 ms   min 4.7   max 14.7
 → 每追加一行日志就全量重写 146 KB 日志数组
 ```
 
-  按 2266 行算，这个任务光"把日志写进库"就 ≈ **21.8 秒**，且写入量是 O(n²)：1+2+…+2266 ≈ 257 万行 × ~65 B ≈ **167 MB 写放大**。叠加 F-21（`synchronous=FULL` + `journal_mode=delete`），每次都是真实 fsync。
+  按 2266 行算，累计 ≈ **11–22 s**（写一次的成本随日志增长，9.6 ms 是最终大小下的值），且写入量是 O(n²)：1+2+…+2266 ≈ 257 万行 × ~65 B ≈ **167 MB 写放大**。叠加 F-21（`synchronous=FULL` + `journal_mode=delete`），每次都是真实 fsync。
 - **建议**：日志单独一张 `task_logs` 表（已有这张表！`api/tasks.py:636` 在用），`persist_task_snapshot` 只写计数器/状态，`logs` 追加走 `INSERT`；或至少把快照持久化节流到 1 s 一次（当前是每行一次）。
 
 ---
@@ -274,7 +276,7 @@ _upsert_task_run(该任务) p50 = 9.6 ms   min 4.7   max 14.7
 `-X importtime` 自身耗时 top（self time）：
 
 ```
-235.6 ms  fastapi.openapi.models      ← 白付：docs_url/redoc_url/openapi_url 全关（main.py:199-201）
+235.6 ms  fastapi.openapi.models      ← FastAPI import 图自带，openapi_url=None 也照拉
 107.0 ms  main
  82.0 ms  sqlalchemy.sql
  68.6 ms  core.db.models_platform
@@ -286,9 +288,9 @@ _upsert_task_run(该任务) p50 = 9.6 ms   min 4.7   max 14.7
 
 #### F-19（中）启动 3 秒是"import 税"，其中约 1.2 秒花在第三方库的 import 图上
 
-- **位置**：`main.py:1-30`（15 个 router 全部在模块顶层 import）、`main.py:191-202`、`main.py:411`
+- **位置**：`main.py:1-30`（15 个 router 全部在模块顶层 import）、`main.py:191-202`、`main.py:401`
 - **证据**：上表。`fastapi.openapi.models` 的 **235.6 ms self time** 是 FastAPI 自己的 import 图带进来的（`fastapi.applications` → `fastapi.routing` → `openapi.models`），**与 `openapi_url=None` 无关，配置关不掉**；列在这里是为了说明 2.4 s 里最大的一块不在本仓库代码里，靠"少 import"而不是"改配置"才能省。
-- **另有一处启动开销**：`main.py:411` `_GzipStatic.__init__` → `_precompress()` 在 **import 期串行 gzip -9** 全部静态资源。实测 **136.1 ms**（其中 `vendor-antd` 单个 74.2 ms）。
+- **另有一处启动开销**：`main.py:401` `_GzipStatic.__init__` → `_precompress()` 在 **import 期串行 gzip -9** 全部静态资源。实测 **136.1 ms**（其中 `vendor-antd` 单个 74.2 ms）。
 - **建议**：
   1. 路由改懒加载：`api.icloud`（54.1 ms）、`api.tasks`（48.0 ms）、`api.accounts`（101.8 ms cumulative）这些只在对应前缀命中时才 import —— FastAPI 支持 `app.include_router` 在 lifespan 里做，可把这部分挪出关键路径；
   2. 预压改成 `gzip -6`（1.14 MB 的 antd 从 74 ms 降到约 45 ms）或放到后台线程；首屏只压 1 个文件，不值得阻塞启动；
@@ -386,15 +388,15 @@ run_auto_refresh_pass(扫描 667) : 402 ms, 1 条 SQL      ← 纯 Python：667 
 #### F-23（中）首屏 477 KB，antd 一家占 346 KB
 
 - **位置**：`frontend/vite.config.ts:19-50`（`codeSplitting.groups` 把 `antd|@ant-design|rc-*` 全部塞进 `vendor-antd`）
-- **证据**：上表。1.14 MB 原始 / 346 KB gzip 说明**整包 antd 都在首屏 chunk 里**（不是按需）。首屏 5 个 JS 全是 `modulepreload`（`static/index.html:10-14`），CSS 是 render-blocking。
+- **证据**：上表。1.14 MB 原始 / 346 KB gzip 说明**整包 antd 都在首屏 chunk 里**（不是按需）。首屏 4 个 `modulepreload` + 1 个 entry script（`static/index.html:10-14`），CSS 是 render-blocking。
 - **建议**：
   1. 确认 `antd` 是否按需引入（当前 `import { Table, Modal, ... } from 'antd'` 依赖 tree-shaking；1.14 MB 说明 shaking 没生效或引了 `antd/dist/reset.css` 之外的整包）；
   2. 把 `vendor-antd` 拆成"首屏必需"（Table/Button/Modal/Form）与"设置页才用"（DatePicker/Upload/ColorPicker 等，这些是 antd 里最重的）；
-  3. 用 brotli 替代 gzip：同体积通常再小 15–20%（本机未装 `brotli` 模块，未实测，只作方向建议）；`main.py:414-417` 的 `_SKIP_EXT` 已经跳过 `.br`，加一层 `.br` 静态文件即可。
+  3. 用 brotli 替代 gzip：同体积通常再小 15–20%（本机未装 `brotli` 模块，未实测，只作方向建议）；`main.py:404-407` 的 `_SKIP_EXT` 已经跳过 `.br`，加一层 `.br` 静态文件即可。
 
 #### F-24（中）`index.html` 没被压缩（1,063 B 走了未压缩路径）
 
-- **位置**：`main.py:588-617` `spa_fallback` 用 `FileResponse(index_path)` 直接返回，没走 `_GzipStatic`
+- **位置**：`main.py:573-602` `spa_fallback` 用 `FileResponse(index_path)` 直接返回，没走 `_GzipStatic`
 - **证据**：`curl -H 'Accept-Encoding: gzip' /` → `dl=1063`（= 原始大小），而 `_GzipStatic` 的 `MIN_SIZE=1024` 本来会压它。
 - **建议**：1 KB 影响不大，但顺手在 `spa_fallback` 里复用 `_GzipStatic` 的压缩结果，或直接把 index.html 内联进响应。
 
@@ -404,10 +406,10 @@ run_auto_refresh_pass(扫描 667) : 402 ms, 1 条 SQL      ← 纯 Python：667 
 
 #### F-25（高）API 响应完全没有 gzip：242 KB 的列表可压到 41 KB
 
-- **位置**：`main.py:387` 注释解释了"为什么不用 `GZipMiddleware`"（为了给静态资源按变体算 ETag），但**结论被误用到了 API 上**——`app.add_middleware` 只加了 CORS（`main.py:269-274`），没有任何响应压缩。
+- **位置**：`main.py:377` 注释解释了"为什么不用 `GZipMiddleware`"（为了给静态资源按变体算 ETag），但**结论被误用到了 API 上**——`app.add_middleware` 只加了 CORS（`main.py:258-263`），没有任何响应压缩。
 - **证据（同一 URL，带/不带 `Accept-Encoding: gzip` 传输字节完全相同）**：
 
-| 端点 | identity | 带 gzip 请求头 | gzip -6 理论值 | 压缩比 |
+| 端点 | identity | 带 gzip 请求头 | gzip 压缩后 | 压缩比 |
 |---|---:|---:|---:|---:|
 | `/api/accounts?page_size=50` | 242,654 | **242,654** | 40,988 | **5.9×** |
 | `/api/tasks` | 374,349 | **374,349** | 23,494 | **15.9×** |
@@ -423,7 +425,7 @@ run_auto_refresh_pass(扫描 667) : 402 ms, 1 条 SQL      ← 纯 Python：667 
 ### 6.3 轮询
 
 - `frontend/src/lib/pollBackoff.ts:13-19`：有活跃任务 **2.5 s**、空闲 **15 s**。
-- 每次轮询 `/api/tasks`：服务端 172 ms（构造 body），命中 ETag 时 80–110 ms（仍构造 body + MD5）。**单标签页 ≈ 1 个核的 3.5–4.4%**，且每次都会把 244 MB 峰值内存的那条路径走一遍（如果同时有人打开 `include_logs`）。
+- 每次轮询 `/api/tasks`：服务端 172 ms（构造 body），命中 ETag 时 **~98 ms**（8 次取样 79–194 ms，仍构造 body + MD5）。**单标签页 ≈ 1 个核的 3.5–4.4%**，且每次都会把 244 MB 峰值内存的那条路径走一遍（如果同时有人打开 `include_logs`）。
 
 ---
 
@@ -436,16 +438,16 @@ run_auto_refresh_pass(扫描 667) : 402 ms, 1 条 SQL      ← 纯 Python：667 
 | P0 | 去掉/收敛 `include_logs`（改单任务语义） | `api/tasks.py:789-818`、`services/task_store_io.py:298` | 810 ms / 13.7 MB → 不再存在 |
 | P0 | `_upsert_task_run` 只写计数器，日志走 `task_logs` 表 | `services/task_store_io.py:159-178` | 每行日志 9.6 ms → <1 ms，写放大 O(n²)→O(n) |
 | P1 | SQLite 开 WAL + `synchronous=NORMAL` + 64 MB cache | `core/db/base.py:57` | 读写不再互斥；写延迟降一个数量级 |
-| P1 | `stats` / `count_by_account` / `bound_counts` 改 SQL 聚合 | `repository.py:837`、`icloud_alias_repository.py:494`、`proxy_pool.py:108` | 1057 行 → 1 行；105 ms → <5 ms；213 ms → <10 ms |
+| P1 | `stats` / `count_by_account` / `bound_counts` 改 SQL 聚合 | `core/db/repository.py:837`、`core/db/icloud_alias_repository.py:494`、`core/proxy_pool.py:108` | 1057 行 → 1 行；105 ms → <5 ms；213 ms → <10 ms |
 | P1 | `/api/tasks/logs` 用 `COUNT(*)` 算 total | `api/tasks.py:655` | 1711 行 → 1 行；52 ms → <10 ms |
 | P1 | `pool_summary` 复用已取到的 rows / `GROUP BY` | `services/icloud/aliases.py:428` | 3882 行 → 1941 行；428 ms → ~220 ms |
-| P1 | API 加 gzip | `main.py:269` 附近 | 列表 242 KB → 41 KB（5.9×），任务 374 KB → 23 KB（15.9×） |
+| P1 | API 加 gzip | `main.py:258` 附近 | 列表 242 KB → 41 KB（5.9×），任务 374 KB → 23 KB（15.9×） |
 | P2 | 深分页改键集分页 | `core/db/repository.py:1170,1197` | 第 21 页 1050 行 → 50 行 |
 | P2 | `plus_status` 落生成列 + 索引 | `api/accounts.py:332-342` | 2114 行 → 50 行；697 ms → ~50 ms |
 | P2 | 列表不解密（`has_*`/`at_exp` 写入时算好） | `api/accounts.py:225,232` | 1.36 ms/行 → ~0.3 ms/行；ps1000 988 ms → ~250 ms |
 | P2 | `config_store.get` 进程内缓存 | `core/config_store.py:287` | 每请求 -0.85 ms；每 tick -2 SQL |
-| P2 | 鉴权/`check_accounts_valid`/任务探测去 N+1 | `main.py:231`、`core/scheduler.py:184,200`、`task_runners.py:778,787` | 每批 50 账号 -100 SQL |
-| P3 | 启动：路由懒加载 + 预压降级/后台 | `main.py:1-30`、`main.py:411` | 启动 -0.2~0.5 s / -30 ms |
+| P2 | 鉴权/`check_accounts_valid`/任务探测去 N+1 | `main.py:216`、`core/scheduler.py:184,200`、`services/task_runners.py:778,787` | 每批 50 账号 -100 SQL |
+| P3 | 启动：路由懒加载 + 预压降级/后台 | `main.py:1-30`、`main.py:401` | 启动 -0.2~0.5 s / -30 ms |
 | P3 | antd 拆包 + brotli | `frontend/vite.config.ts:19-50` | 首屏 477 KB → ~350 KB |
 
 ---
@@ -463,7 +465,7 @@ PY
 
 # 1) 冻结 HEAD 快照并起服务（工作树在审计期间被别人改过，必须冻结）
 git archive 4680c8d | tar -x -C /tmp/perf/src
-cd /tmp/perf/src && DATA_DIR=/tmp/perf/data .venv/bin/python -m uvicorn main:app --port 8000
+cd /tmp/perf/src && DATA_DIR=/tmp/perf/data /data/workspace/Register/.venv/bin/python -m uvicorn main:app --port 8000
 
 # 2) 逐端点计时（warmup 1 + 取样 8）
 curl -s -o /dev/null -w '%{http_code} %{time_total} %{size_download}\n' \
@@ -478,7 +480,7 @@ curl -s -o /dev/null -H "If-None-Match: $ETAG" -w '%{http_code} %{time_total} %{
   http://127.0.0.1:8000/api/tasks
 
 # 5) 启动拆解
-DATA_DIR=/tmp/perf/data .venv/bin/python -X importtime -c "import main" 2>&1 | sort -t'|' -k1 -rn | head
+DATA_DIR=/tmp/perf/data /data/workspace/Register/.venv/bin/python -X importtime -c "import main" 2>&1 | sort -t'|' -k1 -rn | head
 ```
 
 ## 附录 B：原始数据文件（scratch，未入库）

@@ -2,7 +2,7 @@
 
 [MODE: SANDBOX]
 
-- 仓库/基线：`/data/workspace/Register`，分支 `main`，HEAD `4680c8d`
+- 仓库/基线：`/data/workspace/Register`，分支 `main`，审计起点 HEAD `4680c8d`（审计期间仓库前进到 `c93b71f`，其中 `frontend/src/pages/Settings.tsx` 有一处与本次结论无关的改动：改密后回写新 token；**本文行号已按 `c93b71f` 工作树复核**）
 - 范围：`frontend/src/`（`pages/`、`components/`、`lib/`、`api/`、`App.tsx`），共 48 个 `.ts/.tsx`，14 577 行
 - 方式：只读静态阅读 + 只读 `GET` 实测（`http://127.0.0.1:8000`）+ 构建产物核对；未改任何源码
 - 结论速览：**P0 × 5、P1 × 16、P2 × 19**
@@ -18,7 +18,7 @@
 | P0 | F-04 | 「删除选中 N 个」账号**一点即删、无二次确认**（单次最多 1000 条，不可恢复） |
 | P0 | F-05 | 关闭「访问密码保护」/「双因素」**一键生效、无确认** |
 | P1 | §1–§5（16 条） | 竞态、无 catch 的静默失败、重复请求、错误态=空态、契约字段被忽略、图标按钮无名字等 |
-| P2 | §1–§5（19 条） | 死代码、四套时间格式化、a11y 细节、长列表、打包副作用等 |
+| P2 | §1–§5（19 条） | 死代码、多套时间格式化、a11y 细节、长列表、打包副作用等 |
 
 > 已修项（**不重复报**，本次仅复核）：59 → 5 个 chunk、空闲预取、`/api/tasks` 的 ETag —— 见 §7。
 
@@ -80,7 +80,7 @@
 
 ### F-05 [P0] 关闭「访问密码保护」与「双因素认证」一键生效，无确认
 
-- **位置**：`frontend/src/pages/Settings.tsx:353-365`（`handleDisableAuth`）、`Settings.tsx:419-427`（`handleDisableTotp`）
+- **位置**：`frontend/src/pages/Settings.tsx:354-366`（`handleDisableAuth`）、`Settings.tsx:423-431`（`handleDisableTotp`）
 - **证据**：两个 handler 都是 `await apiFetch('/auth/disable' | '/auth/2fa/disable', {method:'POST'})` 直接执行，按钮 `danger` 但无 `Popconfirm`/`modal.confirm`；对比同仓「清理日志」是有确认的（`TaskHistory.tsx:86-109`）。
 - **影响**：安全姿态降级只需一次误点，且没有任何「刚刚发生了什么」的强提示（只有一条 toast）。
 - **建议**：加 `modal.confirm`，要求重新输入当前密码；关闭 2FA 时额外提示「之后仅凭密码即可登录」。
@@ -94,7 +94,7 @@
 
 ### F-07 [P1] 列表请求既无竞态保护，也无 `catch`：旧响应覆盖新筛选 + 失败完全静默
 
-- **位置**：`Accounts.tsx:321-347`、`Proxies.tsx:102-132`、`RunningTasks.tsx:106-124`、`Dashboard.tsx:95-107`、`TaskHistory.tsx:51-67`、`Settings.tsx:570-584`
+- **位置**：`Accounts.tsx:321-347`、`Proxies.tsx:102-132`、`RunningTasks.tsx:106-124`、`Dashboard.tsx:95-107`、`TaskHistory.tsx:51-67`、`Settings.tsx:574-588`
 - **证据**：六个页面的 `load()` 都是 `setLoading(true); try { await apiFetch(...); setX(data) } finally { setLoading(false) }` —— **没有 catch**。`useEffect(() => { load() }, [load])` 里也没有 `.catch`。
   - 竞态：`Accounts` 的 `load` 依赖 `[currentPlatform, search, filterStatus, filterPlusStatus, createdAtStart, createdAtEnd, page, pageSize]`（`Accounts.tsx:343`），任一项变化就发新请求；先发的慢响应会覆盖后发的快响应（切平台/连点翻页可复现）。
   - 静默：接口 500/断网 → unhandled promise rejection，`loading` 归 false，表格保留旧数据，**没有任何 message**。
@@ -162,7 +162,7 @@
 
 ### F-13 [P1] `PUT /api/config` 的 `ignored` 字段没有任何前端读取 → 拼错键仍提示「保存成功」
 
-- **位置**：`frontend/src/pages/Settings.tsx:617`、`frontend/src/components/mail/MailServicePage.tsx:206`、`frontend/src/pages/Proxies.tsx:294`
+- **位置**：`frontend/src/pages/Settings.tsx:621`、`frontend/src/components/mail/MailServicePage.tsx:206`、`frontend/src/pages/Proxies.tsx:294`
 - **证据**：后端 `api/config.py:115-118` 明确把被丢弃的未知键收集起来，`api/config.py:196-200` 返回 `{"ok": true, "updated": [...], "ignored": [...]}`，注释写着「前端可据此提示『这些字段没生效』」。三处调用方都是 `await apiFetch(...)` 后直接 `message.success('保存成功')`，响应体被丢弃。
 - **影响**：字段名写错/后端白名单漏加时，用户得到「保存成功」但配置没生效 —— 这正是后端注释里描述过的线上事故形态。
 - **建议**：`const res = await apiFetch(...)` 后检查 `res.ignored?.length`，非空则 `message.warning` 列出「未生效的字段」，而不是无条件「保存成功」。
@@ -227,7 +227,7 @@
 
 ### F-22 [P1] 危险动作缺 `catch`：失败时用户得不到任何反馈（8 处）
 
-- **位置**：`Accounts.tsx:451-458`（删除）、`460-469`（批量删除）、`471-481`（新增）、`514-568`（注册）、`572-583`（详情保存）；`TaskHistory.tsx:69-83`（批量删除历史）；`Settings.tsx:587-636`（保存配置）；`RegisterTaskPage.tsx:167-229`（提交注册）
+- **位置**：`Accounts.tsx:451-458`（删除）、`460-469`（批量删除）、`471-481`（新增）、`514-568`（注册）、`572-583`（详情保存）；`TaskHistory.tsx:69-83`（批量删除历史）；`Settings.tsx:591-640`（保存配置）；`RegisterTaskPage.tsx:167-229`（提交注册）
 - **证据**：全部是 `try { … } finally { setLoading(false) }`，**没有 `catch`**。以 `handleRegister` 为例：`await apiFetch('/tasks/register')` 抛 422 → `finally` 复位 loading → 异常冒泡成 unhandled rejection → 弹窗原地不动、无 toast。
 - **影响**：最常见的后端校验失败（数量越界、缺邮箱服务、代理不可用）表现为「点了没反应」。
 - **建议**：统一 `catch (e) { message.error(e instanceof Error ? e.message : '操作失败') }`；可抽 `runAction(fn, {success, error})` 高阶函数，顺带统一 loading。
@@ -276,7 +276,7 @@
 
 ### F-29 [P2] Solver 状态卡：5 s 轮询无可见性判断；重启无确认/无 catch；失败显示「未运行」
 
-- **位置**：`frontend/src/pages/Settings.tsx:252-278`
+- **位置**：`frontend/src/pages/Settings.tsx:253-279`
 - **证据**：`window.setInterval(checkSolver, 5000)` 无 `document.hidden` 判断；`restartSolver` 只有 `await apiFetch('/solver/restart')`（无 catch、无 loading、无确认）；`checkSolver` 的 `catch { setRunning(false) }` 把「请求失败」显示成「未运行」。
 - **建议**：`catch → setRunning(null)` + 显示「状态未知」；轮询加 `visibilitychange` 暂停；重启加确认与 loading。
 
@@ -335,7 +335,7 @@
 
 ### F-36 [P2] 重复实现：`localStorage` 令牌读写绕过 `lib/utils`
 
-- **位置**：`Settings.tsx:342`（`localStorage.setItem('auth_token', …)`）、`Settings.tsx:357`（`removeItem`）、`Login.tsx:29,49`（`setToken` 已用，正确）
+- **位置**：`Settings.tsx:343`（`localStorage.setItem('auth_token', …)`）、`Settings.tsx:358`（`removeItem`）、`Login.tsx:29,49`（`setToken` 已用，正确）
 - **证据**：`lib/utils.ts:4-14` 已提供 `getToken/setToken/clearToken`，键名硬编码在两处。
 - **建议**：统一走 `setToken/clearToken`，键名只留一个常量。
 
@@ -401,7 +401,7 @@ exit code = 1
 | 文件 | 条数 | 主要规则 |
 |---|---|---|
 | `src/pages/Accounts.tsx` | 15 | `no-explicit-any` ×15（`columns: any[]`、`accounts: any[]`、`currentAccount: any`） |
-| `src/pages/Settings.tsx` | 10 | `no-explicit-any` ×8、`no-empty`(326)、`set-state-in-effect`(271) |
+| `src/pages/Settings.tsx` | 10 | `no-explicit-any` ×8、`no-empty`(327)、`set-state-in-effect`(272) |
 | `src/App.tsx` | 3 | `exhaustive-deps`(147)、`no-explicit-any`(230)、`set-state-in-effect`(249) |
 | `src/pages/Login.tsx` | 2 | `no-explicit-any`(32,51) |
 | `src/components/settings/MailImportPanel.tsx` | 2 | `exhaustive-deps`(284,620) |
@@ -413,7 +413,7 @@ exit code = 1
 | `src/components/settings/ConfigPanels.tsx` | 1 | `react-refresh/only-export-components`(160) |
 | `src/components/account/AccountDetailParts.tsx` | 1 | `no-explicit-any`(91) |
 
-值得注意的两条 `set-state-in-effect`：`App.tsx:249`（切路由时 `setNavOpen(false)`，React 官方建议在渲染期调整或改用派生 state）与 `Settings.tsx:271`（`checkSolver()` 在 effect 内同步触发 setState）。这两条本身不是 bug，但 `App.tsx` 已经在 `:261-265` 用「渲染期调整」正确解决了同类问题，两处写法不一致。
+值得注意的两条 `set-state-in-effect`：`App.tsx:249`（切路由时 `setNavOpen(false)`，React 官方建议在渲染期调整或改用派生 state）与 `Settings.tsx:272`（`checkSolver()` 在 effect 内同步触发 setState）。这两条本身不是 bug，但 `App.tsx` 已经在 `:261-265` 用「渲染期调整」正确解决了同类问题，两处写法不一致。
 
 ### 6.3 构建产物（只读核对，未重新 build）
 

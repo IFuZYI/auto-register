@@ -276,7 +276,11 @@ def _slim_account_row(row):
     # 不用 `row.model_dump()` 重建整行：那条路把 `created_at` 从
     # `...T...Z` 变成 `...+00:00`（实测），同一时刻两种字符串，
     # 按字符串比较的调用方会坏（tests/test_accounts_list_payload.py 钉着）。
-    payload = jsonable_encoder(row, exclude={"password"})
+    # `exclude={"password", "token"}`：`token` 是 AT/SSO 正文（chatgpt=AT、
+    # grok=SSO），列表页从不显示它 —— 一次 `page_size=1000` 就能把整个账号池的
+    # 访问令牌拖走（安全审查 2026-10-30 F3）。列表只留布尔 `has_token`，
+    # 正文仍由详情端点 `GET /api/accounts/{id}` 提供。
+    payload = jsonable_encoder(row, exclude={"password", "token"})
     raw = payload.get("extra_json")
     if isinstance(raw, str):
         payload["extra_json"] = _slim_extra_for_list(raw)
@@ -297,6 +301,11 @@ def _slim_account_row(row):
     payload.pop("password_cipher", None)
     if cipher is not None:
         payload["has_password"] = bool(str(cipher or "").strip())
+    # 列表不下发 token 正文，但页面要用它判断「有没有 AT/SSO」。
+    token_text = getattr(row, "token", None)
+    if token_text is None:
+        token_text = payload.get("token")
+    payload["has_token"] = bool(str(token_text or "").strip())
     return payload
 
 

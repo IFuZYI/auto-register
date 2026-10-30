@@ -356,7 +356,7 @@ $ .venv/bin/python /root/.hermes/cache/scratch/probe_int_id.py
 RAISED: ValueError invalid literal for int() with base 10: '14de3423-34b4-4e60-9f07-718098cd1a30'
 ```
 
-- 状态（并发修复，2026-10-30）：提交 `9630980` 已把这一行改成 `str(acc_model.id or "")` —— 本条对**基线 `4680c8d`** 成立。同一提交**没有**改另外两处：`services/cliproxyapi_sync.py:570/577/665/667` 的 `dict[int, ...]` 注解、以及 `_execute_batch_cliproxy_sync` 循环体仍然没有 try（F-15）—— 这两项现在依然成立。
+- 状态（并发修复，2026-10-30）：提交 `9630980` 已把这一行改成 `str(acc_model.id or "")` —— 本条对**基线 `4680c8d`** 成立。同一提交**没有**改另外两处：`services/cliproxyapi_sync.py:570/577/665/667` 的 `dict[int, ...]` 注解、以及 `_execute_batch_cliproxy_sync` 循环体仍然没有 try（F-15）—— 这两项现在依然成立。该提交同时补了 `tests/test_batch_cliproxy_sync_uuid.py`（99 行），本条的回归用例已就位。
 - 影响：`POST /api/actions/chatgpt/sync_cliproxyapi_status/batch`（对比页「同步远端状态」的 CPA 分支，`PanelComparisonPanel.tsx:549`）对任何账号都 500，且异常在 `_execute_batch_cliproxy_sync` 内**没有 try**（对比 `api/actions.py:398-415` 的通用循环是有 try 的），冒泡到 FastAPI。
 - 与 `docs/audit/2026-10-30/actions-tasks.md` 的 F-00 是同一处（该报告从动作分发角度记录）。本节补充两点它没写的：① `services/cliproxyapi_sync.py:570/577/665/667` 的 `dict[int, ...]` 注解是同一个错误的另一半，只改 `actions.py` 会把错误留在类型契约里；② 这条路径**没有任何测试**覆盖（`grep -rn "sync_cliproxyapi_status/batch" tests/` 无命中）。
 - 建议：`sync_results.get(str(acc_model.id or ""), {})`；两处注解改 `dict[str, dict[str, Any]]`；`_execute_batch_cliproxy_sync` 循环体包 try（与通用循环同形）；补一条用 UUID 账号跑批量同步的用例。
@@ -394,8 +394,8 @@ RAISED: ValueError invalid literal for int() with base 10: '14de3423-34b4-4e60-9
 | `GET /api/config` | 口令键统一置空 + `<key>_set` 布尔；面板四个口令（`cpa_api_key` / `sub2api_api_key` / `chatgpt2api_api_key` / `grok2api_password`）都在 `SECRET_CONFIG_KEYS` 里 | `api/config.py:96-104`、`core/config_schema.py:68/75/80/96` |
 | 对比接口响应 | **不含**远端 AT/RT：`ComparisonRow.to_dict()` 只给 `remote_extra`（plan/disabled/availability）与字段名列表 | `services/panel_comparison.py:363-391` |
 | 账号列表 | AT/RT/ST/IDT/cookies 正文被替换成 `has_*` 布尔 | `api/accounts.py:165-167`、`:201-232` |
-| 日志 | 面板路径无「打印 payload/header」的语句；`grok2api` 登录失败只报状态码 | `platforms/grok/grok2api.py:198`、全量 grep `logger.*(payload|token|password)` 无命中 |
-| 鉴权 | 未设密码时**非回环来源 503**（fail-closed），不是放行 | `main.py:231-251` |
+| 日志 | 面板路径（`services/panel_*`、四个适配器、`api/integrations.py`）无「打印 payload/header/凭据」的语句；`grok2api` 登录失败只报状态码 | `platforms/grok/grok2api.py:198`；（协议层另有 `platforms/chatgpt/protocol/mixins/signup.py:73` 的 CSRF 前 20 字 debug 日志，不属面板路径，见 `api-security` 审计） |
+| 鉴权 | 未设密码时**非回环来源 503**（fail-closed），不是放行 | `main.py:211-236`（基线 4680c8d 为 225-251） |
 
 ### F-18（P2）面板返回的错误文本被原样落库并经 `GET /api/accounts` 下发 —— 远端若回显凭据，就是明文入库
 
@@ -498,7 +498,7 @@ grep -n "verify" platforms/grok/grok2api.py platforms/grok/upload.py   # 无输�
 
 - **未覆盖**：`reference/panel/*`（上游四个面板的源码）只用于核对端点形状（CPA 分页是否 opt-in、chatgpt2api 的 `account_ids` vs `access_tokens`），未做安全审计；前端只核对了接线（是否真的传参、是否真的渲染选择器），未审 UI 层逻辑；`data/account_manager.db` 只读抽样，未验证历史数据的凭证有效性。
 - **建议补的用例**（当前缺口正好对应上面的 P0/P1）：
-  1. UUID 主键跑 `POST /actions/chatgpt/sync_cliproxyapi_status/batch`（F-14）；
+  1. UUID 主键跑 `POST /actions/chatgpt/sync_cliproxyapi_status/batch`（F-14）—— **已有** `tests/test_batch_cliproxy_sync_uuid.py`（`9630980` 补），其余 6 条仍缺；
   2. `plan_sync(enrolled=set())` 的行为与「登记表为空」的语义（F-06）；
   3. `push → (True, "上传成功（新增 0，跳过 1）")` 时**不得**调用 `delete_remote`（F-07）；
   4. 端点级 `account_ids` 收窄：传 2 个 id，断言只处理 2 个（F-08）；

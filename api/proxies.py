@@ -34,9 +34,29 @@ class ProxyBatchDelete(BaseModel):
     ids: list[int]
 
 
+def _public_proxy(record):
+    """列表用的代理表示：**凭据必须打码**。
+
+    原来直接回 `ProxyRecord`，`url` 里是 `socks5://user:pass@host:port` —— 一次
+    `GET /api/proxies` 就把全部代理账号密码吐出来（安全审查 2026-10-30 F5），
+    而且这些串还会被前端打进浏览器历史/截图/日志里。代理密码同样是凭据。
+
+    打码用 `redact_proxy_url`（日志侧已经在用同一个函数），保证「界面看到的」
+    与「日志里写的」是同一种形状；均衡接口用同一套打码，前端按 url 做的
+    key 匹配才不会错位。
+    """
+    from dataclasses import asdict
+
+    from core.proxy_utils import redact_proxy_url
+
+    payload = asdict(record) if hasattr(record, "__dataclass_fields__") else dict(record)
+    payload["url"] = redact_proxy_url(payload.get("url", ""))
+    return payload
+
+
 @router.get("")
 def list_proxies(session: Session = Depends(get_session)):
-    return proxy_repository.list_all(session=session)
+    return [_public_proxy(record) for record in proxy_repository.list_all(session=session)]
 
 
 @router.post("")
@@ -136,7 +156,7 @@ def proxy_balance(session: Session = Depends(get_session)):
     """
     from core.models.proxy import TAG_BIND, parse_proxy_tags
     from core.proxy_pool import proxy_pool
-    from core.proxy_utils import normalize_proxy_url
+    from core.proxy_utils import normalize_proxy_url, redact_proxy_url
 
     rows = proxy_repository.list_all(session=session)
     counts = proxy_pool.bound_counts()
@@ -154,7 +174,7 @@ def proxy_balance(session: Session = Depends(get_session)):
         items.append(
             {
                 "id": getattr(row, "id", None),
-                "url": url,
+                "url": redact_proxy_url(url),
                 "region": getattr(row, "region", ""),
                 "tags": tags,
                 "is_active": bool(getattr(row, "is_active", True)),

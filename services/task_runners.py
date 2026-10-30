@@ -10,6 +10,14 @@
 """
 from __future__ import annotations
 
+
+def _redact_proxy(value: object) -> str:
+    """日志里的代理串一律打码（凭据不进日志/接口/截图）。"""
+    from core.proxy_utils import redact_proxy_url
+
+    return redact_proxy_url(str(value or ""))
+
+
 import logging
 
 logger = logging.getLogger(__name__)
@@ -256,7 +264,10 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
                 persist_task_snapshot(task_id)
                 _api.log(task_id, f"开始注册第 {i + 1}/{req.count} 个账号{round_suffix}")
                 if _proxy:
-                    _api.log(task_id, f"使用代理: {_proxy}")
+                    # 代理串里带账号密码，日志会被 `/api/tasks/{id}/logs` 原样回吐
+                    # （安全审查 2026-10-30 F4）。日志只需要知道「走的是哪个出口」，
+                    # 用与 API 同一套打码，主机:端口足够定位问题。
+                    _api.log(task_id, f"使用代理: {_redact_proxy(_proxy)}")
 
                 # 已注册的邮箱不重复注册：邮箱是账号唯一业务键，
                 # 指定邮箱时先判重，命中就跳过（省掉整轮注册与验证码）。
@@ -565,7 +576,7 @@ def _run_account_batch_task(
             _api.task_store.set_progress(task_id, f"{index + 1}/{total}")
             _api.log(task_id, f"开始{label} {index + 1}/{total}: {fields['email']}")
             if account_proxy:
-                _api.log(task_id, f"使用代理: {account_proxy}")
+                _api.log(task_id, f"使用代理: {_redact_proxy(account_proxy)}")
 
             result = handle_account(
                 account_id=account_id,
