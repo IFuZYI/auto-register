@@ -17,6 +17,34 @@ def _solver_enabled() -> bool:
     return os.getenv("APP_ENABLE_SOLVER", "1").lower() not in {"0", "false", "no"}
 
 
+def _solver_threads() -> int:
+    """解题浏览器池大小。
+
+    不传 `--thread` 时 solver 自己的默认是 **4**，而每个 camoufox 实测约
+    200MB：2 核 / 2G 的机器上等于 800MB，整机开始 swap，界面连带变卡
+    （实测可用内存只剩 70MB、swap 用掉 1.6G）。
+
+    默认按机器规格收敛，需要更多并发用 `SOLVER_THREADS` 显式抬：
+
+    - 内存 < 4GB → 1 个（这种机器上并发解多个 Turnstile 没有意义）
+    - 否则 → min(2, 核数)
+    """
+    raw = os.getenv("SOLVER_THREADS")
+    if raw:
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            pass
+    total_gb = 0.0
+    try:
+        total_gb = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") / (1024**3)
+    except (ValueError, OSError, AttributeError):
+        pass
+    if total_gb and total_gb < 4:
+        return 1
+    return max(1, min(2, os.cpu_count() or 1))
+
+
 def _solver_port() -> int:
     return int(os.getenv("SOLVER_PORT", "8889"))
 
@@ -85,6 +113,12 @@ def start():
             solver_script,
             "--browser_type",
             _solver_browser_type(),
+            # 池大小：不传就是 solver 自己的默认 4 —— 在 2 核 / 2G 的机器上
+            # 等于同时开 4 个 camoufox（每个 ~250MB），整机开始 swap，界面
+            # 连带变卡（实测 load 1.1、可用内存只剩 87MB）。
+            # 默认收到 min(2, 核数)，需要更多并发用 `SOLVER_THREADS` 显式抬。
+            "--thread",
+            str(_solver_threads()),
             "--host",
             _solver_bind_host(),
             "--port",
