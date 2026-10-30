@@ -9,7 +9,7 @@
 **系统可用。** 10 条 lane 的结论里没有「整体不可用」——每一条都给出了能跑通的
 主路径证据；问题集中在**边界分支**、**跨平台**、**凭据暴露面**与**前端「所选」语义**。
 
-本轮**已修 8 批**（每批带回归测试），其中 4 条是「用户一点就报错/静默失效」的
+本轮**已修 11 批**（每批带回归测试），其中 4 条是「用户一点就报错/静默失效」的
 功能性缺陷：
 
 | 症状 | 根因 | 提交 |
@@ -36,7 +36,7 @@
 | 死代码/坏味道 | `deadcode-quality.md` | ℹ️ 无 P0 | 2 个整模块死、14 组重复实现、453 处宽捕获 |
 | 测试质量 | `tests-quality.md` | ⚠️ 覆盖不均 | 关键路径缺兜底（`rebind` 之前零测试） |
 
-## 三、本轮已修（8 批，全部带测试）
+## 三、本轮已修（11 批，全部带测试）
 
 ### 1. `c2c502b` 模型 ↔ 迁移 ↔ 生产库的索引漂移
 - `ix_accounts_platform_created_at` / `ix_task_logs_platform_id` 是生产库的**承重索引**，
@@ -80,6 +80,28 @@ UUID 被 `Number()` 吞掉（5 处）、任务历史服务端分页、批量删�
 
 ### 8. `e711c7c` 列表分页上界
 `accounts` 1..200（原 988ms/3.5MB 可被单请求放大）、`tasks/logs` 1..500。
+
+### 9. `c539dda` JSON 后端 token 回归 + JSON 落盘封口
+`json_record_to_model` 用 `model_fields` 过滤 kwargs，`token` 变成 property 后被过滤掉
+→ JSON 后端读出来是空串（与当年 `password` 同一个坑）。顺带把 `_json_upsert` 的明文
+password/token 改成落盘密文（D-01/D-02）。
+
+### 10. `bb01a71` 复核轮：子代理报告返回后补的四条
+- **grok SSO 仍在列表里**（data-layer 本轮新增 P0）：`_slim_extra_for_list` 先解密再按
+  黑名单 pop，`sso` 两个名单都没进 → 一页 200 条能拉走 390 个 grok 号的 SSO。
+  并入 token 名单 → 裁正文、留 `has_sso`。
+- **「导出所选」仍 422**（frontend F-01，我上一轮只修了父组件）：`AccountExportModal`
+  仍 `.split(',').map(Number)` → `[NaN]` → `[null]`。改字符串；守卫测试补「不许
+  `.map(Number)`」——只看类型字面量的那条全绿但功能是坏的。
+- **未认证 logout 能踢全员**（api-security N1）：`/api/auth/logout` 在中间件之外且无
+  `require_auth`，任何人一个 POST 就轮换全局 JWT 密钥。加认证依赖。
+- **构建窗口整站 404**（frontend F-42）：`vite build` 会 `emptyOutDir`，而挂载只在启动
+  时判断目录存在 → 18:46 构建、18:42 启动的进程在 18:49 整站 404。改成先 `makedirs`
+  再无条件挂载。
+
+### 11. `c2c502b` 之外的迁移防护
+`test_migration_index_parity.py` 5 条 + 老库补 `tags` 1 条：空库/真库/老库三条路径
+都钉住（模型、迁移、生产形态三方一致）。
 
 ## 四、仍待处理（按优先级）
 
