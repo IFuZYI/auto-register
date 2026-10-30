@@ -54,6 +54,11 @@ _SESSION_OVERRIDES = {
     # prompt=login 恰恰是"忽略现有会话，重走登录页"。这里必须清掉，否则
     # 第一次授权必然被打到 /log-in，白跑一趟才轮到去掉 prompt 的兜底。
     "OAUTH_CODEX_PROMPT": "",
+    # 被打回 /log-in 时**不要**补走完整登录（密码 + OTP + add-phone）。
+    # 实测 2026-10-30：这条策略白烧 2 分钟做了一遍登录，紧接着「协议重登」
+    # 又把同样的事做了一遍，两次都卡在 add-phone。复用会话就该只做它承诺
+    # 的事 —— 拿现有凭证换 RT，换不到快速失败，交给下一条策略。
+    "OAUTH_CODEX_DRIVE_LOGIN_FROM_LOGIN": "0",
 }
 
 _LOGIN_OVERRIDES = {
@@ -201,6 +206,9 @@ class RefreshTokenBackfiller:
         for strategy, runner in self._strategy_runners():
             skip_reason = self._skip_reason(strategy)
             if skip_reason:
+                # 跳过也要留痕：否则用户只看到「没按我配的路线走」，日志里
+                # 一个字都没有（实测踩过：配了密码登录却被静默跳过）。
+                self.log(f"[补RT] 跳过{self._label(strategy)}：{skip_reason}")
                 result.attempts.append(BackfillAttempt(strategy, False, skip_reason))
                 continue
 
@@ -404,10 +412,14 @@ class RefreshTokenBackfiller:
         if strategy == STRATEGY_PLATFORM_LOGIN:
             if not self.password:
                 return "库里没有密码，无法走密码登录路线"
-            # 服务端若已绑 2FA 就会要动态码，而密钥只有本地有。缺了必然卡死，
-            # 提前跳过并说明原因，比跑一轮再报「没拿到 code」清楚。
-            if not self.totp_secret:
-                return "库里没有 totp_secret，密码登录路线无法过 2FA"
+            # **不再因为缺 `totp_secret` 跳过这条路线。**
+            #
+            # 2FA 只在服务端真要的时候才需要，而「有没有绑 2FA」是账号属性，
+            # 不是本地有没有密钥能推断的。原来的写法等于：配置选了「密码登录」，
+            # 但库里没存 totp_secret 就把整条路线跳过 → 退回 session + codex
+            # 烧两轮 OTP（实测 2026-10-30 skyward-31.drums：这个号压根不需要
+            # 2FA，OTP 验完就过了）。缺密钥只该是「要 2FA 时会失败」，
+            # 而不是「一定不走这条路」。
         return ""
 
     def _absorb(self, result: BackfillResult, flow: AuthFlow) -> None:

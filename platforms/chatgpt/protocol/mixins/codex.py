@@ -412,8 +412,18 @@ class CodexMixin:
                 auth_url, redirect_uri, "codex_authorize"
             )
 
-            # 若被打回 /log-in，补走一次协议登录，再继续授权链路
-            if (not callback_url) and "/log-in" in (final_url or ""):
+            # 若被打回 /log-in，补走一次协议登录，再继续授权链路。
+            #
+            # `OAUTH_CODEX_DRIVE_LOGIN_FROM_LOGIN=0` 可以关掉这一步：补 RT 的
+            # 「复用会话」策略本来就承诺「不重新登录」，让它在这儿偷偷跑一遍
+            # 密码 + OTP + add-phone 是自相矛盾的 —— 实测（2026-10-30）白烧
+            # 2 分钟，而下一步「协议重登」会把同样的事再做一遍。注册链不受影响
+            # （不传这个开关，默认 1，行为与以前一致）。
+            if (
+                (not callback_url)
+                and "/log-in" in (final_url or "")
+                and self._env_flag("OAUTH_CODEX_DRIVE_LOGIN_FROM_LOGIN", "1")
+            ):
                 logger.info("Codex 授权回落到 /log-in，尝试协议推进登录状态...")
                 continue_url = ""
                 try:

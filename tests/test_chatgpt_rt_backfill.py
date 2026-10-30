@@ -297,20 +297,47 @@ class ProtocolOverridesTests(unittest.TestCase):
             ).run()
         return [call.kwargs["env_overrides"] for call in flow_cls.call_args_list]
 
+    @staticmethod
+    def _find(overrides: list[dict], marker: str) -> dict:
+        """按「特征键」找某条策略的 overrides，而不是按位置。
+
+        策略顺序跟着 `chatgpt_rt_route` 走（默认 login → 密码登录在最前），
+        按位置取会让用例绑死在某个顺序上 —— 改一次顺序就全红，而真正要钉的
+        是「这条策略的开关对不对」。
+        """
+        for item in overrides:
+            if marker in item:
+                return item
+        raise AssertionError(f"没有任何一条策略带 {marker}，实际: {overrides}")
+
     def test_session_strategy_drops_prompt_login(self):
         overrides = self._overrides_for([_FakeFlow(session_result={"refresh_token": "rt"})])
 
-        self.assertEqual(overrides[0]["OAUTH_CODEX_PROMPT"], "")
-        self.assertNotIn("OAUTH_REFRESH_ONLY", overrides[0])
+        session = self._find(overrides, "OAUTH_CODEX_PROMPT")
+        self.assertEqual(session["OAUTH_CODEX_PROMPT"], "")
+        self.assertNotIn("OAUTH_REFRESH_ONLY", session)
+
+    def test_session_strategy_does_not_drive_a_full_login(self):
+        """复用会话不该偷偷跑完整登录。
+
+        实测 2026-10-30：这条策略在 Codex 被打回 /log-in 后补走了一遍
+        密码 + OTP + add-phone（2 分钟），紧接着「协议重登」又把同样的事做了
+        一遍。复用会话只该拿现有凭证换 RT，换不到就快速失败。
+        """
+        overrides = self._overrides_for([_FakeFlow(session_result={"refresh_token": "rt"})])
+
+        session = self._find(overrides, "OAUTH_CODEX_PROMPT")
+        self.assertEqual(session.get("OAUTH_CODEX_DRIVE_LOGIN_FROM_LOGIN"), "0")
 
     def test_login_strategy_asks_only_for_refresh_token(self):
         overrides = self._overrides_for(
             [_FakeFlow(), _FakeFlow(login_result={"refresh_token": "rt"})]
         )
 
-        self.assertEqual(overrides[1]["OAUTH_REFRESH_ONLY"], "1")
-        self.assertEqual(overrides[1]["WEBUI_ALLOW_LOGIN"], "1")
-        self.assertNotIn("OAUTH_CODEX_PROMPT", overrides[1])
+        login = self._find(overrides, "OAUTH_CODEX_RT_BEFORE_CALLBACK")
+        self.assertEqual(login["OAUTH_REFRESH_ONLY"], "1")
+        self.assertEqual(login["WEBUI_ALLOW_LOGIN"], "1")
+        self.assertNotIn("OAUTH_CODEX_PROMPT", login)
 
     def test_otp_timeout_comes_from_config(self):
         overrides = self._overrides_for([_FakeFlow(session_result={"refresh_token": "rt"})])

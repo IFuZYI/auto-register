@@ -75,8 +75,15 @@ class _FakeFlow:
 def _backfiller(login_error):
     from platforms.chatgpt.rt_backfill import RefreshTokenBackfiller
 
+    # 显式走 Codex 路线：本组测的是「登录链认出封禁」，假体只实现了
+    # `oauth_codex_rt_exchange` / `run_protocol_login` 两个方法。默认路线
+    # （login）会把密码登录排到第一位，而 `_FakeFlow` 没有
+    # `acquire_rt_via_platform_login` —— 那测的就不是这里要测的东西了。
     backfiller = RefreshTokenBackfiller(
-        email="demo@example.com", password="pw", session_token="st-old", extra_config={}
+        email="demo@example.com",
+        password="pw",
+        session_token="st-old",
+        extra_config={"chatgpt_rt_route": "codex"},
     )
     queue = [_FakeFlow(), _FakeFlow(login_error=login_error)]
     backfiller._build_flow = lambda overrides: queue.pop(0)

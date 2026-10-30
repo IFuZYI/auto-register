@@ -368,10 +368,16 @@ class BackfillLoginRouteTests(unittest.TestCase):
         self.assertEqual(bf._calls["platform"], 1,
                          "登录策略必须真的调用密码登录路线，而不是又去跑 Codex")
 
-    def test_missing_totp_skips_with_reason(self):
+    def test_missing_totp_does_not_skip(self):
+        """缺 `totp_secret` 不该整条跳过密码登录路线。
+
+        2FA 只在服务端真要时才需要，而「有没有绑 2FA」是账号属性 —— 本地没存
+        密钥推不出来。原来的写法等于：配置选了「密码登录」，库里没 totp 就把
+        整条路线跳过，退回 session + codex 白烧两轮 OTP（实测 2026-10-30
+        skyward-31.drums：那个号压根不需要 2FA，OTP 验完就过了）。
+        """
         bf, strategy = self._backfill(totp="")
-        reason = bf._skip_reason(strategy)
-        self.assertIn("totp", reason.lower(), f"缺密钥要说明原因，实际: {reason!r}")
+        self.assertEqual(bf._skip_reason(strategy), "")
 
     def test_missing_password_skips_with_reason(self):
         bf, strategy = self._backfill(password="")
