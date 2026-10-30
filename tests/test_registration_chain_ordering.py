@@ -278,3 +278,62 @@ class PlatformRtHandlesEmailOtpTests(unittest.TestCase):
             "mail_provider" in src,
             "platform_rt 没有接收 mail_provider —— 无法等邮箱验证码",
         )
+
+
+class EnginePassesARealMailProviderToRtExchangesTests(unittest.TestCase):
+    """换 RT 的两条路都要拿到**真实存在**的 mail_provider。
+
+    ## 实测（2026-10-28 最终验证 task_1793185778935）
+
+        [协议] [10/10] 获取认证 Session...  session: st=有 at=有
+        登录链换 RT 报错: AttributeError: 'ChatGPTRegistrationEngine'
+                          object has no attribute 'mail_provider'
+        [协议] 尝试 Codex OAuth 直连换取 refresh_token ...
+        ⚠ 本模式要求 refresh_token，但 Codex OAuth 交换没拿到
+
+    ## 这个 bug 一直存在
+
+    `_run_codex_rt` 里 `flow.oauth_codex_rt_exchange(mail_provider=self.mail_provider)`
+    —— 引擎上根本没有 `mail_provider` 属性（构造参数叫 `mailbox`，
+    存在 `self.mailbox`）。`AttributeError` 被 `except Exception` 吞掉后
+    直接 `return False`，于是 **Codex 换 RT 从未真正执行过**，
+    每次都静默回退。
+
+    这就是为什么一批账号 AT/session 都有、RT 全空 —— 两条换 RT 的路
+    同时坏掉：Codex 因 AttributeError 未执行，登录链撞上验证码直接放弃。
+    """
+
+    def test_engine_has_no_phantom_mail_provider_attribute(self):
+        from platforms.chatgpt.registration_engine import ChatGPTRegistrationEngine
+
+        src = __import__("inspect").getsource(ChatGPTRegistrationEngine)
+        # 只看**代码行**：注释里会提到这个词解释为什么不能这么写。
+        offenders = [
+            line.strip()
+            for line in src.splitlines()
+            if "self.mail_provider" in line and not line.lstrip().startswith("#")
+        ]
+        self.assertEqual(
+            offenders, [],
+            "引擎里用了不存在的 `self.mail_provider`（属性叫 `self.mailbox`）"
+            "—— AttributeError 会被 except 吞掉，换 RT 静默失败：\n  "
+            + "\n  ".join(offenders),
+        )
+
+    def test_codex_rt_gets_the_mailbox(self):
+        from platforms.chatgpt.registration_engine import ChatGPTRegistrationEngine
+
+        src = __import__("inspect").getsource(ChatGPTRegistrationEngine._run_codex_rt)
+        self.assertIn(
+            "self.mailbox", src,
+            "_run_codex_rt 没把 self.mailbox 传给 oauth_codex_rt_exchange",
+        )
+
+    def test_login_rt_gets_the_mailbox(self):
+        from platforms.chatgpt.registration_engine import ChatGPTRegistrationEngine
+
+        src = __import__("inspect").getsource(ChatGPTRegistrationEngine._run_login_rt)
+        self.assertIn(
+            "self.mailbox", src,
+            "_run_login_rt 没把 self.mailbox 传给登录链（撞验证码时等不到码）",
+        )

@@ -329,7 +329,11 @@ class ChatGPTRegistrationEngine:
     def _run_codex_rt(self, flow: AuthFlow) -> bool:
         """跑一次 Codex OAuth 交换。成功以 `refresh_token` 到手为准。"""
         try:
-            flow.oauth_codex_rt_exchange(mail_provider=self.mail_provider)
+            # **`self.mailbox`，不是 `self.mail_provider`** —— 后者根本不存在，
+            # AttributeError 被下面的 except 吞掉后直接 return False，于是
+            # Codex 换 RT **从未真正执行过**（实测 2026-10-28：一批账号
+            # AT/session 都有、RT 全空）。
+            flow.oauth_codex_rt_exchange(mail_provider=self.mailbox)
         except Exception as exc:  # noqa: BLE001 - 失败要能回退，不该炸整条链
             self.log(f"Codex 换 RT 报错（将尝试回退）: {type(exc).__name__}: {exc}")
             return False
@@ -350,7 +354,7 @@ class ChatGPTRegistrationEngine:
                 # **必须传收件渠道**：登录链撞上邮箱验证码时要等码 ——
                 # 不传的话它会直接放弃，RT 就彻底拿不到（实测
                 # task_1793184821307：AT/session 都有，RT 空）。
-                mail_provider=self.mail_provider,
+                mail_provider=self.mailbox,
             )
         except Exception as exc:  # noqa: BLE001 - 同上，失败要可回退
             self.log(f"登录链换 RT 报错: {type(exc).__name__}: {exc}")
