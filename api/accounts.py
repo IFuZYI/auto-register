@@ -398,10 +398,15 @@ def create_account(body: AccountCreate, session: Session = Depends(get_session))
         existing.cashier_url = body.cashier_url or existing.cashier_url
         existing.updated_at = datetime.now(timezone.utc)
         with account_repository.session_for(body.platform) as sess:
-            account_repository.save(existing, session=sess)
+            saved = account_repository.save(existing, session=sess)
             sess.commit()
-            sess.refresh(existing)
-        return existing
+            # 与下面新建分支同一条判据：JSON 后端下 `existing` 来自
+            # `json_record_to_model`，是 **detached** 的 —— `sess.refresh()` 会抛
+            # `InvalidRequestError: not persistent within this Session`，
+            # 表现为「邮箱已存在时新增 → 500」（data-layer 审计 D-04）。
+            if sess.object_session(saved) is not None:
+                sess.refresh(saved)
+        return saved
 
     acc = AccountModel(
         platform=body.platform,

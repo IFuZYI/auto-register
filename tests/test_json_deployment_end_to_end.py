@@ -56,6 +56,45 @@ class JsonDeploymentEndToEndTests(unittest.TestCase):
         self._paths.start()
         self.addCleanup(self._paths.stop)
 
+    def test_recreating_an_existing_email_updates_instead_of_500(self):
+        """同邮箱再建一次 = 走更新分支（data-layer 审计 D-04）。
+
+        更新分支原来照抄了新建分支的 `sess.refresh(existing)`，但 JSON 后端下
+        `existing` 来自 `json_record_to_model`，是 **detached** 的 ——
+        `refresh` 抛 `InvalidRequestError: not persistent within this Session`，
+        表现为「邮箱已存在时新增 → 500」。
+        """
+        import asyncio
+
+        import main
+        from fastapi.testclient import TestClient
+
+        async def _run():
+            async with main.lifespan(main.app):
+                client = TestClient(main.app)
+                first = client.post(
+                    "/api/accounts",
+                    json={"platform": "chatgpt", "email": "dup@x.c", "password": "pw1"},
+                )
+                self.assertEqual(first.status_code, 200, first.text[:300])
+
+                second = client.post(
+                    "/api/accounts",
+                    json={
+                        "platform": "chatgpt",
+                        "email": "dup@x.c",
+                        "password": "pw2",
+                        "status": "active",
+                    },
+                )
+                self.assertEqual(second.status_code, 200, second.text[:300])
+                self.assertEqual(second.json().get("status"), "active")
+
+                page = client.get("/api/accounts?page_size=10").json()
+                self.assertEqual(page.get("total"), 1, f"重复创建插出了新行: {page}")
+
+        asyncio.run(_run())
+
     def test_config_accounts_proxies_all_land_in_json(self):
         import asyncio
 
