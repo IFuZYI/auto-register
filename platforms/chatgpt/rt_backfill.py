@@ -383,6 +383,14 @@ class RefreshTokenBackfiller:
         """
         return bool(flow.acquire_rt_via_platform_login(
             email=self.email, password=self.password, totp_secret=self.totp_secret,
+            # **必须传收件渠道**：这条路线走到 `email_otp_verification` 时要等码，
+            # 不传的话 `platform_rt.py` 里 `mail_provider is None` 那个分支会
+            # 直接返回 False（"该路线不可用"），RT 就彻底拿不到。
+            #
+            # 注册链（`registration_engine._run_platform_login`）早就修过同一个
+            # 坑，补 RT 这条当时漏了 —— 同一个号在注册时能补到 RT，事后用
+            # 「补 RT」重跑反而补不到，就是这里。
+            mail_provider=self.mail_provider,
         ))
 
     def _skip_reason(self, strategy: str) -> str:

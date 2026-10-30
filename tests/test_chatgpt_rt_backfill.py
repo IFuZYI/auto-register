@@ -486,5 +486,62 @@ class PluginActionTests(unittest.TestCase):
         self.assertEqual(model.get_extra()["session_token"], "st-old")
 
 
+class PlatformLoginForwardsMailProviderTests(unittest.TestCase):
+    """补 RT 的「密码登录」路线必须把收件渠道传下去。
+
+    `platform_rt.acquire_rt_via_platform_login` 走到
+    `page_type=email_otp_verification` 时要等邮箱验证码；`mail_provider is None`
+    时它**直接返回 False**（"服务端要求邮箱验证码，但没提供收件渠道"）。
+
+    注册链（`registration_engine._run_platform_login`）修过同一个坑，补 RT 这条
+    当时漏了 —— 表现是：同一个号注册时能拿到 RT，事后用「补 RT」重跑反而
+    补不到，日志里只有一句「该路线不可用」。
+    """
+
+    def test_mail_provider_is_forwarded(self):
+        sentinel = object()
+        seen: dict = {}
+
+        class _Flow:
+            def acquire_rt_via_platform_login(self, **kwargs):
+                seen.update(kwargs)
+                return True
+
+        backfiller = RefreshTokenBackfiller(
+            email="demo@example.com",
+            password="pw",
+            totp_secret="JBSWY3DPEHPK3PXP",
+            mail_provider=sentinel,
+        )
+
+        self.assertTrue(backfiller._run_platform_login(_Flow()))
+        self.assertIs(
+            seen.get("mail_provider"), sentinel,
+            "补 RT 的密码登录路线没把 mail_provider 传下去 —— "
+            "撞上邮箱验证码时必然失败",
+        )
+        self.assertEqual(seen.get("email"), "demo@example.com")
+        self.assertEqual(seen.get("password"), "pw")
+        self.assertEqual(seen.get("totp_secret"), "JBSWY3DPEHPK3PXP")
+
+    def test_mail_provider_none_is_still_forwarded(self):
+        """没有收件渠道时也要显式传 None（而不是漏传）。
+
+        传 None 时协议层会给出「没提供收件渠道」的明确原因；漏传则是
+        TypeError，错误信息完全不同。
+        """
+        seen: dict = {}
+
+        class _Flow:
+            def acquire_rt_via_platform_login(self, **kwargs):
+                seen.update(kwargs)
+                return False
+
+        backfiller = RefreshTokenBackfiller(email="demo@example.com", password="pw")
+        backfiller._run_platform_login(_Flow())
+        self.assertIn("mail_provider", seen)
+        self.assertIsNone(seen["mail_provider"])
+
+
 if __name__ == "__main__":
     unittest.main()
