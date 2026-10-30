@@ -579,3 +579,34 @@ class ConcurrentImportTests(_HermeticBundleTest):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WalSidecarImportTests(_HermeticBundleTest):
+    """导入换库时必须清掉旧的 `-wal` / `-shm`（启用 WAL 后的新风险）。
+
+    WAL 模式下，`account_manager.db-wal` 里是**未合并进主文件的事务帧**。
+    导入时只 `shutil.move` 主文件、留下旧 WAL，SQLite 打开新库会把旧帧重放
+    上去 —— 轻则导入前的数据串回来，重则库损坏。
+    """
+
+    def test_stale_wal_and_shm_are_removed_on_import(self):
+        from services.data_bundle import _default_db_path
+
+        _add_account("wal-sidecar@example.com", "AT-WAL")
+        payload, _ = build_export_bundle()
+
+        db_path = _default_db_path()
+        self.assertIsNotNone(db_path, "拿不到默认库路径")
+        wal = db_path.with_name(db_path.name + "-wal")
+        shm = db_path.with_name(db_path.name + "-shm")
+        wal.write_bytes(b"stale-wal-frames")
+        shm.write_bytes(b"stale-shm")
+
+        result = apply_import_bundle(payload)
+        self.assertTrue(result["ok"], result)
+        # 导入后 `init_db()` 会以 WAL 模式重新打开库，所以文件本身可能被**新建**
+        # （空文件）；要断言的是「旧内容没被留下」。
+        if wal.exists():
+            self.assertNotIn(b"stale-wal-frames", wal.read_bytes(), "旧 -wal 内容仍在，会被重放")
+        if shm.exists():
+            self.assertNotIn(b"stale-shm", shm.read_bytes(), "旧 -shm 内容仍在")

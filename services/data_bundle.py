@@ -649,6 +649,17 @@ def apply_import_bundle(bundle_bytes: bytes, *, filename: str = "") -> dict[str,
                 else:
                     target = DATA_DIR / name
                 target.parent.mkdir(parents=True, exist_ok=True)
+                # **必须清掉旧的 -wal / -shm**：启用 WAL 之后（`apply_sqlite_pragmas`），
+                # 数据库旁边可能还留着上一次的预写日志。换库时若不清，SQLite 打开
+                # 新文件会把**旧** WAL 帧重放上去 —— 轻则导入前的数据串回来，
+                # 重则库损坏。这两个文件是库的一部分，不是缓存。
+                for suffix in ("-wal", "-shm"):
+                    sidecar = target.with_name(target.name + suffix)
+                    if sidecar.exists():
+                        try:
+                            sidecar.unlink()
+                        except OSError as exc:  # noqa: BLE001
+                            logger.warning("清理 %s 失败: %s", sidecar, exc)
                 shutil.move(str(staging / name), str(target))
                 imported.append(name)
 
