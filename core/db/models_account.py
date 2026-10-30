@@ -17,6 +17,7 @@ import uuid
 from datetime import datetime
 from typing import Any, Optional
 
+from pydantic import computed_field
 from sqlalchemy import Column, Index, String, text
 from sqlmodel import Field, SQLModel
 
@@ -69,6 +70,10 @@ class AccountModel(SQLModel, table=True):
     #: property —— 67 处 `account.password` 一行都不用改。
     password_cipher: str = Field(
         default="",
+        # 密文不进响应：对外契约里只有明文 `password`（见下面的 computed_field）。
+        # 不排掉的话，列表/详情/创建三个响应都会多出一个 `password_cipher`，
+        # 与改造前的形状不一致，还把密文白送给客户端。
+        exclude=True,
         sa_column=Column("password", String, nullable=False, server_default=""),
     )
     user_id: str = ""
@@ -116,6 +121,7 @@ class AccountModel(SQLModel, table=True):
             self.extra_json = json.dumps(sealed, ensure_ascii=False)
 
     # ------------------------------------------------------------ 密码
+    @computed_field  # type: ignore[misc]
     @property
     def password(self) -> str:
         """明文密码。落盘的是密文，这里透明解密（老明文原样通过）。"""
