@@ -39,6 +39,38 @@ class UuidPrimaryKeyTests(unittest.TestCase):
         )
         self.assertIsNone(acc.legacy_id, "新账号不该带旧的自增主键")
 
+    def test_batch_delete_accepts_uuid_strings(self):
+        """批量删除的请求体必须收字符串 id。
+
+        原来是 `ids: list[int]` —— UUID 化之后前端传 `Array.from(selectedRowKeys)`
+        全被 422 挡掉，也就是「批量删除」按钮直接失效。单测没有一条走这个端点，
+        抓到它的是黑盒冒烟（`scripts/e2e_smoke.py`）。
+        """
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+
+        from api.accounts import router
+
+        first = account_repository.upsert(
+            Account(platform="chatgpt", email="uuid-batch-a@example.com", password="p")
+        )
+        second = account_repository.upsert(
+            Account(platform="chatgpt", email="uuid-batch-b@example.com", password="p")
+        )
+
+        app = FastAPI()
+        app.include_router(router)
+        client = TestClient(app, raise_server_exceptions=False)
+        response = client.post(
+            "/accounts/batch-delete",
+            json={"ids": [str(first.id), str(second.id)], "platform": "chatgpt"},
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json().get("deleted"), 2)
+        self.assertIsNone(_row(str(first.id)))
+        self.assertIsNone(_row(str(second.id)))
+
     def test_two_accounts_get_distinct_ids(self):
         first = account_repository.upsert(
             Account(platform="chatgpt", email="uuid-c@example.com", password="p")

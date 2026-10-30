@@ -52,7 +52,11 @@ class ImportRequest(BaseModel):
 
 
 class BatchDeleteRequest(BaseModel):
-    ids: list[int]
+    # UUID 化（T1.0）之后账号 id 是字符串。这里原来写死 `list[int]`，
+    # 前端传 `Array.from(selectedRowKeys)`（UUID）会被 422 挡掉 ——
+    # 也就是「批量删除」整个按钮失效，而单测里没有一条走这个端点。
+    # 保留 int 是为了兼容旧调用方（`delete_many` 内部本来就 `str()` 归一）。
+    ids: list[str | int]
     # 账号 id 是每库自增的，指定 platform 才能保证不误删别的平台的同 id 账号
     platform: str = ""
 

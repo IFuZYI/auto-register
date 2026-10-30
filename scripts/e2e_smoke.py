@@ -194,6 +194,31 @@ async def _run(steps: list[dict], *, sweep: bool = False) -> None:
         if proxy_id is not None:
             _record(steps, "proxy.delete", client.delete(f"/api/proxies/{proxy_id}"))
 
+        # 12. 批量删（走 delete_many —— JSON 后端的新分支）
+        ids = []
+        for index in range(2):
+            response = client.post(
+                "/api/accounts",
+                json={
+                    "platform": "chatgpt",
+                    "email": f"batch-{index}@example.com",
+                    "password": "pw",
+                },
+            )
+            if response.status_code < 400:
+                ids.append(response.json().get("id"))
+        if ids:
+            r = client.post("/api/accounts/batch-delete", json={"ids": ids})
+            _record(
+                steps,
+                "account.batch_delete",
+                r,
+                deleted=len(ids),
+                remaining=len(
+                    (client.get("/api/accounts?page_size=50").json() or {}).get("items") or []
+                ),
+            )
+
         if sweep:
             _sweep_get_routes(client, steps)
 
