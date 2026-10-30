@@ -321,7 +321,10 @@ def list_accounts(
     page_size: int = 20,
 ):
     page = max(1, int(page or 1))
-    page_size = max(1, int(page_size or 20))
+    # 上界 200：实测 `page_size=1000` 单请求 988 ms / 3.5 MB（1057 个账号，
+    # 每行还要解 extra_json），一个慢客户端就能把 2 核机器拖住；而界面上
+    # 每页最多 100 条，200 已经留了余量（performance 审计 P0）。
+    page_size = min(max(1, int(page_size or 20)), 200)
     offset = (page - 1) * page_size
 
     plat = platform or ""

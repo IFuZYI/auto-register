@@ -635,6 +635,8 @@ def stop_task(task_id: str):
 
 @router.get("/logs")
 def get_logs(platform: str = None, page: int = 1, page_size: int = 50):
+    # 与账号列表同样的上界：日志行比账号行更重（detail_json 里带完整步骤）
+    page_size = min(max(1, int(page_size or 50)), 500)
     # **两种后端返回同一形状**（dict 列表）。SQLite 版原来返回 `TaskLog`
     # 模型、JSON 版返回 dict —— 上层要按后端写两套取值逻辑，很容易漏。
     from core.db.task_log_repository import task_log_repository

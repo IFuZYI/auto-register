@@ -4,6 +4,7 @@
 
 - 仓库：`/data/workspace/Register`，分支 `main`，HEAD `c93b71f`（任务给的 `4680c8d` 是其祖先，之后落了 3 个提交，本文所有行号按 `c93b71f` 校准）
 - 范围：`api/ core/ modules/ platforms/ services/ scripts/ main.py` —— **223 个 `.py`，56,034 行**
+- ⚠️ 工作树状态：审计期间 `git status` 显示 `core/db/models_account.py`、`api/accounts.py`、`scripts/encrypt_existing_credentials.py`、`docs/audit/2026-10-30/frontend.md` 有**他人并发未提交修改**（另一路数据层审计正在改 AT 加密）。本文行号按「读取时的文件内容」校准；这两个 `.py` 的行号会随之漂移，复核请以符号名 + `git diff` 为准。
 - 排除：`.venv/ .worktrees/ reference/ frontend/node_modules/ static/ tests/ migrations/`（tests 只作为「谁在引用」的证据，不计入死代码）
 - 方法：
   1. `pyflakes 4.1.0`（venv 自带，无 ruff）全量扫描 → 255 条：**F401 223 / F811 25 / F841 5 / F-string 2**；
@@ -85,7 +86,7 @@
 | T9 | `services/mail_imports/microsoft_import_rules.py:231-253` `MicrosoftMailboxAvailabilityRule` | 23 | 未注册进 `mail_import_registry`（只注册了 `microsoft` provider），生产 0 引用 | 删或注册 |
 | T10 | `modules/platforms/icloud.py:16-38` `ICloudAliasWorkflow` | 23 | 只在 `modules/__init__.py:19` / `modules/platforms/__init__.py:3` 的 `__all__` 里出现，无调用 | 删 |
 | T11 | `core/mailboxes/channels/outlook/mailbox.py:666-680` `_fetch_oauth_token` | 15 | 生产 0 引用（Graph 刷新走 `backends.py`） | 删 |
-| T12 | `core/db/models_account.py:207-220` `AccountModel.update_extra` | 14 | 生产 0 引用；仓储层用 `repository.update_extra`/`set_extra` | 删 |
+| T12 | `core/db/models_account.py:207-220` `AccountModel.update_extra` | 14 | 生产 0 引用；仓储层用的是 `account_repository.update_extra`（`core/proxy_pool.py:250,309`、`services/task_runners.py:551`），不是模型方法。注意该文件正被并发重构（AT 加密），删前先 rebase | 删，或让仓储改调它 |
 | T13 | `platforms/chatgpt/protocol/response_summary.py:61-73` `describe_page` | 13 | 生产 0 引用，仅测试 | 删 |
 | T14 | `platforms/icloud/remote_client.py:284-292` `RemoteHMEClient.fetch_message` | 9 | 生产 0 引用；取信走 `web_mail` / `mailbox.py` | 删 |
 | T15 | `core/base_platform.py:318-325` `_make_executor` | 8 | 生产 0 引用（`create_executor` 在 `:311` 才是活的那条） | 删 |
@@ -177,7 +178,7 @@
 | # | 位置 | 证据 | 建议 |
 |---|---|---|---|
 | D11 | `api/config.py:57-64` `GET /config/schema` | 端点 docstring 写「前端据此渲染设置页」；实测 `frontend/src` 里 `grep "config/schema"` **0 命中**，字段硬编码在 `PanelConfigPanel.tsx:70-100`；测试也 0 命中 | 删；或真让前端从 schema 渲染（那才能兑现 `core/config_schema.py:17` 的承诺） |
-| D12 | `api/accounts.py:725-730` `POST /accounts/check-all` | 前端 0 引用、测试 0 引用；批量测活已改走批量动作任务（`/actions/{platform}/{action_id}/batch`） | 删 |
+| D12 | `api/accounts.py:725` 起 `POST /accounts/check-all`（行号随并发修改漂移） | 前端 0 引用、测试 0 引用；批量测活已改走批量动作任务（`/actions/{platform}/{action_id}/batch`） | 删 |
 | D13 | `api/icloud.py:317-332` `GET /icloud/accounts/{account_id}/messages` | 前端只用别名维度：`frontend/src/api/icloud.ts:325` `/icloud/aliases/${aliasId}/messages`；账号维度 0 引用 | 删（或前端补「按账号看信」入口） |
 | D14 | `api/auth.py:445-453` `POST /auth/logout` | 后端实现是「换 JWT 密钥吊销全部令牌」（本 HEAD 刚加的安全修复），但前端**根本没调**：`App.tsx:462`、`Settings.tsx:367` 都是 `clearToken()` 只删 localStorage | **不要删**，补上前端调用（否则「退出登录」依然无法吊销服务端令牌，等于 F6 只修了一半） |
 
@@ -217,7 +218,7 @@ services/icloud/{accounts,aliases,messages}.py 共 11 条
   - `platforms/grok/turnstile_mint.py:168` `exc`（只 `except ... as exc` 不记录类型，见 §3.2 E4）
   - `services/task_store_io.py:264` `_json_rows`
 - **F811 25 条**：
-  - `api/accounts.py` 有 **13 处函数内** `from core.db import account_repository`（`:98,135,367,414,454,503,586,688,726,738,762,772,782`），每一处都遮蔽 `:5` 的模块级 import —— 即**模块级那行才是死的**；
+  - `api/accounts.py` 有 **13 处函数内** `from core.db import account_repository`（`:98,135` 起，其余散见全文件；审计时最新一次读到的行号是 `98,135,376,423,463,512,595,697,735,747,771,781,791`），每一处都遮蔽 `:5` 的模块级 import —— 即**模块级那行才是死的**；
   - `services/panel_sync.py:32` 同理（`:195`、`:291` 局部重复 import）；
   - `services/action_execution.py:97,167,215,233,254` 局部重复 import `datetime/timezone/AccountStatus`（`:17,:22` 的模块级版本因此变死）；
   - `api/actions.py:211` 函数内 `import datetime`。
@@ -492,7 +493,7 @@ except Exception:
 | L2 | `api/tasks.py:648` | `from core.db.task_log_repository import _from_sqlite`（**私有**符号） | API 依赖 core 内部实现；`_from_sqlite` 改名就断。建议在仓储暴露公开 `to_dict(row)` |
 | L3 | `api/outlook.py:69,77` | `from core.mailboxes.channels.outlook import OutlookMailbox`，直接调具体渠道类方法（`pool_status_summary` / `import_accounts_to_pool`） | 绕过 `core/mailboxes/registry.py` 的渠道抽象；换实现要改 API。建议加门面函数 |
 | L4 | `api/tasks.py:650-657`、`:676-682`、`:828-833` | 3 处 `with Session(current_engine())` + `select(TaskLog)` 裸 SQL，且同时存在 JSON/SQLite 两分支 | API 层直接写 SQL。建议收进 `core/db/task_log_repository.py` |
-| L5 | `api/accounts.py:5` vs `:98,135,367,414,454,503,586,688,726,738,762,772,782` | 13 处函数内 `from core.db import account_repository`，遮蔽模块级 import | 模块级 import 实际是死的（F811×13）；「每进一个函数就重新 import 一次 DB 层」是重构残留。建议只留模块级 |
+| L5 | `api/accounts.py:5` vs 函数内 13 处（`:98,135` 起） | 13 处函数内 `from core.db import account_repository`，遮蔽模块级 import | 模块级 import 实际是死的（F811×13）；「每进一个函数就重新 import 一次 DB 层」是重构残留。建议只留模块级 |
 | L6 | `services/panel_comparison.py:429 _match_key` | 被 4 个模块以**私有名**导入：`services/panel_sync.py:228`、`services/panel_status_sync.py:210`、`services/panel_push.py:192`、`services/panel_comparison_cache.py:284` | 事实上的公共 API 挂着下划线，且住在 1302 行的 `panel_comparison` 里（导入它=拖进整条对比链）。建议移到 `core/models/account.py` 或 `services/panel_keys.py` 并去掉下划线 |
 
 **附带（同类味道，不算越界）**
