@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from core.models.account import AccountRecord
+
 import logging
 from datetime import datetime, timezone
 from typing import Any
@@ -157,27 +159,38 @@ def record_cliproxy_sync_result(extra: dict[str, Any], sync_result: dict[str, An
     return sync_statuses[CLIPROXY_SYNC_NAME]
 
 
-def build_chatgpt_sync_account(account: Any):
-    extra = _get_account_extra(account)
+def build_chatgpt_sync_account(account: Any) -> AccountRecord:
+    """把任意账号对象收敛成 `AccountRecord` 供各上传器消费。
+
+    以前这里现造一个空壳类逐个挂属性。`AccountRecord`
+    自带同名属性（读写都落在 `extra`），空壳没有存在意义 —— 而且空壳上的
+    `obj.client_id = …` 只活在内存里，落库时又丢一次。
+    """
+    extra = dict(_get_account_extra(account))
     from core.credential_fields import get_credential, token_column_credential
 
-    class _SyncAccount:
-        pass
-
-    obj = _SyncAccount()
-    obj.email = getattr(account, "email", "")
-    obj.user_id = getattr(account, "user_id", "")
     # 凭证读取统一走注册表（认 camelCase 别名）—— 整理前只读蛇形，
     # camelCase 落库的账号会被当成「缺 RT」。
-    obj.access_token = get_credential(extra, "access_token") or token_column_credential(
+    access_token = get_credential(extra, "access_token") or token_column_credential(
         account, "chatgpt", "access_token"
     )
-    obj.refresh_token = get_credential(extra, "refresh_token")
-    obj.id_token = get_credential(extra, "id_token")
-    obj.session_token = get_credential(extra, "session_token")
-    obj.client_id = extra.get("client_id", "app_EMoamEEZ73f0CkXaXp7hrann")
-    obj.cookies = extra.get("cookies", "")
-    return obj
+    record = AccountRecord(
+        platform="chatgpt",
+        email=str(getattr(account, "email", "") or ""),
+        password=str(getattr(account, "password", "") or ""),
+        user_id=str(getattr(account, "user_id", "") or ""),
+        token=str(getattr(account, "token", "") or ""),
+        extra=extra,
+    )
+    record.access_token = access_token
+    # 逐个经 `get_credential` 归一：它认 camelCase 别名（`refreshToken`），
+    # 直接拷 extra 会让「camelCase 落库的账号」被当成缺 RT。
+    record.refresh_token = get_credential(extra, "refresh_token")
+    record.id_token = get_credential(extra, "id_token")
+    record.session_token = get_credential(extra, "session_token")
+    record.client_id = extra.get("client_id", "app_EMoamEEZ73f0CkXaXp7hrann")
+    record.cookies = extra.get("cookies", "")
+    return record
 
 
 def upload_chatgpt_account_to_cpa(account: Any, api_url: str | None = None, api_key: str | None = None) -> tuple[bool, str]:

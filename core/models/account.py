@@ -156,6 +156,70 @@ class AccountRecord:
     def credentials(self) -> Credentials:
         return Credentials(self)
 
+    # ---------------------------------------------------- 平台侧的鸭子类型
+    # 平台代码（`status_probe` / `token_refresh` / `cpa_upload` / `chatgpt2api`
+    # 上传器）历史上是拿「任意带这些属性的对象」的。以前每个调用点现造一个
+    # 空壳类往里塞属性（`platforms/chatgpt/plugin.py` 两处、
+    # `services/chatgpt_sync.py`、`services/external_sync.py`）。
+    #
+    # 把这几个名字挂到领域模型上，空壳就不需要了 —— 读写都落在 `extra` 上，
+    # 与 `Credentials` 是同一份数据，不会出现「对象上有、落库没有」。
+    @property
+    def access_token(self) -> str:
+        return self.credentials.access_token or str(self.token or "")
+
+    @access_token.setter
+    def access_token(self, value: Any) -> None:
+        self.credentials.access_token = value
+
+    @property
+    def refresh_token(self) -> str:
+        return self.credentials.refresh_token
+
+    @refresh_token.setter
+    def refresh_token(self, value: Any) -> None:
+        self.credentials.refresh_token = value
+
+    @property
+    def id_token(self) -> str:
+        return self.credentials.id_token
+
+    @id_token.setter
+    def id_token(self, value: Any) -> None:
+        self.credentials.id_token = value
+
+    @property
+    def session_token(self) -> str:
+        return self.credentials.session_token
+
+    @session_token.setter
+    def session_token(self, value: Any) -> None:
+        self.credentials.session_token = value
+
+    @property
+    def cookies(self) -> str:
+        return str(self.extra.get("cookies") or "")
+
+    @cookies.setter
+    def cookies(self, value: Any) -> None:
+        text = "" if value is None else str(value)
+        if text:
+            self.extra["cookies"] = text
+        else:
+            self.extra.pop("cookies", None)
+
+    @property
+    def client_id(self) -> str:
+        return str(self.extra.get("client_id") or "")
+
+    @client_id.setter
+    def client_id(self, value: Any) -> None:
+        text = "" if value is None else str(value)
+        if text:
+            self.extra["client_id"] = text
+        else:
+            self.extra.pop("client_id", None)
+
     # ---------------------------------------------------------------- 转换
     def to_model_fields(self) -> dict[str, Any]:
         """喂给 `AccountModel(**fields)` 的字段（不含 `extra` —— 那是 JSON 串）。"""
