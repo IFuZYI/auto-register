@@ -83,6 +83,13 @@ CONFIG_SCHEMA: tuple[ConfigKey, ...] = (
     # ---- CLIProxyAPI ----
     ConfigKey("cliproxyapi_base_url", "cliproxyapi"),
     ConfigKey("cliproxyapi_management_key", "cliproxyapi", secret=True),
+    # ---- 代理池 ----
+    #: 绑定均衡：给账号挑绑定代理时选「当前挂得最少」的那个。
+    #: 关掉则随机挑（用户要求「均衡配置」可开关）。
+    ConfigKey("proxy_balance_enabled", "proxy"),
+    #: 单个代理最多绑多少个账号；0 = 不限。
+    #: 超过上限的代理不再接收新绑定（全部超限时忽略上限，避免无处可绑）。
+    ConfigKey("proxy_balance_max_per_proxy", "proxy"),
     # ---- grok2api ----
     ConfigKey("grok2api_base_url", "grok2api"),
     ConfigKey("grok2api_username", "grok2api"),

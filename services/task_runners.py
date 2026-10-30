@@ -109,11 +109,20 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
         if not req.proxy and req.count > 1:
             with Session(current_engine()) as _s:
                 from core.db import ProxyModel
+                from core.models.proxy import TAG_REGISTER, parse_proxy_tags
                 from sqlmodel import select as _sel
                 _active = _s.exec(
                     _sel(ProxyModel).where(ProxyModel.is_active == True)
                 ).all()
-                _prefetched_proxies = [p.url for p in _active if p.url]
+                # 注册链路优先用带 `register` 标签的出口；一个都没有时回退到
+                # 全部活跃代理（存量部署升级上来时标签是空的，硬过滤会让注册
+                # 任务直接「没有可用代理」）。
+                _tagged = [
+                    p.url
+                    for p in _active
+                    if p.url and TAG_REGISTER in parse_proxy_tags(getattr(p, "tags", ""))
+                ]
+                _prefetched_proxies = _tagged or [p.url for p in _active if p.url]
 
         def _get_proxy() -> Optional[str]:
             if req.proxy:
@@ -123,7 +132,9 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
                     if _prefetched_proxies:
                         import random
                         return random.choice(_prefetched_proxies)
-            return _proxy_pool.get_next()
+            from core.models.proxy import TAG_REGISTER
+
+            return _proxy_pool.get_next(tag=TAG_REGISTER)
 
         def _build_mailbox(proxy: Optional[str]):
             # 不给兜底 provider：用户要求默认留空、必须显式选。空串会让
@@ -298,7 +309,18 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
                 return AttemptResult.stopped(str(e))
             except Exception as e:
                 if _proxy:
-                    _proxy_pool.report_fail(_proxy)
+                    from core.proxy_utils import looks_like_proxy_error
+
+                    if looks_like_proxy_error(e):
+                        # 注册用的是**注册标签**的出口，这里摘掉它，下一轮
+                        # `_get_proxy()` 会从剩下的里重新挑一个。
+                        _proxy_pool.report_proxy_error(_proxy)
+                        _api.log(
+                            task_id,
+                            f"代理异常，已摘除 {_proxy}，下一轮换出口",
+                        )
+                    else:
+                        _proxy_pool.report_fail(_proxy)
                 _api.log(task_id, f"[FAIL] 注册失败{round_suffix}: {e}")
                 # 环境类错误（浏览器/Node 缺失等）即使以字符串形态传上来
                 # （register_browser 的兜底 except 会把异常文本化）也判成
@@ -554,7 +576,22 @@ def _run_account_batch_task(
             )
             if account_proxy:
                 if result.outcome == AttemptOutcome.FAILED:
-                    proxy_pool.report_fail(account_proxy)
+                    from core.proxy_utils import looks_like_proxy_error
+
+                    if looks_like_proxy_error(result.message):
+                        # 代理类失败：当场摘掉并给账号换一个绑定代理。
+                        # `report_fail` 的阈值是「0 成功 + 5 次失败」，对
+                        # 「跑到一半代理挂了」太慢 —— 用户要求当场切换。
+                        proxy_pool.report_proxy_error(account_proxy)
+                        old_proxy, new_proxy = proxy_pool.rebind(fields.get("email", ""))
+                        if new_proxy and new_proxy != old_proxy:
+                            _api.log(
+                                task_id,
+                                f"代理异常，已切换绑定: {redact_proxy_url(old_proxy)}"
+                                f" → {redact_proxy_url(new_proxy)}",
+                            )
+                    else:
+                        proxy_pool.report_fail(account_proxy)
                 elif result.outcome == AttemptOutcome.SUCCESS:
                     proxy_pool.report_success(account_proxy)
             return result

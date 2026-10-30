@@ -54,7 +54,7 @@ class SchemaShapeTests(unittest.TestCase):
         self.assertEqual(len(CONFIG_KEYS), len(set(CONFIG_KEYS)), "登记表里有重复键")
 
     def test_key_count(self):
-        self.assertEqual(len(CONFIG_KEYS), 69, "键数变了要同步改文档")
+        self.assertEqual(len(CONFIG_KEYS), 71, "键数变了要同步改文档")
 
     def test_every_key_has_a_group(self):
         for item in CONFIG_SCHEMA:
@@ -105,7 +105,7 @@ class ReadsAreRegisteredTests(unittest.TestCase):
 class SchemaPayloadTests(unittest.TestCase):
     def test_payload_has_no_values(self):
         payload = schema_payload()
-        self.assertEqual(len(payload["keys"]), 69)
+        self.assertEqual(len(payload["keys"]), 71)
         self.assertEqual(sorted(payload["secrets"]), sorted(SECRET_CONFIG_KEYS))
         # 只允许这三个键：多一个就说明有人把值塞进来了
         self.assertEqual(set(payload), {"keys", "secrets", "groups"})

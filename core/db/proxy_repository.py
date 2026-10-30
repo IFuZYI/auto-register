@@ -19,7 +19,7 @@ from sqlmodel import Session, select
 
 from .base import current_engine
 from .models_infra import ProxyModel
-from core.models.proxy import ProxyRecord
+from core.models.proxy import ProxyRecord, proxy_tags_csv
 
 #: 该表在 JSON 后端下的表名（也是文件名前缀，见 `json_table.table_path`）
 TABLE = "proxies"
@@ -73,16 +73,23 @@ class ProxyRepository:
                 sess.close()
 
     @staticmethod
-    def add(*, url: str, region: str = "", session: Session | None = None) -> Any:
+    def add(
+        *, url: str, region: str = "", tags: Any = None, session: Session | None = None
+    ) -> Any:
+        from core.models.proxy import proxy_tags_csv
+
+        tag_csv = proxy_tags_csv(tags)
         store = ProxyRepository._store()
         if store is not None:
             return ProxyRecord.from_dict(
-                store.insert({"url": str(url or ""), "region": str(region or "")})
+                store.insert(
+                    {"url": str(url or ""), "region": str(region or ""), "tags": tag_csv}
+                )
             )
         own = session is None
         sess = session or Session(current_engine())
         try:
-            row = ProxyModel(url=str(url or ""), region=str(region or ""))
+            row = ProxyModel(url=str(url or ""), region=str(region or ""), tags=tag_csv)
             sess.add(row)
             # **写即提交**：原端点就是 `add` 后立刻 `commit`。不提交的话
             # 新行没有 id（SQLite 在 flush 时才分配），调用方拿到 `id=None`
@@ -111,6 +118,7 @@ class ProxyRepository:
                     if getattr(row, "last_checked", None)
                     else None
                 ),
+                "tags": proxy_tags_csv(getattr(row, "tags", "")),
             })
             return row
         own = session is None
@@ -125,6 +133,7 @@ class ProxyRepository:
             model.success_count = int(getattr(row, "success_count", 0) or 0)
             model.fail_count = int(getattr(row, "fail_count", 0) or 0)
             model.last_checked = getattr(row, "last_checked", None)
+            model.tags = proxy_tags_csv(getattr(row, "tags", ""))
             sess.add(model)
             sess.commit()
             sess.refresh(model)

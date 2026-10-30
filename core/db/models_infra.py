@@ -55,6 +55,13 @@ class ProxyModel(SQLModel, table=True):
     fail_count: int = 0
     is_active: bool = True
     last_checked: Optional[datetime] = None
+    #: 逗号分隔的标签。当前两个：
+    #: - `register`：可用于**注册链路**（新号从这些出口出去）
+    #: - `bind`：可**绑定给账号**（账号的 register_proxy 只能落在这类代理上）
+    #:
+    #: 存逗号串而不是 JSON 数组：两种后端（SQLite / JSON 文件）都能原样存，
+    #: 不需要为 JSON 后端单独做序列化分支（这仓库已经踩过「JSON 分支丢字段」）。
+    tags: str = ""
 
 
 INFRA_TABLES = [m.__table__ for m in (TaskLog, TaskRunModel, ProxyModel)]

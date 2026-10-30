@@ -202,3 +202,33 @@ def build_playwright_proxy_config(proxy_url: Optional[str]) -> Optional[dict[str
     if password:
         config["password"] = password
     return config
+
+
+#: 代理/隧道类错误的特征词。**刻意不含裸 "timeout"** —— 等验证码超时、
+#: 上游慢响应都会命中，误判会把好代理摘掉。
+_PROXY_ERROR_MARKERS = (
+    "proxy",
+    "socks",
+    "tunnel",
+    "407",
+    "econnrefused",
+    "econnreset",
+    "etimedout",
+    "getaddrinfo",
+    "failed to connect",
+    "cannot connect",
+    "代理",
+)
+
+
+def looks_like_proxy_error(message: object) -> bool:
+    """这段错误文本像不像「代理不通」。
+
+    判据只用于**决定要不要当场换代理**：命中就把代理摘掉、给账号换一个绑定的；
+    误判的代价是「好代理被摘 + 换一次出口」，漏判的代价是「这一轮白跑」。
+    所以宁可窄一点（不含裸 timeout）。
+    """
+    text = str(message or "").lower()
+    if not text:
+        return False
+    return any(marker in text for marker in _PROXY_ERROR_MARKERS)
