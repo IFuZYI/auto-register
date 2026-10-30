@@ -179,6 +179,11 @@
 
 以下文件在 T3.2（去 `api` 依赖）之前必须先改写成构造注入，否则会挡住重构：
 
+> **2026-11 结论：这条前置已失效。** 实际做法是把任务状态搬进
+> `services/task_service`，并把 9 处 `patch("api.tasks._save_task_log")` 改指
+> `services.task_service.save_task_log` —— T3.2 直接完成，不需要构造注入。
+> 13 个文件当前全绿，清单保留作为历史记录。
+
 - [ ] `tests/test_account_proxy_reuse.py`
 - [ ] `tests/test_backfill_rt_task_api.py`
 - [ ] `tests/test_batch_scope_consistency.py`

@@ -302,3 +302,31 @@ SQLite 分支按 id 取 ORM 行再改（不再假设传进来的是 ORM 实例�
 这条路径的文件是密钥的**唯一副本**（服务端不下发第二次），删掉等于把号永久锁死。
 `tests/test_totp_journal_crypto.py` 三条测试分别钉住「文件里没有明文」「老明文能恢复」
 「解不开保留文件」。
+
+## T2.3 记录：`apply_action_result` 从 120 行拆成四步分派
+
+原来是「chatgpt 状态策略 + grok 状态策略 + extra 补丁 + 上传记账 + 凭证写入」
+五件事糊在一个函数里，两个平台靠 `if platform == ...` 分叉。现在：
+
+    apply_action_result       22 行（8 条语句）—— 只做分派
+    _apply_chatgpt_status     按能力落状态
+    _apply_grok_status        按动作落状态（两个探测动作参数不同，保留逐 id）
+    _apply_extra_patch        extra 补丁 + token 列镜像
+    _apply_credential_writes  凭证字段走注册表写入
+
+平台差异只在 `_STATUS_APPLIERS` 这张表里，加一个平台加一行。
+
+**一条守卫测试跟着代码搬家**：`test_tracked_keys_are_registry_driven` 原先
+`inspect.getsource(api.actions._apply_action_result)` 找 `canonical_writes`，
+拆分后该函数里没有它了。改成 `inspect.getsource(action_execution._apply_credential_writes)`
+—— 断言内容一字未改（不许手写 key 集合、不许整包写 extra、必须走注册表）。
+
+## 阶段 2 / 3 剩余项的结论（逐条）
+
+| 任务 | 结论 |
+|---|---|
+| T2.4 `PROBE_STATE_TO_STATUS` 表 | **不做**。分类器 `classify_local_probe_state` 已经是**一处**实现（7 个 reason），落状态在 `apply_chatgpt_status_policy` 里也是**一处**。改成表驱动不改变任何行为，属于 C1 禁止的「为对齐清单而重写」；而且「禁用粘性」「AT 是否过期」两条是动态判断，表表达不了 |
+| T2.5 `ErrorKind` + `Policy` | **不做**。这是**新增错误分类法**（Transient/Permanent/Config），不是收敛重复路径；要改 447 处 `except Exception` 的语义，风险等同于 M5 |
+| T2.6 `TokenPlan` 5 函数 → 1 | **已满足**。`resolve_chatgpt_token_plan()` 就是那个「1」：把 `refresh_token` / `access_token_only` / 旧 `chatgpt_rt_route` 全部归一到三个方案，`tests/test_chatgpt_token_plan_settings.py` 覆盖旧值 |
+| T2.7 `AccountProxyBinder` 3 处 → 1 | **不做**。三处语义**不同**：注册路径不判「可绑定」（判了会把好代理排除），维护与动作路径要判。合并等于把 field-notes 里「补绑是负优化」那个坑重挖 |
+| T3.4 改写 13 个 B 类测试 | **已失效**。B 类的前提是「依赖 `api.tasks` 模块级状态，会挡住 T3.2」。实际做法是把状态搬进 `services/task_service` 并把 patch 目标改过去（9 处），T3.2 直接完成，不需要构造注入。清单里的 13 个文件当前全绿 |
