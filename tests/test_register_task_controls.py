@@ -144,7 +144,7 @@ class RegisterRetryRoundsTests(unittest.TestCase):
             patch("core.base_mailbox.create_mailbox", return_value=_FakeMailbox()),
             patch("core.db.save_account", side_effect=lambda account: account),
             patch(
-                "api.tasks._save_task_log",
+                "services.task_service.save_task_log",
                 side_effect=lambda *args, **kwargs: saved_logs.append((args, kwargs)),
             ),
         ):
@@ -249,7 +249,7 @@ class NonRetryableFailureTests(unittest.TestCase):
             patch("core.base_mailbox.create_mailbox", return_value=_FakeMailbox()),
             patch("core.db.save_account", side_effect=lambda account: account),
             patch(
-                "api.tasks._save_task_log",
+                "services.task_service.save_task_log",
                 side_effect=lambda *args, **kwargs: saved_logs.append((args, kwargs)),
             ),
         ):
@@ -327,7 +327,7 @@ class RegisterTaskControlFlowTests(unittest.TestCase):
             patch("core.registry.get", return_value=_FakePlatform),
             patch("core.base_mailbox.create_mailbox", return_value=_FakeMailbox()),
             patch("core.db.save_account", side_effect=lambda account: account),
-            patch("api.tasks._save_task_log"),
+            patch("services.task_service.save_task_log"),
         ):
             _run_register(task_id, req)
 
@@ -359,7 +359,7 @@ class RegisterTaskControlFlowTests(unittest.TestCase):
             patch("core.registry.get", return_value=_FakeChatGPTPlatform),
             patch("core.base_mailbox.create_mailbox", return_value=_FakeMailbox()),
             patch("core.db.save_account", side_effect=lambda account: account),
-            patch("api.tasks._save_task_log"),
+            patch("services.task_service.save_task_log"),
         ):
             _run_register(task_id, req)
 
@@ -412,7 +412,7 @@ class BrokenPipeResilienceTests(unittest.TestCase):
             patch("core.registry.get", return_value=_FakeChatGPTPlatform),
             patch("core.base_mailbox.create_mailbox", return_value=_FakeMailbox()),
             patch("core.db.save_account", side_effect=lambda account: account),
-            patch("api.tasks._save_task_log"),
+            patch("services.task_service.save_task_log"),
         ):
             _run_register(task_id, req)
 
@@ -435,8 +435,8 @@ class BrokenPipeResilienceTests(unittest.TestCase):
 
         with (
             patch("core.registry.get", side_effect=RuntimeError("平台加载炸了")),
-            patch("api.tasks._log", side_effect=BrokenPipeError(32, "Broken pipe")),
-            patch("api.tasks._save_task_log"),
+            patch("services.task_service.log", side_effect=BrokenPipeError(32, "Broken pipe")),
+            patch("services.task_service.save_task_log"),
         ):
             _run_register(task_id, req)
 

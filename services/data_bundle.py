@@ -570,7 +570,7 @@ def _rollback_import(
 def _has_active_tasks() -> bool:
     # 走公开包装器而不是直接伸进 `_task_store` 单例：任务存储将来若加
     # 门控（这正是该守卫的使用模式），私有直连会静默漂移。
-    from api.tasks import has_active_register_task
+    from services.task_service import has_active_register_task
 
     return bool(has_active_register_task())
 

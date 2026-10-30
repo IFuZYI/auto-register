@@ -44,6 +44,8 @@
 
 from __future__ import annotations
 
+from services.task_store_io import persist_task_snapshot
+
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Optional
 
@@ -635,19 +637,19 @@ def _open_auto_task(
     try:
         import time as _time
 
-        from api import tasks as _api
+        from services import task_service as _api
 
         task_id = f"{source}_{int(_time.time() * 1000)}"
-        _api._task_store.create(
+        _api.task_store.create(
             task_id,
             platform=platform,
             total=max(0, int(total)),
             source=source,
             meta=dict(meta or {}),
         )
-        _api._task_store.mark_running(task_id)
-        _api._persist_task_snapshot(task_id)
-        return task_id, _api._task_store.control_for(task_id)
+        _api.task_store.mark_running(task_id)
+        persist_task_snapshot(task_id)
+        return task_id, _api.task_store.control_for(task_id)
     except Exception:  # noqa: BLE001 - 记录失败不影响本轮执行
         return None, None
 
@@ -665,9 +667,9 @@ def _close_auto_task(
     if task_id is None:
         return
     try:
-        from api import tasks as _api
+        from services import task_service as _api
 
-        _api._task_store.finish(
+        _api.task_store.finish(
             task_id,
             status=status,
             success=max(0, int(success)),
@@ -675,8 +677,8 @@ def _close_auto_task(
             skipped=max(0, int(skipped)),
             errors=[str(e) for e in errors],
         )
-        _api._persist_task_snapshot(task_id)
-        _api._task_store.cleanup()
+        persist_task_snapshot(task_id)
+        _api.task_store.cleanup()
     except Exception:  # noqa: BLE001 - 收尾失败只影响可见性
         pass
 
@@ -692,9 +694,9 @@ def _make_logger(
         if sink is not None:
             sink(msg)
         if task_id is not None:
-            from api import tasks as _api
+            from services import task_service as _api
 
-            _api._log(task_id, msg)
+            _api.log(task_id, msg)
         elif sink is None:
             print(f"{prefix} {msg}")
 

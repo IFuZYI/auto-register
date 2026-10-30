@@ -17,35 +17,37 @@ from core.task_runtime import (
 )
 import time, json, asyncio, threading, logging
 
+# 任务运行时的共享状态与写原语住在服务层（`services/task_service.py`）。
+# 这里保留 `_` 前缀别名：路由与测试都按老名字引用，行为一字未改。
+from services.task_service import (  # noqa: E402
+    CLEANUP_THRESHOLD,
+    DEFAULT_REGISTER_RETRY_TIMES,
+    MAX_DEAD_END_ROUNDS,
+    MAX_FINISHED_TASKS,
+    MAX_REGISTER_RETRY_TIMES,
+    account_already_registered as _account_already_registered,
+    auto_upload_integrations as _auto_upload_integrations,
+    log as _log,
+    has_active_register_task,
+    normalize_register_retry_times,
+    save_task_log as _save_task_log,
+    save_task_log_sync as _save_task_log_sync,
+    task_store as _task_store,
+)
+
 router = APIRouter(prefix="/tasks", tags=["tasks"])
 logger = logging.getLogger(__name__)
 
-MAX_FINISHED_TASKS = 200
-CLEANUP_THRESHOLD = 250
-_task_store = RegisterTaskStore(
-    max_finished_tasks=MAX_FINISHED_TASKS,
-    cleanup_threshold=CLEANUP_THRESHOLD,
-)
 
 
-MAX_REGISTER_RETRY_TIMES = 10
-DEFAULT_REGISTER_RETRY_TIMES = 1
 # 「重开也是同样结局」的失败最多连着出现几轮就收手。
 #
 # 手机注册里这类失败（账号已建好、接码平台一条短信都没收到）以前是一票否决：
 # 第一轮撞上就把用户填的重试轮数整个作废，看上去就是「我写了没反应」。可一轮
 # 只用了一个号，凭它断定整个号源都被静默拦码证据太薄 —— 再开一轮确认一下，
 # 连着两轮同样结局才是真的号源问题，那时候继续只会多几个孤号。
-MAX_DEAD_END_ROUNDS = 2
 
 
-def normalize_register_retry_times(value) -> int:
-    """空值按默认算，越界夹回去 —— 这个数字来自表单和配置项，什么都可能填。"""
-    try:
-        parsed = int(str(value).strip())
-    except (TypeError, ValueError):
-        return DEFAULT_REGISTER_RETRY_TIMES
-    return max(0, min(parsed, MAX_REGISTER_RETRY_TIMES))
 
 
 #: 单次注册任务的账号数上限。
@@ -288,104 +290,14 @@ def enqueue_register_task(
     return task_id
 
 
-def has_active_register_task(
-    *, platform: str | None = None, source: str | None = None
-) -> bool:
-    return _task_store.has_active(platform=platform, source=source)
 
 
-def _log(task_id: str, msg: str):
-    """向任务追加一条日志。
-
-    stdout 用 `safe_print`：服务被 `... | tee` 或编辑器终端拉起时，那个进程
-    一走 stdout 读端就消失，裸 print 会抛 BrokenPipeError —— 任务线程里会把它
-    当成注册失败，收尾路径再抛一次还会跳过 finish() 让任务卡在 running
-    （详见 core/console.py）。
-    """
-    from core.console import safe_print
-
-    ts = time.strftime("%H:%M:%S")
-    entry = f"[{ts}] {msg}"
-    _task_store.append_log(task_id, entry)
-    _persist_task_snapshot(task_id)
-    safe_print(entry)
 
 
-def _save_task_log(
-    platform: str, email: str, status: str, error: str = "", detail: dict = None
-):
-    """Write a TaskLog record to the database (fire-and-forget, non-blocking)."""
-    def _write():
-        _save_task_log_sync(platform, email, status, error=error, detail=detail)
-    threading.Thread(target=_write, daemon=True).start()
 
 
-def _save_task_log_sync(
-    platform: str, email: str, status: str, error: str = "", detail: dict = None
-) -> dict:
-    """同步写一条任务历史（测试与 JSON 后端用；生产走线程版）。
-
-    抽出来的理由：JSON 后端下写路径要能**同步**返回刚写的行（调用方拿 id），
-    而 `_save_task_log` 是 fire-and-forget（起线程、不返回）。
-    """
-    payload = {
-        "platform": platform, "email": email, "status": status,
-        "error": error, "detail": detail or {},
-    }
-    from core.db.task_log_repository import task_log_repository
-
-    written = task_log_repository.add_json(payload)
-    if written is not None:
-        return written
-
-    with Session(current_engine()) as s:
-        log = TaskLog(
-            platform=platform,
-            email=email,
-            status=status,
-            error=error,
-            detail_json=json.dumps(detail or {}, ensure_ascii=False),
-        )
-        s.add(log)
-        s.commit()
-        s.refresh(log)
-        return {
-            "id": log.id, "platform": log.platform, "email": log.email,
-            "status": log.status, "error": log.error,
-            "detail_json": log.detail_json, "created_at": log.created_at,
-        }
 
 
-def _account_already_registered(platform: str, email: str) -> bool:
-    """该 (平台, 邮箱) 是否已注册过。
-
-    邮箱是账号唯一业务键；命中即跳过，避免重复注册同一个邮箱。
-    查不到或库不可用时返回 False —— 宁可多注册一次，也不要因为判重故障
-    把正常任务全卡死。
-    """
-    try:
-        from core.db import account_repository
-
-        return account_repository.is_registered(platform, email)
-    except Exception as exc:  # pragma: no cover - 防御性
-        logger.warning("判重失败（按未注册处理）: %s", exc)
-        return False
-
-
-def _auto_upload_integrations(task_id: str, account):
-    """注册成功后自动导入外部系统（后台线程，不阻塞注册流程）。"""
-    def _run():
-        try:
-            from services.external_sync import sync_account
-
-            for result in sync_account(account):
-                name = result.get("name", "Auto Upload")
-                ok = bool(result.get("ok"))
-                msg = result.get("msg", "")
-                _log(task_id, f"  [{name}] {'[OK] ' + msg if ok else '[FAIL] ' + msg}")
-        except Exception as e:
-            _log(task_id, f"  [Auto Upload] 自动导入异常: {e}")
-    threading.Thread(target=_run, daemon=True).start()
 
 
 @router.post("/backfill-rt")
