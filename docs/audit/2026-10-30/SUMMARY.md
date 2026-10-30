@@ -112,10 +112,12 @@ password/token 改成落盘密文（D-01/D-02）。
    降级前预检主键映射，撞主键直接拒绝（`ALLOW_DESTRUCTIVE_DOWNGRADE=1` 才放行）。
 3. **JSON 后端主路径仍不等价**（D-03/D-04/D-05）：Outlook 池写错表、改账号 500。
    凭据明文那半条已修（`c539dda` 落盘封口）。要么补齐，要么启动时拒绝。
-4. **任务收尾无 `try/finally`（actions F-03）→ 任务永久 running**：
-   进程内异常路径会让任务卡在 running，除 `test_tasks_list_perf` 外无兜底。
-5. **面板「拉回」被登记闸门锁死**（panels F-06）：生产库 CPA 0/667 登记，
-   「更新本地」永远不会执行。
+4. ~~任务收尾无 `try/finally`（actions F-03）→ 任务永久 running~~ ——
+   **已修（`2c84226`）**：两处收尾改 `try: log() finally: finish()`，
+   `finish`/`persist_snapshot` 各自再包一层；+2 条测试（日志抛 locked / 快照抛错）。
+5. ~~面板「拉回」被登记闸门锁死（panels F-06）~~ —— **已缓解（`97bfd0c`）**：
+   语义不变（仍只同步已登记账号），但零登记时返回 `enrolled/candidates/reason`，
+   界面能说清「先登记再拉回」。
 6. **注册主链 `AuthFlow.run_register` 无任何行为测试**（tests-quality P0）：
    mutation 实测——函数体首行插 `raise`，注册相关 83 条测试全绿。真机跑通≠有兜底。
 
