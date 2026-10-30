@@ -22,6 +22,7 @@ import argparse
 import asyncio
 import json
 import os
+import pathlib
 import sys
 import tempfile
 from pathlib import Path
@@ -180,9 +181,27 @@ async def _run(steps: list[dict], *, sweep: bool = False) -> None:
             found=any(str((x or {}).get("task_id") or (x or {}).get("id")) == str(task_id) for x in (tasks or [])),
         )
 
-        # 11d. 任务详情/日志（不存在的任务也该是 404，不是 500）
+        # 11d. 任务详情（不存在的任务也该是 404，不是 500）
         if task_id:
             _record(steps, "task.detail", client.get(f"/api/tasks/{task_id}"))
+
+            # 11e. 让它真跑两秒，再看它跑到哪一步：本机没有邮箱服务，
+            #      正常形态是「跑到取邮箱才失败」，而不是立刻崩在装配阶段。
+            await asyncio.sleep(2)
+            detail = client.get(f"/api/tasks/{task_id}").json() or {}
+            logs = detail.get("logs") or []
+            last = ""
+            if logs:
+                entry = logs[-1]
+                last = str(entry.get("message") if isinstance(entry, dict) else entry)[:60]
+            _record(
+                steps,
+                "task.progress",
+                client.get(f"/api/tasks/{task_id}"),
+                status_field=str(detail.get("status") or ""),
+                log_count=len(logs),
+                last=last,
+            )
 
         # 12. 统计
         r = client.get("/api/accounts/stats")
@@ -264,6 +283,9 @@ def main(argv: list[str] | None = None) -> int:
         help="存储后端（默认 sqlite；json 走另一条写路径）",
     )
     parser.add_argument(
+        "--out", default=None, help="把 JSON 报告写到这个路径（stdout 仍照常打印）",
+    )
+    parser.add_argument(
         "--sweep", action="store_true",
         help="额外把所有无路径参数的 GET 路由打一遍（5xx 记为失败）",
     )
@@ -281,6 +303,10 @@ def main(argv: list[str] | None = None) -> int:
         "failed": len(failed),
         "ok": not failed,
     }
+    if args.out:
+        pathlib.Path(args.out).write_text(
+            json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
     if args.quiet:
         print(f"{len(steps) - len(failed)}/{len(steps)} 步通过")
         for item in failed:
