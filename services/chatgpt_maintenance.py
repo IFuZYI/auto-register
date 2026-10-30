@@ -335,7 +335,10 @@ def _default_execute(account_id: str) -> dict[str, Any]:
     从池里取备用（惰性来源 —— 避免白推轮转游标）并**写回** `register_proxy`
     （用户要求「不再是仅有注册才绑定」）。
     """
-    from api.actions import _apply_action_result, _to_platform_account
+    from services.action_execution import (
+        apply_action_result as _apply_action_result,
+        to_platform_account as _to_platform_account,
+    )
     from core.base_platform import RegisterConfig
     from core.config_store import config_store
     from core.db import AccountModel, platform_session

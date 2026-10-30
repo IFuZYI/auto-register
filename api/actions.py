@@ -44,13 +44,17 @@ def _get_platform_cls_or_404(platform: str):
         raise HTTPException(404, detail) from exc
 
 
-def _merge_extra_patch(base: dict, patch: dict) -> dict:
-    for key, value in patch.items():
-        if isinstance(value, dict) and isinstance(base.get(key), dict):
-            _merge_extra_patch(base[key], value)
-        else:
-            base[key] = value
-    return base
+# 动作执行的核心逻辑住在服务层（`services/action_execution.py`）。
+# 这里保留 `_` 前缀别名：历史调用点（services 与 tests）都按这个名字引用。
+from services.action_execution import (
+    UPLOAD_ACTIONS as _UPLOAD_ACTIONS,
+    apply_action_result as _apply_action_result,
+    is_banned_status as _is_banned_status,
+    merge_extra_patch as _merge_extra_patch,
+    result_message as _result_message,
+    to_platform_account as _to_platform_account,
+)
+
 
 
 #: 上传动作 → 该动作的同步状态写入函数（import 路径延迟到调用时）。
@@ -59,12 +63,6 @@ def _merge_extra_patch(base: dict, patch: dict) -> dict:
 #: 漏加的症状（界面永远不显示上传状态）曾经在 sub2api / chatgpt2api
 #: 上各踩过一次。grok 的 upload_sub2api 也收进来 —— 它此前没有落库，
 #: 面板上 Grok 的 Sub2API 上传状态一直是空的（同一 bug 类的兄弟路径）。
-_UPLOAD_SYNC_WRITERS: dict[str, tuple[str, str]] = {
-    # action_id: (模块, 函数名)
-    "upload_cpa": ("services.chatgpt_sync", "update_account_model_cpa_sync"),
-    "upload_sub2api": ("services.chatgpt_sync", "update_account_model_sub2api_sync"),
-    "upload_chatgpt2api": ("services.chatgpt_sync", "update_account_model_chatgpt2api_sync"),
-}
 
 #: 面板凭据上传类动作 —— 禁用（banned）账号一律跳过（用户要求 2026-10-07
 #: 「禁用的不参与同步」「已封禁的没必要在面板同步凭据」）。
@@ -73,187 +71,14 @@ _UPLOAD_SYNC_WRITERS: dict[str, tuple[str, str]] = {
 #: banned；动作端点（批量/单账号）是另一条路径，不排除的话直调仍会把死凭证
 #: 推给远端（远端拿死凭证刷 token、污染号池）。集合覆盖 ChatGPT 与 Grok 的
 #: 全部上传动作 —— 新增上传动作时这里要同步加。
-_UPLOAD_ACTIONS: frozenset[str] = frozenset({
-    "upload_cpa",
-    "upload_sub2api",
-    "upload_chatgpt2api",
-    "upload_grok2api",
-})
 
 
-def _is_banned_status(status: Any) -> bool:
-    """账号是否处于「禁用」状态（大小写/空白容忍）。"""
-    return str(getattr(status, "value", status) or "").strip().lower() == "banned"
 
 
-def _record_upload_sync(
-    platform: str,
-    action_id: str,
-    acc_model: AccountModel,
-    result: dict[str, Any],
-    session: Session,
-) -> None:
-    """把上传动作的结果写进账号的 `sync_statuses.<面板名>`。
-
-    没写的话面板管理页「上传状态」永远不显示 —— 界面读的是
-    `extra.sync_statuses[<面板名>]`，与这里写入的位置必须一致。
-
-    `upload_cpa` 对 ChatGPT 与 Grok 都有效（同一个 CLIProxyAPI 端点）；
-    sub2api / chatgpt2api 当前只在对应平台声明。查表按 action_id 即可，
-    平台差异由「该平台是否声明并实现了这个动作」决定（不声明就调不到）。
-    """
-    target = _UPLOAD_SYNC_WRITERS.get(action_id)
-    if target is None:
-        return
-    module_name, func_name = target
-    import importlib
-
-    writer = getattr(importlib.import_module(module_name), func_name)
-    sync_msg = result.get("data") or result.get("error") or ""
-    writer(
-        acc_model,
-        bool(result.get("ok")),
-        str(sync_msg),
-        session=session,
-        commit=False,
-    )
 
 
-def _to_platform_account(acc_model: AccountModel):
-    """ORM 行 → 领域对象。转换只有 `AccountModel.to_record()` 一处实现。"""
-    from core.base_platform import AccountStatus
-
-    record = acc_model.to_record()
-    # 有些动作要按 id 记账（如 Grok 的 CPA 状态同步拿它当结果字典的键）。
-    # 放进 extra 传给平台侧，平台代码不必知道仓储的存在。
-    if record.id:
-        record.extra.setdefault("account_id", record.id)
-    # 用 coerce 而非 AccountStatus(...)：库里可能存在枚举外的历史状态值
-    # （如 chatgpt 侧的 active/banned），直接构造会抛 ValueError 打断整个操作
-    record.status = AccountStatus.coerce(record.status)
-    return record
 
 
-def _apply_action_result(
-    platform: str,
-    action_id: str,
-    acc_model: AccountModel,
-    result: dict[str, Any],
-    session: Session,
-) -> None:
-    if platform == "chatgpt":
-        raw_data = result.get("data")
-        data: dict = raw_data if isinstance(raw_data, dict) else {}
-        status_reason = ""
-        if action_id == "probe_local_status":
-            status_reason = apply_chatgpt_status_policy(acc_model, local_probe=data.get("probe"))
-        elif action_id == "sync_cliproxyapi_status":
-            status_reason = apply_chatgpt_status_policy(acc_model, remote_sync=data.get("sync"))
-        elif action_id == "refresh_token":
-            # 刷新链自己认过封禁措辞，这里只把结论交给共享策略落状态。
-            # 刷新成功（ok）是正向信号 → usable=True 让过期/失效恢复「正常」。
-            status_reason = apply_chatgpt_status_policy(
-                acc_model,
-                banned=bool(data.get("banned")),
-                usable=bool(result.get("ok")),
-                # 失败分类：`permanent`（invalid_grant 等）落「失效」并停止重试；
-                # `configuration`（invalid_client）**不动状态** —— 那是我们的
-                # 配错，账号可能是好的。
-                refresh_kind=str(data.get("refresh_kind") or ""),
-            )
-        elif action_id in ("backfill_refresh_token", "bind_2fa"):
-            # 补 RT / 绑 2FA 的登录链同样会发掘「号没了」（用户要求：禁用
-            # 靠登录流程发掘）—— 结论经 data.banned 传上来，这里落状态。
-            status_reason = apply_chatgpt_status_policy(
-                acc_model,
-                banned=bool(data.get("banned")),
-            )
-        if status_reason:
-            from datetime import datetime, timezone
-
-            acc_model.updated_at = datetime.now(timezone.utc)
-            account_repository.save(acc_model, session=session)
-    elif platform == "grok":
-        # grok 的探测/刷新动作同样要落状态（对齐 grok2api 的失效判定）——
-        # 此前只有 chatgpt 有状态策略，grok 测活失败不会改状态。
-        from services.grok_account_state import apply_grok_status_policy
-
-        raw_data = result.get("data")
-        data: dict = raw_data if isinstance(raw_data, dict) else {}
-        status_reason = ""
-        if action_id == "probe":
-            code = data.get("status")
-            # 只认真实的探测码。**不**读 `sso_status` 当失效判据：
-            # `_sso_status` 那套判定已知不可靠（响应没有 url、i18n 文案表里带
-            # sign-in 字样、全新会话会把有效 SSO 判成未登录），用它落「失效」
-            # 会误杀好号（评审实测）。SSO 是否还有效，用「刷新 Token（登录协议）」
-            # 的真实结果判 —— 那条走 `probe_refresh` / `refresh_token` 分支。
-            status_reason = apply_grok_status_policy(
-                acc_model,
-                probe_code=int(code) if code is not None else None,
-                probe_summary=str(data.get("summary") or ""),
-            )
-        elif action_id == "probe_refresh":
-            status_reason = apply_grok_status_policy(
-                acc_model,
-                refresh_kind=str(data.get("kind") or ""),
-                refresh_error=str(data.get("error_code") or result.get("error") or ""),
-                usable=bool(result.get("ok")),
-            )
-        elif action_id == "sync_cliproxyapi_status":
-            sync_raw = data.get("sync")
-            sync = sync_raw if isinstance(sync_raw, dict) else {}
-            status_reason = apply_grok_status_policy(
-                acc_model,
-                remote_state=str(sync.get("remote_state") or ""),
-            )
-        elif action_id == "refresh_token":
-            status_reason = apply_grok_status_policy(
-                acc_model,
-                refresh_kind=str(data.get("kind") or ""),
-                refresh_error=str(result.get("error") or ""),
-                usable=bool(result.get("ok")),
-            )
-        if status_reason:
-            from datetime import datetime, timezone
-
-            acc_model.updated_at = datetime.now(timezone.utc)
-            account_repository.save(acc_model, session=session)
-    if isinstance(result.get("account_extra_patch"), dict):
-        patch = result["account_extra_patch"]
-        extra = acc_model.get_extra()
-        _merge_extra_patch(extra, patch)
-        acc_model.set_extra(extra)
-        # token 列 = 平台主凭证的镜像（chatgpt → AT，grok → SSO）。
-        # 整理前这里无条件写 access_token —— grok 的刷新补丁里带 AT，把 SSO
-        # 镜像盖成了 AT（线上 32 行里 12 行如此，读侧 `or account.token` 的
-        # 兜底会拿错值）。改为按平台取镜像字段；没有对应值时不碰列。
-        from core.credential_fields import sync_token_column
-
-        sync_token_column(acc_model, platform, extra)
-        from datetime import datetime, timezone
-        acc_model.updated_at = datetime.now(timezone.utc)
-        account_repository.save(acc_model, session=session)
-    _record_upload_sync(platform, action_id, acc_model, result, session)
-    if result.get("ok") and result.get("data", {}) and isinstance(result["data"], dict):
-        data = result["data"]
-        # 凭证字段统一走注册表（`core/credential_fields.py`）：只收凭证类字段、
-        # 归一到规范名（camelCase 落库的也认），其余展示字段（message/status/
-        # strategy 等）不落。整理前这里是手写集合，混着 camelCase 与
-        # `clientId`/`clientSecret`/`webAccessToken` 三个零生产方的死键。
-        from core.credential_fields import canonical_writes, sync_token_column
-
-        writes = canonical_writes(data)
-        if writes:
-            extra = acc_model.get_extra()
-            extra.update(writes)
-            acc_model.set_extra(extra)
-            # token 列 = 平台主凭证的镜像（chatgpt → AT，grok → SSO）
-            sync_token_column(acc_model, platform, writes)
-            from datetime import datetime, timezone
-
-            acc_model.updated_at = datetime.now(timezone.utc)
-            account_repository.save(acc_model, session=session)
 
 
 def _resolve_action_proxy(acc_model: AccountModel) -> str:
@@ -405,23 +230,6 @@ def _execute_batch_panel_status(
     }
 
 
-def _result_message(result: dict[str, Any]) -> str:
-    data = result.get("data")
-    if isinstance(data, dict):
-        for key in ("message", "detail", "url", "checkout_url", "cashier_url"):
-            value = str(data.get(key) or "").strip()
-            if value:
-                return value
-        # data 里没有可展示的文案时，退回 `error` 而不是把 data 序列化成 JSON。
-        # 实测踩过：refresh_token 失败时 data 只有 {"banned": false}，于是批量界面
-        # 上那一行显示成 `{"banned": false}` —— 而人话原因就写在 error 里。
-        error = str(result.get("error") or "").strip()
-        if error:
-            return error
-        return json.dumps(data, ensure_ascii=False)
-    if str(data or "").strip():
-        return str(data)
-    return str(result.get("error") or "").strip()
 
 
 def _execute_batch_cliproxy_sync(accounts: list[AccountModel], session: Session) -> dict[str, Any]:

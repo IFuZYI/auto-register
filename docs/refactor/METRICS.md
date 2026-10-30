@@ -21,10 +21,11 @@ HTTP 端点     102
 
 | # | 指标 | 基线 | 阶段 1 后 | 阶段 2 后 | 阶段 3 后 |
 |---|---|---:|---:|---:|---:|
-| M1 | `from api import` 违规 | 14 | 14 | 14 | **0** |
+| M1a | `from api import tasks` 延迟门面（T3.1 才能拆） | 14 | 14 | 14 | **0** |
+| M1b | `from api.<mod> import <私有 helper>`（真分层倒置） | 5 | **0** | 0 | 0 |
 | M2a | 动作声明数（plugin `"id": "`） | 17 | 17 | **7** | 7 |
 | M2b | 动作 id 字符串散落 | 97 | 97 | ≤ 40 | ≤ 20 |
-| M3 | 鸭子类型 shim | 13 | **3** | 3 | 3 |
+| M3 | 鸭子类型 shim（账号/代理空壳类） | 6 | **2** | 2 | 0 |
 | M4 | 账号表示模型 | 2 | **1** | 1 | 1 |
 | M5 | `except Exception` | 471 | ≤ 450 | ≤ 420 | ≤ 380 |
 | M6 | 其中静默 `pass` | 80 | ≤ 65 | ≤ 45 | ≤ 25 |
@@ -88,3 +89,19 @@ AND dump diff 为空 或 差异已登记
 ```
 
 三条缺一不可。**只有测试全绿不算完成** —— 测试只覆盖你想到的路径。
+
+## 口径修正记录（阶段 1 实测）
+
+**M1 拆成两个数**：原口径 `grep "from api import\|import api"` 数出来的 14 行**全部**是
+`from api import tasks as _api` —— 那是刻意的延迟绑定门面（测试 patch `api.tasks` 必须被
+服务层看见），不是分层倒置。真正的倒置是 `from api.actions import _apply_action_result`
+这类**私有 helper 跨层引用**，共 5 处，原口径一条都没数到（因为写的是 `from api.actions`
+而不是 `from api import`）。
+
+T3.2a 把那 5 处搬到了 `services/action_execution.py`，M1b = 0。
+M1a 要等 T3.1 把任务注册表从 `api/tasks.py` 挪进 `TaskService` 才能动 —— 那是阶段 3 的活。
+
+**M3 的原口径不可复现**：`grep "class _[A-Z][A-Za-z]*:"` 会匹配到 docstring 里的示例
+（我自己写的注释就污染过一次），而且把 `_Job` / `_Entry` / `_Connection` 这类正常私有类
+也算成 shim。改为只数「账号/代理鸭子类型空壳」：基线 6（`_A`×2、`_SyncAccount`、
+`_UploadAccount`、`_JsonProxy`、`_LegacyProxyParts`），现在 2（剩两个代理相关的）。

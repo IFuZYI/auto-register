@@ -709,7 +709,11 @@ def _run_probe_status(task_id: str, account_ids: list[int], req: "ProbeStatusTas
     base_config = config_store.get_all() or {}
 
     def _handle(*, account_id, fields, proxy, control, attempt_id) -> AttemptResult:
-        from api.actions import _apply_action_result, _result_message, _to_platform_account
+        from services.action_execution import (
+        apply_action_result as _apply_action_result,
+        result_message as _result_message,
+        to_platform_account as _to_platform_account,
+    )
         from core.base_platform import RegisterConfig
         from core.db import AccountModel, platform_session
         from core.registry import get
@@ -789,7 +793,11 @@ def _run_batch_action(task_id: str, account_ids: list[int], req: "BatchActionTas
     platform = str(req.platform or "").strip().lower()
 
     def _handle(*, account_id, fields, proxy, control, attempt_id) -> AttemptResult:
-        from api.actions import _apply_action_result, _result_message, _to_platform_account
+        from services.action_execution import (
+        apply_action_result as _apply_action_result,
+        result_message as _result_message,
+        to_platform_account as _to_platform_account,
+    )
         from core.base_platform import RegisterConfig
         from core.db import AccountModel, platform_session
         from core.registry import get
@@ -812,7 +820,10 @@ def _run_batch_action(task_id: str, account_ids: list[int], req: "BatchActionTas
                 _api._log(task_id, f"[SKIP] 账号 #{account_id} 不存在")
                 return AttemptResult.skipped("账号不存在")
             # 禁用账号不参与面板上传（与 `_UPLOAD_ACTIONS` 的既有口径一致）
-            from api.actions import _UPLOAD_ACTIONS, _is_banned_status
+            from services.action_execution import (
+            UPLOAD_ACTIONS as _UPLOAD_ACTIONS,
+            is_banned_status as _is_banned_status,
+        )
 
             if action_id in _UPLOAD_ACTIONS and _is_banned_status(row.status):
                 _api._log(task_id, f"[SKIP] {email} 已禁用，不参与面板凭据上传")
@@ -866,7 +877,11 @@ def _run_refresh_token(task_id: str, account_ids: list[int], req: RefreshTokenTa
     base_config = config_store.get_all() or {}
 
     def _handle(*, account_id, fields, proxy, control, attempt_id) -> AttemptResult:
-        from api.actions import _apply_action_result, _result_message, _to_platform_account
+        from services.action_execution import (
+        apply_action_result as _apply_action_result,
+        result_message as _result_message,
+        to_platform_account as _to_platform_account,
+    )
         from core.base_platform import RegisterConfig
         from core.db import AccountModel, platform_session
         from core.registry import get
