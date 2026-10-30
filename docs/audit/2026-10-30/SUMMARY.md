@@ -170,7 +170,7 @@ password/token 改成落盘密文（D-01/D-02）。
 
 | 门禁 | 结果 |
 |---|---|
-| 全量测试 | **3131 passed / 0 failed / 1 skipped**（326s，含本轮全部 11 批改动与新增 45+ 条回归） |
+| 全量测试 | **3159 passed / 0 failed / 1 skipped**（335s，含本轮全部 31 批改动与新增 80+ 条回归） |
 | `alembic check`（真库 / 空库） | 均 `No new upgrade operations detected` |
 | `compileall` | 通过 |
 | `pyflakes`（undefined name） | 0 |
@@ -178,7 +178,7 @@ password/token 改成落盘密文（D-01/D-02）。
 | 前端 eslint | 39 problems（与基线一致，无新增） |
 | 明文凭据扫描 | 账号密码 / AT·SSO / extra 六键 / 配置口令 / 2FA journal 全 0 |
 | 黑盒冒烟 `scripts/e2e_smoke.py --sweep` | **46 步 0 失败**（含 `app.openapi()` 全路由 sweep） |
-| 运行中服务 | `http://127.0.0.1:8000`，版本 `bb01a71`，`stale: false`，SPA `/` 200 |
+| 运行中服务 | `http://127.0.0.1:8000`，版本 `4d081e7`，`stale: false`，SPA `/` 200 |
 
 > 注意：`npx tsc --noEmit` 在本仓库**不可靠**（项目引用下不检查页面文件），
 > 前端门禁一律用 `npm run build`。
