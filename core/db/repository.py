@@ -118,9 +118,11 @@ def json_record_to_model(record: dict[str, Any]) -> AccountModel:
         for key, value in record.items()
         if key not in _MODEL_SKIP_KEYS
     }
-    # `password` 不是 pydantic 字段（是透明加解密的 property），但构造器认这个
-    # 关键字 —— 不把它加回来，JSON 后端读出来的账号密码全是空串。
-    columns = set(AccountModel.model_fields.keys()) | {"password"}
+    # `password` / `token` 都不是 pydantic 字段（是透明加解密的 property），
+    # 但构造器认这两个关键字 —— 不把它们加回来，JSON 后端读出来的账号
+    # 密码与 AT/SSO 全是空串（`token` 是 2026-10-30 加密改造后新踩的一次：
+    # 同一条过滤把 token 也筛掉了，`test_repository_backends` 的 json 子用例抓到）。
+    columns = set(AccountModel.model_fields.keys()) | {"password", "token"}
     kwargs = {k: v for k, v in kwargs.items() if k in columns}
     return AccountModel(**kwargs)
 
@@ -596,6 +598,14 @@ class AccountRepository:
                 else None
             ),
         )
+        # **落盘前封口**：JSON 文件与 SQLite 列必须同一种形态（都是 `v1:` 密文）。
+        # 原来这里写的是明文 —— 一次 `cat accounts.json` 就能拿到全池密码与
+        # AT/SSO（data-layer D-01/D-02）。`encrypt_text` 对已加密值幂等。
+        from core.credential_crypto import encrypt_text
+
+        for key in ("password", "token"):
+            if fields.get(key):
+                fields[key] = encrypt_text(str(fields[key]))
         if existing_record:
             updated = store.update(existing_record["id"], fields)
             return json_record_to_model(updated or {})

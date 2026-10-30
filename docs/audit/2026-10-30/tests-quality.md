@@ -3,9 +3,9 @@
 [MODE: SANDBOX]
 
 - 审计对象：`/data/workspace/Register`（Python 3.12，pytest 9.1.1）
-- 审计基线：起点 `4680c8d`，审计过程中 HEAD 被并行提交推进到 **`c93b71f`**（`fix(auth): 堵住 setup 抢注接管 …`）。本文行号以 `c93b71f` 为准；期间被上游修掉的瞬时问题会单独标注。
-- 口径：只读审计。除本文件外未改动任何仓库文件；验证用的 mutation 插件放在仓库外的 scratch 目录。
-- 规模：`tests/` 下 **224 个 `test_*.py`**、AST 统计 **3043 个 test 函数**、pytest 收集 **3107 条**（含参数化/subTest），`--collect-only` 4.6s。
+- 审计基线：起点 `4680c8d`，审计过程中 HEAD 被并行提交连续推进：`c93b71f`（auth 加固）→ `a3470d3`（列表不再下发凭据）→ `e6f8670`（前端 UUID/确认）→ `519c821`（代理写回）→ `bb81e93`（token 加密落盘）→ 复核时 **`e711c7c`**。正文行号以 `c93b71f` 为准，**§9 复核补记按 `e711c7c` 校正**；两者不一致处以 §9 为准。
+- 口径：只读审计。除本文件外未改动任何仓库文件；验证用的 mutation 插件/副本放在仓库外的 scratch 目录。
+- 规模（`c93b71f` → 复核时 `e711c7c`）：`test_*.py` **224 → 227 个**、AST test 函数 **3043 → 3048**、pytest 收集 **3107 → 3112 条**（含参数化/subTest），`--collect-only` 4.6s → **3.31s**。
 
 ## 0. 结论摘要
 
@@ -13,10 +13,11 @@
 | --- | --- |
 | 关键路径兜底 | 六条主链都有测试文件，但**注册协议链、RT 的两条执行函数、平台登录的邮箱 OTP 分支、任务停止端点、通用批量动作 runner** 只有「源码字符串断言」或「只测端点不测执行体」——见 §1 |
 | 钉错误行为 | 存在把「已知盲区/旧契约」写成硬断言的用例（`test_panel_comparison.py:801` 最典型）；审计中还抓到一条安全加固前的旧契约测试（已在上游 `c93b71f` 修掉） |
-| 脆弱测试 | 真实 `sleep`/墙钟、模块级单例（`_task_store`、scheduler `_jobs`、logging handler、config_store）、**全 session 共享一个 SQLite**（74 个文件碰库，仅 3 个文件自建隔离库）、源码切片断言 |
-| 断言强度 | 36 条「只断言 status_code」、17 条「零断言」、1226 条「单断言」；其中若干条 **500/404 也能过** |
-| 运行时间 | 绝大多数逻辑测试毫秒级；**5 个文件吃掉约 100s+**（npm lint 26s、tsc 25s、PBKDF2 600k 约 24s、真实 sleep 6.4s、嵌套 pytest 收集 8s） |
-| 假通过风险 | 6 处「把被测逻辑本身替掉」：`hasattr` 当测试、`404` 也算通过、源码字符串断言（mutation 实测：注入历史 bug 后 109 条仍全绿） |
+| 脆弱测试 | 真实 `sleep`/墙钟、模块级单例（`_task_store`、scheduler `_jobs`、logging handler、config_store）、**全 session 共享一个 SQLite**（复核口径：98 个文件引用 `core.db`/`AccountModel`，仅 28 个自建临时库；见 §9.1）、源码切片断言 |
+| 断言强度 | **43 条「只断言 status_code」**、**17 条「零断言」**（AST 粗扫 39 条，扣除 22 条走自定义 `assert_*` helper 的用例）、**1243 条「单断言」**；其中若干条 **500/404 也能过** |
+| 运行时间 | 绝大多数逻辑测试毫秒级；**6 个文件吃掉约 100–120s**（npm lint 24.2s、tsc 22.0s、PBKDF2 约 24-45s、`data_bundle` 13.1s、真实 sleep 5.4s、嵌套 pytest 收集 8.3s） |
+| 假通过风险 | 6 处「把被测逻辑本身替掉」：`hasattr` 当测试、`404` 也算通过、源码字符串断言（mutation 实测：注入历史 bug 后 109 条仍全绿；`run_register` 整段 `raise` 后 83 条仍全绿；`_run_batch_action` 首行 `return None` 后 6 条仍全绿——见 §9.2） |
+| 基础设施 | **无 `pytest.ini`/`pyproject.toml`**（无 `testpaths`、无 marker、无 timeout）；仓库根直接跑 `pytest` → **246 个收集错误**；无 CI、无覆盖率门槛（§9.3） |
 
 **建议的修复顺序（P0）**：给 `AuthFlow.run_register` 补一条 `FakeHttp` 驱动的端到端测试 → 给 `platform_rt` 的 `email_otp_verification` 分支补行为测试 → 把 `_run_codex_rt` / `_run_login_rt` 的源码断言换成行为断言 → 补 `/tasks/{id}/stop`、`/skip-current` 端点测试 → 补 `_run_probe_status` / `_run_batch_action` runner 测试 → 补 `looks_like_proxy_error` + 任务时代理换绑分支。
 
@@ -37,6 +38,7 @@
 **缺口（点名）**
 
 - **`AuthFlow.run_register`（`platforms/chatgpt/protocol/auth_flow.py:567`）从未被任何测试执行。** 全仓 `grep "run_register("` 只命中 mock 的 `return_value/side_effect`（`tests/test_chatgpt_registration_engine.py:244,265,277,291`）与源码读取（`tests/test_registration_chain_ordering.py:41-44`）。这条 ~400 行的注册主链（signup → sentinel → OTP → 设密码 → callback → RT）没有任何行为兜底。
+- **复核 mutation（§9.2 实测）**：在副本的 `run_register` 函数体首行插入 `raise RuntimeError("MUTANT")`，跑 `test_registration_chain_ordering + test_chatgpt_registration_engine + test_register_task_controls + test_chatgpt_plugin + test_rt_route_reaches_protocol_flow` → **83 passed**（基线同为 83 passed）。即整条主链无条件抛异常，注册相关测试一条都不会红。
 - **`tests/route_harness.py`（437 行、`FakeHttp`/`FakeResponse`/`assert_account_persisted`）只有自测在用。** `grep -rl route_harness tests/*.py` → 仅 `tests/test_route_harness.py`；其 docstring 明说「Task 2-7 复用」，但没有任何线路测试接入（`tests/route_harness.py:1-30`）。这套夹具正是为解决「2978 条全绿时注册仍在失败」而写的，现在等于建好没通电。
 - `platforms/chatgpt/plugin.py:118` 的 `register()` 只被 adapter 替身覆盖；`create_application_platform_registration_service(...).register_chatgpt(...)`（`plugin.py:148-153`）这条真实装配链没有测试。
 
@@ -234,7 +236,7 @@ assert 'account.extra["register_proxy"] = _proxy' in src
 ### 3.3 共享数据库（最大的系统性脆弱点）
 
 - `tests/conftest.py:39-40`：整个 pytest session 共用一个临时 SQLite（`DATABASE_URL` 只设一次）。
-- **74 个测试文件**直接使用 `core.db` / `account_repository`；**只有 3 个文件**自建隔离库：`tests/test_db_modular.py:27`、`tests/test_account_repository_batch.py:19`、`tests/test_task_store_io.py:84`。
+- **98 个测试文件**引用 `core.db` / `AccountModel` / `DATABASE_URL`（原报告按更窄口径计 74）；**28 个文件**自建临时库/临时目录（`grep -rln "_IsolatedDbTestCase|tempfile.mkdtemp|TemporaryDirectory"`），典型实现见 `tests/test_task_store_io.py:84-100`、`tests/test_db_modular.py:27`、`tests/test_account_repository_batch.py:19`。
 - **27 处 `session.exec(delete(AccountModel))`** 在 setUp 里清空全表，例如 `tests/test_account_password_serialization.py:31`、`tests/test_backfill_rt_task_api.py:23,83`、`tests/test_batch_scope_consistency.py:51,100,152,251`、`tests/test_chatgpt_auto_maintenance.py:404,811,1195`。
 - **后果**：任何并行化（`pytest-xdist`）、随机顺序、或「单文件跑绿、全量跑红」都由此产生；`tests/test_proxy_tags_balance.py:82-87` 的注释直接承认「共享库里可能有别的用例建的代理」，并因此把断言弱化成「非空」。
 - **建议**：把 conftest 的「一个 session 库」改成 `function` 级 fixture（`tmp_path` + `monkeypatch core.db.engine` + `platform_database_registry.configure`），仓库里已有三份可复用的实现，抽成 `tests/conftest.py` 的 `isolated_db` 即可。
@@ -272,10 +274,11 @@ assert 'account.extra["register_proxy"] = _proxy' in src
 
 ## 4. 断言强度
 
-### 4.1 统计（AST 口径，`c93b71f`）
+### 4.1 统计（AST 口径，`c93b71f`；括号内为复核时 `e711c7c`）
 
-- test 函数 3043；**只断言 `status_code` 的 36 条**；**零断言的 17 条**；**只有 1 条断言的 1226 条（40%）**。
+- test 函数 3043（**3048**）；**只断言 `status_code` 的 36 条（**43 条**，含 `assertIn(status, (200,400,404))` 这种区间断言）**；**零断言的 17 条（复核：AST 粗扫 39 条，其中 22 条通过自定义 `assert_*` helper 断言，净 17 条）**；**只有 1 条断言的 1226 条（1243 条，约 41%）**。
 - `status_code` 精确等于 200 的仅 25 处 —— 本仓整体不是「只测 200」，问题集中在少数「接受一个区间」的用例。
+- 复核新增：**47 条用例用 `inspect.getsource`（55 个调用点，18 个文件）、121 条用例读源码/TSX 文本做断言**；6 处 `assertRaises(Exception)`；26 处测试内裸 `except Exception`（见 §9.4）。
 
 ### 4.2 「500 也能过」/「404 也能过」
 
@@ -347,8 +350,8 @@ assert 'account.extra["register_proxy"] = _proxy' in src
 
 | 位置 | 做法 | 为什么是假通过 |
 | --- | --- | --- |
-| `tests/test_batch_action_task.py:73-79` + `:90-106` | `hasattr(task_runners, "_run_batch_action")` + `getsource` 里找 `execute_action` / `_apply_action_result` | `_run_batch_action`（`services/task_runners.py:835`）**从未被执行**；整个「通用批量动作」机制（9 个动作）没有一条行为用例。若 runner 里 `execute_action` 调用被注释掉、字符串留在注释里，测试仍绿 |
-| `tests/test_probe_status_task.py:38-43` + `:63-…` | `hasattr(_run_probe_status)` + `getsource` | `_run_probe_status`（`services/task_runners.py:751`）从未执行；端点用例 404 也过（§4.2） |
+| `tests/test_batch_action_task.py:73-79` + `:90-106` | `hasattr(task_runners, "_run_batch_action")` + `getsource` 里找 `execute_action` / `_apply_action_result` | `_run_batch_action`（`services/task_runners.py:851`，`c93b71f` 时为 835）**从未被执行**；整个「通用批量动作」机制（9 个动作）没有一条行为用例。若 runner 里 `execute_action` 调用被注释掉、字符串留在注释里，测试仍绿。**复核 mutation 已证实**：函数首行加 `return None`（后面的字符串全保留）→ `6 passed`（§9.2） |
+| `tests/test_probe_status_task.py:38-43` + `:63-…` | `hasattr(_run_probe_status)` + `getsource` | `_run_probe_status`（`services/task_runners.py:767`，`c93b71f` 时为 751）从未执行；端点用例 `assertIn(status, (200,400,404))` → 404 也过（§4.2） |
 | `tests/test_account_proxy_reuse.py:197-270` | 4 条 `getsource` 断言 | `_run_register` / `_run_account_batch_task` 在这 4 条里没有执行；`register_proxy` 是否真的写进账号、日志是否真的脱敏，均未观察 |
 | `tests/test_registration_chain_ordering.py:306-339` | `assertIn("self.mailbox", src)` | mutation 实测：改成传 `None` 仍 109 passed（§2.2） |
 | `tests/test_end_to_end_flows.py:109,158` | `mock.patch("core.registry.get", return_value=_E2EPlatform)` | 「端到端」只到任务层；注册协议、插件、adapter 全部绕过。文件名的承诺大于实际 |
@@ -397,3 +400,154 @@ assert 'account.extra["register_proxy"] = _proxy' in src
 11. 代理/任务/凭据相关 8 个文件回归：`test_proxy_tags_balance + test_account_proxy_reuse + test_account_proxy_rebind_endpoints + test_register_task_controls + test_mailbox_task_control + test_credential_crypto + test_account_password_serialization + test_batch_action_task` → 79 passed / 13.40s。
 
 > 说明：审计期间 HEAD 从 `4680c8d` 推进到 `c93b71f`（并行提交），第 10 项之后又新增了认证加固提交；上表耗时是各文件在对应提交上的实测值，量级结论不受影响。
+
+---
+
+## 9. 复核补记（HEAD `e711c7c`）
+
+> 本节是第二轮复核：重新做 AST 全量统计、8 个文件单跑、2 个新 mutation，并核对基础设施。凡与上文冲突的数字，以本节为准。
+
+### 9.1 规模与隔离（复核口径）
+
+| 指标 | 值 |
+| --- | --- |
+| `tests/test_*.py` / 测试函数 / 收集条数 | **227 / 3048 / 3112**（`--collect-only` 3.31s） |
+| 测试代码行 / 后端源码行 | **57,653 / 54,743**（比例 1.05） |
+| 单断言 / 零断言（净） / 只测 mock | **1243（40.8%）/ 17 / 22** |
+| `inspect.getsource` 用例 / 读源码文本用例 | **47（55 个调用点，18 文件）/ 121** |
+| 断言全为 `status_code` 的用例 | **43** |
+| `unittest.TestCase` 类 / 模块级 `def test_` | 615 / 404 |
+| 引用 `core.db`/`AccountModel`/`DATABASE_URL` 的文件 | **98**（仅 28 个自建临时库） |
+| `session.exec(delete(AccountModel))` | **27 处 / 17 个文件** |
+
+- 最大文件：`tests/test_chatgpt_auto_maintenance.py` 1,224 行 / 66 条；`tests/test_chatgpt2api_panel.py` 1,019 行 / 45 条；`tests/test_panel_comparison.py` 1,001 行 / 79 条。
+- 55 个 `Fake*/Stub*/Dummy*/_Recording*` 类分散在 30+ 文件；`_FakeResponse` 至少 3 份（`tests/route_harness.py:73`、`tests/test_api_mail_imports_and_contribution.py:386`、`tests/test_chatgpt2api_panel.py:784`）。
+
+### 9.2 新增 mutation：两条主链可以被掏空而全绿
+
+**方法**：`rsync` 出 `api core services platforms modules tests main.py` 到 `/root/.hermes/cache/scratch/mut`，只改副本；基线先跑绿，再注入，再跑同一组用例。
+
+**M-A：`AuthFlow.run_register` 无条件抛异常**
+
+```python
+# platforms/chatgpt/protocol/auth_flow.py:567-569（副本）
+def run_register(self, mail_provider: MailProvider) -> AuthResult:
+    """执行完整注册流程"""
+    raise RuntimeError("MUTANT: 注册主链已被掏空")
+```
+
+```
+$ pytest tests/test_registration_chain_ordering.py tests/test_chatgpt_registration_engine.py \
+         tests/test_register_task_controls.py tests/test_chatgpt_plugin.py \
+         tests/test_rt_route_reaches_protocol_flow.py -q
+83 passed in 3.08s      # 基线：83 passed in 4.11s
+```
+
+**M-B：`_run_batch_action` 首行 `return None`**
+
+```python
+# services/task_runners.py:860（副本）—— 注入前
+    from services import task_service as _api  # 延迟 import：patch 打在 task_service 上必须被看到
+```
+
+改成（后续所有字符串都还在，只是永远不执行）：
+
+```python
+    return None  # MUTANT
+    from services import task_service as _api  # 延迟 import…
+```
+
+```
+$ pytest tests/test_batch_action_task.py -q
+6 passed in 1.55s       # 基线：6 passed
+```
+
+- 结论：`run_register` 与 `_run_batch_action` 的测试是**纯结构/文本**的；执行体坏到 100%，测试仍全绿。这两条与上文 §2.2 的 109 passed 是同一类问题的三个实例。
+- 透明说明：复制体里未带 `frontend/`，`tests/test_account_status_removal.py` 的 5 条前端文件断言会因缺文件失败；上述 83/6 条的子集本身基线全绿，不受影响。
+
+### 9.3 基础设施：没有 pytest 配置、没有 CI、没有超时
+
+- **没有 `pytest.ini` / `pyproject.toml` / `setup.cfg` / `tox.ini`**（`ls -a` 与 `find -maxdepth 2` 均无）。`tests/conftest.py` 只设 `APP_ENABLE_SOLVER`、`APP_TRUST_TEST_CLIENT`、`DATA_DIR`、`DATABASE_URL` 并 `init_db()`（`:28-45`），不提供 marker/超时/收集范围。
+- **仓库根直接跑 `pytest` → 246 个收集错误**（实测）：
+
+```
+$ .venv/bin/python -m pytest --collect-only -q
+ERROR reference/panel/camoufox/tests/camoufox/test_route_request_fingerprint.py
+E   ModuleNotFoundError: No module named 'tests.server'
+...
+2927 tests collected, 246 errors in 15.71s
+```
+
+  原因：无 `testpaths`，`reference/`（271 个 `test_*.py`）被收进来，而本仓 `tests/` 抢先占住 `tests` 包名。文档写的入口是 `pytest tests/ -q`（`docs/MAINTENANCE.md:429`），但约束只存在于文档。
+- **没有 CI**：仓库无 `.github/workflows`、无 Jenkinsfile、无 `.gitlab-ci.yml`（`find . -maxdepth 2 -name '*.yml'` 只命中 `docker-compose.yml`）。
+- **没有覆盖率门槛**：venv 里只有 `pytest 9.1.1`（`pip list` 无 `coverage`/`pytest-cov`/`pytest-xdist`/`pytest-timeout`/`hypothesis`）；根目录 `.coverage` 停在 **10-07**，不会随测试更新。
+- **没有单条超时**：任何一条卡死（真实 `sleep`、线程 `join`、`TestClient` lifespan）都会拖死整套。
+- 建议：加最小 `pytest.ini`（`testpaths=tests`、`norecursedirs=reference .worktrees node_modules`、`--strict-markers`、`-ra`），CI 跑 `pytest tests -q` + `--durations=20` + `pytest-timeout --timeout=60`；覆盖率先测基线再加 `--cov-fail-under`。
+
+### 9.4 断言强度复核（AST 口径）
+
+- 3048 条中 **1243 条只有 1 个断言（40.8%）**，中位数 2。
+- **39 条**在 AST 里没有 `assert`/`self.assert*`/`pytest.raises`；其中 **22 条**其实通过 `assert_account_persisted(...)` 这类自定义 helper 断言，**净 17 条真正零断言**。零断言里多数是合理的「不抛即过」smoke（`tests/test_data_paths.py:84`、`tests/test_task_store_io.py:469,474,489,511`、`tests/test_console_broken_pipe.py:38,99,125`），但 `_ensure_task_exists` 若退化成 no-op，那 4 条仍绿（同文件 404 负例兜底）。
+- **43 条**用例的全部断言只落在 `status_code` 上；危险的是「区间断言」：
+  - `tests/test_batch_action_task.py:45-53` `assertIn(r.status_code, (200,400,404))` —— **404（端点不存在）也算过**，用例名却叫 `test_endpoint_exists`；
+  - `tests/test_probe_status_task.py:24-35` 同样 `(200,400,404)`，且没有断言 task 被创建；
+  - `tests/test_api_integration.py:118-133` `assertGreaterEqual(r.status_code, 400)` —— **500 也满足**。
+- **6 处 `assertRaises(Exception)`**：`tests/test_auth_hardening.py:391,426`、`tests/test_data_bundle.py:279`、`tests/test_grok_send_code_rejection.py:153`、`tests/test_storage_backend.py:135` —— `KeyError`/`TypeError` 也算通过；安全用例建议精确到 `HTTPException` + `status_code`。
+- **26 处测试内裸 `except Exception`**（如 `tests/test_executor_drives_path.py:57-58`、`tests/test_tasks_list_perf.py:109-117`）会吞掉真实异常，让「should not raise」永远绿。
+
+### 9.5 环境依赖与静默跳过（8 处）
+
+| 位置 | 条件 | 跳过后失去的覆盖 |
+| --- | --- | --- |
+| `tests/test_frontend_layout_contract.py:43` | 无 `npx` | `tsc -b` 唯一结构回归网（`:37` 自称） |
+| `tests/test_frontend_layout_contract.py:45` | 无 `node_modules` | 同上 |
+| `tests/test_account_format_contract.py:27` | 无 `node` | 前端纯函数 24 条断言 |
+| `tests/test_account_format_contract.py:29` | 无 `rolldown` | 同上 |
+| `tests/test_api_integration.py:157` | 无 `static/index.html` | SPA 兜底路由 |
+| `tests/test_frontend_delivery_perf.py:31` | 无 `static/assets` | gzip/缓存/304（整模块 module-level skip） |
+| `tests/test_frontend_delivery_perf.py:38` | 无 js 产物 | 同上 |
+| `tests/test_api_integration.py:188` | 未启用 iCloud 路由 | iCloud 集成路径 |
+
+- 全新 clone（未 `npm ci` / 未 `npm run build`）上这些用例**显示 skipped 而不是 failed**，总数仍然好看；没有 skip 预算/门槛。
+- 根因之一是**前端没有 JS 测试运行器**：`frontend/package.json:6-12` 只有 `dev/build/lint/preview/check`，没有 `test`，也没有 vitest/jest；`docs/MAINTENANCE.md:334` 与 `tests/test_frontend_uuid_and_confirm_guards.py:4` 都明说「前端没有单元测试运行器」。于是 TSX 只能靠 pytest 读文本断言（§2.2、§9.4）。
+- 建议：CI 增加带 `npm ci && npm run build` 的 job 并加 `-ra`；前端引入 `vitest` + `@testing-library/react`，把 UUID/确认/分页三条源码断言迁成组件测试。
+
+### 9.6 慢用例复核（单文件实测）
+
+| 文件 | 结果 | 最慢项 |
+| --- | --- | --- |
+| `tests/test_maintenance_doc.py` | 6 passed in **32.86s** | `npm run lint` **24.21s**（`:109`）+ 嵌套 `pytest --collect-only` **8.32s**（`:139`） |
+| `tests/test_frontend_layout_contract.py` | 36 passed in **22.85s** | `npx tsc -b` **22.02s**（`:36`） |
+| `tests/test_data_bundle.py` | 26 passed in **13.10s** | setup 3.51s（PBKDF2） |
+| `tests/test_task_runtime.py` | 15 passed in **5.39s** | 1.90s / 1.71s（真实 sleep） |
+| `tests/test_json_deployment_end_to_end.py` | 1 passed in **3.73s** | — |
+| `tests/test_panel_comparison.py` | 79 passed in **0.74s** | — |
+
+- 单文件启动固定开销 **3–4s**（解释器 + `import main`/SQLModel/插件注册）：`test_panel_comparison` pytest 报 0.74s、`WALL` 3.92s；49 个文件建 `TestClient`（72 处构造）。
+- 建议：`slow`/`contract`/`frontend` 三个 marker + 默认 `-m "not slow"`；`test_maintenance_doc.py` 的 npm lint 与嵌套收集移到独立 contract job；PBKDF2 加仅测试可注入的迭代数（保留一条「默认 ≥600k」断言）。
+
+### 9.7 做对的地方（建议保留）
+
+1. **每个修复提交都带专项回归测试**：`c93b71f`（auth，+253 行）、`a3470d3`（凭据泄露，+106）、`e6f8670`（前端 UUID/确认，+73）、`9630980`（UUID 批量同步，+99）、`519c821`（代理，+238）、`bb81e93`（token 加密，+72）——不是「修完就算」。
+2. **`tests/route_harness.py` 的自测带变异判据**：`tests/test_route_harness.py:1-10` 明说「把 RT 检查去掉，这条必须变红」，这是全套里质量最高的测试思想；问题只是没接到真实线路上。
+3. **安全类断言是行为级的**：`tests/test_secret_leaks_in_api.py:26-40` 直接调 `_slim_account_row` 断言 `token` 不在 payload、`has_token` 仍在；`tests/test_auth_hardening.py:446-455` 用真实请求头验 XFF 默认不可信。
+4. **失败信息带中文解释与上下文**（如 `tests/test_panel_comparison.py:810` 的「现状（只读 extra）确实是 synced」），排查成本低。
+
+### 9.8 增量建议（按 ROI）
+
+**P0**
+1. `route_harness.FakeHttp` 驱动 `AuthFlow.run_register` 跑 3 条：happy path / OTP / callback 409 重试（消掉 M-A 与「夹具没通电」）。
+2. `_run_batch_action` 行为用例：fake platform + 2 个 account id → 断言 `execute_action` 2 次、落库 2 条、`AttemptResult` 汇总（消掉 M-B）。
+3. `/tasks/{id}/stop`、`/tasks/{id}/skip-current`、`_run_probe_status` 各补端点/执行体用例（404/409/成功三态）。
+
+**P1**
+4. `pytest.ini`：`testpaths=tests`、`--strict-markers`、`-ra`；修掉根目录 246 errors。
+5. CI：`pytest tests -q` + `npm ci && npm run build` job + 覆盖率基线/门槛。
+6. `conftest.py` 的 function 级临时库 + `delete(AccountModel)` 收口 + `config_store`/`_task_store`/scheduler/cache autouse reset。
+7. `pytest-timeout` + `--durations=20` + `slow` marker。
+
+**P2**
+8. 121 条源码文本断言逐步改成事件序列/行为断言；前端引入 `vitest`。
+9. 真实 `sleep` 换可注入时钟；6 处墙钟阈值改成事件证据（并发用 Barrier/Event，不测耗时）。
+10. 清掉 `assertRaises(Exception)` 与测试里的裸 `except`；写路径用例至少「返回值 + 落库 + 副作用」三选二。
+
