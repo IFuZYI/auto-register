@@ -19,26 +19,10 @@ from sqlmodel import Session, select
 
 from .base import current_engine
 from .models_infra import ProxyModel
+from core.models.proxy import ProxyRecord
 
 #: 该表在 JSON 后端下的表名（也是文件名前缀，见 `json_table.table_path`）
 TABLE = "proxies"
-
-
-class _JsonProxy:
-    """把 JSON 记录包成有 `.url` / `.region` / `.is_active` 的小对象。
-
-    调用方到处读这些属性；返回裸 dict 会让那些调用点在 JSON 后端下全炸。
-    """
-
-    def __init__(self, record: dict[str, Any]):
-        self.id = int(record.get("id") or 0)
-        self.url = str(record.get("url") or "")
-        self.region = str(record.get("region") or "")
-        self.is_active = bool(record.get("is_active", True))
-        self.created_at = record.get("created_at")
-
-    def __repr__(self) -> str:  # 便于排障
-        return f"<_JsonProxy id={self.id} url={self.url!r}>"
 
 
 class ProxyRepository:
@@ -59,11 +43,11 @@ class ProxyRepository:
     def list_all(*, session: Session | None = None) -> list[Any]:
         store = ProxyRepository._store()
         if store is not None:
-            return [_JsonProxy(r) for r in store.all()]
+            return [ProxyRecord.from_dict(r) for r in store.all()]
         own = session is None
         sess = session or Session(current_engine())
         try:
-            return list(sess.exec(select(ProxyModel)).all())
+            return [ProxyRecord.from_model(m) for m in sess.exec(select(ProxyModel)).all()]
         finally:
             if own:
                 sess.close()
@@ -76,13 +60,14 @@ class ProxyRepository:
         store = ProxyRepository._store()
         if store is not None:
             record = store.first(url=wanted)
-            return _JsonProxy(record) if record else None
+            return ProxyRecord.from_dict(record) if record else None
         own = session is None
         sess = session or Session(current_engine())
         try:
-            return sess.exec(
+            model = sess.exec(
                 select(ProxyModel).where(ProxyModel.url == wanted)
             ).first()
+            return ProxyRecord.from_model(model) if model else None
         finally:
             if own:
                 sess.close()
@@ -91,7 +76,9 @@ class ProxyRepository:
     def add(*, url: str, region: str = "", session: Session | None = None) -> Any:
         store = ProxyRepository._store()
         if store is not None:
-            return _JsonProxy(store.insert({"url": str(url or ""), "region": str(region or "")}))
+            return ProxyRecord.from_dict(
+                store.insert({"url": str(url or ""), "region": str(region or "")})
+            )
         own = session is None
         sess = session or Session(current_engine())
         try:
@@ -102,7 +89,7 @@ class ProxyRepository:
             # —— DELETE `/proxies/None` 直接 422（实测）。
             sess.commit()
             sess.refresh(row)
-            return row
+            return ProxyRecord.from_model(row)
         finally:
             if own:
                 sess.close()
@@ -117,15 +104,31 @@ class ProxyRepository:
                 "url": getattr(row, "url", ""),
                 "region": getattr(row, "region", ""),
                 "is_active": bool(getattr(row, "is_active", True)),
+                "success_count": int(getattr(row, "success_count", 0) or 0),
+                "fail_count": int(getattr(row, "fail_count", 0) or 0),
+                "last_checked": (
+                    row.last_checked.isoformat()
+                    if getattr(row, "last_checked", None)
+                    else None
+                ),
             })
             return row
         own = session is None
         sess = session or Session(current_engine())
         try:
-            sess.add(row)
+            model = sess.get(ProxyModel, getattr(row, "id", None))
+            if model is None:
+                return row
+            model.url = str(getattr(row, "url", "") or "")
+            model.region = str(getattr(row, "region", "") or "")
+            model.is_active = bool(getattr(row, "is_active", True))
+            model.success_count = int(getattr(row, "success_count", 0) or 0)
+            model.fail_count = int(getattr(row, "fail_count", 0) or 0)
+            model.last_checked = getattr(row, "last_checked", None)
+            sess.add(model)
             sess.commit()
-            sess.refresh(row)
-            return row
+            sess.refresh(model)
+            return ProxyRecord.from_model(model)
         finally:
             if own:
                 sess.close()
@@ -138,7 +141,10 @@ class ProxyRepository:
         own = session is None
         sess = session or Session(current_engine())
         try:
-            sess.delete(row)
+            model = sess.get(ProxyModel, getattr(row, "id", None))
+            if model is None:
+                return False
+            sess.delete(model)
             sess.commit()
             return True
         finally:
@@ -153,7 +159,9 @@ class ProxyRepository:
         store = ProxyRepository._store()
         if store is not None:
             return [
-                _JsonProxy(r) for r in store.all() if int(r.get("id") or 0) in wanted
+                ProxyRecord.from_dict(r)
+                for r in store.all()
+                if int(r.get("id") or 0) in wanted
             ]
         own = session is None
         sess = session or Session(current_engine())
