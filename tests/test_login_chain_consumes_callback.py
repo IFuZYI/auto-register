@@ -122,9 +122,22 @@ class AtProvenanceStampingTests(unittest.TestCase):
 
 class PluginStampCarriesAtProvenanceTests(unittest.TestCase):
     def test_refresh_stamp_records_at_iat(self):
-        from platforms.chatgpt import plugin as mod
+        """读**源文件**，不用 `inspect.getsource`。
 
-        source = inspect.getsource(mod.ChatGPTPlatform.execute_action)
+        为什么不用 getsource：别的测试会 `mock.patch` 掉
+        `ChatGPTPlatform.execute_action`（`test_banned_upload_exclusion` /
+        `test_chatgpt_auto_maintenance` 都这么做）。`mock.patch` 正常会还原，
+        但只要有一条用例在还原前失败、或用了 `patch(..., new=MagicMock)` 之后
+        又 reload 模块，`getsource` 就会拿到非函数对象而抛 TypeError ——
+        表现为「单跑绿、全量红」的假失败（实测踩过）。
+        读文件是幂等的，与测试执行顺序无关。
+        """
+        from pathlib import Path
+
+        plugin_path = (
+            Path(__file__).resolve().parents[1] / "platforms" / "chatgpt" / "plugin.py"
+        )
+        source = plugin_path.read_text(encoding="utf-8")
         self.assertIn("at_iat", source, "刷新 stamp 没记 AT 的签发时间")
         self.assertIn("_access_token_claims", source)
 
