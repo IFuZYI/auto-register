@@ -114,107 +114,128 @@ def apply_action_result(
     result: dict[str, Any],
     session: Session,
 ) -> None:
-    if platform == "chatgpt":
-        raw_data = result.get("data")
-        data: dict = raw_data if isinstance(raw_data, dict) else {}
-        status_reason = ""
-        # 按**能力**分派，不再逐个比较动作 id：`check_plus_trial` 与
-        # `probe_local_status` 同属 PROBE，`sync_sub2api_status` /
-        # `sync_chatgpt2api_status` 与 `sync_cliproxyapi_status` 同属 SYNC_STATUS。
-        # 它们的结果里没有 `probe` / `sync` 键 → 策略函数收到 None → 返回空串
-        # → 不落库，与改造前逐 id 分派完全一致（`tests/test_capability_dispatch.py`
-        # 钉住了这一点，包括「禁用不被无信号的同步洗掉」）。
-        capability = capability_of(action_id)
-        if capability is Capability.PROBE:
-            status_reason = apply_chatgpt_status_policy(acc_model, local_probe=data.get("probe"))
-        elif capability is Capability.SYNC_STATUS:
-            status_reason = apply_chatgpt_status_policy(acc_model, remote_sync=data.get("sync"))
-        elif capability is Capability.REFRESH:
-            # 刷新链自己认过封禁措辞，这里只把结论交给共享策略落状态。
-            # 刷新成功（ok）是正向信号 → usable=True 让过期/失效恢复「正常」。
-            status_reason = apply_chatgpt_status_policy(
-                acc_model,
-                banned=bool(data.get("banned")),
-                usable=bool(result.get("ok")),
-                # 失败分类：`permanent`（invalid_grant 等）落「失效」并停止重试；
-                # `configuration`（invalid_client）**不动状态** —— 那是我们的
-                # 配错，账号可能是好的。
-                refresh_kind=str(data.get("refresh_kind") or ""),
-            )
-        elif capability_of(action_id) in (Capability.BACKFILL, Capability.BIND_2FA):
-            # 补 RT / 绑 2FA 的登录链同样会发掘「号没了」（用户要求：禁用
-            # 靠登录流程发掘）—— 结论经 data.banned 传上来，这里落状态。
-            status_reason = apply_chatgpt_status_policy(
-                acc_model,
-                banned=bool(data.get("banned")),
-            )
-        if status_reason:
-            from datetime import datetime, timezone
+    """把动作结果落库：状态 → extra 补丁 → 上传账 → 凭证字段。
 
-            acc_model.updated_at = datetime.now(timezone.utc)
-            account_repository.save(acc_model, session=session)
-    elif platform == "grok":
-        # grok 的探测/刷新动作同样要落状态（对齐 grok2api 的失效判定）——
-        # 此前只有 chatgpt 有状态策略，grok 测活失败不会改状态。
-        from services.grok_account_state import apply_grok_status_policy
-
-        raw_data = result.get("data")
-        data: dict = raw_data if isinstance(raw_data, dict) else {}
-        status_reason = ""
-        if action_id == "probe":
-            code = data.get("status")
-            # 只认真实的探测码。**不**读 `sso_status` 当失效判据：
-            # `_sso_status` 那套判定已知不可靠（响应没有 url、i18n 文案表里带
-            # sign-in 字样、全新会话会把有效 SSO 判成未登录），用它落「失效」
-            # 会误杀好号（评审实测）。SSO 是否还有效，用「刷新 Token（登录协议）」
-            # 的真实结果判 —— 那条走 `probe_refresh` / `refresh_token` 分支。
-            status_reason = apply_grok_status_policy(
-                acc_model,
-                probe_code=int(code) if code is not None else None,
-                probe_summary=str(data.get("summary") or ""),
-            )
-        elif action_id == "probe_refresh":
-            status_reason = apply_grok_status_policy(
-                acc_model,
-                refresh_kind=str(data.get("kind") or ""),
-                refresh_error=str(data.get("error_code") or result.get("error") or ""),
-                usable=bool(result.get("ok")),
-            )
-        elif action_id == "sync_cliproxyapi_status":
-            sync_raw = data.get("sync")
-            sync = sync_raw if isinstance(sync_raw, dict) else {}
-            status_reason = apply_grok_status_policy(
-                acc_model,
-                remote_state=str(sync.get("remote_state") or ""),
-            )
-        elif action_id == "refresh_token":
-            status_reason = apply_grok_status_policy(
-                acc_model,
-                refresh_kind=str(data.get("kind") or ""),
-                refresh_error=str(result.get("error") or ""),
-                usable=bool(result.get("ok")),
-            )
-        if status_reason:
-            from datetime import datetime, timezone
-
-            acc_model.updated_at = datetime.now(timezone.utc)
-            account_repository.save(acc_model, session=session)
+    四步各一个函数，平台差异只体现在 `_STATUS_APPLIERS` 这张表上。
+    以前这里是 120 行的单体：两个平台的状态策略、extra 补丁、上传记账、
+    凭证写入全糊在一起，加一个平台就要再嵌一层 `elif`。
+    """
+    applier = _STATUS_APPLIERS.get(str(platform or "").strip().lower())
+    if applier is not None:
+        applier(acc_model, action_id, result, session)
     if isinstance(result.get("account_extra_patch"), dict):
-        patch = result["account_extra_patch"]
-        extra = acc_model.get_extra()
-        merge_extra_patch(extra, patch)
-        acc_model.set_extra(extra)
-        # token 列 = 平台主凭证的镜像（chatgpt → AT，grok → SSO）。
-        # 整理前这里无条件写 access_token —— grok 的刷新补丁里带 AT，把 SSO
-        # 镜像盖成了 AT（线上 32 行里 12 行如此，读侧 `or account.token` 的
-        # 兜底会拿错值）。改为按平台取镜像字段；没有对应值时不碰列。
-        from core.credential_fields import sync_token_column
+        _apply_extra_patch(acc_model, platform, result, session)
+    record_upload_sync(platform, action_id, acc_model, result, session)
+    _apply_credential_writes(acc_model, platform, result, session)
 
-        sync_token_column(acc_model, platform, extra)
+
+def _apply_chatgpt_status(acc_model, action_id, result, session) -> None:
+    raw_data = result.get("data")
+    data: dict = raw_data if isinstance(raw_data, dict) else {}
+    status_reason = ""
+    # 按**能力**分派，不再逐个比较动作 id：`check_plus_trial` 与
+    # `probe_local_status` 同属 PROBE，`sync_sub2api_status` /
+    # `sync_chatgpt2api_status` 与 `sync_cliproxyapi_status` 同属 SYNC_STATUS。
+    # 它们的结果里没有 `probe` / `sync` 键 → 策略函数收到 None → 返回空串
+    # → 不落库，与改造前逐 id 分派完全一致（`tests/test_capability_dispatch.py`
+    # 钉住了这一点，包括「禁用不被无信号的同步洗掉」）。
+    capability = capability_of(action_id)
+    if capability is Capability.PROBE:
+        status_reason = apply_chatgpt_status_policy(acc_model, local_probe=data.get("probe"))
+    elif capability is Capability.SYNC_STATUS:
+        status_reason = apply_chatgpt_status_policy(acc_model, remote_sync=data.get("sync"))
+    elif capability is Capability.REFRESH:
+        # 刷新链自己认过封禁措辞，这里只把结论交给共享策略落状态。
+        # 刷新成功（ok）是正向信号 → usable=True 让过期/失效恢复「正常」。
+        status_reason = apply_chatgpt_status_policy(
+            acc_model,
+            banned=bool(data.get("banned")),
+            usable=bool(result.get("ok")),
+            # 失败分类：`permanent`（invalid_grant 等）落「失效」并停止重试；
+            # `configuration`（invalid_client）**不动状态** —— 那是我们的
+            # 配错，账号可能是好的。
+            refresh_kind=str(data.get("refresh_kind") or ""),
+        )
+    elif capability_of(action_id) in (Capability.BACKFILL, Capability.BIND_2FA):
+        # 补 RT / 绑 2FA 的登录链同样会发掘「号没了」（用户要求：禁用
+        # 靠登录流程发掘）—— 结论经 data.banned 传上来，这里落状态。
+        status_reason = apply_chatgpt_status_policy(
+            acc_model,
+            banned=bool(data.get("banned")),
+        )
+    if status_reason:
         from datetime import datetime, timezone
+
         acc_model.updated_at = datetime.now(timezone.utc)
         account_repository.save(acc_model, session=session)
-    record_upload_sync(platform, action_id, acc_model, result, session)
+
+
+def _apply_grok_status(acc_model, action_id, result, session) -> None:
+    # grok 的探测/刷新动作同样要落状态（对齐 grok2api 的失效判定）——
+    # 此前只有 chatgpt 有状态策略，grok 测活失败不会改状态。
+    from services.grok_account_state import apply_grok_status_policy
+
+    raw_data = result.get("data")
+    data: dict = raw_data if isinstance(raw_data, dict) else {}
+    status_reason = ""
+    if action_id == "probe":
+        code = data.get("status")
+        # 只认真实的探测码。**不**读 `sso_status` 当失效判据：
+        # `_sso_status` 那套判定已知不可靠（响应没有 url、i18n 文案表里带
+        # sign-in 字样、全新会话会把有效 SSO 判成未登录），用它落「失效」
+        # 会误杀好号（评审实测）。SSO 是否还有效，用「刷新 Token（登录协议）」
+        # 的真实结果判 —— 那条走 `probe_refresh` / `refresh_token` 分支。
+        status_reason = apply_grok_status_policy(
+            acc_model,
+            probe_code=int(code) if code is not None else None,
+            probe_summary=str(data.get("summary") or ""),
+        )
+    elif action_id == "probe_refresh":
+        status_reason = apply_grok_status_policy(
+            acc_model,
+            refresh_kind=str(data.get("kind") or ""),
+            refresh_error=str(data.get("error_code") or result.get("error") or ""),
+            usable=bool(result.get("ok")),
+        )
+    elif action_id == "sync_cliproxyapi_status":
+        sync_raw = data.get("sync")
+        sync = sync_raw if isinstance(sync_raw, dict) else {}
+        status_reason = apply_grok_status_policy(
+            acc_model,
+            remote_state=str(sync.get("remote_state") or ""),
+        )
+    elif action_id == "refresh_token":
+        status_reason = apply_grok_status_policy(
+            acc_model,
+            refresh_kind=str(data.get("kind") or ""),
+            refresh_error=str(result.get("error") or ""),
+            usable=bool(result.get("ok")),
+        )
+    if status_reason:
+        from datetime import datetime, timezone
+
+        acc_model.updated_at = datetime.now(timezone.utc)
+        account_repository.save(acc_model, session=session)
+
+
+def _apply_extra_patch(acc_model, platform, result, session) -> None:
+    patch = result["account_extra_patch"]
+    extra = acc_model.get_extra()
+    merge_extra_patch(extra, patch)
+    acc_model.set_extra(extra)
+    # token 列 = 平台主凭证的镜像（chatgpt → AT，grok → SSO）。
+    # 整理前这里无条件写 access_token —— grok 的刷新补丁里带 AT，把 SSO
+    # 镜像盖成了 AT（线上 32 行里 12 行如此，读侧 `or account.token` 的
+    # 兜底会拿错值）。改为按平台取镜像字段；没有对应值时不碰列。
+    from core.credential_fields import sync_token_column
+
+    sync_token_column(acc_model, platform, extra)
+    from datetime import datetime, timezone
+    acc_model.updated_at = datetime.now(timezone.utc)
+    account_repository.save(acc_model, session=session)
+
+
+def _apply_credential_writes(acc_model, platform, result, session) -> None:
     if result.get("ok") and result.get("data", {}) and isinstance(result["data"], dict):
         data = result["data"]
         # 凭证字段统一走注册表（`core/credential_fields.py`）：只收凭证类字段、
@@ -234,6 +255,14 @@ def apply_action_result(
 
             acc_model.updated_at = datetime.now(timezone.utc)
             account_repository.save(acc_model, session=session)
+
+
+#: 平台 → 状态策略。加一个平台只加一行，不再往 `apply_action_result` 里嵌 `elif`。
+_STATUS_APPLIERS = {
+    "chatgpt": _apply_chatgpt_status,
+    "grok": _apply_grok_status,
+}
+
 
 
 def result_message(result: dict[str, Any]) -> str:
