@@ -48,6 +48,33 @@ class AccountListPayloadTests(unittest.TestCase):
         self.assertFalse(payload.get("has_token"))
 
 
+class GrokSsoLeakTests(unittest.TestCase):
+    """grok 的 SSO 不能出现在列表里（data-layer 本轮新增 P0）。
+
+    `_slim_extra_for_list` 先 `decrypt_extra` 再按黑名单 pop，而黑名单里
+    既没有 `sso` 也不在 `has_*` 名单里 → 390 个 grok 号的 SSO 明文随列表下发。
+    """
+
+    def test_sso_is_replaced_by_a_boolean(self):
+        import json
+
+        from api.accounts import _slim_extra_for_list
+
+        raw = json.dumps({"sso": "eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiJ9.payload.sig", "k": "v"})
+        slim = json.loads(_slim_extra_for_list(raw))
+        self.assertNotIn("sso", slim, "列表仍在明文下发 grok SSO")
+        self.assertTrue(slim.get("has_sso"), "裁掉正文后没留 has_sso")
+
+    def test_sso_flag_survives_a_second_pass(self):
+        import json
+
+        from api.accounts import _slim_extra_for_list
+
+        once = _slim_extra_for_list(json.dumps({"sso": "abc"}))
+        twice = json.loads(_slim_extra_for_list(once))
+        self.assertTrue(twice.get("has_sso"), "二次瘦身把 has_sso 翻成 False")
+
+
 class ProxyListPayloadTests(unittest.TestCase):
     URL = "socks5h://gobngawr:06pk6as8qlwu@9.142.194.72:6740"
 

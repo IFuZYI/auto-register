@@ -553,7 +553,12 @@ class _GzipStatic(StaticFiles):
         )
 
 
-if os.path.isdir(_static_dir):
+# 目录**必须先建出来**再挂载。`vite build` 会 `emptyOutDir` 清空 `static/`，
+# 而挂载只发生在启动那一刻：18:42 启动、18:46 构建 → 进程启动时目录为空
+# （或不存在）→ 整站 404，直到重启（frontend 审计 F-42，实测 18:49 复现）。
+# 先 makedirs 保证挂载一定成立；构建产物出现后立刻就能被服务到。
+os.makedirs(os.path.join(_static_dir, "assets"), exist_ok=True)
+if True:
     app.mount(
         "/assets",
         _GzipStatic(directory=os.path.join(_static_dir, "assets")),

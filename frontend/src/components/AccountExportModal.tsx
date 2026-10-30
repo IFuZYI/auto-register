@@ -74,7 +74,10 @@ export function AccountExportModal({
   const request = useMemo(
     () => ({
       filters: JSON.parse(filtersKey) as AccountExportFilters,
-      ids: selectionKey ? selectionKey.split(',').map(Number) : [],
+      // 不能 `.map(Number)`：账号主键是 UUID，`Number(uuid)` → NaN，
+      // JSON.stringify(NaN) 变 `null` → 后端 422，「导出所选」直接失败。
+      // 这里必须保留字符串（后端 `account_ids: list[str | int]`）。
+      ids: selectionKey ? selectionKey.split(',').filter(Boolean) : [],
     }),
     [filtersKey, selectionKey],
   )

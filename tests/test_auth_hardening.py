@@ -434,12 +434,24 @@ class LogoutRevocationTests(unittest.TestCase):
 
         os.environ["APP_JWT_SECRET"] = "fixed-by-deployer"
         try:
+            token = self._auth.create_token()
             client = TestClient(_auth_app())
-            r = client.post("/api/auth/logout")
-            self.assertEqual(r.status_code, 200)
+            # logout 现在要求已认证（否则任何人一个 POST 就能把全员踢下线）
+            r = client.post("/api/auth/logout", headers={"Authorization": f"Bearer {token}"})
+            self.assertEqual(r.status_code, 200, r.text)
             self.assertFalse(r.json().get("revoked"))
         finally:
             os.environ.pop("APP_JWT_SECRET", None)
+
+    def test_logout_without_token_is_rejected(self):
+        """未认证的 logout 不能触发全局密钥轮换（api-security N1）。"""
+        from fastapi.testclient import TestClient
+
+        client = TestClient(_auth_app())
+        before = self._cfg.get("auth_jwt_secret", "")
+        r = client.post("/api/auth/logout")
+        self.assertEqual(r.status_code, 401)
+        self.assertEqual(self._cfg.get("auth_jwt_secret", ""), before)
 
 
 class ForwardedForSpoofingTests(unittest.TestCase):

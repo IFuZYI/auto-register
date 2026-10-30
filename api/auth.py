@@ -442,12 +442,17 @@ def verify_totp_route(body: TotpVerifyRequest):
     return {"access_token": token, "token_type": "bearer"}
 
 
-@router.post("/logout")
+@router.post("/logout", dependencies=[Depends(require_auth)])
 def logout():
     """注销 = 换密钥，把已签发的令牌全部作废。
 
     原来是空实现：token 有效期 7 天且无法吊销，「退出登录」只是前端删掉了
     localStorage 里的那串字符（安全审查 F6）。
+
+    **必须已认证**：这条路由在鉴权中间件之外（`/api/auth/*` 整段跳过），
+    不加 `require_auth` 的话，任何能连到端口的人一个 POST 就能强制轮换全局
+    JWT 密钥 —— 所有会话立刻失效，而且每次还写一次 `configs`（api-security
+    审计 N1）。注销是「自己退出」，不是「把所有人踢下线」。
     """
     revoked = _rotate_jwt_secret()
     return {"ok": True, "revoked": revoked}

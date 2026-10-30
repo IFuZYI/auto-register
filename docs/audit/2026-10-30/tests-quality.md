@@ -378,14 +378,14 @@ assert 'account.extra["register_proxy"] = _proxy' in src
 | --- | --- | --- |
 | (1) 关键路径有无测试兜底 | 六条都有文件，但 6 处关键执行体无行为测试 | `auth_flow.py:567` 无执行；`platform_rt.py:232-262` 仅源码断言；`api/tasks.py:615/626` 无调用；`task_runners.py:751/835` 无执行；`proxy_utils.py:224` 无测试；`panel_push.py:252/293` 仅 mock |
 | (2) 是否钉错误行为 | 有，1 处明确 + 1 处历史遗留已修 | `test_panel_comparison.py:801` 把盲区判 synced 写成契约；`test_api_proxies_and_auth.py` 旧 F10 契约（`c93b71f` 已修） |
-| (3) 脆弱测试 | 四类齐全 | 真实 sleep（`test_task_runtime.py:105-226`）；全局单例（`_task_store`/`_jobs`/config_store）；共享 DB（`conftest.py:39`，74 文件碰库仅 3 隔离）；源码切片（`test_registration_chain_ordering.py:82`） |
-| (4) 断言强度 | 36 条仅 status、17 条零断言、1226 条单断言；4 条「500/404 也过」 | `test_batch_action_task.py:45-53`、`test_probe_status_task.py:24-35`、`test_api_integration.py:124,133` |
+| (3) 脆弱测试 | 四类齐全 | 真实 sleep（`test_task_runtime.py:105-226`）；全局单例（`_task_store`/`_jobs`/config_store）；共享 DB（`conftest.py:39`，复核 98 文件碰库、28 个自建临时库，§9.1）；源码切片（`test_registration_chain_ordering.py:82`） |
+| (4) 断言强度 | 43 条仅 status（复核）、17 条零断言、1243 条单断言；4 条「500/404 也过」 | `test_batch_action_task.py:45-53`、`test_probe_status_task.py:24-35`、`test_api_integration.py:124,133` |
 | (5) 运行时间分布 | 双峰：逻辑测试 ms 级；5 个文件 ~100s+ | 见 §5.1 表；npm lint 26s、tsc 25s、PBKDF2 ~45s、sleep 5.4s |
 | (6) mock 是否 mock 掉被测逻辑 | 6 处假通过 | 见 §6.1；mutation 实测 109 passed 是最硬的一条 |
 
 ---
 
-## 8. 附：本次审计做过的验证
+## 8. 第一轮验证记录（`c93b71f` 基线）
 
 1. `pytest tests/test_chatgpt_auto_maintenance.py -q --durations=25` → 66 passed / 9.15s。
 2. `pytest tests/test_task_runtime.py -q --durations=10` → 15 passed / 6.40s（sleep 占 5.4s）。
@@ -523,7 +523,7 @@ E   ModuleNotFoundError: No module named 'tests.server'
 | `tests/test_json_deployment_end_to_end.py` | 1 passed in **3.73s** | — |
 | `tests/test_panel_comparison.py` | 79 passed in **0.74s** | — |
 
-- 单文件启动固定开销 **3–4s**（解释器 + `import main`/SQLModel/插件注册）：`test_panel_comparison` pytest 报 0.74s、`WALL` 3.92s；49 个文件建 `TestClient`（72 处构造）。
+- 单文件启动固定开销 **3–4s**（解释器 + `import main`/SQLModel/插件注册）：`test_panel_comparison` pytest 报 0.74s、`WALL` 3.92s；49 个文件构造 `TestClient`（72 处）。
 - 建议：`slow`/`contract`/`frontend` 三个 marker + 默认 `-m "not slow"`；`test_maintenance_doc.py` 的 npm lint 与嵌套收集移到独立 contract job；PBKDF2 加仅测试可注入的迭代数（保留一条「默认 ≥600k」断言）。
 
 ### 9.7 做对的地方（建议保留）

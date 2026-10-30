@@ -163,8 +163,14 @@ def _count_accounts(
 #: getRefreshToken 只用来显示有无），正文一概不渲染 —— 于是把它们换成布尔，
 #: 详情端点（`GET /accounts/{id}`）仍返回全量。
 _LIST_HEAVY_EXTRA_KEYS = ("session_token", "id_token", "cookies", "cpa_record")
-#: 这两个不是删掉，而是换成 `has_xxx` 布尔。
-_LIST_TOKEN_EXTRA_KEYS = ("access_token", "refresh_token")
+#: 这几个不是删掉，而是换成 `has_xxx` 布尔。
+#:
+#: `sso` 必须在这里：grok 账号的 SSO 是**可直接冒用身份的 bearer 凭据**
+#: （与 AT 同级），而它既不在 `_LIST_HEAVY_EXTRA_KEYS` 也不在原有两个键里 ——
+#: `decrypt_extra` 解密之后原样下发，一页 `page_size=200` 就能拉走 390 个
+#: grok 号的 SSO（data-layer 审计本轮新增 P0）。`token` 列那一份已经加密封口，
+#: 这一份在 `extra_json` 里，同样的东西漏在同一张响应里。
+_LIST_TOKEN_EXTRA_KEYS = ("access_token", "refresh_token", "sso")
 
 
 def _at_claims_for_list(token: str) -> dict:

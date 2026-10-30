@@ -39,6 +39,22 @@ class SelectedRowKeyTests(unittest.TestCase):
         source = _read("components", "AccountExportModal.tsx")
         self.assertIn("(string | number)[]", source, "导出对话框的 selectedIds 类型要能装 UUID")
 
+    def test_export_modal_does_not_recast_ids_to_number(self):
+        """类型改对了不代表实现对了 —— 上一版就是「类型改了、`.map(Number)` 还在」。
+
+        实测形态：`selectionKey.split(',').map(Number)` → `[NaN]` →
+        `JSON.stringify` 变 `[null]` → 后端 422。只看类型字面量的守卫会全绿。
+        """
+        source = _read("components", "AccountExportModal.tsx")
+        # 只看代码行：注释里写着「不能 .map(Number)」是说明，不是违规。
+        code_lines = [
+            line for line in source.splitlines()
+            if not line.strip().startswith("//") and not line.strip().startswith("*")
+        ]
+        code = "\n".join(code_lines)
+        self.assertNotIn(".map(Number)", code, "导出请求仍把 UUID 转成 number")
+        self.assertNotIn("split(',').map(", code, "导出请求仍在把 selectedIds 逐项转换")
+
 
 class TaskHistoryPaginationTests(unittest.TestCase):
     def test_page_and_page_size_come_from_state(self):
