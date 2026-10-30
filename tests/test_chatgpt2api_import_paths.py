@@ -28,7 +28,7 @@ class PanelPushCarriesPasswordTests(unittest.TestCase):
     def test_panel_push_sends_password_and_totp(self):
         from unittest import mock
 
-        import api.integrations as integ
+        import services.panel_push as panel_push_mod
 
         captured = {}
 
@@ -55,8 +55,8 @@ class PanelPushCarriesPasswordTests(unittest.TestCase):
         with mock.patch(
             "platforms.chatgpt.chatgpt2api_upload.upload_to_chatgpt2api", _fake_upload
         ), mock.patch("services.chatgpt_sync.upload_proxy_for", lambda *a, **k: ""), \
-             mock.patch.object(integ, "_lookup_account_row", lambda _id: _Row(), create=True):
-            ok, _ = integ._push_account_uploader("chatgpt2api", "chatgpt", row)
+             mock.patch.object(panel_push_mod, "_lookup_account_row", lambda _id: _Row(), create=True):
+            ok, _ = panel_push_mod._push_account_uploader("chatgpt2api", "chatgpt", row)
 
         self.assertTrue(ok)
         account = captured["account"]

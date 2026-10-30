@@ -129,217 +129,18 @@ def sync_panel_endpoint(panel_key: str, platform: str = "", account_ids: str = "
 #:   CPA（同名 auth 文件覆写）、grok2api（SSO 按邮箱 upsert）。
 #: `append`：上传即新增一条记录，重推会产生重复 —— sub2api / chatgpt2api，
 #:   推成功后用 `delete_remote` 删掉旧记录（`delete_old=true` 时）。
-_PANEL_PUSH_KIND: dict[str, str] = {
-    "cpa": "overwrite",
-    "grok2api": "overwrite",
-    "sub2api": "append",
-    "chatgpt2api": "append",
-}
 
 
-def _lookup_account_row(account_id):
-    """按 id 取账号仓储行（拿独立列上的字段，如 password）。
-
-    对比行（`fetch_panel_raw` 的产物）只带 `extra`，而 password 存在独立列上。
-    """
-    from core.db import account_repository
-
-    try:
-        return account_repository.get(account_id)
-    except Exception:
-        return None
 
 
-def _password_for_row(row) -> str:
-    """取该行的 password（独立列）。
-
-    取不到就返回空串 —— 对端是「非空才写入」，空串等于不下发该字段，
-    不会抹掉远端已有的密码。
-    """
-    account_id = row.get("id") if isinstance(row, dict) else None
-    if account_id is None:
-        return ""
-    found = _lookup_account_row(account_id)
-    return str(getattr(found, "password", "") or "").strip() if found else ""
 
 
-def _push_account_uploader(panel_key: str, platform: str, row: dict):
-    """把一行本地账号推给对应面板，返回 `(ok, message)`。
-
-    `row` 是 `fetch_panel_raw` 的本地行形状：`{id, email, platform,
-    updated_at, extra}`。上传器按面板 + 账号所属平台分发 —— CPA 同时托管
-    ChatGPT 与 Grok，用错平台的上传器会传错凭据类型。
-    """
-    email = str(row.get("email") or "")
-    raw_extra = row.get("extra")
-    extra: dict = raw_extra if isinstance(raw_extra, dict) else {}
-    plat = str(platform or row.get("platform") or "").strip().lower()
-
-    if panel_key == "grok2api":
-        from platforms.grok.grok2api import Grok2ApiClient
-
-        sso = str(extra.get("sso") or "").strip()
-        if not sso:
-            return False, "账号没有 SSO（grok2api 的 Web 导入需要 SSO）"
-        client = Grok2ApiClient.from_config()
-        if not client.configured:
-            return False, "grok2api 未配置（「全局配置 → 面板配置 → grok2api」）"
-        ok, msg = client.ingest_sso(sso, email)
-        if ok:
-            from services.chatgpt_sync import record_grok2api_sync_result
-
-            record_grok2api_sync_result(extra, ok, msg)
-        return ok, msg
-
-    if panel_key == "cpa":
-        from core.base_platform import Account, AccountStatus
-        from services.chatgpt_sync import upload_proxy_for
-
-        if plat == "grok":
-            # **Grok 不再支持 CPA**（2026-10-27，用户要求只保留 SSO + grok2api）。
-            # 明说原因而不是静默跳过：批量推送时用户需要知道「为什么这个号没传」。
-            return False, (
-                "Grok 已不再支持 CPA 上传（只支持 grok2api）"
-                "—— 请在面板管理里用 grok2api"
-            )
-
-        # ChatGPT：走 generate_token_json（与手动动作 / 自动上传同一条路径）
-        from core.credential_fields import get_credential
-        from platforms.chatgpt.cpa_upload import generate_token_json, upload_to_cpa
-
-        account = Account(
-            platform=plat or "chatgpt", email=email, password="",
-            token=get_credential(extra, "access_token"),
-            status=AccountStatus.REGISTERED, extra=extra,
-        )
-        return upload_to_cpa(
-            generate_token_json(account), proxy=upload_proxy_for("cpa", extra)
-        )
-
-    if panel_key == "sub2api":
-        from core.base_platform import Account, AccountStatus
-        from core.credential_fields import get_credential
-        from platforms.chatgpt.sub2api_upload import upload_to_sub2api
-
-        account = Account(
-            platform=plat or "chatgpt", email=email, password="",
-            token=get_credential(extra, "access_token"),
-            status=AccountStatus.REGISTERED, extra=extra,
-        )
-        return upload_to_sub2api(account)
-
-    if panel_key == "chatgpt2api":
-        from core.base_platform import Account, AccountStatus
-        from core.credential_fields import get_credential
-        from platforms.chatgpt.chatgpt2api_upload import upload_to_chatgpt2api
-        from services.chatgpt_sync import upload_proxy_for
-
-        account = Account(
-            platform=plat or "chatgpt", email=email,
-            # `password` 在**独立列**上、不在 extra 里 —— `row` 只带了 extra，
-            # 所以按 id 回查一次。对端 chatgpt2api 2.2.0 起靠 password +
-            # totp_secret 做「RT 失效后自动密码重登」，不给就只能人工救号。
-            password=_password_for_row(row),
-            token=get_credential(extra, "access_token"),
-            status=AccountStatus.REGISTERED, extra=extra,
-        )
-        return upload_to_chatgpt2api(
-            account, proxy=upload_proxy_for("chatgpt2api", extra)
-        )
-
-    return False, f"面板 {panel_key} 没有推送器"
 
 
-def _panel_remote_deleter(panel_key: str):
-    """新建式面板的旧记录删除器；覆盖式面板返回 None（没有可删的重复）。"""
-    if panel_key == "chatgpt2api":
-        from services.panel_push import delete_chatgpt2api_account
-
-        return lambda _platform, remote_id: delete_chatgpt2api_account(remote_id)
-    if panel_key == "sub2api":
-        from services.panel_push import delete_sub2api_account
-
-        return lambda _platform, remote_id: delete_sub2api_account(remote_id)
-    return None
 
 
-def _persist_push_results(panel_key: str, items: list[dict]) -> None:
-    """把 push 结果写回账号行（`sync_statuses.<面板>`）。
 
-    与手动动作（`api/actions.py` 的 `_UPLOAD_SYNC_WRITERS`）和自动上传
-    （`services/external_sync.py`）保持同一语义：推了（成功或失败）都留痕；
-    跳过（无需更新）的动都没动，不写。
 
-    `items` 是 `push_local_to_remote` 的产出 —— 只有 `push=True` 的条目
-    代表真正发起过上传。写回按 `email` 定位账号（跨平台库：grok2api 的行
-    在 grok 库，CPA 的行可能是 chatgpt 或 grok）。
-    """
-    from services.chatgpt_sync import (
-        update_account_model_chatgpt2api_sync,
-        update_account_model_cpa_sync,
-        update_account_model_sub2api_sync,
-    )
-
-    writers = {
-        "cpa": update_account_model_cpa_sync,
-        "sub2api": update_account_model_sub2api_sync,
-        "chatgpt2api": update_account_model_chatgpt2api_sync,
-    }
-
-    for item in items:
-        if not item.get("push"):
-            continue  # 跳过的没发生任何事，不留痕
-        # 归一邮箱：远端返回的大小写可能与本地行不同（本地行经仓储统一为
-        # 小写），不归一会精确匹配失败、静默不落库（实测 'User@X.com' 查
-        # 'user@x.com' 落空）。
-        from core.db import normalize_email
-
-        email = normalize_email(str(item.get("email") or ""))
-        platform = str(item.get("platform") or "").strip().lower()
-        if not email or not platform:
-            continue
-        ok = bool(item.get("pushed"))
-        message = str(item.get("message") or "")
-
-        try:
-            with platform_database_registry.session_for(platform) as session:
-                row = session.exec(
-                    select(AccountModel)
-                    .where(AccountModel.platform == platform)
-                    .where(AccountModel.email == email)
-                ).first()
-                if row is None:
-                    continue
-                # 远端删号 → 自动撤销登记（ADR-0002）。这里掌握的是「推送成功」
-                # 的账号，所以 present=True 恒成立 —— 真正的撤销判定在拉回路径
-                # （那里能确定远端有没有这个账号，见下面的 `_revoke_missing`）。
-                from services.panel_enrollment import enroll
-
-                extra = row.get_extra()
-                enroll(
-                    extra, panel_key, ok=ok, message=message,
-                    remote_id=str(item.get("remote_id") or ""),
-                )
-                row.set_extra(extra)
-
-                if panel_key == "grok2api":
-                    # grok2api 的落库没有 update_account_model_* 版本
-                    # （它走 record_grok2api_sync_result 的 extra 形状）——
-                    # 就地写 extra 并提交。
-                    from services.chatgpt_sync import record_grok2api_sync_result
-
-                    extra = row.get_extra()
-                    record_grok2api_sync_result(extra, ok, message)
-                    row.set_extra(extra)
-                else:
-                    writer = writers.get(panel_key)
-                    if writer is None:
-                        continue
-                    writer(row, ok, message, session=session, commit=False)
-                account_repository.save(row, session=session)
-                session.commit()
-        except Exception as exc:  # noqa: BLE001 - 落库失败不该毁整批结果
-            logger.warning("push 结果落库失败 %s/%s: %s", panel_key, email, exc)
 
 
 @router.post("/panels/{panel_key}/push")
@@ -350,60 +151,15 @@ def push_panel_endpoint(
 ):
     """把「本地较新 / 未上传」的凭证推到远端（「更新远程凭证」的动作面）。
 
-    与 `/sync`（更新本地，只拉 remote_newer）是一对**方向互斥**的动作：
-    这里只推 `local_newer` 与 `local_only` 的行，`remote_newer` 的行不碰
-    （推上去会用本地旧凭证覆盖远端新的）。
-
-    `delete_old=true`：对**新建式面板**（sub2api / chatgpt2api）推成功后删除
-    旧远端记录 —— 它们的上传每次新增一条，不删会留重复。覆盖式面板
-    （CPA / grok2api）传了也无效（没有可删的重复记录）。
-
-    `platform`（`chatgpt` / `grok`）给多平台面板用（CPA）：界面筛了 Grok
-    再点更新时只推 Grok 的行。空串 = 全部（老行为）。
+    编排逻辑住在 `services/panel_push.push_local_rows`（服务层），这里只做
+    参数透传与错误翻译：未知面板 → 404。
     """
-    from services.panel_comparison_cache import fetch_panel_raw
-    from services.panel_push import push_local_to_remote
-    from services.panel_registry import resolve_panel_key
+    from services.panel_push import push_local_rows
 
-    key = resolve_panel_key(panel_key)
-    if key not in FETCHERS:
-        raise HTTPException(404, f"未知面板: {panel_key}")
-
-    local_rows, remote_accounts, remote_error = fetch_panel_raw(key)
-    if remote_error:
-        return {
-            "panel": key,
-            "total": 0,
-            "pushed": 0,
-            "deleted": 0,
-            "failed": 0,
-            "skipped": 0,
-            "items": [],
-            "remote_error": remote_error,
-        }
-
-    wanted = str(platform or "").strip().lower()
-    if wanted:
-        local_rows = [
-            row for row in local_rows
-            if str(row.get("platform") or "").strip().lower() == wanted
-        ]
-
-    kind = _PANEL_PUSH_KIND.get(key, "overwrite")
-    deleter = _panel_remote_deleter(key) if (delete_old and kind == "append") else None
-
-    summary = push_local_to_remote(
-        local_rows,
-        remote_accounts,
-        upload=lambda row: _push_account_uploader(key, row.get("platform") or "", row),
-        delete_remote=deleter,
-    )
-    summary["panel"] = key
-    summary["remote_error"] = ""
-    # 推送结果落库（与手动动作/自动上传同语义）——此前只写内存副本，
-    # 经 push 路径上传的账号 sync_statuses 永远空白。
-    _persist_push_results(key, summary.get("items") or [])
-    return summary
+    try:
+        return push_local_rows(panel_key, platform=platform, delete_old=delete_old)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
 
 
 @router.post("/backfill")

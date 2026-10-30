@@ -788,9 +788,9 @@ def run_chatgpt2api_auto_sync(
 
 def _default_chatgpt2api_push() -> dict[str, Any]:
     """生产推送：直接调用接口层的 push 端点函数（同一份管线）。"""
-    from api.integrations import push_panel_endpoint
+    from services.panel_push import push_local_rows
 
-    return push_panel_endpoint("chatgpt2api", platform="chatgpt", delete_old=True)
+    return push_local_rows("chatgpt2api", platform="chatgpt", delete_old=True)
 
 
 # ── 周期任务自注册（core.scheduler 不认识具体业务，见其模块 docstring）──
