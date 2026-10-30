@@ -106,7 +106,11 @@ class PlatformDatabaseRegistry:
             cached = self._engines.get(name)
             if cached is not None:
                 return cached
-            created = create_engine(url)
+            # 平台库也要 WAL：`_run_one` 会对每个平台库跑迁移与建表，
+            # 与主库同一套并发问题（data-layer 审计：journal_mode=delete）。
+            from .base import apply_sqlite_pragmas
+
+            created = apply_sqlite_pragmas(create_engine(url))
             self._engines[name] = created
             return created
 

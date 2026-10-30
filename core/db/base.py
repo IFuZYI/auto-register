@@ -54,7 +54,50 @@ if DATABASE_URL.startswith("sqlite:///"):
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     PLATFORM_DB_DIR.mkdir(parents=True, exist_ok=True)
 
-engine = create_engine(DATABASE_URL)
+def apply_sqlite_pragmas(target_engine: Engine) -> Engine:
+    """给 SQLite engine 挂上正确的 PRAGMA。
+
+    默认参数有多差（实测，data-layer / performance 两条 lane 都提到）：
+
+    - `journal_mode=delete`：写事务期间**读也被阻塞**，并发注册 + 面板轮询
+      必然撞 `database is locked`（仓内 `chatgpt_two_factor.py` 已记录过实测）；
+    - `synchronous=FULL(2)`：每次 commit 都 fsync，单次 upsert 22.9 ms；
+    - `busy_timeout` 靠驱动默认 5s，遇到长事务直接抛错而不是等。
+
+    WAL + NORMAL 是 SQLite 官方给「多读一写」场景的推荐组合：读写不互斥，
+    写延迟降一个数量级，崩溃安全性仍然足够（掉电最多丢最后一个事务，
+    而这里每个事务都是账号/任务状态，重跑即可）。
+    """
+    if not str(getattr(target_engine, "url", "")).startswith("sqlite"):
+        return target_engine
+    if getattr(target_engine, "_sqlite_pragmas_applied", False):
+        return target_engine
+
+    from sqlalchemy import event
+
+    @event.listens_for(target_engine, "connect")
+    def _set_sqlite_pragmas(dbapi_connection, _record):  # noqa: ANN001
+        cursor = dbapi_connection.cursor()
+        try:
+            # 每条单独兜：内存库/只读库上 `journal_mode=WAL` 会失败，
+            # 但 busy_timeout 仍然要设。
+            for statement in (
+                "PRAGMA journal_mode=WAL",
+                "PRAGMA synchronous=NORMAL",
+                "PRAGMA busy_timeout=10000",
+            ):
+                try:
+                    cursor.execute(statement)
+                except Exception:  # noqa: BLE001 - 单个 PRAGMA 不支持不该阻断连接
+                    pass
+        finally:
+            cursor.close()
+
+    target_engine._sqlite_pragmas_applied = True  # type: ignore[attr-defined]
+    return target_engine
+
+
+engine = apply_sqlite_pragmas(create_engine(DATABASE_URL))
 
 
 def current_engine() -> Engine:
