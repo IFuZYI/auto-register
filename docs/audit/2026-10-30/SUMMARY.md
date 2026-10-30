@@ -122,8 +122,11 @@ password/token 改成落盘密文（D-01/D-02）。
    mutation 实测——函数体首行插 `raise`，注册相关 83 条测试全绿。真机跑通≠有兜底。
 
 ### P1
-- 性能：`/api/tasks` ETag 仍是 O(n)（304 分支 172ms）；`include_logs` 建议收敛为
-  单任务语义；`task_logs` upsert O(n²)（每行日志 9.6ms）；SQLite 开 WAL；
+- 性能：~~SQLite 开 WAL~~ —— **已修（`2a91175`）**：主库与各平台库都开
+  `journal_mode=WAL` / `synchronous=NORMAL` / `busy_timeout=10s`；
+  导入换库前清 `-wal`/`-shm`（`d8e4bf2`，否则旧帧会被重放到新库）。
+  仍剩：`/api/tasks` ETag O(n)（304 分支 90ms CPU）；`include_logs` 收敛为
+  单任务语义；`task_logs` upsert O(n²)（每行日志 9.6ms）；
   `stats`/`bound_counts` 改 SQL 聚合。
 - 安全：`GET /api/accounts/export` 直出明文密码 CSV 无二次确认；
   备份导出含 `credential_key`（设计如此，但应加确认 + `no-store`）；
