@@ -88,8 +88,8 @@ UUID 签名会穿透到 `platforms/`（不再保证零平台改动），但**行
 | 任务 | 改动 | 验收 |
 |---|---|---|
 | T1.0 `accounts.id` → UUID | ✅ **已完成**（`c3f8a1d64b27`）。实际影响面比原估小得多：**12 处签名 + 5 个路由 + 前端 2 个类型**，不是 91 处 —— 那 91 里 79 处是 `icloud_accounts.id`（另一张表，仍是 int）。无任何外键指向 `accounts` | 全链路跑通；`legacy_id` 可回滚；`alembic check` 无变更 |
-| T1.1 `AccountRecord` + `Credentials` | 新建 `core/models/account.py`；`Account` / `AccountModel` 降级为适配器 | 三向往返等价测试（DTO↔ORM↔JSON） |
-| T1.2 删 13 个鸭子类型 shim | `_A`×2 / `_SyncAccount` / `_UploadAccount` / `_JsonProxy` / `_FacadeProxy` / `_LegacyProxyParts` 等 | `grep -c "class _[A-Z]"` = 3（只留三个真适配器） |
+| T1.1 `AccountRecord` + `Credentials` | ✅ **已完成**：`core/models/account.py`（268 行），`Account` 是**别名**不是子类；`AccountModel.to_record()` 是唯一 ORM→领域转换点 | `tests/test_account_record.py` 9 条往返等价全绿；M4 = 1 |
+| T1.2 删鸭子类型 shim | ✅ **部分完成**：删掉 `_A`×2 / `_SyncAccount` / `_UploadAccount`（账号侧 4 个）。剩 `_JsonProxy`（代理 dict→属性）与 `_LegacyProxyParts`（frozen dataclass，其实不是 shim） | 账号侧 shim = 0；`_JsonProxy` 待代理域有 `ProxyRecord` 后再删 |
 | T1.3 分库塌缩 | `PlatformDatabaseRegistry` 保留接口、恒返回默认 engine；按 `uid` 去重合并 | 合并脚本把 N 个 db 文件并成 1 个；行数守恒 |
 | T1.4 全量加密 | password / AT / RT / ST / IDT / SSO / `totp_secret` / 配置口令 | 库文件 grep 不到任何明文 token；`v1:` 前缀可轮换 |
 | T1.5 2FA journal 加密 | `_write_secret_journal` 改用 `secret_box` | journal 文件 grep 不到明文 secret；恢复后删除 |
