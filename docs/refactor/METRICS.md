@@ -262,3 +262,26 @@ API 层，归 T3.3（`PanelAdapter`）一起搬。
 密钥文件位置见 `core/secret_box.py`（`CREDENTIAL_ENCRYPTION_KEY` /
 `CREDENTIAL_ENCRYPTION_KEY_FILE`）。**密钥丢了 = 所有 RT 不可恢复**，
 备份策略必须把密钥文件与数据库一起备（`data_bundle` 已经这么做了）。
+
+## M6 清零 + T1.2c 记录
+
+### M6：静默 `pass` 71 → 3
+
+70 处 `except Exception: pass` 改成 `logger.debug("忽略异常（保留原行为）", exc_info=True)`。
+**只加日志，不动控制流** —— 这是唯一能批量做且零行为变化的改法。剩下 3 处在
+`platforms/chatgpt/protocol/auth_flow.py`，按 C6 阶段 1–3 不碰该文件，留到阶段 4。
+
+没有追 M5（`except Exception` 447 → ≤380）：把宽捕获收窄成具体类型，**没有证据就是
+在盲改行为** —— 原来被吞掉的异常会开始往上冒。M5 只能逐条读上下文、确认「这里只可能
+抛哪几种」再改，属于长尾人工活，且 PLAN 自己写了「M5/M6 不达标不阻塞阶段推进」。
+
+### T1.2c：代理只剩一种表示
+
+`_JsonProxy`（4 个字段）删除，两条后端统一返回 `ProxyRecord`（7 个字段，与 `proxies`
+表一一对应）。修的是**静默功能缺失**：JSON 部署下 `success_count` / `fail_count` /
+`last_checked` 被丢掉，代理池的「成功率」永远显示 0，且没有任何报错。
+
+`api/proxies.py` 的 `p.is_active = not p.is_active; save(p)` 语义不变 —— `save()` 在
+SQLite 分支按 id 取 ORM 行再改（不再假设传进来的是 ORM 实例）。
+
+至此 M3（账号/代理鸭子类型空壳）= **0**。
