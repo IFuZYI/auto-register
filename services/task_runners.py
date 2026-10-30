@@ -389,16 +389,22 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
             _api.log(task_id, f"致命错误: {e}")
         except Exception:
             logger.debug("忽略异常（保留原行为）", exc_info=True)
-        _api.task_store.finish(
-            task_id,
-            status="failed",
-            success=success,
-            registered=success + skipped + len(errors),
-            skipped=skipped,
-            errors=errors,
-            error=str(e),
-        )
-        persist_task_snapshot(task_id)
+        try:
+            _api.task_store.finish(
+                task_id,
+                status="failed",
+                success=success,
+                registered=success + skipped + len(errors),
+                skipped=skipped,
+                errors=errors,
+                error=str(e),
+            )
+        except Exception:  # noqa: BLE001 - 收尾路径绝不能再抛
+            logger.exception("批量任务失败收尾 finish 失败: %s", task_id)
+        try:
+            persist_task_snapshot(task_id)
+        except Exception:  # noqa: BLE001
+            logger.exception("批量任务失败收尾快照失败: %s", task_id)
         _api.task_store.cleanup()
         return
 
@@ -409,17 +415,32 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
         )
     else:
         summary = f"完成: 成功 {success} 个, 跳过 {skipped} 个, 失败 {len(errors)} 个"
-    _api.log(task_id, summary)
-    _api.task_store.finish(
-        task_id,
-        status=final_status,
-        success=success,
-        registered=success + skipped + len(errors),
-        skipped=skipped,
-        errors=errors,
-    )
-    persist_task_snapshot(task_id)
-    _api.task_store.cleanup()
+    # **收尾必须在 finally 里**：`_api.log()` 会走 `persist_task_snapshot` →
+    # SQLite 写；并发写时 `database is locked` 会直接上抛。这条路径原来没有任何
+    # 保护 —— 一旦抛出，`finish()` 永不执行，任务在内存里**永久 running**：
+    # DELETE 409、stop 无人消费、`has_active()` 恒真连备份导入都拒绝
+    # （actions 审计 F-03，实测）。
+    try:
+        _api.log(task_id, summary)
+    except Exception:  # noqa: BLE001 - 日志写不进去也要把任务结束掉
+        logger.exception("任务收尾日志写入失败（继续结束任务）: %s", task_id)
+    finally:
+        try:
+            _api.task_store.finish(
+                task_id,
+                status=final_status,
+                success=success,
+                registered=success + skipped + len(errors),
+                skipped=skipped,
+                errors=errors,
+            )
+        except Exception:  # noqa: BLE001 - finish 自身失败只能记日志，不能二次抛出
+            logger.exception("任务 finish 失败: %s", task_id)
+        try:
+            persist_task_snapshot(task_id)
+        except Exception:  # noqa: BLE001
+            logger.exception("任务快照落库失败: %s", task_id)
+        _api.task_store.cleanup()
 
 
 def _load_account_fields(account_id: str, platform: str = "chatgpt") -> Optional[dict]:
@@ -694,17 +715,28 @@ def _run_account_batch_task(
 
     final_status = "stopped" if control.is_stop_requested() or stopped else "done"
     prefix = f"{label}已停止" if final_status == "stopped" else f"{label}完成"
-    _api.log(task_id, f"{prefix}: 成功 {success} 个, 跳过 {skipped} 个, 失败 {len(errors)} 个")
-    _api.task_store.finish(
-        task_id,
-        status=final_status,
-        success=success,
-        registered=success + skipped + len(errors),
-        skipped=skipped,
-        errors=errors,
-    )
-    persist_task_snapshot(task_id)
-    _api.task_store.cleanup()
+    # 与 `_run_register` 同理：日志写失败不能把 finish() 一起带走（F-03）。
+    try:
+        _api.log(task_id, f"{prefix}: 成功 {success} 个, 跳过 {skipped} 个, 失败 {len(errors)} 个")
+    except Exception:  # noqa: BLE001
+        logger.exception("批量任务收尾日志写入失败（继续结束任务）: %s", task_id)
+    finally:
+        try:
+            _api.task_store.finish(
+                task_id,
+                status=final_status,
+                success=success,
+                registered=success + skipped + len(errors),
+                skipped=skipped,
+                errors=errors,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("批量任务 finish 失败: %s", task_id)
+        try:
+            persist_task_snapshot(task_id)
+        except Exception:  # noqa: BLE001
+            logger.exception("批量任务快照落库失败: %s", task_id)
+        _api.task_store.cleanup()
 
 
 def _run_backfill_rt(task_id: str, account_ids: list[int], req: BackfillRtTaskRequest):

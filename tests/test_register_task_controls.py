@@ -482,3 +482,75 @@ class ConsoleGuardTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TaskFinishSurvivesLogFailureTests(unittest.TestCase):
+    """收尾日志写失败不能把任务留在 running（actions 审计 F-03）。
+
+    真实形态：收尾时 `_api.log("完成: …")` 会走 `persist_task_snapshot` → SQLite 写，
+    并发下 `database is locked` 直接上抛。原来这条路径没有任何保护 —— `finish()`
+    永不执行，任务在内存里永久 running：DELETE 409、stop 无人消费、
+    `has_active()` 恒真连备份导入都拒绝。
+    """
+
+    def test_task_finishes_even_if_the_summary_log_raises(self):
+        from api.tasks import RegisterTaskRequest, _create_task_record
+
+        task_id = "task-finish-log-failure"
+        req = RegisterTaskRequest(
+            platform="chatgpt", count=1, concurrency=1, extra={"mail_provider": "fake"}
+        )
+        _create_task_record(task_id, req, "manual", None)
+        _FlakyPlatform.reset(0)
+
+        def _boom(*args, **kwargs):
+            message = args[1] if len(args) > 1 else kwargs.get("message", "")
+            if str(message).startswith(("完成:", "任务已停止:")):
+                raise RuntimeError("database is locked")
+            return None
+
+        with (
+            patch("core.registry.get", return_value=_FlakyPlatform),
+            patch("core.base_mailbox.create_mailbox", return_value=_FakeMailbox()),
+            patch("core.db.save_account", side_effect=lambda account: account),
+            patch("services.task_service.log", side_effect=_boom),
+        ):
+            _run_register(task_id, req)
+
+        snapshot = _task_store.snapshot(task_id)
+        self.assertEqual(
+            snapshot["status"], "done", f"收尾日志抛错后任务卡在 {snapshot['status']}"
+        )
+        self.assertEqual(snapshot["success"], 1)
+
+    def test_task_finishes_even_if_persist_snapshot_raises_at_the_end(self):
+        """`persist_task_snapshot` 自己抛错也不能阻止 finish。"""
+        from api.tasks import RegisterTaskRequest, _create_task_record
+
+        task_id = "task-finish-persist-failure"
+        req = RegisterTaskRequest(
+            platform="chatgpt", count=1, concurrency=1, extra={"mail_provider": "fake"}
+        )
+        _create_task_record(task_id, req, "manual", None)
+        _FlakyPlatform.reset(0)
+
+        calls = {"n": 0}
+        real = __import__("services.task_runners", fromlist=["persist_task_snapshot"]).persist_task_snapshot
+
+        def _maybe_boom(tid):
+            calls["n"] += 1
+            # 最后几次（收尾）抛错，过程快照照常
+            if calls["n"] > 3:
+                raise RuntimeError("database is locked")
+            return real(tid)
+
+        with (
+            patch("core.registry.get", return_value=_FlakyPlatform),
+            patch("core.base_mailbox.create_mailbox", return_value=_FakeMailbox()),
+            patch("core.db.save_account", side_effect=lambda account: account),
+            patch("services.task_runners.persist_task_snapshot", side_effect=_maybe_boom),
+        ):
+            _run_register(task_id, req)
+
+        snapshot = _task_store.snapshot(task_id)
+        self.assertNotEqual(snapshot["status"], "running", "任务永久 running")
