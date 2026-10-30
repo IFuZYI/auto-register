@@ -14,6 +14,10 @@
 
 ## 0. 结论速览
 
+> **第二轮复核（2026-10-30，同一审计目录）**：新增 1 条 **P0**（列表响应明文下发 grok SSO）、
+> 6 条 P1、6 条 P2，见 **§6**。其中 R-01 与 HEAD `a3470d3`「列表类响应不再下发凭据正文」
+> 直接冲突 —— 该提交堵住了 `token` 列，但没堵 `extra.sso`。
+
 | 审计项 | 结论 | 最严重发现 |
 |---|---|---|
 | (1) SQLite / JSON 等价性 | ❌ 不等价 | D-01/D-02 凭据明文落盘；D-03 Outlook 池写错表；D-04 JSON 改账号 500；D-05 混合后端不建表；D-06 并发丢写 |
@@ -49,7 +53,7 @@ proxies           5 行，5/5 的 url 含 `user:pass@`      ← 见 D-20
 configs           143 键，78 个不在 CONFIG_SCHEMA 内     ← 见 D-19
                   gptmail_api_key / maliapi_api_key 明文
 task_runs         837 行，59 行 logs_json 含 `scheme://user:pass@`（与 proxy.md P1-10 同一批）
-alembic_version   d4e7f1a25b90（head 是 e5b2c8f71a34）   ← 见 D-16
+alembic_version   e5b2c8f71a34（= head；D-16 记录的是 d4e7f1a25b90 —— 见 §6 复核说明）
 data/platforms/outlook.db   3 行，password/refresh_token 均为空串
 data/platforms/icloud.db    3 主号（source=remote，credentials_cipher 为空）
                             1941 别名，share_token 全明文（22 字符）
@@ -679,3 +683,208 @@ PY
 - `core/db/icloud_alias_repository.py` 的 `update_where(match={...None...})`：SQLite `= NULL` 永不命中，JSON `str(None)=="None"` 会命中（`core/storage/query.py:57-64` 的 `eq` 已处理 None，但 `update_where` 走的是自己的字符串比较，`:231-240`）。当前调用方（`services/icloud/aliases.py:399`）只传字符串，未触发。
 - `AccountStoreJson.platforms_by_email()` 是 O(N) 全表扫且被逐地址调用（`core/db/repository.py:949`），邮箱池候选多时是 O(N×M)。
 - `data/accounts.json` 目前是空骨架但真实数据在 SQLite：一旦有人把 `STORAGE_BACKEND` 切成 `json`，界面会显示 0 个账号，且仓库里**没有** sqlite→json 的迁移脚本（`scripts/` 只有 merge/dump/encrypt）。建议在文档与启动日志里显式警告，或提供 `scripts/export_accounts_json.py`。
+
+---
+
+## 6. 第二轮补充（2026-10-30 复核）
+
+复核方式：只读静态审阅 + 对真库 `file:...?mode=ro` 跑 `PRAGMA` / `EXPLAIN QUERY PLAN` / 行数与
+长度统计 + 在**库副本**上调用 `api/accounts.py::_slim_account_row()` 复现响应形状 +
+单文件测试 `tests/test_accounts_list_payload.py`（10 passed，未改动任何源码）。
+真库 `quick_check = ok`；`alembic_version = e5b2c8f71a34`（= head）—— 与 D-16 记录的
+`d4e7f1a25b90` 不一致，可能审计后跑过 `upgrade head`（或 D-16 读的是副本）。
+**D-16 的「版本号落后 head」结论按当前真库不成立，但「表达式索引反射盲区」仍成立**
+（`migrations/env.py:112` 的 `Skipped unsupported reflection of expression-based index`
+告警与索引定义无关，属 alembic/SQLite 反射限制）。以下条目与 §1–§5 不重复。
+
+> **行号口径**：§6 的行号以本轮复核时的**工作树**为准。复核期间 `core/db/repository.py`
+> 有未提交改动（新增 `AccountRepository.update_extra()`，+53 行），因此该文件中
+> **436 行之后**的引用比 HEAD 大 53（例：`stats()` 在 891 而非 838）。每条都同时给了
+> 函数名/代码片段，改版后按名字定位即可。其余文件（`api/accounts.py`、`core/db/migrations.py`、
+> `core/proxy_pool.py`、`services/task_store_io.py`）行号与 HEAD 一致。
+
+### R-01 [P0] 列表接口把 grok 的 SSO 正文（明文）下发给客户端 —— `a3470d3` 漏掉的那把钥匙
+
+- 位置：`api/accounts.py:165`、`:167`、`:225`、`:241-253`、`:283`
+- 证据：
+  - `_LIST_HEAVY_EXTRA_KEYS = ("session_token", "id_token", "cookies", "cpa_record")`（:165）与
+    `_LIST_TOKEN_EXTRA_KEYS = ("access_token", "refresh_token")`（:167）**都是黑名单**，
+    两边都没有 `sso` / `sso_token`。
+  - `slim = decrypt_extra(data)`（:225）先把整份 `extra_json` 解密，再按黑名单 pop。
+  - `core/credential_crypto.py:41-50` 的 `SENSITIVE_EXTRA_KEYS` 明确包含 `sso`
+    —— 代码自己把 SSO 定性为「可直接冒用身份的 bearer 凭证」，落盘加密、读侧解密，
+    然后原样进了列表响应。
+  - 库副本实测：对 `platform='grok'` 的真实行调用 `_slim_account_row()`，返回的
+    `extra_json` 含 `"sso": "eyJ0eX...NiJ9.eyJ..."`（明文 JWT）。同一行的 `token` 列确实被
+    :283 的 `exclude={"password","token"}` 排掉了 —— **列被堵住，extra 里的同一把钥匙没堵**。
+  - `tests/test_accounts_list_payload.py` 全文 0 处提及 `sso`（`grep -c sso` = 0），10 条用例全绿，
+    所以回归测试挡不住。
+- 影响：`GET /api/accounts?page_size=1000` 一次最多返回 1000 行，可把整个 grok 号池（390 行）
+  的 SSO 正文批量交给调用方。面板未设密码时中间件只放行本机回环（`api/auth.py:337`），
+  但任何已登录会话 / 本机进程 / 浏览器扩展都能一次拖走全部登录态。这与 D-17（`token` 列
+  静态明文）是**同一批凭据的两个出口**：D-17 修了静态，这条还是传输侧。
+- 建议：
+  1. 黑名单改**白名单**：列表只放行确实要渲染的键（`register_proxy`、`chatgpt_local`、
+     `probe_status`、`sync_statuses`…），其余一律 pop —— 以后新增凭证字段不会再漏；
+  2. 过渡期至少把 `sso`、`sso_token` 并入 `_LIST_TOKEN_EXTRA_KEYS` 并补 `has_sso` 布尔
+     （与 `has_access_token` 同款，:241-253 的循环已经是这个形状，加一项即可）；
+  3. `decrypt_extra` 改成「只解密要放行的键」，不要先全量解密再丢弃（顺带省掉 P0 之外的 CPU）；
+  4. 测试用 `SENSITIVE_EXTRA_KEYS` **注册表驱动**断言：列表响应里不得出现其中任何一个键。
+
+### R-02 [P1] 引擎没配 WAL / busy_timeout：写并发靠 pysqlite 默认值，仓内已有 `database is locked` 实测记录
+
+- 位置：`core/db/base.py:57`（`engine = create_engine(DATABASE_URL)`）、
+  `core/db/registry.py:109`（平台库同款裸 `create_engine`）
+- 证据：全仓无 `connect_args`、无 `event.listens_for(engine, "connect")`、应用侧无
+  `PRAGMA journal_mode/busy_timeout/foreign_keys`（grep 只命中 `migrations.py` / `merge.py` 的
+  `PRAGMA table_info`）。真库：`journal_mode=delete`、`busy_timeout=5000`（= pysqlite 默认，
+  非显式配置）、`synchronous=2`。
+- 影响：`journal_mode=delete` 下写事务阻塞读者、每个事务一次 fsync；并发写超时直接
+  `database is locked`。这不是假设：`services/chatgpt_two_factor.py:242`、`:313`、`:407`
+  三处注释都写着「另开连接写库就是 `database is locked`（实测复现）」，并为此专门加了文件
+  写前日志兜底。当前形态是 FastAPI 线程池 + 后台任务线程 + 启动迁移同时写一个文件。
+- 建议：在引擎创建处统一挂 connect 事件：`journal_mode=WAL`（持久化）、
+  `busy_timeout=15000`、`synchronous=NORMAL`、`foreign_keys=ON`（见 R-06）。
+  `services/data_bundle.py` 的导出已用 `VACUUM INTO`，WAL 下仍然正确。
+
+### R-03 [P1] 每追加一行日志就整行 UPDATE 一次任务快照（写放大 50–100 倍）
+
+- 位置：`services/task_service.py:95`（`log()` 无条件 `persist_task_snapshot`）→
+  `services/task_store_io.py:159-178`（UPDATE 全字段）
+- 证据：更新分支把 `meta_json` / `logs_json` / `errors_json` / `cashier_urls_json` /
+  `control_json` 全部重新 `json.dumps` 写回（:169-173），不区分「只多了一行日志」。
+  真库单行最大 `logs_json = 158_093` B（`task_1793122095317`）；
+  `task_runs` 累计 `sum(length(logs_json)) = 7_365_755`、`sum(length(errors_json)) = 4_719_115`。
+- 影响：一个 100 账号任务按每号 5 行日志 = 500 次写，每次都重写整份 logs/errors
+  （末段上百 KB），写放大 50–100 倍；在 `journal_mode=delete` 下每次都是一次完整事务 + fsync，
+  写锁持有时间被拉长，直接放大 R-02。
+- 建议：`log()` 做节流（按时间/条数合并，如 500 ms 或 20 条落一次盘），任务收尾强制 flush；
+  或把日志拆到 `task_log_lines(task_id, seq, text)` 子表、快照只存计数 —— 后者同时解掉
+  「列表页不敢带 logs」的老问题（D-34）。
+
+### R-04 [P1] 判重热路径 `find_by_email` 用不到唯一索引，按平台全扫
+
+- 位置：`core/db/repository.py:276-280`（同型：`registered_emails` :325-329、
+  `platforms_by_email` :1021）
+- 证据（真库 `EXPLAIN QUERY PLAN`）：
+  - `WHERE platform = ? AND email = ?` → `SEARCH accounts USING INDEX ix_accounts_platform_created_at (platform=?)`
+  - `WHERE platform = ? AND lower(email) = ?` → `SEARCH accounts USING INDEX uq_accounts_platform_email (platform=? AND <expr>=?)`
+- 影响：唯一索引只承担「防重复」的约束作用，查询完全没吃到；每次判重要把该平台全部行读出来
+  再比 email（chatgpt 现 667 行/次）。`is_registered()` 是注册链路**每个邮箱动手前**的必经调用，
+  `upsert()` 开头还要再来一次（:364-368）。
+- 建议：email 条件改成 `func.lower(AccountModel.email) == key`（值已是 `normalize_email()`
+  的小写形态），三处一起改；改完 `ix_accounts_email` 可删（见 R-09）。
+
+### R-05 [P1] `platform` 写入不归一、查询却一律按小写比较 —— 大小写不同的行会「消失」
+
+- 位置：写入 `core/db/repository.py:352`（`platform = str(getattr(account, "platform", "") or "")`，
+  无 `strip()/lower()`）、建行 `:397`；读取 `:958`、`:1015`、`:857`、`:692`、`:726`
+  （一律 `== xxx.strip().lower()` 或 `func.lower(platform)`）
+- 证据：`normalize_email()` 存在且到处调用（`core/db/base.py:86`），platform 没有对应归一；
+  真库当前 `platform <> lower(platform)` 行数为 0 —— 只是**现有数据恰好**都小写。
+  与 D-11(b) 的区别：那是 JSON/SQLite 两个后端对同一行的匹配差异，这里是**写入口缺归一**。
+- 影响：任何插件/导入脚本产出一行 `platform="Grok"`，该行会出现在「不带 platform 的全量列表」里，
+  但在所有按平台过滤的列表/计数/导出里静默消失（`WHERE platform='grok'` 匹配不到）；
+  更糟的是 `uq_accounts_platform_email` 对 platform **大小写敏感**，同一邮箱可以同时存在
+  `Grok` 与 `grok` 两行，而业务判重（走 lower 比较）认为只有一行。
+- 建议：加 `normalize_platform()`（`strip().lower()`），在 `upsert` / `save` / `AccountModel.__init__`
+  三处入口归一；补一条一次性 `UPDATE accounts SET platform = lower(trim(platform))`；
+  之后可以去掉 `func.lower(platform)`（它同时挡住主键查找的索引使用，:639/:673）。
+
+### R-06 [P1] 声明了外键但从不启用（`foreign_keys=0`）
+
+- 位置：`core/db/models_platform.py:100`（`account_id: int = Field(index=True,
+  foreign_key="icloud_accounts.id")`）；引擎处 `core/db/base.py:57` / `core/db/registry.py:109`
+- 证据：`data/platforms/icloud.db` 的 DDL 确有
+  `FOREIGN KEY(account_id) REFERENCES icloud_accounts (id)`（`PRAGMA foreign_key_list` 可见，
+  `on_delete=NO ACTION`），但 `PRAGMA foreign_keys = 0`，应用侧没有 connect 事件打开它。
+  当前 1941 条别名里孤儿 0 条 —— 只是还没人删过主号。
+- 影响：删除 iCloud 主号会留下 `account_id` 指向不存在行的别名，它们仍出现在别名列表/取号池，
+  到取号时才发现主号没了。约束写了等于没写。
+- 建议：与 R-02 一起 `PRAGMA foreign_keys=ON`；删除主号改成显式级联
+  （或 `ondelete="CASCADE"` + 重建表）；加一条一次性 SQL 找出历史孤儿。
+
+### R-07 [P1] `page_size` 无上限，叠加「全表 stats」——一条请求即可拉满内存与 CPU
+
+- 位置：`api/accounts.py:324`（`page_size = max(1, int(page_size or 20))`，无上界）；
+  `core/db/repository.py::stats()`（工作树 `:891`，整表读在 `:910` / `:935`）
+- 证据：`/api/accounts/stats` 每次把 1057 行**整行**读进内存（`extra_json` 平均 7 935 B、
+  最大 17 105 B，全表约 8.4 MB）只为算两个 `group by`；列表接口的 `page_size` 只夹下界，
+  `page_size=100000` 会把整库拉进内存并逐行 AES 解密（`_slim_extra_for_list` :225）。
+- 影响：两个最热接口的开销都只随账号数线性增长；`page_size` 无上界与 R-01 组合 =
+  「一条请求导空号池」的完整链路。
+- 建议：`page_size` 夹到 `min(200, ...)`；`stats()` 改
+  `select(platform, status, func.count()).group_by(platform, status)`（`ix_accounts_status` 可覆盖），
+  或加一张按 `updated_at` 失效的汇总缓存。
+
+### R-08 [P2] UUID 之后 `MIN(id)` / `ORDER BY id` 不再等于「最早那条」
+
+- 位置：`core/db/migrations.py:365-368`（`MIN(id) keep_id`）、`:373`（`ORDER BY id`）；
+  `migrations/versions/b7c1e4a92d30...py:48-50`（`DELETE ... NOT IN (SELECT MIN(id) ...)`）
+- 证据：docstring 写「保留 id 最小的一条」（:342），这句话在自增整数主键下等于「最早注册的」；
+  `core/db/models_account.py:66-68` 记录 id 已改 UUID、旧整数存 `legacy_id`。UUID 字典序与创建
+  时间无关，现在保留的是**随机一条**。
+- 影响：去重时可能丢掉「最早、字段最全」的行（与 D-28 的 `legacy_id` 丢失叠加）；
+  该函数每次启动都跑，等于每次启动都可能做一次随机的取舍。
+- 建议：排序键改成 `COALESCE(legacy_id, 9223372036854775807), created_at, id`；
+  并把这套逻辑下沉进一次性 revision（见 D-12/D-15），不要每次启动重跑。
+
+### R-09 [P2] 索引配置与真实查询不匹配：既有冗余也有缺口
+
+- 位置/证据（真库 8 个 accounts 索引 + `EXPLAIN`）：
+  - `ix_accounts_email`（单列）：没有任何查询只按 email 过滤（`find_by_email` 带 platform，
+    `email_contains` 是 `LIKE '%x%'` 用不上索引）→ 纯维护成本。
+  - `ix_accounts_platform`：被 `ix_accounts_platform_created_at` 前缀完全覆盖 → 冗余。
+  - `ix_accounts_updated_at`：全仓无 `ORDER BY/filter updated_at` 的查询 → 纯维护成本。
+  - 缺口：真正热的 `WHERE platform=? AND email=?` 没有可用索引（R-04）。
+- 影响：1057 行的量级下只是写放大；账号数上到万级后每次 upsert 要多维护 3 个索引页。
+- 建议：R-04 改完后删 `ix_accounts_email` / `ix_accounts_platform` / `ix_accounts_updated_at`，
+  用一条 alembic revision 收敛（注意模型侧 `index=True` 也要同步删，否则 `create_all`
+  又会建回来 —— 这正是 D-14/D-16 那类漂移的来源）。
+
+### R-10 [P2] 代理计数每次成功/失败都开新会话提交；`_find_by_url` 会退化成全表扫
+
+- 位置：`core/proxy_pool.py:77-104`（`report_success` / `report_fail`：各开 `Session` + `commit`）；
+  `:39-42`（URL 未规范化时 `select(ProxyModel)` 全表扫）；`:44-76`（`get_next` 全量加载 + Python 排序）
+- 证据：注册链路每个账号至少触发两次计数写；`_find_by_url` 先按 `url` 精确查，规范化后不同则
+  逐行比对。当前只有 5 条代理，成本可忽略，但这是**每账号必经**的写放大点（与 R-02 叠加）。
+- 建议：计数走内存累加 + 定时 flush（或 `UPDATE ... SET success_count = success_count + 1`
+  单语句，避免读-改-写）；`_find_by_url` 先 `normalize_proxy_url()` 再精确匹配唯一列。
+
+### R-11 [P2] 导入前的「安全网」是裸文件拷贝（导出却是 `VACUUM INTO`）
+
+- 位置：`services/data_bundle.py:491`（`shutil.copy2(source, destination)`）；
+  对照 `:139-154`（导出用 `VACUUM INTO`，注释里明确写了「直接 copy 会撕裂」）
+- 证据：同一份代码两种口径：导出安全、导入前备份不安全。导入前虽有「运行中任务守卫」，
+  但后台维护任务（`services/chatgpt_maintenance` 等）仍可能在写。
+- 影响：导入失败需要回滚时，回滚源本身可能是一个撕裂/半写的库 —— 安全网在关键时刻失效。
+- 建议：`_backup_current_data` 也走 `VACUUM INTO`（只读连接 + 目标路径不能已存在），
+  失败再退回 copy 并打 warning。
+
+### R-12 [P2] `config_store.get()` 每次调用都开一个 Session，无进程内缓存
+
+- 位置：`core/config_store.py:294-303`（SQLite 分支：`Session(current_engine())` + `s.get`），
+  `_backend_name()` 每次重算
+- 证据：全仓 67 处配置读取；configs 只有 143 行、全表 < 100 KB。任务链路里按账号/按动作反复读。
+- 影响：每账号 N 次额外 round-trip + 连接获取，且都是对同一个热点表的重复读。
+- 建议：启动时 `get_all()` 进内存 + `set/delete` 时失效（`set_many` 已是批写，失效点集中）。
+
+### R-13 [P2] 20% 的库文件是空闲页，永不回收
+
+- 位置：运维面（无代码位置）；相关：`services/log_cleanup.py` 只删行不回收
+- 证据：`PRAGMA page_count=8229`、`freelist_count=1660`（≈ 6.8 MB / 33.7 MB，20%）、
+  `auto_vacuum=0`；全仓无 `VACUUM` / `incremental_vacuum` 调用。
+- 影响：删日志/删账号后文件不缩小，备份包与 `VACUUM INTO` 导出都带着这份空洞（导出会紧凑化，
+  但日常备份/拷贝不会）。
+- 建议：`auto_vacuum=INCREMENTAL` 需要一次全量 `VACUUM` 生效；在那之前提供一个显式的
+  「压缩数据库」运维入口（`VACUUM INTO` 新文件 + 原子替换），并在日志清理后提示。
+
+### §6 修复顺序
+
+1. **R-01**（一个提交、改动小、影响最大）：黑名单改白名单 + 补 `sso` + 注册表驱动测试。
+2. **R-02 / R-03 / R-06**：引擎 pragma（WAL、busy_timeout、foreign_keys）+ 日志写入节流。
+   三条互相放大，一起改收益最大。
+3. **R-04 / R-05 / R-09**：判重改 `lower(email)`、platform 归一（含一次数据修正）、索引收敛。
+4. **R-07**：`page_size` 上界 + `stats()` 下推到 SQL。
+5. **R-08 / R-10 / R-11 / R-12 / R-13**：随 D-12/D-15 的迁移收敛一并处理，其余按运维节奏。
+

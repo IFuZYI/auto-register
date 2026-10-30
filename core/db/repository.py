@@ -437,6 +437,59 @@ class AccountRepository:
                 sess.close()
 
     @staticmethod
+    def update_extra(
+        account_id: Any, platform: str, extra: dict, *, session: Session | None = None
+    ) -> bool:
+        """只更新一个账号的 `extra_json`；**行不存在就返回 False，绝不插入**。
+
+        为什么不能用 `upsert` / `save` 做「改一个键」：那两条路把调用方手里的
+        **整行快照**写回去 —— `password` / `token` / `status` / `extra_json`
+        全都被 0.4~35 秒前的旧值覆盖。均衡（`rebalance`，1057 个号实测 35.5s）
+        和换绑（`rebind`）都踩过这个：任务线程刚写进去的 token、2FA 密钥、
+        手工备注被回滚；更糟的是删掉的账号被 `upsert` 的插入分支**以新 UUID
+        复活**（全量检测 proxy P0-3）。
+
+        这里只做 `UPDATE accounts SET extra_json=?, updated_at=? WHERE id=? [AND platform=?]`，
+        受影响行数为 0 就说明账号已被删/已跨库迁走 —— 调用方据此跳过而不是重建。
+        """
+        import json as _json
+        from datetime import datetime, timezone
+
+        account_id_text = str(account_id or "").strip()
+        platform_text = str(platform or "").strip()
+        if not account_id_text:
+            return False
+        payload = _json.dumps(extra or {}, ensure_ascii=False)
+
+        store = AccountRepository._json_store()
+        if store is not None:
+            updated = store.update(account_id_text, {"extra_json": payload})
+            if updated is None and account_id_text.isdigit():
+                # JSON 后端的历史记录用自增 int 主键，UUID 化只覆盖了 SQLite 行
+                updated = store.update(int(account_id_text), {"extra_json": payload})
+            return updated is not None
+
+        from sqlalchemy import update as sa_update
+
+        own = session is None
+        sess = session if session is not None else AccountRepository._session_for(platform_text)
+        try:
+            conds = [AccountModel.id == account_id_text]
+            if platform_text:
+                conds.append(AccountModel.platform == platform_text)
+            result = sess.exec(
+                sa_update(AccountModel)
+                .where(*conds)
+                .values(extra_json=payload, updated_at=datetime.now(timezone.utc))
+            )
+            if own:
+                sess.commit()
+            return bool(result.rowcount)
+        finally:
+            if own:
+                sess.close()
+
+    @staticmethod
     def save(model, *, session: Session | None = None) -> Optional[AccountModel]:
         """写回一个账号行 —— **写路径的统一入口**。
 

@@ -133,7 +133,8 @@
 | 仓储落盘（`save_account` → `extra_json`） | `tests/test_chatgpt_two_factor_persistence.py:98-110` | 有（totp_secret 密文 + 读回明文） |
 | 密码列 | `tests/test_account_password_serialization.py`（5） | 强：DB 密文、响应明文、`password_cipher` 不泄露 |
 | 配置密钥 | `tests/test_config_secret_encryption.py`（6） | 有 |
-| TOTP 待写入日志 | `tests/test_totp_journal_crypto.py`（3） | 有（含 0600 权限断言 `:325-326`） |
+| TOTP 待写入日志 | `tests/test_totp_journal_crypto.py`（3） | 有（journal 明文/恢复/不可解密保留） |
+| 密钥文件权限 | `tests/test_chatgpt_two_factor_persistence.py:325-326` | 只覆盖 TOTP journal 的 0600；凭据密钥文件本身没有 |
 | 列表/日志不泄露 | `tests/test_list_payload_no_secrets.py`、`tests/test_no_credential_in_logs.py`（2） | 见下 |
 
 **缺口（点名）**
@@ -164,7 +165,7 @@ self.assertEqual(state, "synced")                      # ← 把「漏读列上�
 
 ### 2.2 源码字符串断言：既钉实现，又放过 bug
 
-`tests/test_registration_chain_ordering.py` 全文件 16 条测试，**13 条是 `inspect.getsource` + `assertIn`**。
+`tests/test_registration_chain_ordering.py` 全文件 16 条测试，**全部基于 `inspect.getsource`**（13 处 `getsource` 调用 + 3 个 helper）。
 
 | 用例 | 断言 | 问题 |
 | --- | --- | --- |

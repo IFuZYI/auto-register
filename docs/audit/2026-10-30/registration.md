@@ -2,7 +2,8 @@
 
 [MODE: SANDBOX]
 
-- 仓库：`/data/workspace/Register`，分支 `main`，HEAD `4680c8d`
+- 仓库：`/data/workspace/Register`，分支 `main`
+- 基线：审计执行于 `4680c8d`；写入报告时 HEAD 已因**其他审计的修复提交**推进到 `e6f8670`，本报告的行号已按 `e6f8670` 复核（in-scope 变更只有 `services/task_runners.py` 的 8 行日志打码与 `core/db/models_account.py` 的索引声明）
 - 解释器：`.venv/bin/python`（3.12）
 - 生产库：`data/account_manager.db`（**只读**，`mode=ro` 打开；本报告未写入任何一行）
 - 审计方式：静态通读 + 只读 SQL 抽样 + 3 个可复现探针 + 3 个既有测试文件（73 passed）
@@ -32,7 +33,7 @@
 | 5 | 凭证落库完整性 | **两处硬伤**：邮箱渠道的 RT/client_id 会覆盖账号的；`client_id` 在三个结果类型里全部丢失 | R-01 / R-24 / R-25 |
 | 6 | 并发共享状态 | **有全局串行锁**：SMS 验证锁跨整个租号周期、无超时；Grok 发码锁内 sleep | R-18 / R-30 / R-31 |
 
-一句话：**注册主链（协议 + 引擎）结构清晰、单号路径能跑通，但"换 RT"这条横切能力在注册 / 补RT / 刷新三处的路线语义、收件渠道类型和 client_id 归属上各说各话；其中两处会把账号凭证写错（邮箱 RT 覆盖账号 RT、Codex RT 配 platform client_id），一处会让指定邮箱的注册永久烧掉一个号池别名。**
+一句话：**注册主链（协议 + 引擎）结构清晰、单号路径能跑通，但"换 RT"这条横切能力在注册 / 补RT / 刷新三处的路线语义、收件渠道类型和 client_id 归属上各说各话；其中两处会把账号凭证写错（邮箱 RT 覆盖账号 RT、Codex RT 配 platform client_id），一处会让指定邮箱的注册白烧一个号池别名。**
 
 ---
 
@@ -44,7 +45,7 @@
 
 | 链路 | 入口 | `route=codex` | `route=login` |
 |---|---|---|---|
-| 注册 | `registration_engine._acquire_refresh_token`（`:240-287`） | Codex → 登录链回退 → 协议层 Codex 兜底（被 `_codex_rt_attempted` 挡住，见 R-02） | 登录链 → **协议层 Codex 兜底仍会跑**（R-03） |
+| 注册 | `registration_engine._acquire_refresh_token`（`:240-287`） | Codex → 登录链回退 → 协议层 Codex 兜底（已被 `_codex_rt_attempted` 占掉，实际跳过） | 登录链 → **协议层 Codex 兜底真的会跑**（R-03） |
 | 补 RT | `rt_backfill.RefreshTokenBackfiller.run`（`:200-235`） | session → codex → platform | platform → session → codex |
 | 刷新 AT | `login_refresh` → `run_protocol_login` | 登录 → `_ensure_refresh_token` → Codex | 登录 → **`_ensure_refresh_token` → Codex**（R-03） |
 
@@ -75,7 +76,7 @@
   BaseMailbox.wait_for_code: True
   ```
 
-  触发点：`platform_rt.py:240-246`（登录链要邮箱码时）与 `codex.py:322` 的 `mail_provider.wait_for_otp(...)`；两处都被 `except Exception` 收成「登录链等邮箱验证码失败: 'XxxMailbox' object has no attribute 'wait_for_otp'」，然后返回 False。
+  触发点：`platform_rt.py:240-246`（登录链要邮箱码时）与 `codex.py:328-332` 的 `mail_provider.wait_for_otp(...)`；两处都被 `except Exception` 收成「登录链等邮箱验证码失败: 'XxxMailbox' object has no attribute 'wait_for_otp'」，然后返回 False。
 - **影响**：注册链里只要 RT 路线撞上 `email_otp_verification`，RT 就**必然拿不到**，且日志看起来像"邮箱链路问题"。这正是 `a093ab4`/`7f6be46` 在补 RT 链修过的同一类坑（补 RT 传的是 `services/chatgpt_otp_mailbox` 造的真 provider），注册链只修了"属性不存在"（`:292-295` 的注释），没修"类型不对"。
 - **建议**：`_build_flow` 把 `provider`（`MailboxProviderAdapter`）存到引擎上，`_acquire_rt_adapter` / `_run_login_rt` / `_run_codex_rt` 一律用它；加结构性测试：`AuthFlow` 收到的 `mail_provider` 必须 `isinstance(MailProvider)`。
 
@@ -83,7 +84,8 @@
 
 - **位置**：`platforms/chatgpt/protocol/auth_flow.py:276-303`（`_ensure_refresh_token`）、`:1197-1200`（`run_protocol_login` 末尾）、`platforms/chatgpt/login_refresh.py:172-184`（env 未关 Codex）。
 - **证据**：`_ensure_refresh_token` 在注入路线失败后**无条件**执行 `if self._env_flag("OAUTH_CODEX_RT_EXCHANGE", "1"): self.oauth_codex_rt_exchange(...)`，没有看 `chatgpt_rt_route`；而 `registration_engine.py:250-253` 的 docstring 明确写「`login` → 只走登录链，不跑 Codex（那条路在这个场景白花时间）」。
-  刷新链更直接：`login_refresh` 构造的 flow 没有 `acquire_rt`，`run_protocol_login` 在登录成功后因为 `result.refresh_token` 为空（密码登录本身不产 RT）→ `:1199-1200` 调 `_ensure_refresh_token` → 走 Codex。也就是说**每一次"刷新 Token"的登录兜底都会额外跑一次 Codex OAuth**，与设置无关。
+  刷新链更直接：`login_refresh` 构造的 flow 没有 `acquire_rt`，`run_protocol_login` 在登录成功后因为 `result.refresh_token` 为空（密码登录本身不产 RT）→ `:1199-1200` 调 `_ensure_refresh_token` → 走 Codex（只要本轮有 callback/continue，正常登录都有）。也就是说**每一次"刷新 Token"的登录兜底都会额外跑一次 Codex OAuth**，与设置无关。
+  再看 `_codex_rt_attempted`（`codex.py:395-402`）：`route=codex` 时 Codex 已经试过（非 speculative 那次会置位），这里的兜底直接跳过；`route=login` 时没试过，兜底反而真跑。**这段兜底的实际效果与设计意图完全相反**。
 - **影响**：① 选 `login` 的用户仍要付 Codex 的 add-phone 成本（配了接码会**真租号花钱**；没配则多 3 轮 authorize 刷新）；② Codex 若成功，会拿回一个 Codex 签发的 RT，被 `plugin.py:530-534` 以 platform client_id 落库 → 下一次刷新 `invalid_client`（见 R-25）。
 - **建议**：把"是否允许 Codex 兜底"做成显式参数/环境（`OAUTH_CODEX_RT_FALLBACK`），由 `resolve_chatgpt_rt_route` 决定；`login_refresh` 在 `route=login` 时设 `OAUTH_CODEX_RT_EXCHANGE=0`（它只想要 AT）；注册链只在 `route=codex` 时才允许兜底。
 
@@ -110,6 +112,8 @@
 ---
 
 ## 2. 重试 / 回退语义
+
+**先回答"有没有无限重试"**：没有。所有重试循环都有上界 —— `warmup` 4 次、`get_csrf_token` 3 次、`follow_redirect_chain` 8 跳、`_MAX_ATTEMPTS=3`（仅 3 个邮箱错误标记）、任务级 `1 + register_retry_times`（`MAX_REGISTER_RETRY_TIMES` 夹紧）。真正的问题不是"重试太多"，而是**该重试的没重试（R-09/R-10）、不该重试的吞掉了中断（R-07）、以及没有超时的等待（R-35）**。
 
 ### R-07 [P1] `TaskInterruption` 被 4 处 catch-all 吞掉，"停止/跳过"变成普通失败
 
@@ -168,7 +172,7 @@
 ### R-14 [P3] Sentinel/QuickJS 的"模块缺失"按可重试处理，会白烧邮箱
 
 - **位置**：`platforms/chatgpt/protocol/sentinel.py:82-83`、`core/environment.py:67-92`。
-- **证据**：`ImportError` 被包成 `RuntimeError("Sentinel QuickJS 模块缺失: ...")`；`is_environment_error_message` 只认 `"找不到 node 运行时"` 等少数文本，不认 QuickJS 模块/sdk.js 缺失。任务层因此按 retryable 重开整轮（`services/task_runners.py:320-334`），每轮都重新领一个邮箱。
+- **证据**：`ImportError` 被包成 `RuntimeError("Sentinel QuickJS 模块缺失: ...")`；`is_environment_error_message` 只认 `"找不到 node 运行时"` 等少数文本，不认 QuickJS 模块/sdk.js 缺失。任务层因此按 retryable 重开整轮（`services/task_runners.py:336-346`），每轮都重新领一个邮箱。
 - **影响**：部署缺 `quickjs`/`sdk.js` 时，每个号会烧掉 `1 + register_retry_times` 个别名，最后全部失败。
 - **建议**：把 sentinel 的模块/资源缺失纳入环境错误白名单（`EnvironmentNotReadyError`）。
 
@@ -239,7 +243,7 @@
 
 - **位置**：`platforms/grok/register_browser.py:120-142`（`classify_send_code_page` 的兜底分支）、`:474-490`（调用点）。
 - **证据**：兜底 `SEND_CODE_NO_CONFIRMATION` 固定 `consumes_address=True, retryable=False`；调用点据此把邮箱标 `used` 并抛 `NonRetryableRegisterError`（`grok/plugin.py:775-790`）。而"页面没出现确认文案"既可能是 x.ai 真拒绝，也可能是 CF 挑战页、网络半截、页面还没渲染完（代码自己在 `:419-447` 就为重载/等表单做了 3 轮）。
-- **影响**：一次 CF 抖动就会永久消耗一个别名（iCloud `used` 不可再领），并且任务被标成"不可重试"，直接放弃该序号。
+- **影响**：一次 CF 抖动就会消耗一个别名（iCloud 对当前平台标 `used`、本平台不可再领；Outlook 直接移出池子），并且任务被标成"不可重试"，直接放弃该序号。
 - **建议**：兜底分支改为"重试 N 次后仍无确认"才 `consumes_address=True`；把 CF 挑战页（`cf-challenge`/`Just a moment`）单独识别为环境错误（不消耗地址）。
 
 ### R-23 [P3] Grok 读码超时与读信失败不可区分
@@ -306,17 +310,19 @@
 
 ## 6. 并发注册时的共享状态
 
+**事实基线**：`AuthFlow` 的全部可变状态都在实例上（`auth_flow.py:100-200` 逐项初始化），没有类级可变默认值；`fingerprint._ALL_IMPERSONATES` 只在 import 时构建、之后只读；注册引擎/适配器每次 attempt 新建。真正的跨线程共享只有四处：SMS 门面的 `_SMS_CACHE`/`_SMS_VERIFY_LOCK`、Grok 的 `_SEND_CODE_LOCK`/`_SEND_CODE_LAST_TS`、`ProxyPool._index`/计数、iCloud 的 `_ACCOUNT_LOCKS`。
+
 ### R-29 [P2] 指定邮箱 + `concurrency>1` 的判重是 TOCTOU
 
 - **位置**：`services/task_runners.py:274-276`。
-- **证据**：`if req.email and _api.account_already_registered(...)` 与真正 `_platform.register(...)` 之间没有任何锁/占位；N 个线程同时通过检查 → N 个线程用同一邮箱注册。唯一索引 `uq_accounts_platform_email`（`core/db/models_account.py:36-41`）只能保证最后一行，挡不住上游创建多个账号。
+- **证据**：`if req.email and _api.account_already_registered(...)` 与真正 `_platform.register(...)` 之间没有任何锁/占位；N 个线程同时通过检查 → N 个线程用同一邮箱注册。唯一索引 `uq_accounts_platform_email`（`core/db/models_account.py:38-43`）只能保证最后一行，挡不住上游创建多个账号。
 - **影响**：同一邮箱在上游被重复注册/登录，后写的凭证覆盖先写的；并发越高越容易触发。
 - **建议**：`req.email` 非空时强制 `concurrency=1`，或用进程内 per-email 锁 + DB 占位行（`status=registering`）。
 
 ### R-30 [P2] Grok 发码节流在锁内 `sleep`，且只在进程内生效
 
 - **位置**：`platforms/grok/plugin.py:76-92`。
-- **证据**：`_throttle_send_code` 持 `_SEND_CODE_LOCK` 执行 `time.sleep(wait)`，`wait` 最长等于 `grok_send_code_min_interval`（注释建议 240s）；`time.sleep` 不响应 `task_control`，`plugin.py:733-737` 的 `except TaskInterruption` 在这段时间内不会触发。`_SEND_CODE_LAST_TS` 是模块级变量，多进程部署时每个进程各算一份，限流形同虚设。
+- **证据**：`_throttle_send_code` 持 `_SEND_CODE_LOCK` 执行 `time.sleep(wait)`，`wait` 最长等于 `grok_send_code_min_interval`（注释建议 240s）；`time.sleep` 不响应 `task_control`，`plugin.py:726-735` 的 `except TaskInterruption` 在这段时间内不会触发。`_SEND_CODE_LAST_TS` 是模块级变量，多进程部署时每个进程各算一份，限流形同虚设。
 - **影响**：点"停止"要等节流睡完；并发任务被串行化成"每 240s 一个"；多 worker 时又会一起撞 x.ai 限流。
 - **建议**：锁只保护时间戳读写，`sleep` 放到锁外并分片 `checkpoint`；跨进程用文件锁或 DB 记录时间戳。
 
@@ -402,7 +408,7 @@ r = RegistrationResult(success=True, email="a@outlook.com", password="pw",
                        access_token="AT", refresh_token="RT_CHATGPT", session_token="ST")
 r.metadata.update({"client_id": "MS_CLIENT_ID", "refresh_token": "MS_RT",
                    "password": "MS_PW", "mail_provider": "microsoft"})
-ChatGPTRegistrationModeAdapter("refresh_token").build_account(r, "").extra
+ChatGPTRegistrationModeAdapter("refresh_token").build_account(r, "").extra   # 节选
 # → {'access_token': 'AT', 'refresh_token': 'MS_RT', 'session_token': 'ST',
 #    'client_id': 'MS_CLIENT_ID', 'password': 'MS_PW'}
 ```

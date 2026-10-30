@@ -28,9 +28,9 @@ import threading
 import time
 from typing import TYPE_CHECKING, Callable, Optional
 
-from sqlmodel import Session, select
+from sqlmodel import Session
 
-from core.db import account_repository, TaskLog, current_engine
+from core.db import account_repository, current_engine
 from core.environment import EnvironmentNotReadyError, is_environment_error_message
 from core.task_runtime import (
     AttemptOutcome,
@@ -442,6 +442,10 @@ def _load_account_fields(account_id: str, platform: str = "chatgpt") -> Optional
             return None
         extra = account.get_extra()
         return {
+            # 写回路径必须有主键：只按 email 写会跨平台改错号（真库 387 个邮箱
+            # 同时存在于 chatgpt 与 grok，见 proxy 审计 P0-1/P0-2）。
+            "account_id": str(account.id or ""),
+            "platform": str(account.platform or platform or ""),
             "email": account.email,
             "password": account.password,
             "extra": extra,
@@ -515,29 +519,37 @@ def _run_account_batch_task(
                     task_id,
                     f"账号未绑定代理，绑定 {redact_proxy_url(chosen)}（已写回账号的代理字段）",
                 )
-            _persist_register_proxy(fields.get("email", ""), chosen)
+            _persist_register_proxy(
+                fields.get("account_id", ""), fields.get("platform", ""), chosen
+            )
         return chosen or None
 
-    def _persist_register_proxy(email: str, proxy_url: str) -> None:
-        """把新代理写回账号的 `register_proxy`（就地改一个键，不覆盖其它）。"""
-        if not email or not proxy_url:
+    def _persist_register_proxy(account_id: str, platform: str, proxy_url: str) -> None:
+        """把新代理写回账号的 `register_proxy`（只改这一个键）。
+
+        原来这里硬编码 `platform="chatgpt"` + `platform == "chatgpt"`：
+
+        - **Grok 任务**查不到行 → 直接 `return`，代理永不落库，下一轮又换出口
+          （用户看到的「Grok 批量任务每次都用新代理」）；
+        - 同邮箱的 **ChatGPT 号**被当成目标 → 改坏另一个平台（真库 387 个
+          共享邮箱、286 个最新行是 grok，见 proxy 审计 P0-1）。
+
+        写回走 `update_extra`：只 UPDATE `extra_json`，不拿整行快照覆盖，
+        也不会在账号已删时把它复活（P0-3）。
+        """
+        if not account_id or not proxy_url:
             return
-        from core.db import AccountModel, platform_session
+        from core.db import account_repository
 
         try:
-            with platform_session("chatgpt") as s:
-                row = s.exec(
-                    select(AccountModel)
-                    .where(AccountModel.platform == "chatgpt")
-                    .where(AccountModel.email == email)
-                ).first()
-                if row is None:
-                    return
-                extra = row.get_extra()
-                extra["register_proxy"] = proxy_url
-                row.set_extra(extra)
-                s.add(row)
-                s.commit()
+            row = account_repository.get(str(account_id), str(platform or ""))
+            if row is None:
+                _api.log(task_id, "写回代理字段跳过：账号已不存在")
+                return
+            extra = row.get_extra()
+            extra["register_proxy"] = proxy_url
+            if not account_repository.update_extra(str(account_id), str(platform or ""), extra):
+                _api.log(task_id, "写回代理字段跳过：账号已被删除")
         except Exception as exc:  # noqa: BLE001 - 记账失败不该让整轮任务失败
             _api.log(task_id, f"写回代理字段失败（忽略）: {exc}")
 
@@ -594,7 +606,11 @@ def _run_account_batch_task(
                         # `report_fail` 的阈值是「0 成功 + 5 次失败」，对
                         # 「跑到一半代理挂了」太慢 —— 用户要求当场切换。
                         proxy_pool.report_proxy_error(account_proxy)
-                        old_proxy, new_proxy = proxy_pool.rebind(fields.get("email", ""))
+                        old_proxy, new_proxy = proxy_pool.rebind(
+                            fields.get("email", ""),
+                            account_id=fields.get("account_id", ""),
+                            platform=fields.get("platform", ""),
+                        )
                         if new_proxy and new_proxy != old_proxy:
                             _api.log(
                                 task_id,

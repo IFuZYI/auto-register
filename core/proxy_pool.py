@@ -187,29 +187,77 @@ class ProxyPool:
         pool = [url for score, url in scored if score == lightest]
         return random.choice(pool)
 
-    def rebind(self, account_email: str) -> tuple[str, str]:
+    def rebind(
+        self,
+        account_email: str = "",
+        *,
+        account_id: str = "",
+        platform: str = "",
+    ) -> tuple[str, str]:
         """给一个账号重新挑绑定代理并写回 `register_proxy`。
 
         返回 `(旧值, 新值)`；新值为空表示没有可绑定的代理（保持原样）。
+
+        **必须按 id（或 email + platform）定位**。原来的实现只按 email 在所有
+        平台库里找、取 `created_at` 最新的一行 —— 实测真库 670 个邮箱里 387 个
+        同时存在于 chatgpt 与 grok，其中 286 个最新行是 grok。于是「ChatGPT
+        任务里代理挂了」会把 **Grok 号**的绑定改掉（全量检测 proxy P0-2）。
+
+        写回也**不走 `upsert`**：那是整行快照覆盖，会把并发写入的
+        token/password/状态回滚，还会把已删除的账号以新 UUID 复活（P0-3）。
         """
         from .db import account_repository
 
-        rows = [
-            row
-            for row in account_repository.list_all_accounts()
-            if str(row.email or "").strip().lower() == account_email.strip().lower()
-        ]
-        if not rows:
+        account = None
+        if account_id:
+            account = account_repository.get(str(account_id), str(platform or ""))
+        elif account_email and platform:
+            account = account_repository.find_by_email(str(platform), str(account_email))
+        elif account_email:
+            # 没给 platform：先看这个邮箱到底存在于几个平台
+            # `platforms_by_email` 返回 {email: {platform, ...}}
+            mapping = account_repository.platforms_by_email([str(account_email)]) or {}
+            names = sorted({name for names in mapping.values() for name in names})
+            candidates = []
+            for name in names:
+                # 注意参数顺序：`find_by_email(platform, email)`（平台在前）
+                row = account_repository.find_by_email(name, str(account_email))
+                if row is not None:
+                    candidates.append(row)
+            if len(candidates) > 1:
+                # 跨平台同名邮箱：没有 platform 就**不要猜**，猜错=改坏另一个平台
+                logger.warning(
+                    "rebind 拒绝按 email 跨平台定位（%s 命中 %d 个平台），"
+                    "调用方必须传 platform 或 account_id",
+                    account_email,
+                    len(candidates),
+                )
+                return "", ""
+            account = candidates[0] if candidates else None
+        if account is None:
             return "", ""
-        account = rows[0]
+
         old = normalize_proxy_url(account.get_extra().get("register_proxy") or "")
-        chosen = self.pick_bindable(exclude=old)
+        # 归一化后再落库/返回：`pick_bindable` 给的是库里的原始串（可能是
+        # `socks5://`），而 `old` 已经过 `normalize_proxy_url`（→ `socks5h://`）。
+        # 不统一的话调用方拿到的 (old, new) 两种写法，比较必然不等，
+        # 日志里也会出现「切换到了同一个代理」的假象。
+        chosen = normalize_proxy_url(self.pick_bindable(exclude=old) or "")
         if not chosen:
             return old, old
         extra = dict(account.get_extra())
         extra["register_proxy"] = chosen
-        account.set_extra(extra)
-        account_repository.upsert(account)
+        saved = account_repository.update_extra(
+            getattr(account, "id", ""), str(getattr(account, "platform", "") or ""), extra
+        )
+        if not saved:
+            # 账号在挑选期间被删了：不要 upsert 把它复活
+            logger.warning(
+                "rebind 写回失败（账号已不存在）: id=%s platform=%s",
+                getattr(account, "id", ""),
+                getattr(account, "platform", ""),
+            )
+            return old, old
         return old, chosen
 
     def rebalance(self, *, dry_run: bool = True) -> dict:
@@ -258,8 +306,15 @@ class ProxyPool:
             counts[target]["total"] += 1
             if not dry_run:
                 extra["register_proxy"] = target
-                account.set_extra(extra)
-                account_repository.upsert(account)
+                saved = account_repository.update_extra(
+                    getattr(account, "id", ""),
+                    str(getattr(account, "platform", "") or ""),
+                    extra,
+                )
+                if not saved:
+                    # 期间被删：不 upsert（会以新 UUID 复活的账号比没均衡更糟）
+                    changed.pop()
+                    skipped += 1
         return {"changed": changed, "skipped": skipped}
 
     def report_proxy_error(self, url: str) -> None:

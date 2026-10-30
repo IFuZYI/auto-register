@@ -126,3 +126,50 @@ class MigrationIndexParityTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LegacyProxyTagsUpgradeTests(unittest.TestCase):
+    """老库升级路径：`init_db()` 不跑 Alembic，必须由手写迁移补 `proxies.tags`。
+
+    这是「按文档升级」最常见的场景：`docs/MAINTENANCE.md` 说 `init_db()` 每次
+    启动自动迁移，但 `proxies.tags` 是 **Alembic** 迁移加的，两条链没有交叉。
+    不补的话，启动后第一次 `select(ProxyModel)` 就是
+    `no such column: proxies.tags`，整个服务起不来（proxy 审计 P0-4）。
+    """
+
+    def test_missing_tags_column_is_added_idempotently(self):
+        import sqlite3
+        import tempfile
+
+        from sqlalchemy import create_engine
+
+        from core.db.migrations import _ensure_proxy_tags_column
+
+        path = tempfile.mktemp(suffix=".db")
+        try:
+            conn = sqlite3.connect(path)
+            conn.execute(
+                "CREATE TABLE proxies (id INTEGER PRIMARY KEY, url TEXT, region TEXT, is_active BOOLEAN)"
+            )
+            conn.execute("INSERT INTO proxies (url) VALUES ('socks5://u:p@1.2.3.4:1080')")
+            conn.commit()
+            conn.close()
+
+            engine = create_engine(f"sqlite:///{path}")
+            _ensure_proxy_tags_column(engine)
+            _ensure_proxy_tags_column(engine)  # 幂等：第二次是空操作
+
+            conn = sqlite3.connect(path)
+            try:
+                columns = [row[1] for row in conn.execute("PRAGMA table_info('proxies')")]
+                rows = conn.execute("SELECT count(*) FROM proxies").fetchone()[0]
+            finally:
+                conn.close()
+
+            self.assertIn("tags", columns, "老库升级后仍然没有 proxies.tags —— 启动会炸")
+            self.assertEqual(rows, 1, "补列过程中丢了数据")
+        finally:
+            import os
+
+            if os.path.exists(path):
+                os.unlink(path)

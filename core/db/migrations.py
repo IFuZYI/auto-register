@@ -757,6 +757,32 @@ def _normalize_grok_token_column(engine: Engine | None = None) -> None:
                 )
 
 
+def _ensure_proxy_tags_column(engine: Engine | None = None) -> None:
+    """老库补 `proxies.tags`。
+
+    为什么必须有这一步：`proxies.tags` 是 **Alembic** 迁移 `d4e7f1a25b90` 加的，
+    而应用启动走的是 `init_db()` → `create_all()` + 这里的 `run_migrations()`，
+    **两条链没有交叉**。于是：
+
+    - 空库：`create_all` 直接按模型建表，有 tags，看不出问题；
+    - 老库（已存在 proxies 表）：`create_all` 什么都不做，`run_migrations` 也不补
+      —— 启动后第一次 `select(ProxyModel)` 就是
+      `OperationalError: no such column: proxies.tags`，整个服务起不来。
+
+    这正是「按文档升级」最常见的场景（`docs/MAINTENANCE.md` 说迁移是自动的）。
+    必须排在**任何读 proxies 的迁移之前**。
+    """
+    engine = engine or current_engine()
+    if not _is_sqlite(engine):
+        return
+    with engine.begin() as conn:
+        rows = conn.exec_driver_sql("PRAGMA table_info('proxies')").fetchall()
+        if not rows:
+            return
+        if "tags" not in {str(row[1]) for row in rows}:
+            conn.exec_driver_sql("ALTER TABLE proxies ADD COLUMN tags TEXT DEFAULT ''")
+
+
 def run_migrations(engine: Engine | None = None) -> None:
     """在指定库跑全部迁移；不传则跑「默认库 + 所有平台库」。"""
     if engine is not None:
@@ -771,6 +797,8 @@ def run_migrations(engine: Engine | None = None) -> None:
 
 
 def _run_one(engine: Engine) -> None:
+    # 补列必须最先跑：`select(ProxyModel)` 会把 tags 一起 SELECT 出来。
+    _ensure_proxy_tags_column(engine)
     _ensure_account_email_unique(engine)
     _migrate_outlook_accounts_schema(engine)
     # 补列必须排在任何**用 ORM 读这两张表**的迁移之前：SQLModel 的
