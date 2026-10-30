@@ -33,7 +33,15 @@ if str(REPO_ROOT) not in sys.path:
 #: 必须在 import main 之前生效（`core.paths` 的常量是模块级求值）。
 _TMP = tempfile.mkdtemp(prefix="e2e-smoke-")
 os.environ["DATA_DIR"] = _TMP
-os.environ["STORAGE_BACKEND"] = "sqlite"
+#: 默认 sqlite；`--backend json` 会把 `E2E_BACKEND` 提前塞进来，两条后端都验一遍。
+#: 后端必须在**模块导入时**定下来（`core.paths` / storage 的常量都是模块级求值），
+#: 所以这里直接读 argv，不能等 argparse。
+_BACKEND = "sqlite"
+if "--backend" in sys.argv:
+    _idx = sys.argv.index("--backend")
+    if _idx + 1 < len(sys.argv):
+        _BACKEND = sys.argv[_idx + 1]
+os.environ["STORAGE_BACKEND"] = _BACKEND
 os.environ["APP_TRUST_TEST_CLIENT"] = "1"
 os.environ.pop("PLATFORM_DATABASE_URLS", None)
 
@@ -50,7 +58,8 @@ async def _run(steps: list[dict]) -> None:
     from fastapi.testclient import TestClient
 
     async with main.lifespan(main.app):
-        client = TestClient(main.app)
+        # 500 要记成一步失败，不能让整份报告崩掉
+        client = TestClient(main.app, raise_server_exceptions=False)
 
         # 1. 配置读
         _record(steps, "config.get", client.get("/api/config"))
@@ -164,6 +173,10 @@ async def _run(steps: list[dict]) -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--quiet", action="store_true")
+    parser.add_argument(
+        "--backend", choices=("sqlite", "json"), default=None,
+        help="存储后端（默认 sqlite；json 走另一条写路径）",
+    )
     args = parser.parse_args(argv)
 
     steps: list[dict] = []
@@ -172,6 +185,7 @@ def main(argv: list[str] | None = None) -> int:
     failed = [s for s in steps if not s["ok"]]
     report = {
         "data_dir": _TMP,
+        "backend": os.environ.get("STORAGE_BACKEND"),
         "steps": steps,
         "total": len(steps),
         "failed": len(failed),

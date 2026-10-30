@@ -701,6 +701,19 @@ class AccountRepository:
         if not wanted:
             return []
 
+        # JSON 后端：单文件、没有「每库一次 IN 查询」这回事，直接全量取再按 id
+        # 过滤。**以前这里没有分支** —— JSON 部署下导出/批量动作会去查一个根本
+        # 不存在的 sqlite 表，报 `no such table: accounts`（base commit 上就有）。
+        store = AccountRepository._json_store()
+        if store is not None:
+            wanted_platform = platform.strip().lower()
+            rows = store.list_all(platform=wanted_platform) if wanted_platform else store.list_all()
+            found_json = {
+                str(row.get("id")): json_record_to_model(row) for row in rows
+            }
+            ordered_json = list(dict.fromkeys(wanted))
+            return [found_json[i] for i in ordered_json if i in found_json]
+
         found: dict[str, AccountModel] = {}
         wanted_platform = platform.strip().lower()
 
@@ -753,6 +766,27 @@ class AccountRepository:
         wanted = list(dict.fromkeys(str(v) for v in ids))
         if not wanted:
             return [], []
+
+        # JSON 后端：同 `get_many` —— 不补这条，批量删除会去打 sqlite。
+        store = AccountRepository._json_store()
+        if store is not None:
+            wanted_platform = platform.strip().lower()
+            deleted_json: list[str] = []
+            missing_json: list[str] = []
+            for account_id in wanted:
+                record = store.get(account_id)
+                if record is None:
+                    missing_json.append(account_id)
+                    continue
+                if wanted_platform and str(record.get("platform") or "").strip().lower() != wanted_platform:
+                    missing_json.append(account_id)
+                    continue
+                if store.delete(account_id):
+                    deleted_json.append(account_id)
+                else:
+                    missing_json.append(account_id)
+            return deleted_json, missing_json
+
         deleted: list[str] = []
         remaining = set(wanted)
         wanted_platform = platform.strip().lower()

@@ -111,6 +111,40 @@ class RepositoryContractTests(unittest.TestCase):
 
     # ------------------------------------------------------------ 契约
 
+    def test_get_many_and_delete_many_work_on_both_backends(self):
+        """批量取/批量删在两条后端上都要工作。
+
+        这条是补的**既有缺口**：`get_many` / `delete_many` 原先只有 sqlite 分支，
+        JSON 部署下导出与批量删除会去查一张不存在的表
+        （`no such table: accounts`，base commit 上就复现）。
+        """
+        for fixture in self._cases():
+            with self.subTest(backend=fixture.name), fixture:
+                from core.base_platform import Account
+                from core.db import account_repository
+
+                first = account_repository.upsert(
+                    Account(platform="chatgpt", email="contract-many-a@example.com", password="p")
+                )
+                second = account_repository.upsert(
+                    Account(platform="chatgpt", email="contract-many-b@example.com", password="p")
+                )
+
+                rows = account_repository.get_many([str(second.id), str(first.id)])
+                self.assertEqual(
+                    [str(r.id) for r in rows], [str(second.id), str(first.id)],
+                    "批量取要保持调用方给的顺序",
+                )
+
+                deleted, missing = account_repository.delete_many(
+                    [str(first.id), "00000000-0000-4000-8000-000000000000"]
+                )
+                self.assertEqual(deleted, [str(first.id)])
+                self.assertEqual(missing, ["00000000-0000-4000-8000-000000000000"])
+
+                account_repository.delete_many([str(second.id)])
+        self._cleanup_sqlite()
+
     def test_upsert_then_find(self):
         for fixture in self._cases():
             with self.subTest(backend=fixture.name), fixture:
