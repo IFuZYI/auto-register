@@ -213,6 +213,17 @@ async def _run(steps: list[dict], *, sweep: bool = False) -> None:
         if proxy_id is not None:
             _record(steps, "proxy.delete", client.delete(f"/api/proxies/{proxy_id}"))
 
+        # 11g. 导入（每行 `email password`）—— 走 normalize + upsert 那条路
+        r = client.post(
+            "/api/accounts/import",
+            json={"platform": "chatgpt", "lines": ["imported-1@example.com pw-a"], "format": "text"},
+        )
+        body = r.json() if r.status_code < 400 else {}
+        _record(
+            steps, "account.import", r,
+            imported=body.get("imported") or body.get("created") or body.get("success"),
+        )
+
         # 12. 批量删（走 delete_many —— JSON 后端的新分支）
         ids = []
         for index in range(2):
