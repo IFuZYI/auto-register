@@ -40,14 +40,27 @@ def _accounts(dry_run: bool) -> dict:
     from core.credential_crypto import encrypt_extra, encrypt_text, is_ciphertext
     from core.db import current_engine
 
-    stats = {"rows": 0, "password": 0, "extra_fields": 0, "already": 0, "changed_rows": 0}
+    stats = {
+        "rows": 0,
+        "password": 0,
+        "token": 0,
+        "extra_fields": 0,
+        "already": 0,
+        "changed_rows": 0,
+    }
     engine = current_engine()
     with engine.begin() as conn:
-        rows = conn.execute(text("SELECT id, password, extra_json FROM accounts")).fetchall()
+        rows = conn.execute(
+            text("SELECT id, password, token, extra_json FROM accounts")
+        ).fetchall()
         for row in rows:
             stats["rows"] += 1
-            account_id, password, extra_json = row[0], row[1] or "", row[2] or "{}"
+            account_id, password, token, extra_json = (
+                row[0], row[1] or "", row[2] or "", row[3] or "{}"
+            )
             new_password = encrypt_text(password)
+            # `token` 列存的是 chatgpt 的 AT / grok 的 SSO —— Q3 点名的凭据之一
+            new_token = encrypt_text(token)
             try:
                 extra = json.loads(extra_json) if extra_json.strip() else {}
             except json.JSONDecodeError:
@@ -55,23 +68,34 @@ def _accounts(dry_run: bool) -> dict:
             new_extra = encrypt_extra(extra)
 
             password_changed = new_password != password
+            token_changed = new_token != token
             extra_changed = new_extra != extra
             if password_changed:
                 stats["password"] += 1
+            if token_changed:
+                stats["token"] += 1
             if extra_changed:
                 stats["extra_fields"] += sum(
                     1
                     for key, value in new_extra.items()
                     if extra.get(key) != value and is_ciphertext(value)
                 )
-            if not (password_changed or extra_changed):
+            if not (password_changed or token_changed or extra_changed):
                 stats["already"] += 1
                 continue
             stats["changed_rows"] += 1
             if not dry_run:
                 conn.execute(
-                    text("UPDATE accounts SET password = :p, extra_json = :e WHERE id = :i"),
-                    {"p": new_password, "e": json.dumps(new_extra, ensure_ascii=False), "i": account_id},
+                    text(
+                        "UPDATE accounts SET password = :p, token = :t, extra_json = :e "
+                        "WHERE id = :i"
+                    ),
+                    {
+                        "p": new_password,
+                        "t": new_token,
+                        "e": json.dumps(new_extra, ensure_ascii=False),
+                        "i": account_id,
+                    },
                 )
     return stats
 
@@ -152,13 +176,16 @@ def _verify() -> int:
     from core.db import current_engine
 
     plaintext_accounts = 0
+    plaintext_tokens = 0
     plaintext_extra = 0
     with current_engine().connect() as conn:
-        for _id, password, extra_json in conn.execute(
-            text("SELECT id, password, extra_json FROM accounts")
+        for _id, password, token, extra_json in conn.execute(
+            text("SELECT id, password, token, extra_json FROM accounts")
         ).fetchall():
             if password and not is_ciphertext(password):
                 plaintext_accounts += 1
+            if token and not is_ciphertext(token):
+                plaintext_tokens += 1
             try:
                 extra = json.loads(extra_json or "{}")
             except json.JSONDecodeError:
@@ -177,8 +204,15 @@ def _verify() -> int:
             if key in SECRET_CONFIG_KEYS and (value or "").strip() and not is_ciphertext(value)
         )
 
-    print(f"剩余明文：账号密码 {plaintext_accounts} 行 / extra 凭证 {plaintext_extra} 个 / 配置口令 {plaintext_configs} 个")
-    return 0 if (plaintext_accounts or plaintext_extra or plaintext_configs) == 0 else 1
+    print(
+        f"剩余明文：账号密码 {plaintext_accounts} 行 / AT·SSO {plaintext_tokens} 行 / "
+        f"extra 凭证 {plaintext_extra} 个 / 配置口令 {plaintext_configs} 个"
+    )
+    return (
+        0
+        if (plaintext_accounts or plaintext_tokens or plaintext_extra or plaintext_configs) == 0
+        else 1
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -202,6 +236,7 @@ def main(argv: list[str] | None = None) -> int:
 
     prefix = "[dry-run] " if args.dry_run else ""
     print(f"{prefix}账号：{accounts['rows']} 行，密码待加密 {accounts['password']}，"
+          f"AT/SSO 待加密 {accounts['token']}，"
           f"extra 凭证 {accounts['extra_fields']} 个，已是密文 {accounts['already']} 行")
     print(f"{prefix}配置：口令键 {configs['rows']} 个，待加密 {configs['encrypted']}，"
           f"已是密文 {configs['already']}，空值 {configs['empty']}")

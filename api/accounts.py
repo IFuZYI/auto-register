@@ -302,10 +302,10 @@ def _slim_account_row(row):
     if cipher is not None:
         payload["has_password"] = bool(str(cipher or "").strip())
     # 列表不下发 token 正文，但页面要用它判断「有没有 AT/SSO」。
-    token_text = getattr(row, "token", None)
-    if token_text is None:
-        token_text = payload.get("token")
-    payload["has_token"] = bool(str(token_text or "").strip())
+    # **只看密文列，不解密**：`token` 现在是 computed_field（每读一次一次 AES），
+    # 列表里只需要知道「有没有」，按密文非空判断即可。
+    token_cipher = getattr(row, "token_cipher", None)
+    payload["has_token"] = bool(str(token_cipher or "").strip())
     return payload
 
 

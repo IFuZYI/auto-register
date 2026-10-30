@@ -83,7 +83,16 @@ class AccountModel(SQLModel, table=True):
     )
     user_id: str = ""
     region: str = ""
-    token: str = ""
+    #: 同 `password` 的手法：列名保持 `token`（不新增列、不动 schema），
+    #: 属性名改成 `token_cipher`，让 `token` 变成透明加解密的 property。
+    #: 为什么必须加密：这列存的是 chatgpt 的 AT / grok 的 SSO —— 真库
+    #: 1057/1057 行非空（单行 152 字符 JWT）。Q3 的「全量凭据加密」本来就
+    #: 点名了 AT/SSO，这里是漏掉的一块（data-layer 审计 D-17/F8）。
+    token_cipher: str = Field(
+        default="",
+        exclude=True,
+        sa_column=Column("token", String, nullable=False, server_default=""),
+    )
     # 列表默认「按状态筛选 + created_at 倒序」，两个条件都建索引；
     # 状态取值见 AccountStatus 枚举（registered/expired/invalid/banned），
     # 历史行可能带任意字符串。
@@ -107,7 +116,10 @@ class AccountModel(SQLModel, table=True):
         # `password` 不是字段（是 property），pydantic 不认这个关键字 ——
         # 先摘出来，构造完再经 setter 加密写进 `password_cipher`。
         password = data.pop("password", None)
+        token = data.pop("token", None)
         super().__init__(**data)
+        if token is not None:
+            self.token = token
         if password is not None:
             self.password = password
         raw = getattr(self, "extra_json", "") or ""
@@ -139,6 +151,20 @@ class AccountModel(SQLModel, table=True):
         from core.credential_crypto import encrypt_text
 
         self.password_cipher = encrypt_text("" if value is None else str(value))
+
+    @computed_field  # type: ignore[misc]
+    @property
+    def token(self) -> str:
+        """明文 AT / SSO。落盘密文，这里透明解密（老明文原样通过）。"""
+        from core.credential_crypto import decrypt_text
+
+        return decrypt_text(self.token_cipher)
+
+    @token.setter
+    def token(self, value: Any) -> None:
+        from core.credential_crypto import encrypt_text
+
+        self.token_cipher = encrypt_text("" if value is None else str(value))
 
     def get_extra(self) -> dict:
         """解析 extra_json 为字典。
