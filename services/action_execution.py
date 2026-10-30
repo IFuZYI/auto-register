@@ -20,11 +20,13 @@ from typing import Any
 from sqlmodel import Session
 
 from core.base_platform import AccountStatus
+from core.capabilities import Capability, capability_of
 from core.db import AccountModel, account_repository
 from services.chatgpt_account_state import apply_chatgpt_status_policy
 from services.chatgpt_sync import update_account_model_cliproxy_sync
 
 __all__ = [
+    "UPLOAD_SYNC_WRITERS",
     "UPLOAD_ACTIONS",
     "apply_action_result",
     "is_banned_status",
@@ -68,7 +70,7 @@ def record_upload_sync(
     sub2api / chatgpt2api 当前只在对应平台声明。查表按 action_id 即可，
     平台差异由「该平台是否声明并实现了这个动作」决定（不声明就调不到）。
     """
-    target = _UPLOAD_SYNC_WRITERS.get(action_id)
+    target = UPLOAD_SYNC_WRITERS.get(action_id)
     if target is None:
         return
     module_name, func_name = target
@@ -132,7 +134,7 @@ def apply_action_result(
                 # 配错，账号可能是好的。
                 refresh_kind=str(data.get("refresh_kind") or ""),
             )
-        elif action_id in ("backfill_refresh_token", "bind_2fa"):
+        elif capability_of(action_id) in (Capability.BACKFILL, Capability.BIND_2FA):
             # 补 RT / 绑 2FA 的登录链同样会发掘「号没了」（用户要求：禁用
             # 靠登录流程发掘）—— 结论经 data.banned 传上来，这里落状态。
             status_reason = apply_chatgpt_status_policy(
@@ -246,7 +248,7 @@ def result_message(result: dict[str, Any]) -> str:
     return str(result.get("error") or "").strip()
 
 
-_UPLOAD_SYNC_WRITERS: dict[str, tuple[str, str]] = {
+UPLOAD_SYNC_WRITERS: dict[str, tuple[str, str]] = {
     # action_id: (模块, 函数名)
     "upload_cpa": ("services.chatgpt_sync", "update_account_model_cpa_sync"),
     "upload_sub2api": ("services.chatgpt_sync", "update_account_model_sub2api_sync"),

@@ -25,6 +25,7 @@ HTTP 端点     102
 | M1b | `from api.<mod> import <私有 helper>`（真分层倒置） | 5 | **0** | 0 | 0 |
 | M2a | 动作声明数（plugin `"id": "`） | 17 | 17 | **7** | 7 |
 | M2b | 动作 id 字符串散落 | 97 | 97 | ≤ 40 | ≤ 20 |
+| M2c | 已归类动作 / 能力数 | — | **17 / 6** | 17 / 6 | 17 / 6 |
 | M3 | 鸭子类型 shim（账号/代理空壳类） | 6 | **2** | 2 | 0 |
 | M4 | 账号表示模型 | 2 | **1** | 1 | 1 |
 | M5 | `except Exception` | 471 | ≤ 450 | ≤ 420 | ≤ 380 |
@@ -105,3 +106,22 @@ M1a 要等 T3.1 把任务注册表从 `api/tasks.py` 挪进 `TaskService` 才能
 （我自己写的注释就污染过一次），而且把 `_Job` / `_Entry` / `_Connection` 这类正常私有类
 也算成 shim。改为只数「账号/代理鸭子类型空壳」：基线 6（`_A`×2、`_SyncAccount`、
 `_UploadAccount`、`_JsonProxy`、`_LegacyProxyParts`），现在 2（剩两个代理相关的）。
+
+## T2.1 记录：能力层已建立，dispatch 尚未切换
+
+`core/capabilities.py` 定义了 6 个能力（probe / refresh / backfill / bind_2fa /
+upload / sync_status），17 个动作 id 全部登记，`tests/test_capability_registry.py`
+用**平台真实声明的动作列表**反向校验 —— 新加动作不登记会当场红。
+
+已经切过去的：
+
+* `GET /actions/{platform}` 每条动作多返回一个 `capability` 字段（前端可按能力分组，
+  不用再硬编码 17 个 id）；
+* `_apply_action_result` 里 `action_id in ("backfill_refresh_token", "bind_2fa")`
+  → `capability_of(action_id) in (BACKFILL, BIND_2FA)`（1:1 映射，行为等价）。
+
+**还没切的**（T2.2）：`plugin.execute_action` 里 20 处 `action_id == "..."` 与
+`_apply_action_result` 里 3 处。不能机械替换 —— 同一个能力下的动作**输入不同**：
+`probe_local_status` 读 `data["probe"]`，`check_plus_trial` 不产出 probe；
+`sync_cliproxyapi_status` 读 `data["sync"]`，另两个同步动作的 data 里没有 `sync`。
+按能力合并会让后者的 `apply_*_policy` 收到 `None`，是否等价要逐个验证，不能靠推断。

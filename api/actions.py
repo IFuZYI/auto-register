@@ -291,10 +291,23 @@ def _execute_batch_cliproxy_sync(accounts: list[AccountModel], session: Session)
 
 @router.get("/{platform}")
 def list_actions(platform: str):
-    """获取平台支持的操作列表"""
+    """获取平台支持的操作列表。
+
+    每条动作附带 `capability`（见 `core/capabilities.py`）：前端按能力分组，
+    不用再硬编码 17 个动作 id 到界面里。未登记的动作给空串 ——
+    `tests/test_capability_registry.py` 会挡住「声明了没登记」。
+    """
+    from core.capabilities import capability_of
+
     PlatformCls = _get_platform_cls_or_404(platform)
     instance = PlatformCls(config=RegisterConfig(extra=config_store.get_all()))
-    return {"actions": instance.get_platform_actions()}
+    actions = []
+    for action in instance.get_platform_actions():
+        enriched = dict(action)
+        capability = capability_of(str(action.get("id") or ""))
+        enriched["capability"] = capability.value if capability else ""
+        actions.append(enriched)
+    return {"actions": actions}
 
 
 @router.post("/{platform}/{action_id}/batch")
