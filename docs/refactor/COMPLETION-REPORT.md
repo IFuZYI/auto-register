@@ -36,6 +36,15 @@ camoufox 浏览器未装（base commit 上逐条复现过）。
 | `(platform, lower(email))` 表达式唯一索引 | 同上 |
 | `accounts.password` 列**名不变**，值变成 `v1:` 密文 | 设 `CREDENTIAL_ENCRYPTION=0` 后重写即可（读侧兼容明文） |
 | `extra_json` 里六把凭证（AT/RT/IDT/ST/SSO/totp_secret）变成密文 | 同上 |
+| `configs` 表 10 个口令键（`cpa_api_key` / `grok2api_password` …）变成 `v1:` 密文 | 同上（读侧兼容明文） |
+| `data/secrets/totp_journal/*.json` 老格式 `totp_secret` → `totp_secret_cipher` | 无需回滚（读侧两种都认） |
+
+**存量数据要跑一次回填**（幂等，可预演）：
+
+```bash
+python scripts/encrypt_existing_credentials.py --dry-run   # 先看要改多少
+python scripts/encrypt_existing_credentials.py             # 真跑，结束自动 --verify
+```
 
 **升级顺序**（老库，已有数据、无 `alembic_version`）：
 
@@ -99,7 +108,12 @@ grep -rn '^class Account\b\|^class AccountModel\b' --include=*.py core | wc -l  
 | 单个任务 | `git revert <sha>` |
 | 整个阶段 | `git checkout v0-refactor-baseline`（或其余 tag） |
 | 数据库 | `alembic downgrade b7c1e4a92d30` → `77cc4baded71` |
-| 加密 | `CREDENTIAL_ENCRYPTION=0`（读侧兼容明文，不会自动回填） |
+| 加密 | `CREDENTIAL_ENCRYPTION=0`（读侧兼容明文；已回填的密文仍可解，只是新写入不再加密） |
+
+## 生产迁移已实跑
+
+见 `docs/refactor/MIGRATION-LOG.md`：备份 → `stamp 77cc4baded71` → `upgrade head`
+→ 凭据回填。1056 行 → 1056 行，字段级 diff 为空，服务起在迁移后的库上六个端点全 200。
 
 ## 已知限制（不是 bug，是取舍）
 
