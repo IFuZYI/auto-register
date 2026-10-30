@@ -761,10 +761,7 @@ def _do_check(account_id: str):
         try:
             PlatformCls = get(acc.platform)
             plugin = PlatformCls(config=RegisterConfig())
-            obj = Account(platform=acc.platform, email=acc.email,
-                         password=acc.password, user_id=acc.user_id,
-                         region=acc.region, token=acc.token,
-                         extra=acc.get_extra())
+            obj = acc.to_record()
             valid = plugin.check_valid(obj)
             # 重新取一次：check_valid 期间可能已被别处改动
             fresh = account_repository.get(account_id)

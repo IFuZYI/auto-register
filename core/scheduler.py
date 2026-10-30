@@ -178,15 +178,7 @@ class Scheduler:
             try:
                 PlatformCls = get(acc.platform)
                 plugin = PlatformCls(config=RegisterConfig())
-                account_obj = Account(
-                    platform=acc.platform,
-                    email=acc.email,
-                    password=acc.password,
-                    user_id=acc.user_id,
-                    region=acc.region,
-                    token=acc.token,
-                    extra=acc.get_extra(),
-                )
+                account_obj = acc.to_record()
                 valid = plugin.check_valid(account_obj)
                 if acc.id is not None:
                     fresh = account_repository.get(acc.id, platform=acc.platform)

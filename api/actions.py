@@ -120,24 +120,18 @@ def _record_upload_sync(
 
 
 def _to_platform_account(acc_model: AccountModel):
-    from core.base_platform import Account, AccountStatus
+    """ORM 行 → 领域对象。转换只有 `AccountModel.to_record()` 一处实现。"""
+    from core.base_platform import AccountStatus
 
-    # `Account` 本身没有 id 字段（那是仓储行的概念），但有些动作要按 id 记账
-    # （如 Grok 的 CPA 状态同步要拿它当结果字典的键）。放进 extra 传给平台侧。
-    extra = acc_model.get_extra()
-    if acc_model.id is not None:
-        extra.setdefault("account_id", acc_model.id)
-    return Account(
-        platform=acc_model.platform,
-        email=acc_model.email,
-        password=acc_model.password,
-        user_id=acc_model.user_id,
-        token=acc_model.token,
-        # 用 coerce 而非 AccountStatus(...)：库里可能存在枚举外的历史状态值
-        # （如 chatgpt 侧的 active/banned），直接构造会抛 ValueError 打断整个操作
-        status=AccountStatus.coerce(acc_model.status),
-        extra=extra,
-    )
+    record = acc_model.to_record()
+    # 有些动作要按 id 记账（如 Grok 的 CPA 状态同步拿它当结果字典的键）。
+    # 放进 extra 传给平台侧，平台代码不必知道仓储的存在。
+    if record.id:
+        record.extra.setdefault("account_id", record.id)
+    # 用 coerce 而非 AccountStatus(...)：库里可能存在枚举外的历史状态值
+    # （如 chatgpt 侧的 active/banned），直接构造会抛 ValueError 打断整个操作
+    record.status = AccountStatus.coerce(record.status)
+    return record
 
 
 def _apply_action_result(

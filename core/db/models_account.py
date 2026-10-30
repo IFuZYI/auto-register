@@ -117,6 +117,18 @@ class AccountModel(SQLModel, table=True):
         self.set_extra(data)
         return data
 
+    # ------------------------------------------------------------ 领域模型
+    def to_record(self):
+        """转成领域对象（`core.models.account.AccountRecord`）。
+
+        这是 ORM → 领域对象的**唯一**入口。以前每个调用点各写一遍字段搬运
+        （`api/actions.py`、`api/accounts.py`、`core/scheduler.py`、
+        `api/integrations.py`），四份实现里 `region` 和 `cashier_url` 各漏一处。
+        """
+        from core.models.account import AccountRecord
+
+        return AccountRecord.from_model(self)
+
 
 # 表对象供平台库建表用（`register_schema` 只建本平台的表）。
 # 注意：必须取 `__table__`（SQLAlchemy Table），SQLModel 类对象本身不能直接
