@@ -18,6 +18,8 @@ UUID 在 SQL 里生成（`randomblob`），不依赖 Python 侧逐行回填 —�
 """
 from __future__ import annotations
 
+import os
+
 from alembic import op
 import sqlalchemy as sa
 
@@ -95,8 +97,30 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    """回到自增整数主键：用 `legacy_id` 还原，缺失的按行号补。"""
+    """回到自增整数主键：用 `legacy_id` 还原，缺失的按行号补。
+
+    **降级前必须预检**：`COALESCE(legacy_id, rowid)` 可能撞主键（老库做过去重、
+    或 `legacy_id` 本身重复）。撞了之后 `INSERT` 失败，而 `accounts` 新表已经
+    `CREATE` 出来了、原表已经改名成 `accounts_uuid` —— 结果就是**`accounts`
+    变成空表**（data-layer 审计 D-13 在真实数据形态上实测到）。
+
+    这里在动任何 DDL 之前先算一遍映射，撞主键就拒绝，除非显式
+    `ALLOW_DESTRUCTIVE_DOWNGRADE=1`（确实想清库回退的人自己承担）。
+    """
     conn = op.get_bind()
+
+    try:
+        total, distinct = conn.exec_driver_sql(
+            "SELECT COUNT(*), COUNT(DISTINCT COALESCE(legacy_id, rowid)) FROM accounts"
+        ).fetchone()
+    except Exception:  # noqa: BLE001 - 表结构不同（已是旧形态）直接跳过预检
+        total, distinct = 0, 0
+    if int(total or 0) != int(distinct or 0) and os.getenv("ALLOW_DESTRUCTIVE_DOWNGRADE", "") != "1":
+        raise RuntimeError(
+            f"拒绝降级：{total} 行账号映射到 {distinct} 个整数主键，会撞主键并把 "
+            f"`accounts` 变成空表。先用 scripts/ 里的工具补齐 legacy_id，或显式设置 "
+            f"ALLOW_DESTRUCTIVE_DOWNGRADE=1 承担清库风险。"
+        )
 
     conn.exec_driver_sql("ALTER TABLE accounts RENAME TO accounts_uuid")
     conn.exec_driver_sql(

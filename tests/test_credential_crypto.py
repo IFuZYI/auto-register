@@ -34,6 +34,8 @@ SECRETS = {
     "session_token": "ST-plain-1",
     "sso": "SSO-plain-1",
     "totp_secret": "JBSWY3DPEHPK3PXP",
+    # cookies 是会话凭据（真库 607 行）—— 2026-10-30 起纳入加密白名单
+    "cookies": "oai-did=plain-cookie-value; session=abc",
 }
 
 

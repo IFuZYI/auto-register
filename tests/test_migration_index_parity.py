@@ -173,3 +173,55 @@ class LegacyProxyTagsUpgradeTests(unittest.TestCase):
 
             if os.path.exists(path):
                 os.unlink(path)
+
+
+class DestructiveDowngradeGuardTests(unittest.TestCase):
+    """UUID 迁移的 downgrade 不能把 `accounts` 变成空表（data-layer D-13）。
+
+    真实形态：`COALESCE(legacy_id, rowid)` 会把「新号（legacy_id 为空，rowid=1）」
+    和「老号（legacy_id=1）」映射到同一个整数主键 → INSERT 撞唯一约束 →
+    新 `accounts` 表已经建好、原表已改名 → **表是空的**。
+    现在改成降级前预检，撞主键直接拒绝。
+    """
+
+    def test_downgrade_is_refused_when_ids_collide(self):
+        import sqlite3
+        import subprocess
+
+        db = Path(ROOT) / ".pytest-downgrade-guard.db"
+        if db.exists():
+            db.unlink()
+        try:
+            self.assertEqual(_run_alembic(db, "upgrade", "head").returncode, 0)
+            conn = sqlite3.connect(db)
+            cols = [row[1] for row in conn.execute("PRAGMA table_info('accounts')")]
+            base = {
+                "platform": "chatgpt", "password": "p", "user_id": "", "region": "",
+                "token": "t", "status": "active", "cashier_url": "", "extra_json": "{}",
+                "created_at": "2026-01-01 00:00:00.000000", "updated_at": "2026-01-01 00:00:00.000000",
+            }
+            for row in (
+                dict(base, id="a", email="a@x.c", legacy_id=None),  # rowid=1 → 1
+                dict(base, id="b", email="b@x.c", legacy_id=1),     # legacy_id=1 → 1
+            ):
+                keys = [k for k in row if k in cols]
+                conn.execute(
+                    f"INSERT INTO accounts ({','.join(keys)}) VALUES ({','.join('?' * len(keys))})",
+                    [row[k] for k in keys],
+                )
+            conn.commit()
+            conn.close()
+
+            result = _run_alembic(db, "downgrade", "b7c1e4a92d30")
+            self.assertNotEqual(result.returncode, 0, "撞主键的降级竟然成功了")
+            self.assertIn("拒绝降级", result.stdout + result.stderr)
+
+            conn = sqlite3.connect(db)
+            try:
+                remaining = conn.execute("SELECT count(*) FROM accounts").fetchone()[0]
+            finally:
+                conn.close()
+            self.assertEqual(remaining, 2, "降级被拒后账号表被清空了")
+        finally:
+            if db.exists():
+                db.unlink()

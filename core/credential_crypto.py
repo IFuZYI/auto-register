@@ -4,9 +4,9 @@
 
 `extra_json` 里这几把是**可直接冒用身份的 bearer 凭证**，泄露一把等于泄露账号：
 
-    access_token / refresh_token / id_token / session_token / sso / totp_secret
+    access_token / refresh_token / id_token / session_token / sso / totp_secret / cookies
 
-其余键（`client_id`、`cookies`、同步状态、面板登记…）保持明文 —— 它们要么不是
+其余键（`client_id`、同步状态、面板登记…）保持明文 —— 它们要么不是
 秘密，要么需要被 SQL 查询/排序（加密后 `WHERE extra_json LIKE '%x%'` 就失效）。
 
 ## 为什么在 `get_extra` / `set_extra` 上做
@@ -46,6 +46,11 @@ SENSITIVE_EXTRA_KEYS: frozenset[str] = frozenset(
         "session_token",
         "sso",
         "totp_secret",
+        # `cookies` 是**会话凭据**：带着它就能免密续上已登录会话，与 AT 同级。
+        # 原来是明文（真库 607 行），理由是「需要被 SQL 查询」—— 实际全仓没有
+        # 任何 `WHERE extra_json LIKE '%cookies%'`，这条理由不成立
+        # （data-layer 审计 D-18）。
+        "cookies",
     }
 )
 
