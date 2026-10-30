@@ -21,7 +21,7 @@ HTTP 端点     102
 
 | # | 指标 | 基线 | 阶段 1 后 | 阶段 2 后 | 阶段 3 后 |
 |---|---|---:|---:|---:|---:|
-| M1a | `from api import tasks` 延迟门面（T3.1 才能拆） | 14 | 14 | 14 | **0** |
+| M1a | `from api import` 违规（服务层反向依赖 API） | 14 | **0** ✅ | 0 | 0 |
 | M1b | `from api.<mod> import <私有 helper>`（真分层倒置） | 5 | **0** | 0 | 0 |
 | M2a | 动作声明数（plugin `"id": "`） | 17 | 17 | **7** | 7 |
 | M2b | 动作 id 字符串散落 | 97 | 97 | ≤ 40 | ≤ 20 |
@@ -152,3 +152,33 @@ upload / sync_status），17 个动作 id 全部登记，`tests/test_capability_
 
 同时把「动作 id → 面板 key」的映射从三处（api 的 dict、ChatGPT 插件三元式、Grok 插件
 写死字符串）收敛到 `services/panel_status_sync.ACTION_PANEL_KEYS` 一处。
+
+## T3.1 记录：任务运行时下沉，M1a 归零
+
+`api/tasks.py` 902 → 814 行。搬进 `services/task_service.py`（201 行）的是：
+
+| 符号 | 原位置 | 服务层调用次数 |
+|---|---|---:|
+| `_log` → `log` | `api/tasks.py:297` | 55 |
+| `_task_store` → `task_store` | `api/tasks.py:25` | 24 |
+| `_save_task_log` → `save_task_log` | `api/tasks.py:314` | 14 |
+| `_persist_task_snapshot` → `persist_task_snapshot` | 本来就在 `services/task_store_io.py` | 13 |
+| `normalize_register_retry_times` | `api/tasks.py:42` | 2 |
+| `_auto_upload_integrations` → `auto_upload_integrations` | `api/tasks.py:375` | 2 |
+| `_account_already_registered` → `account_already_registered` | `api/tasks.py:359` | 2 |
+| `MAX_DEAD_END_ROUNDS` | `api/tasks.py:39` | 2 |
+
+**循环 import 的解法**：`task_service` 在 `log()` 里延迟 import
+`task_store_io.persist_task_snapshot`；`task_store_io` 反过来在 `_store()` 里取
+`task_service.task_store`。两个方向都是函数内 import，模块加载期不互相等待。
+
+**patch 目标随之移动**：`test_register_task_controls.py` 与
+`test_environment_preflight.py` 里 9 处 `patch("api.tasks._save_task_log")` 改为
+`patch("services.task_service.save_task_log")` —— 函数搬了，patch 就得打在它现在
+所在的地方，否则 patch 的是 `api/tasks.py` 里那个不再被调用的别名（假绿）。
+`test_task_module_layout.py` 保持原样：它断言的是「`api.tasks` 上还能取到这个名字」，
+属于结构性契约，仍然成立。
+
+**还剩一处真违规**（不在这条指标口径里）：`services/chatgpt_maintenance.py:791`
+`from api.integrations import push_panel_endpoint`。那个函数有 ~100 行推送逻辑住在
+API 层，归 T3.3（`PanelAdapter`）一起搬。
