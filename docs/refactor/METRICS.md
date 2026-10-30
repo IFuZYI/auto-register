@@ -125,3 +125,30 @@ upload / sync_status），17 个动作 id 全部登记，`tests/test_capability_
 `probe_local_status` 读 `data["probe"]`，`check_plus_trial` 不产出 probe；
 `sync_cliproxyapi_status` 读 `data["sync"]`，另两个同步动作的 data 里没有 `sync`。
 按能力合并会让后者的 `apply_*_policy` 收到 `None`，是否等价要逐个验证，不能靠推断。
+
+## T1.6 记录：配置键从三处定义收敛到一处
+
+`core/config_schema.py` 现在是 69 个配置键的唯一身份来源（键名 + 分组 + 是否口令）。
+`api/config.py` 的 `CONFIG_KEYS` / `SECRET_CONFIG_KEYS` 由它派生，文件从 263 行降到 165 行。
+
+派生关系不是靠人守的，`tests/test_config_schema.py` 钉了四件事：
+
+1. `api.CONFIG_KEYS` 与 schema **顺序**完全一致（顺序即界面顺序）；
+2. `api.SECRET_CONFIG_KEYS` 与 schema 的 secret 集合相等（10 个）；
+3. 代码里所有 `config_store.get("字面量")` 的键都必须登记过 —— 拼错键名会静默返回
+   默认值，这类 bug 以前永远不报错；
+4. `GET /api/config/schema` 的响应只含 `keys` / `secrets` / `groups`，**不含任何值**。
+
+新增 `GET /api/config/schema` 给前端渲染表单用，第三份键名列表可以退休了。
+
+## T2.2 记录：状态策略按能力分派
+
+`_apply_action_result` 的 ChatGPT 分支从「逐个比 4 个动作 id」变成「按 3 个能力分派」，
+`check_plus_trial` / `sync_sub2api_status` / `sync_chatgpt2api_status` 不再需要枚举 ——
+它们的结果里没有 `probe` / `sync` 键，策略函数收到 `None` 返回空串，行为与逐 id 完全一致。
+
+这条等价不是推理出来的：`tests/test_capability_dispatch.py` 先钉住现状（6 条，含
+「禁用不被无信号的同步洗掉」），再改分派，改完 6 条仍绿。
+
+同时把「动作 id → 面板 key」的映射从三处（api 的 dict、ChatGPT 插件三元式、Grok 插件
+写死字符串）收敛到 `services/panel_status_sync.ACTION_PANEL_KEYS` 一处。
