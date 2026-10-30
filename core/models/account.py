@@ -266,7 +266,11 @@ class AccountRecord:
             region=str(getattr(model, "region", "") or ""),
             token=str(getattr(model, "token", "") or ""),
             status=getattr(model, "status", DEFAULT_STATUS) or DEFAULT_STATUS,
-            extra=_load_extra(getattr(model, "extra_json", "") or "{}"),
+            extra=(
+                model.get_extra()
+                if callable(getattr(model, "get_extra", None))
+                else _load_extra(getattr(model, "extra_json", "") or "{}")
+            ),
             created_at=created if created is not None else int(time.time()),
             id=getattr(model, "id", None),
             legacy_id=getattr(model, "legacy_id", None),
@@ -312,21 +316,31 @@ class AccountRecord:
 
 
 def _load_extra(raw: Any) -> dict[str, Any]:
-    if isinstance(raw, dict):
-        return dict(raw)
+    """解析 extra 并**解密**凭证字段（老明文原样通过）。"""
     import json
 
+    from core.credential_crypto import decrypt_extra
+
+    if isinstance(raw, dict):
+        return decrypt_extra(raw)
     try:
         parsed = json.loads(raw or "{}")
     except (TypeError, ValueError):
         return {}
-    return parsed if isinstance(parsed, dict) else {}
+    return decrypt_extra(parsed) if isinstance(parsed, dict) else {}
 
 
 def _dump_extra(extra: dict[str, Any]) -> str:
+    """序列化并**加密**凭证字段 —— 与 `_load_extra` 对称。
+
+    两条后端（SQLite / JSON）都从这里拿 `extra_json`，所以加密只在这一处生效，
+    不会出现「SQLite 是密文、JSON 是明文」。
+    """
     import json
 
+    from core.credential_crypto import encrypt_extra
+
     try:
-        return json.dumps(extra or {}, ensure_ascii=False)
+        return json.dumps(encrypt_extra(extra or {}), ensure_ascii=False)
     except (TypeError, ValueError):
         return "{}"

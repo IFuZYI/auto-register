@@ -5,6 +5,8 @@
 """
 from __future__ import annotations
 
+from core.secret_box import CredentialKeyError
+
 from sqlalchemy.engine import Engine
 from sqlmodel import Session, select
 
@@ -732,6 +734,16 @@ def _normalize_grok_token_column(engine: Engine | None = None) -> None:
                 continue
             if not isinstance(extra, dict):
                 continue
+            # 凭证字段落盘是密文（T1.4）：不先解密的话 sso/access_token 都是
+            # `v1:…`，比较恒不相等，这条修补会静默失效。
+            try:
+                from core.credential_crypto import decrypt_extra
+
+                extra = decrypt_extra(extra)
+            except CredentialKeyError:
+                # 解不开就按原样判断：这条修补只修「token 被 AT 盖过」的老行，
+                # 不该因为密钥文件缺失把启动迁移整个打断。
+                pass
             sso = str(extra.get("sso") or "").strip()
             access = str(extra.get("access_token") or "").strip()
             # 只修「被 AT 盖过」的行：token == AT 且与 SSO 不符

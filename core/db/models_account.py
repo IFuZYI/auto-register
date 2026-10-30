@@ -77,6 +77,33 @@ class AccountModel(SQLModel, table=True):
     created_at: datetime = Field(default_factory=_utcnow, index=True)
     updated_at: datetime = Field(default_factory=_utcnow, index=True)
 
+    def __init__(self, **data: Any) -> None:
+        """构造时就把 `extra_json` 里的凭证加密。
+
+        为什么必须在 `__init__` 里做：`set_extra()` 是写路径的正门，但**导入、
+        测试、面板回填**这些地方直接 `AccountModel(extra_json=json.dumps({...}))`
+        构造 —— 绕过正门，明文就落盘了（`test_chatgpt_two_factor_persistence`
+        原先断言的正是这个泄漏）。这里是所有构造的必经点，补一道就够。
+
+        `encrypt_extra` 对已是 `v1:` 的值跳过，所以「从库里读出来再构造一次」
+        不会套娃。
+        """
+        super().__init__(**data)
+        raw = getattr(self, "extra_json", "") or ""
+        if not raw.strip():
+            return
+        try:
+            payload = json.loads(raw)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return
+        if not isinstance(payload, dict):
+            return
+        from core.credential_crypto import encrypt_extra
+
+        sealed = encrypt_extra(payload)
+        if sealed != payload:
+            self.extra_json = json.dumps(sealed, ensure_ascii=False)
+
     def get_extra(self) -> dict:
         """解析 extra_json 为字典。
 
@@ -91,12 +118,25 @@ class AccountModel(SQLModel, table=True):
             data = json.loads(raw)
         except (json.JSONDecodeError, TypeError, ValueError):
             return {}
-        return data if isinstance(data, dict) else {}
+        if not isinstance(data, dict):
+            return {}
+        # 敏感凭证（AT/RT/IDT/ST/SSO/totp_secret）落盘是密文，这里解密。
+        # 老数据是明文 —— `decrypt_extra` 对非 `v1:` 值原样通过。
+        from core.credential_crypto import decrypt_extra
+
+        return decrypt_extra(data)
 
     def set_extra(self, d: dict):
-        """写回 extra_json。非字典输入按空字典处理，避免写出非法结构。"""
+        """写回 extra_json。非字典输入按空字典处理，避免写出非法结构。
+
+        **落盘前加密**：`access_token` / `refresh_token` / `id_token` /
+        `session_token` / `sso` / `totp_secret` 六把凭证不进明文
+        （见 `core/credential_crypto.py`）。读侧由 `get_extra` 解密。
+        """
+        from core.credential_crypto import encrypt_extra
+
         payload = d if isinstance(d, dict) else {}
-        self.extra_json = json.dumps(payload, ensure_ascii=False)
+        self.extra_json = json.dumps(encrypt_extra(payload), ensure_ascii=False)
 
     def get_extra_value(self, key: str, default: Any = None) -> Any:
         """读单个平台自定义字段（键不存在或数据损坏时返回 default）。"""

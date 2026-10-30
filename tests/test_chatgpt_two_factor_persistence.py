@@ -102,7 +102,12 @@ class RegisterPathPersistenceTests(unittest.TestCase):
             row = session.exec(
                 select(AccountModel).where(AccountModel.email == "demo@example.com")
             ).first()
-        self.assertEqual(json.loads(row.extra_json)["totp_secret"], SECRET)
+        # T1.4：totp_secret 落盘必须是密文（原先这条断言的是**明文**，
+        # 也就是把泄漏当成了契约）。
+        sealed = json.loads(row.extra_json)["totp_secret"]
+        self.assertNotEqual(sealed, SECRET, "totp_secret 落盘还是明文")
+        self.assertTrue(sealed.startswith("v1:"), f"密文信封不对: {sealed[:8]}")
+        self.assertEqual(row.get_extra()["totp_secret"], SECRET, "读出来必须是明文")
 
     def test_a_late_crash_does_not_lose_an_already_bound_secret(self):
         # 典型场景：2FA 绑完了，后面 Codex 换 refresh_token 那步炸了

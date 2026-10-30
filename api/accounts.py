@@ -212,7 +212,13 @@ def _slim_extra_for_list(raw: str) -> str:
     if not isinstance(data, dict):
         return raw
 
-    slim = dict(data)
+    # 凭证字段落盘是密文（T1.4）：不先解密，`access_token` 就是 `v1:…`，
+    # `_at_claims_for_list` 解不出 iat/exp，列表的「AT 有效期」整列空掉。
+    # 解密只在本函数内发生；下面会把 AT/RT/ST/IDT 的**正文**全部 pop 掉，
+    # 客户端拿到的只有 `has_*` 布尔与 iat/exp。
+    from core.credential_crypto import decrypt_extra
+
+    slim = decrypt_extra(data)
     for key in _LIST_HEAVY_EXTRA_KEYS:
         slim.pop(key, None)
     # 把 AT 的 iat/exp 提出来放进列表（约 20 字节），前端据此渲染「AT 有效期」。

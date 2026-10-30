@@ -149,11 +149,12 @@ def merge_account_fields(
     """
     is_model = isinstance(incoming, AccountModel)
     if is_model:
+        # `extra_json` **原样保留**（见上面的说明）：模型里的密文不该被解析再
+        # 序列化，否则凭证会以明文形态写回。
+        # 但**比较用的 `extra`** 必须走 `get_extra()`（解密后的视图）——
+        # 直接 json.loads 会把 `v1:…` 当明文参与合并。
         extra_json = str(getattr(incoming, "extra_json", "") or "{}")
-        try:
-            extra = json.loads(extra_json) if extra_json else {}
-        except (json.JSONDecodeError, TypeError):
-            extra = {}
+        extra = incoming.get_extra()
     else:
         extra = getattr(incoming, "extra", None) or {}
         extra_json = json.dumps(extra, ensure_ascii=False)
