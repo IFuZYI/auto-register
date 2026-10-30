@@ -7,7 +7,8 @@
 
 | 层面 | 结果 |
 |---|---|
-| 单元/集成测试 | **3020 passed / 0 failed / 16 skipped**（175s） |
+| 单元/集成测试（主仓库，有 `node_modules`） | **3064 passed / 0 failed / 1 skipped**（222s，`tsc` 真跑） |
+| 单元/集成测试（worktree，无 `node_modules`） | **3020 passed / 0 failed / 16 skipped**（175s） |
 | 黑盒冒烟（sqlite 后端） | **45/45 步通过** |
 | 黑盒冒烟（JSON 后端） | **45/45 步通过** |
 | 与 base commit `5ba4bac` 对比 | base **44/44**，refactor **45/45**（多的一条是新端点 `/api/config/schema`） |
@@ -15,6 +16,7 @@
 | 注册任务真跑 | 建任务 → 执行 → `status=done` / 5 条日志 / 完成摘要，**与 base 逐字一致** |
 | pyflakes 静态检查 | `undefined name` **7 → 0**（其中 5 条是真 NameError） |
 | **真实生产库 dump diff** | **1056 行，字段级差异 0**（仅 `id` 按 H4 变 UUID） |
+| **生产库已迁移** | `c3f8a1d64b27 (head)`、1056/1056 UUID、明文凭据 0（见 `MIGRATION-LOG.md`） |
 
 ## 二、怎么验的
 
