@@ -131,8 +131,11 @@ password/token 改成落盘密文（D-01/D-02）。
 5. ~~面板「拉回」被登记闸门锁死（panels F-06）~~ —— **已缓解（`97bfd0c`）**：
    语义不变（仍只同步已登记账号），但零登记时返回 `enrolled/candidates/reason`，
    界面能说清「先登记再拉回」。
-6. **注册主链 `AuthFlow.run_register` 无任何行为测试**（tests-quality P0）：
-   mutation 实测——函数体首行插 `raise`，注册相关 83 条测试全绿。真机跑通≠有兜底。
+6. **注册主链 `AuthFlow.run_register` 仍无完整 E2E**（tests-quality P0）——
+   **已开始**（`31fd9a1`）：入口三连（warmup → csrf → signin/openai）接到
+   `FakeHttp` 真实调用链上，3 条测试钉住请求顺序、授权 URL、403 必须失败。
+   仍缺：`signup` / OTP / passwordless / callback / RT 交换这几段的行为测试
+   （mutation「首行插 raise」现在会被入口这三条抓到，但链子后半段仍无覆盖）。
 
 ### P1
 - 性能：~~SQLite 开 WAL~~ —— **已修（`2a91175`）**：主库与各平台库都开
