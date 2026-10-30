@@ -53,7 +53,7 @@ def _record(steps: list[dict], name: str, resp, **extra) -> dict:
     return entry
 
 
-async def _run(steps: list[dict]) -> None:
+async def _run(steps: list[dict], *, sweep: bool = False) -> None:
     import main
     from fastapi.testclient import TestClient
 
@@ -159,6 +159,31 @@ async def _run(steps: list[dict]) -> None:
         # 11. 任务列表（空也该 200）
         _record(steps, "tasks.list", client.get("/api/tasks"))
 
+        # 11b. 建一个注册任务：核心链路的接线（不要求真跑通 —— 本机没有邮箱
+        #      服务，跑到「未配置邮箱」就该干净失败，不能 500）。
+        r = client.post(
+            "/api/tasks/register",
+            json={"platform": "chatgpt", "count": 1, "concurrency": 1},
+        )
+        task_id = (r.json() or {}).get("task_id") or (r.json() or {}).get("id")
+        _record(steps, "task.register.create", r, task_id_present=bool(task_id))
+
+        # 11c. 任务列表里能看到它
+        r = client.get("/api/tasks")
+        body = r.json() if r.status_code < 400 else {}
+        tasks = body.get("tasks") if isinstance(body, dict) else body
+        _record(
+            steps,
+            "task.register.visible",
+            r,
+            count=len(tasks or []),
+            found=any(str((x or {}).get("task_id") or (x or {}).get("id")) == str(task_id) for x in (tasks or [])),
+        )
+
+        # 11d. 任务详情/日志（不存在的任务也该是 404，不是 500）
+        if task_id:
+            _record(steps, "task.detail", client.get(f"/api/tasks/{task_id}"))
+
         # 12. 统计
         r = client.get("/api/accounts/stats")
         _record(steps, "account.stats", r, total=(r.json() or {}).get("total"))
@@ -169,6 +194,42 @@ async def _run(steps: list[dict]) -> None:
         if proxy_id is not None:
             _record(steps, "proxy.delete", client.delete(f"/api/proxies/{proxy_id}"))
 
+        if sweep:
+            _sweep_get_routes(client, steps)
+
+
+def _sweep_get_routes(client, steps: list[dict]) -> None:
+    """把**所有无路径参数的 GET 路由**打一遍，5xx 记为失败。
+
+    这是「功能面」的全量检查：单测按功能点写，总会漏掉某个端点的接线
+    （T1.4b 的密码回归就是这么漏的）。这里不判断业务正确性，只判断
+    「这个端点还能不能正常回话」—— 4xx 是正常业务响应（缺参数/没配置），
+    5xx 一定是坏了。
+    """
+    from main import app
+
+    # 用 OpenAPI 而不是 `app.routes`：新版 FastAPI 把 `include_router` 变成惰性的
+    # `_IncludedRouter` 对象，`app.routes` 里只看得到 2 条直挂路由（实测）。
+    paths = (app.openapi() or {}).get("paths") or {}
+    for path, operations in sorted(paths.items()):
+        if "get" not in operations:
+            continue
+        if "{" in path or not path.startswith("/api"):
+            continue
+        try:
+            response = client.get(path)
+            steps.append(
+                {
+                    "step": f"sweep {path}",
+                    "status": response.status_code,
+                    "ok": response.status_code < 500,
+                }
+            )
+        except Exception as exc:  # noqa: BLE001 - 单点异常不该中断整轮扫描
+            steps.append(
+                {"step": f"sweep {path}", "status": 0, "ok": False, "error": str(exc)[:80]}
+            )
+
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
@@ -177,10 +238,14 @@ def main(argv: list[str] | None = None) -> int:
         "--backend", choices=("sqlite", "json"), default=None,
         help="存储后端（默认 sqlite；json 走另一条写路径）",
     )
+    parser.add_argument(
+        "--sweep", action="store_true",
+        help="额外把所有无路径参数的 GET 路由打一遍（5xx 记为失败）",
+    )
     args = parser.parse_args(argv)
 
     steps: list[dict] = []
-    asyncio.run(_run(steps))
+    asyncio.run(_run(steps, sweep=args.sweep))
 
     failed = [s for s in steps if not s["ok"]]
     report = {

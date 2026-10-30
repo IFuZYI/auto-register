@@ -111,6 +111,23 @@ class RepositoryContractTests(unittest.TestCase):
 
     # ------------------------------------------------------------ 契约
 
+    def test_outlook_pool_summary_works_on_both_backends(self):
+        """号池汇总不能因为后端切换而 500。
+
+        原先直接对 `outlook_accounts` 发 `GROUP BY`，JSON 部署下那张表不存在
+        （`no such table: outlook_accounts`）—— 接口 500，而单测全绿。
+        改成走仓储层后两条后端都能算。
+        """
+        for fixture in self._cases():
+            with self.subTest(backend=fixture.name), fixture:
+                from core.mailboxes.channels.outlook import OutlookMailbox
+
+                summary = OutlookMailbox.pool_status_summary()
+
+                self.assertIn("total", summary)
+                for key in ("unpooled", "available", "in_use", "used", "failed"):
+                    self.assertIn(key, summary, f"号池汇总缺 {key}")
+
     def test_get_many_and_delete_many_work_on_both_backends(self):
         """批量取/批量删在两条后端上都要工作。
 
