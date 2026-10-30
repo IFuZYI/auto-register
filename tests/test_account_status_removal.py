@@ -56,14 +56,27 @@ def _insert_legacy_row(engine, email: str, status: str) -> None:
 
 
 class AccountStatusValuesTests(unittest.TestCase):
-    """枚举只保留四个状态。"""
+    """枚举的成员集合必须精确（多一个少一个都要当场红）。
 
-    def test_exactly_four_statuses_remain(self):
+    原本是「只保留四个」，2026-10-30 加了第五个 `limited`（用户要求
+    「GPT 限流…尝试恢复」）：限流号的凭证是好的、只是额度用尽，与
+    `invalid`（要重新登录）不是一回事 —— 塞进 invalid 会让恢复队列去重登，
+    而重登解决不了额度。所以这里改成精确集合，新增成员必须显式改这条测试，
+    而不是靠「碰巧没被断言到」蒙过去。
+    """
+
+    def test_exact_status_set(self):
         self.assertEqual(
             AccountStatus.values(),
-            {"registered", "expired", "invalid", "banned"},
-            "状态集合应为 registered/expired/invalid/banned —— trial 与 subscribed 已删除",
+            {"registered", "expired", "invalid", "banned", "limited"},
+            "状态集合变了 —— trial/subscribed 应保持已删除；limited 是 2026-10-30 新增",
         )
+
+    def test_removed_statuses_are_still_absent(self):
+        """核心契约：trial / subscribed 必须仍然是删除状态。"""
+        values = AccountStatus.values()
+        for gone in ("trial", "subscribed"):
+            self.assertNotIn(gone, values, f"{gone} 又冒出来了")
 
     def test_active_values_only_registered(self):
         """「还能用」的白名单只剩 registered（另三个都是失效态）。"""
