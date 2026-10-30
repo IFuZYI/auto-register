@@ -409,7 +409,7 @@ export default function Accounts() {
    * - `token` 列：chatgpt 的列镜像 AT，可作为兜底；**grok 的列镜像是 SSO**
    *   （不是 AT），不能拿来当 AT —— 否则列表会把 SSO 显示成「无法解析」。
    */
-  const getAccessToken = (record: { token?: string; extra_json?: string } | null | undefined): string => {
+  const getAccessToken = (record: { token?: string; has_token?: boolean; extra_json?: string } | null | undefined): string => {
     try {
       const extra = JSON.parse(record?.extra_json || '{}')
       // 正文优先（详情端点给全量）；列表行只有布尔，返回占位串仅供判有无。
@@ -458,15 +458,25 @@ export default function Accounts() {
     load()
   }
 
-  const handleBatchDelete = async () => {
+  const handleBatchDelete = () => {
     if (selectedRowKeys.length === 0) return
-    await apiFetch('/accounts/batch-delete', {
-      method: 'POST',
-      body: JSON.stringify({ ids: Array.from(selectedRowKeys), platform: currentPlatform }),
+    // 单次最多删 1000 条且**不可恢复**，原来一点即删（全量检测 F-04）。
+    Modal.confirm({
+      title: `确认删除选中的 ${selectedRowKeys.length} 个账号？`,
+      content: '删除后无法恢复（账号凭据、任务历史里的关联记录都会一起消失）。',
+      okText: '删除',
+      okButtonProps: { danger: true },
+      cancelText: '取消',
+      onOk: async () => {
+        await apiFetch('/accounts/batch-delete', {
+          method: 'POST',
+          body: JSON.stringify({ ids: Array.from(selectedRowKeys), platform: currentPlatform }),
+        })
+        message.success('批量删除成功')
+        setSelectedRowKeys([])
+        load()
+      },
     })
-    message.success('批量删除成功')
-    setSelectedRowKeys([])
-    load()
   }
 
   const handleAdd = async () => {
@@ -596,8 +606,11 @@ export default function Accounts() {
 
     if (scope === 'selected') {
       const accountIds = Array.from(selectedRowKeys)
-        .map((value) => Number(value))
-        .filter((value) => Number.isInteger(value) && value > 0)
+        // 账号主键是 UUID 字符串。原来 `Number(uuid)` → NaN → 被下面的
+        // `Number.isInteger` 全部过滤掉，于是「同步/补RT/刷新/上传（所选）」
+        // 永远提示「请先选择」、导出退化成「全部筛选结果」（全量检测 F-01/F-02）。
+        .map((value) => String(value))
+        .filter((value) => value.length > 0)
 
       if (accountIds.length === 0) {
         message.warning('请先选择要同步的账号')
@@ -668,8 +681,11 @@ export default function Accounts() {
     const body: Record<string, unknown> = {}
     if (scope === 'selected') {
       body.account_ids = Array.from(selectedRowKeys)
-        .map((value) => Number(value))
-        .filter((value) => Number.isInteger(value) && value > 0)
+        // 账号主键是 UUID 字符串。原来 `Number(uuid)` → NaN → 被下面的
+        // `Number.isInteger` 全部过滤掉，于是「同步/补RT/刷新/上传（所选）」
+        // 永远提示「请先选择」、导出退化成「全部筛选结果」（全量检测 F-01/F-02）。
+        .map((value) => String(value))
+        .filter((value) => value.length > 0)
     } else {
       body.all_filtered = true
       if (search) body.email = search
@@ -719,8 +735,11 @@ export default function Accounts() {
 
     if (scope === 'selected') {
       body.account_ids = Array.from(selectedRowKeys)
-        .map((value) => Number(value))
-        .filter((value) => Number.isInteger(value) && value > 0)
+        // 账号主键是 UUID 字符串。原来 `Number(uuid)` → NaN → 被下面的
+        // `Number.isInteger` 全部过滤掉，于是「同步/补RT/刷新/上传（所选）」
+        // 永远提示「请先选择」、导出退化成「全部筛选结果」（全量检测 F-01/F-02）。
+        .map((value) => String(value))
+        .filter((value) => value.length > 0)
     } else {
       body.all_filtered = true
       if (search) body.email = search
@@ -762,8 +781,11 @@ export default function Accounts() {
 
     if (scope === 'selected') {
       body.account_ids = Array.from(selectedRowKeys)
-        .map((value) => Number(value))
-        .filter((value) => Number.isInteger(value) && value > 0)
+        // 账号主键是 UUID 字符串。原来 `Number(uuid)` → NaN → 被下面的
+        // `Number.isInteger` 全部过滤掉，于是「同步/补RT/刷新/上传（所选）」
+        // 永远提示「请先选择」、导出退化成「全部筛选结果」（全量检测 F-01/F-02）。
+        .map((value) => String(value))
+        .filter((value) => value.length > 0)
     } else {
       body.all_filtered = true
       if (search) body.email = search
@@ -892,7 +914,7 @@ export default function Accounts() {
       title: 'AT 有效期',
       key: 'at_lifecycle',
       width: 130,
-      render: (_: unknown, record: { token?: string; extra_json?: string }) => {
+      render: (_: unknown, record: { token?: string; has_token?: boolean; extra_json?: string }) => {
         // 与详情弹窗同口径（atListSummary 内部复用 atLifecycleMeta）。
         // 参考实现（chatgpt2api）在列表行内直接显示凭据状态，用户反馈
         // 「GPT 界面没见到 AT 日期」——此前只在详情弹窗里。
@@ -1468,8 +1490,8 @@ export default function Accounts() {
           created_at_end: createdAtEnd,
         }}
         selectedIds={Array.from(selectedRowKeys)
-          .map((value) => Number(value))
-          .filter((value) => Number.isInteger(value) && value > 0)}
+          .map((value) => String(value))
+          .filter((value) => value.length > 0)}
         filteredTotal={total}
       />
 

@@ -114,7 +114,7 @@ jsonable_encoder      0.055 ms/行
 #### F-03（高）`/api/icloud/aliases` — 428 ms / 712 KB，同一条查询跑了两遍
 
 - **位置**：`api/icloud.py:339-345`（`list_aliases()` + `pool_summary()`）→ `services/icloud/aliases.py:92` 与 `services/icloud/aliases.py:428` **各自**调 `icloud_alias_repository.list_aliases()`
-- **证据**：ORM `load` 事件统计 **3882 行 = 1941 × 2**（别名表实际 1941 行、3 个主号）；响应 712,390 B，其中 `pool` 字段只有 4 个整数。
+- **证据**：ORM `load` 事件统计 **3882 行 = 1941 × 2**（别名表实际 1941 行、3 个主号）；响应 712,390 B，其中 `pool` 字段只有 4 个整数。cProfile：`list_aliases` 1045 ms，其中 `icloud_alias_repository.list_aliases` **被调 2 次共 880.6 ms**，`_from_model` 3882 次 297.4 ms。
 - **建议**：`pool_summary` 接受已取到的 rows（`pool_summary(rows=rows)`）或在 SQL 层 `GROUP BY pool_status`（1 行 4 列），省掉一次 1941 行全表 + 一次 JSON 组装。
 
 #### F-04（中）`/api/proxies/balance` — 213 ms 只为返回 999 B
@@ -208,7 +208,7 @@ jsonable_encoder      0.055 ms/行
 
 - **位置**：`main.py:215-216` → `core/config_store.py:287-300`（每次 `get()` 都 `with Session(...)` + `s.get(ConfigItem, key)`，**无缓存**）
 - **证据**：微基准 `config_store.get('auth_password_hash')` **0.85 ms/次**（p50，200 次）；cProfile 里每个端点的 `auth_middleware` 都占 3–7 ms（含 `_runtime_env_values()` 0.16 ms 的 `.env` 重读）。
-- **影响**：`/api/config` 总耗时 9.7 ms，其中 0.85 ms 是"查自己有没有设密码"；轮询类端点（2.5 s 一次）每年多跑 1260 万条无用 SQL。
+- **影响**：`/api/config` 总耗时 9.7 ms，其中 0.85 ms 是"查自己有没有设密码"；单标签页按 2.5 s 轮询算，一年 ≈ **1260 万条**无用 SQL。
 - **建议**：`auth_password_hash` 在进程内缓存（`config_store.set()` 时失效），或中间件只在启动时读一次 + `PUT /api/config` 后刷新。
 
 ### F-14（中）`check_accounts_valid`：2 条 SQL/账号

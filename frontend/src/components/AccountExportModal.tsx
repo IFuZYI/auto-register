@@ -34,7 +34,10 @@ type AccountExportModalProps = {
   open: boolean
   onClose: () => void
   filters: AccountExportFilters
-  selectedIds: number[]
+  // 账号主键是 UUID 字符串（后端 `account_ids: list[str | int]`）。
+  // 这里原来写 `number[]`，父组件又用 `Number(uuid)` 转换 → NaN 全被过滤掉，
+  // 「导出所选」于是静默退化成「导出全部筛选结果」。
+  selectedIds: (string | number)[]
   filteredTotal: number
 }
 

@@ -2,581 +2,492 @@
 
 [MODE: SANDBOX]
 
-- **仓库**：`/data/workspace/Register`，分支 `main`，HEAD `4680c8d`（feat(proxy): 代理标签【注册】【绑定】…）
-- **审计范围**：`api/*.py`（accounts / tasks / proxies / config / actions / integrations / auth / mail_imports / outlook / icloud / backup / sms / shared_mail / platforms / contribution）、`main.py`、`core/auth*`（本仓库无 `core/auth*`，鉴权实现全部在 `api/auth.py` + `main.py` 中间件）、以及被上述接口直接调用的 `core/db/*`、`core/config_store.py`、`services/task_runners.py`、`services/data_bundle.py`
-- **方法**：静态阅读 + 真实 HTTP 探测（GET/HEAD）+ 只读 SQLite 取证
-- **只读约束**：真实库 `data/account_manager.db` 仅以 `file:...?mode=ro` 打开；所有写操作（含唯一一次 `POST /api/auth/setup`）只发生在**一次性 DB 副本**上
+- **仓库**：`/data/workspace/Register`，分支 `main`，HEAD **`c93b71f`**（`fix(auth): 堵住 setup 抢注接管 / 改密不要旧密码 / 令牌不可吊销 / XFF 绕退避 / CORS 全开`）
+- **解释器**：`.venv/bin/python`（3.12）
+- **审计时间**：2026-10-30 18:30–18:45 UTC
+- **范围**：`api/*.py`（15 个路由模块，4537 行）、`main.py`、`core/net_utils.py`、`core/config_store.py`、`core/config_schema.py`、`core/db/models_account.py`、`services/task_runners.py`、`services/account_export.py`、`services/data_bundle.py`（仅导出侧）
+- **方法**：静态通读 + 对运行中的 `127.0.0.1:8000` 做 **GET/HEAD 探测** + 真实库 `data/account_manager.db` 只读 SQL（`file:...?mode=ro`）
+- **只读约束**：全程**没有**发出任何 POST/PUT/PATCH/DELETE，没有写真实库，没有改任何代码。本文件是本轮唯一写入的文件。
 
-### 0.1 探测环境说明（重要）
+### 0.1 取证基线与两个必须说明的前提
 
-审计开始时 `127.0.0.1:8000` **并未监听**（`curl` exit 7 / `ss -ltnp` 无 8000），工作区同时处于脏状态（`core/db/models_infra.py` 等在审计期间被并发修改，`python -c "import main"` 一度抛 `NameError: name 'Index' is not defined`）。为保证可复现且不影响任何人，采用如下沙箱：
+1. **本轮 `:8000` 有实例在跑**（上一轮审计时没有），所以结论里第一次出现**运行时证据**而不只是静态推断。但它的 `DATA_DIR` 不是仓库的 `data/`：`GET /api/backup/info` 返回 `"data_dir": "/root/.hermes/cache/scratch/regperf/data"`（一个性能测试用的同源副本）。真实库 `data/account_manager.db` 已用只读连接逐表比对，行数完全一致（accounts 1057 / proxies 5 / task_runs 837 / task_logs 1661 / configs 143），所以运行时观察到的数据形状可以代表真实库。
+2. **仓库在被并发修改**。审计期间鉴权加固从「工作区未提交」变成了提交 `c93b71f`（18:36），`api/proxies.py` 又出现了新的未提交改动（正在给代理 URL 打码，见 F5）。**本报告所有 `path:line` 以 `c93b71f` 为准**；`api/proxies.py` 因工作区正在改，行号取 `c93b71f` 版本并注明。
 
-1. `git archive HEAD | tar -x -C /root/.hermes/cache/scratch/audit-repo` —— 取**提交态**代码，不受并发编辑影响；
-2. `cp -a data/. /root/.hermes/cache/scratch/audit-data` —— 真实数据的一次性副本；
-3. `DATA_DIR=<副本> APP_ENABLE_SOLVER=0 APP_JWT_SECRET=audit-sandbox-secret uvicorn main:app --host 127.0.0.1 --port 18000`；
-4. 全部 GET/HEAD 探测打在 `:18000`；**没有**对真实 `:8000` 或真实库发出任何写请求。
+### 0.2 与上一版报告的关系
 
-文中的响应体均来自该沙箱实例，数据与真实库同源（1057 个账号 / 5 个代理 / 837 个任务 / 1661 条日志）。长凭据在报告中只给**长度 + 结构**，不落明文。
-
-> **行号基准**：审计期间仓库又前进了两个提交（`9630980` 修 `api/actions.py` 的 `int(uuid)`、`c2c502b` 补 `core/db` 索引声明），均不触及鉴权/敏感数据路径。本报告所有 `path:line` 以 **`4680c8d`** 为准；在 `9630980` 上 `core/db/models_account.py` 因新增 5 行索引声明而整体 +5（`token` 列在 `:86`），其余文件行号不变。
+本目录下原有的 `api-security.md`（18:31 落盘）审的是 `4680c8d`，其 F1/F6/F7/F10/F12 五条已在 `c93b71f` 修掉。为避免团队正在引用的编号（提交信息里已经出现「安全审查 2026-10-30 F5」）失效，**本轮保留 F1–F25 原编号并给出复核状态**，新发现另编 N0–N6。
 
 ---
 
 ## 1. 结论摘要
 
+### 1.1 本轮新增
+
 | ID | 严重度 | 主题 | 位置 | 一句话 |
 |----|--------|------|------|--------|
-| F1 | **严重** | 鉴权 | `main.py:228` + `api/auth.py:309-324` | `/api/auth/setup` 绕过鉴权中间件：未设密码时**任何来源**都能设密码并拿到 token → 远程接管 |
-| F2 | **严重** | 敏感数据 | `api/backup.py:37-54` | `GET /api/backup/export` 一个请求返回全库 + `secrets/credential_key`（解密密钥本身），ZIP 不加密 |
-| F3 | 高 | 敏感数据 | `api/accounts.py:260-300` | 账号**列表**明文下发 `token` 列（chatgpt=AT、grok=SSO），与文件内注释「列表不下发 AT」直接矛盾 |
-| F4 | 高 | 敏感数据 | `services/task_runners.py:259,568` → `api/tasks.py:636,789` | 任务日志把 `socks5h://user:pass@host` 完整写库，并被两个列表接口回吐 |
-| F5 | 高 | 敏感数据 | `api/proxies.py:37-39,128-173` | 代理列表/均衡接口返回带账号密码的代理串 |
-| F6 | 高 | 鉴权 | `api/auth.py:402-403,406-416,58` | token 7 天有效且**不可吊销**：logout 是空实现，改密码不轮换 JWT secret |
-| F7 | 高 | 鉴权 | `api/auth.py:256-266` | 登录退避按 `X-Forwarded-For` 首段计数 → 伪造该头即**完全绕过**爆破限速 |
-| F8 | 高 | 敏感数据 | `core/db/models_account.py:81` | `token` 列（AT/SSO）**明文落盘**，1057/1057 行非密文，与「凭据加密落盘」不符 |
-| F9 | 中 | 敏感数据 | `api/accounts.py:419-443` | `GET /api/accounts/export` 直出明文密码 CSV，无二次认证、无条数上限 |
-| F10 | 中 | 鉴权 | `api/auth.py:309-337` | 持任意有效 token 即可 `setup` 改密 / `disable` 关鉴权，**不需要旧密码**（持久化接管） |
-| F11 | 中 | 鉴权 | `main.py:205-222` | 无密码时的「仅回环」兜底在同机反代下失效（代理连接源地址恒为 127.0.0.1） |
-| F12 | 中 | CORS | `main.py:269-274` | `allow_origins=["*"]` + 全方法 + 全头 |
-| F13 | 中 | 敏感数据 | `api/accounts.py:724-735`、`api/backup.py:37` | 凭据类响应无 `Cache-Control: no-store` |
-| F14 | 中 | 输入校验 | 见 §4.1 | 批量接口上限不一致：`import` / `outlook` / `icloud` / `mail-imports` / `proxies/bulk` **无上限**；`page_size` 无上限 |
-| F15 | 中 | 错误语义 | 见 §5.1 | 多处 500/200 响应体透传 `str(exc)`（SQL、路径、代理串可能外泄） |
-| F16 | 中 | 错误语义 | `api/mail_imports.py:19-38` | 参数越界返回 400 且带 pydantic 内部模型名与校验细节 |
-| F17 | 中 | 破坏性 | 见 §6 | `sync` / `push?delete_old` / `icloud batch-delete(remote=true)` / `logs cleanup` 无二次确认或 dry-run |
-| F18 | 中 | 敏感数据 | `api/icloud.py:338-346` + `api/shared_mail.py:149` | 1941 个免登录邮件页的 `share_token` 被列表接口批量下发 |
-| F19 | 低 | 静态/头 | `main.py:573-610` | SPA 与 API 无 CSP / `X-Content-Type-Options` / `X-Frame-Options` |
-| F20 | 低 | 信息泄露 | `api/auth.py:300-305,340-373` | 未认证可读 `has_password/has_totp`；login 用 403 `no_password_set` 确认「没设密码」 |
-| F21 | 低 | 信息泄露 | `main.py:300-305` | `/api/runtime` 回绝对解释器路径、pid、启动时间 |
-| F22 | 低 | 输入校验 | `api/tasks.py:636-657` | `page_size` 无上限，且每次 `len(s.exec(q).all())` 全表装载算 total |
-| F23 | 低 | 鉴权 | `api/auth.py:214-240` | `_login_failures` 以可伪造的 client key 为键，无清理，可无界增长 |
-| F24 | 低 | 错误语义 | `api/sms.py:83-100` | 上游错误原文透传（`f"查询余额失败: {exc}"`），可能回显 key |
-| F25 | 低 | 契约 | `api/integrations.py:67-79` | GET 触发对第三方面板的外网请求（GET 有外部副作用），单次响应 388 KB |
+| **N0** | **严重** | 部署 | `main.py:258-264` vs 运行进程 | **在跑的进程是加固前代码**：CORS 仍回 `*`、预检仍宣告 `QUERY`；进程 18:25:13 启动，早于 `c93b71f`（18:36）—— 五条鉴权修复在当前实例上等于没生效 |
+| **N1** | 中 | 鉴权 | `api/auth.py:446-453`、`main.py:213` | `/api/auth/logout` **无需认证**，任何能连到端口的人都能轮换全局 JWT 密钥 → 全体会话被踢、每次请求写一次 `configs` 表 |
+| **N2** | 中高 | SSRF / 密钥外带 | `api/contribution.py:33-53,78-90` | 4 个 POST 的 `server_url` **由请求体控制**，服务端照此发请求，并把 `Authorization: Bearer <contribution_key>` 送到该地址、把响应体原样回传 |
+| **N3** | 中 | SSRF / 凭据外带 | `api/icloud.py:104-119,257-285` | `base_url` 同样由请求体控制，`admin_password` 会被发往任意 host，响应回传 |
+| **N4** | 中 | 敏感数据 | `core/config_store.py:20-27` + `core/config_schema.py:135-137` | `auth_jwt_secret` / `auth_password_hash` 不在 `SECRET_CONFIG_KEYS` → **明文存 `configs` 表**，并随备份包外带；拿到备份即可伪造管理员 JWT |
+| **N5** | 中 | 鉴权 | `api/auth.py:370-380` | F10 只修了一半：`/api/auth/disable` 仍**只要 token、不要旧密码**就能清空密码与 TOTP（`setup` 已要求 `old_password`） |
+| **N6** | 低 | 可观测性 | `main.py:45-84,290-309` | `_read_git_version()` 失败时返回 `"未知"`，而 `stale = code != disk` → `"未知" != "未知"` 为 `False`：**「改完没重启」这个守卫在取不到版本时谎报「已是最新」**（当前实例正是这个状态） |
 
-**做得对、值得保留的控制点**（避免后续重构改坏）：
+### 1.2 前一轮 F1–F25 复核
+
+| ID | 主题 | 状态 | 依据 |
+|----|------|------|------|
+| F1 | `setup` 抢注接管 | ✅ **已修** | `api/auth.py:352-362` 未设密码时只允许回环（`APP_ALLOW_REMOTE_SETUP=1` 可显式放开）；`main.py:213` 的整段放行仍在，但被端点自校验兜住 |
+| F2 | 备份含 `credential_key` | ❌ **未修** | 实测 ZIP 8 个成员，`secrets/credential_key` 44 B |
+| F3 | 列表明文下发 `token` / `sso` | ❌ **未修** | 实测列表首行 `token` 长 1988；grok 行 `extra_json.sso` 152 字符 |
+| F4 | 任务日志写代理账号密码 | ❌ **未修** | `?include_logs=true` 响应里 761 处 `socks5h://user:pass@` |
+| F5 | 代理接口回明文 URL | 🟡 **修复中（未提交）** | `c93b71f:api/proxies.py:157` 仍是 `"url": url`；工作区已有 `_public_proxy()` 打码补丁 |
+| F6 | token 不可吊销 | ✅ **已修** | `_rotate_jwt_secret()`（`api/auth.py:47-57`）+ logout/改密/关鉴权三处调用；副作用见 N1 |
+| F7 | XFF 绕登录退避 | ✅ **已修** | `core/net_utils.py:55-70`，只有 `APP_TRUST_PROXY=1` 才看 XFF |
+| F8 | `token` 列明文落盘 | ❌ **未修** | 只读 SQL：`token<>'' and token not like 'v1:%'` = **1057 / 1057** |
+| F9 | 明文密码 CSV 导出 | ❌ **未修** | `api/accounts.py:428-451`，实测 667 行含 16 字符明文密码 |
+| F10 | 持 token 即可改密/关鉴权 | 🟡 **半修** | `setup` 已要求旧密码；`disable` 未改（见 N5） |
+| F11 | 回环兜底在同机反代下失效 | ❌ **未修** | `main.py:225` 仍只看 `request.client.host`，`docs/` 也没有「无密码模式不支持反代」的声明 |
+| F12 | CORS 全开 | ✅ **源码已修 / ❌ 运行未生效** | `main.py:258-264` 已改 `allow_origin_regex`；实测进程仍回 `access-control-allow-origin: *`（N0） |
+| F13 | 凭据响应无 `no-store` | ❌ **未修** | `/api/accounts` 响应头只有 `content-length/content-type/vary` |
+| F14 | 分页/批量无上限 | ❌ **未修** | `api/accounts.py:315` 仍 `max(1, …)`；实测 `page_size=100000` → 200 / 3,802,434 B / 2.35 s |
+| F15 | `str(exc)` 进响应体 | ❌ **未修** | `api/accounts.py:713`、`api/tasks.py:697`、`api/backup.py:46,110,122` 等 8 处 |
+| F16 | pydantic 细节回显 | ❌ **未修** | 实测 `preview_limit=100000` → 400 + `MailImportSnapshotRequest` / `less_than_equal` / pydantic 文档链接 |
+| F17 | 破坏性接口无确认/dry-run | ❌ **未修** | `api/icloud.py` 的 `remote` 默认仍是 `True` |
+| F18 | `share_token` 随列表下发 | ❌ **未修** | 实测 712,390 B，每条 22 字符 token；`GET /m/<token>` 未登录 200 |
+| F19 | 无 CSP / nosniff / X-Frame-Options | ❌ **未修** | 实测 `/` 与 `/api/**` 只有 `cache-control/content-type/vary` |
+| F20 | `auth/status` 泄露是否设密码 | ❌ **未修（设计所需）** | 登录页要用；建议只保留 `has_password` |
+| F21 | `/api/runtime`、`/api/backup/info` 泄露绝对路径/pid | ❌ **未修** | 实测 `python: "/data/workspace/Register/.venv/bin/python"`、`pid: 317023`、`data_dir: /root/.hermes/...` |
+| F22 | `tasks/logs` 无上限 + 全表算 total | ❌ **未修** | `api/tasks.py:655` `total = len(s.exec(q).all())`；实测 `page_size=999999` → 356,026 B |
+| F23 | `_login_failures` 无清理 | ❌ **未修** | `api/auth.py:227`，键已改成真实 IP（F7 修好），但字典仍只增不减 |
+| F24 | SMS 上游错误原文透传 | ❌ **未修** | `api/sms.py:89,100` |
+| F25 | GET 触发第三方面板请求 | ❌ **未修** | `api/integrations.py:66-79`（`refresh=true` 时） |
+
+**净结果**：25 条里 **5 条已修（F1/F6/F7/F12 源码/F10 半条）**，**1 条修复中（F5）**，**19 条仍在**。真正的高危集中在「凭据怎么出去」（F2/F3/F4/F8/F9/F18）而不是「门锁得紧不紧」—— 门锁这一轮修得不错。
+
+### 1.3 已核实「做对了」的控制点（防止后续重构改坏）
 
 - `docs_url/redoc_url/openapi_url` 全关（`main.py:199-201`），实测 `/api/openapi.json` → 404；
-- 未设密码时非回环返回 503 而非 fail-open（`main.py:231-251`），实测生效；
-- 密码 PBKDF2-HMAC-SHA256 600k + 每用户随机盐 + `hmac.compare_digest`（`api/auth.py:100-158`）；
-- TOTP 失败计数并消费临时令牌（`api/auth.py:376-399`，上限 5 次）；
-- 账号/代理/任务/动作四个 batch-delete 都有 1000 条上限（`api/accounts.py:693`、`api/proxies.py:82`、`api/tasks.py:666`、`api/actions.py:138,167`）；
-- 代理均衡默认 `dry_run=True`（`api/proxies.py:28-31`）；
-- 备份导入有 zip-slip 净化、成员数/大小/sha256/魔数四重校验、Content-Length 强制、运行中任务 409（`services/data_bundle.py:409-458,578-606`、`api/backup.py:70-95`）；
-- 静态目录 `StaticFiles` 与 SPA 兜底均无路径穿越（实测见 §7.2）。
+- 未设密码时非回环返回 503 而非 fail-open（`main.py:227-236`），代码路径与上一轮沙箱实测一致；
+- 密码 PBKDF2-HMAC-SHA256 / 600k / 随机盐 / `compare_digest`，旧无盐哈希可验证但会透明升级（`api/auth.py:115-171`）；
+- TOTP 失败 5 次即作废临时令牌（`api/auth.py:429-439`），±1 窗口；
+- `GET /api/config` 的 10 个口令键全部置空 + `<key>_set`（实测 `yescaptcha_key:""` + `yescaptcha_key_set:false`，无明文）；
+- 路径穿越：9 个变体（`/api/auth/../accounts`、`%2e%2e`、`//`、`/./`、`/api/accounts%2f`）全部 404，`/API/accounts` 落到 SPA（200 HTML，非 API）—— 鉴权前缀判定**不可穿越**；
+- SPA 兜底对 `/api/**` 显式 404（`main.py:573-574`），实测 `/api/definitely-not-a-route` → 404 JSON；
+- 备份导入的 zip-slip / 成员数 / 大小 / sha256 / 魔数五重校验仍在（`services/data_bundle.py`）；
+- 鉴权用 `Authorization` 头而非 Cookie，且 `allow_credentials=False` → **经典 CSRF 不成立**（这是下面「GET 导出」只定低危的原因）。
 
 ---
 
-## 2. (1) 鉴权：哪些端点无需登录即可读写
+## 2. 鉴权面
 
-### 2.1 中间件的实际判定链
-
-`main.py:225-266` 是唯一的鉴权入口，逻辑是三段：
+### 2.1 中间件的实际判定链（`main.py:210-251`）
 
 ```
-path.startswith("/api/auth/") or not path.startswith("/api/")   → 直接放行   (main.py:228)
-auth_password_hash 为空                                          → 仅回环放行，其余 503 (main.py:231-251)
-否则要求 Authorization: Bearer <JWT>                             → 401 / 通过  (main.py:252-266)
+path.startswith("/api/auth/") or not path.startswith("/api/")  → 直接放行   (main.py:213)
+auth_password_hash 为空                                        → 仅回环放行，其余 503 (main.py:216-236)
+否则要求 Authorization: Bearer ***                            → 401 / 通过  (main.py:237-251)
 ```
 
-由此得到**未登录可达面**的完整清单：
+未登录可达面（`c93b71f`）：
 
 | 路径 | 方法 | 未登录可达 | 说明 |
 |------|------|-----------|------|
-| `/api/auth/status` | GET | ✅ | 回 `{"has_password":…,"has_totp":…}` |
-| `/api/auth/setup` | POST | ✅ | **未设密码时无任何校验**（F1） |
-| `/api/auth/disable` | POST | ✅ | 未设密码时无校验，且会清空 `auth_totp_secret`（`api/auth.py:327-337`） |
-| `/api/auth/login` | POST | ✅ | 预期公开 |
-| `/api/auth/verify-totp` | POST | ✅ | 预期公开 |
-| `/api/auth/logout` | POST | ✅ | 空实现（F6） |
-| `/api/auth/2fa/setup` `/2fa/enable` `/2fa/disable` `/change-password` | POST/GET | ❌ | 有 `Depends(require_auth)`（`api/auth.py:406-436`） |
-| 其余所有 `/api/**` | 任意 | ❌（设了密码）/ ⚠️（未设密码+回环或反代） | 中间件统一拦截 |
-| `/m/{share_token}` | GET | ✅ | 设计如此（`api/shared_mail.py:1-7,149`） |
-| `/`、`/assets/**`、任意非 `/api` 路径 | GET | ✅ | SPA 静态资源 |
+| `/api/auth/status` | GET | ✅ | `{"has_password":…,"has_totp":…}` |
+| `/api/auth/setup` | POST | ✅ | 未设密码时**仅回环**；`APP_ALLOW_REMOTE_SETUP=1` 时放开 |
+| `/api/auth/disable` | POST | ✅ | 未设密码时无校验；**已设密码时只需 token**（N5） |
+| `/api/auth/login` | POST | ✅ | 预期公开，有失败退避（键=真实 IP） |
+| `/api/auth/verify-totp` | POST | ✅ | 预期公开，5 次上限 |
+| `/api/auth/logout` | POST | ✅ | **无任何校验**，且会轮换全局密钥（N1） |
+| `/api/auth/2fa/*`、`/change-password` | GET/POST | ❌ | `Depends(require_auth)` |
+| 其余 `/api/**` | 任意 | ❌（设了密码）/ ⚠️（未设密码 + 回环） | 中间件统一拦截 |
+| `/m/{share_token}` | GET | ✅ | 设计如此（`api/shared_mail.py:149`） |
+| `/`、`/assets/**` | GET | ✅ | SPA 静态资源 |
 
-实测（沙箱，未设密码，客户端 127.0.0.1）：
-
-```bash
-$ curl -s http://127.0.0.1:18000/api/auth/status
-{"has_password":false,"has_totp":false}
-$ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:18000/api/accounts?page_size=1
-200                      # 回环 → 全量可读
-$ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:18000/api/openapi.json
-404                      # docs/openapi 已关
-$ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:18000/api/definitely-not-a-route
-404 {"detail":"Not Found"}
-```
-
-**真实库的当前状态**：`configs` 表里**没有** `auth_password_hash`（只读查询 `select key from configs` 共 143 行，无该键）—— 也就是说现网部署正处于「未设密码」状态，下面 F1/F11 不是理论风险。
-
-### F1（严重）`/api/auth/setup` 完全绕过鉴权中间件 → 远程接管
-
-- **位置**：`main.py:228`（`path.startswith("/api/auth/")` 一律放行）+ `api/auth.py:309-324`
-- **证据**：用一个**非回环**客户端（`TestClient` 的 `client.host == "testclient"`，且未设 `APP_TRUST_TEST_CLIENT`）对**一次性 DB 副本**发起请求：
+**当前真实状态**：真实库 `configs` 表 143 行里**没有** `auth_password_hash`、也没有 `auth_jwt_secret` —— 面板处于「未设密码」模式。此时任何**本机进程/本机用户**（含同机容器、同机其他服务、任何能打到 127.0.0.1:8000 的东西）无需任何凭据即可读全量账号与备份包。实测：
 
 ```
-remote(testclient) GET  /api/auth/status            -> 200 {"has_password":false,"has_totp":false}
-remote(testclient) GET  /api/accounts?page_size=1   -> 503 {"detail":"面板尚未设置登录密码…","code":"password_not_set"}
-remote(testclient) GET  /api/config                 -> 503 同上
-remote(testclient) GET  /api/backup/info            -> 503 同上
-remote(testclient) POST /api/auth/setup             -> 200 {"ok":true,"access_token":"<JWT>"}   ← 攻击者设定的密码生效
-remote(testclient) GET  /api/accounts?page_size=1   -> 401 {"detail":"未认证，请先登录"}          ← 门已装上，钥匙在攻击者手里
+$ curl -s 'http://127.0.0.1:8000/api/accounts?page_size=1'   # 无 Authorization 头
+200  {"total":1057,"items":[{"token":"eyJhbG…"(1988 字符), …}]}
+$ curl -s -o bundle.zip -w '%{http_code} %{size_download}' http://127.0.0.1:8000/api/backup/export
+200 7298029
 ```
 
-`api/auth.py:315-322` 的逻辑是「库里没有 hash 就不校验调用方」，而中间件又对这个前缀完全放行 —— 两条各自看起来合理的规则叠在一起，等于把「首次设置密码」这个最高权限动作暴露给任意网络来源。
+这不是「配错了」，是 `main.py:225` 的显式设计（本机调试不受影响）。问题在于**默认部署是 `0.0.0.0:8000`**（`docker-compose.yml:44`，`${APP_PORT_BIND:-8000}:8000`），而「本机」的判据是 TCP 源地址 —— 见 F11：同机反代下所有外部访问的源地址都是 `127.0.0.1`。
 
-- **影响**：默认部署 `docker-compose.yml:44` 是 `0.0.0.0:8000` 对外。任何能连到端口的人在面板首次配置前发一个 POST，即成为管理员；随后可读全量账号、导出含 `credential_key` 的备份包（F2）。
-- **建议**：
-  1. `/api/auth/setup` 在 `auth_password_hash` 为空时**只接受回环**（复用 `_is_loopback_client`），非回环返回 403 并提示「请在本机初始化」；
-  2. 更好的做法：首次密码只能由进程启动时生成的一次性 token（打印在 stdout / 写入 `data/secrets/`，0600）设置；
-  3. 中间件不要用前缀整段放行，改成显式白名单集合 `{"/api/auth/status","/api/auth/login","/api/auth/verify-totp"}`，`setup`/`disable` 走单独判定。
+### N1（中）`/api/auth/logout` 未认证 + 轮换全局密钥
 
-### F6（高）token 不可吊销：logout 空实现 + 改密不轮换密钥
+- **位置**：`api/auth.py:446-453`（`def logout()` 无 `Depends(require_auth)`）+ `main.py:213`（`/api/auth/*` 整段放行）+ `api/auth.py:47-57`（`_rotate_jwt_secret` 写 `configs`）
+- **证据**：静态。`logout()` 直接 `revoked = _rotate_jwt_secret()`，函数签名里没有任何凭据参数；中间件对该前缀直接 `call_next`。同理 `disable_auth`（`:370-380`）在未设密码时也是零校验。
+- **影响**（按只读约束未发 POST 验证，结论来自代码路径）：
+  1. **任意网络来源**（不限于本机）都能把 `auth_jwt_secret` 换掉 → 已签发的全部 token 立即失效 → 管理员被踢回登录页；反复调用即持续拒绝服务；
+  2. 每次调用都写一次 `configs` 表（`ConfigStore.set` → `s.commit()`），是廉价的写放大点；
+  3. 修复前 logout 是空实现（F6），修复时把「吊销」实现成了「全局换密钥」——**吊销的粒度错了**：一个用户的退出不该注销所有人，更不该由未认证者触发。
+- **建议**：`logout` 加 `dependencies=[Depends(require_auth)]`，且只吊销**调用者自己**的会话（payload 里加 `jti` + 服务端黑名单/版本号，见 F6 的建议）；`disable` 加旧密码 + TOTP；把「全局换密钥」保留给 `change-password` 这类确实需要全量吊销的动作，并单独记审计日志。
 
-- **位置**：`api/auth.py:402-403`（`logout` 只 `return {"ok": True}`）、`api/auth.py:407-416`（`change_password` 只写新 hash）、`api/auth.py:58`（`expire_seconds=86400*7`）、`api/auth.py:71-89`（`verify_token` 只校验签名与 exp，无 jti/版本）
-- **证据**：静态；`verify_token` 的 payload 只有 `sub/exp/iat`，没有任何可撤销标识；改密路径没有 `config_store.set("auth_jwt_secret", …)`。
-- **影响**：一次 token 泄漏 = 7 天有效；受害者「改密码」不会踢掉攻击者；配合 F10，攻击者还能用旧 token 把密码再改回去。
-- **建议**：payload 加 `ver`（或 `pwd_epoch`），改密/登出时自增；`verify_token` 比对 `ver`；或维护短期 access token + refresh token。
+### N5（中）`/api/auth/disable` 仍不要旧密码
 
-### F7（高）登录退避可被 `X-Forwarded-For` 绕过
+- **位置**：`api/auth.py:370-380`
+- **证据**：`if cfg.get("auth_password_hash",""): verify_token(...)` —— 只验 token，不验密码；而 `setup`（`:344-351`）与 `change_password`（`:456-462`）都要求旧密码。同一类动作三套强度。
+- **影响**：面板 token 一旦泄漏（浏览器/日志/截图/XSS），攻击者可直接 `disable` 把面板退回无密码态，再叠加 F11（同机反代）即完全接管；即便不接管，也能清掉 `auth_totp_secret` 让二次因子消失。
+- **建议**：`disable` 要求 `current_password` + TOTP；或干脆删除该端点，只保留「改密码」。
 
-- **位置**：`api/auth.py:256-266`
+### F11（中）「仅回环」兜底在同机反代下失效
 
-```python
-forwarded = request.headers.get("x-forwarded-for", "")
-if forwarded:
-    return forwarded.split(",")[0].strip()      # ← 取的是**客户端可写**的第一段
-```
-
-- **证据**：静态 + 与 `main.py:205-222` 对照 —— 同一份代码在判定「是否回环」时明确写了「不看 X-Forwarded-For：那是请求方可伪造的头」，但退避计数却把它当成可信身份。
-- **影响**：`_LOGIN_FAILURE_THRESHOLD=5` / `_LOGIN_BACKOFF_MAX=300s`（`api/auth.py:216-219`）形同虚设。攻击者每次请求换一个 `X-Forwarded-For`，即获得无限次密码尝试；若面板挂在 nginx 后且用 `$proxy_add_x_forwarded_for`（把客户端自带值放在**最前**），该头依然由攻击者控制。
-- **建议**：计数键取 `request.client.host`；只有在**显式配置可信代理网段**（如 `TRUSTED_PROXIES=127.0.0.1/32`）且 `request.client.host` 属于该网段时，才解析 XFF 的**最后一段**。同时把计数下沉到共享存储（多 worker 时进程内 dict 不共享）。
-
-### F10（中）持 token 即可改密 / 关鉴权，无需旧密码
-
-- **位置**：`api/auth.py:309-324`（`setup_password`：只要 `verify_token` 通过就直接覆盖 hash）、`api/auth.py:327-337`（`disable_auth` 清空 hash 与 TOTP）
-- **证据**：`setup_password` 分支里没有任何 `current_password` 校验；对照 `change_password`（`api/auth.py:407-416`）是要求旧密码的 —— 同一件事两个端点两套强度。
-- **影响**：F6 的 token 泄漏被放大成**永久**接管（改密后原主人被锁在门外）；`disable` 还能把面板退回「无密码」状态，再叠加 F1。
-- **建议**：`setup` 在已有 hash 时改为「必须提供 `current_password`」，或直接删除该分支、只保留 `change-password`；`disable` 同样要求旧密码 + TOTP。
-
-### F11（中）「仅回环」兜底在同机反向代理下失效
-
-- **位置**：`main.py:205-222`，注释自述「反向代理场景下本机代理连进来就是回环地址，判定仍然正确」
-- **证据**：`_is_loopback_client` 只看 `request.client.host`。同机 nginx/caddy `proxy_pass http://127.0.0.1:8000` 时，**所有**外部访问的源地址都是 `127.0.0.1` → 未设密码时 503 分支永不触发，等价于 fail-open。
-- **影响**：`api/auth.py:259` 的注释说明作者预期面板「通常挂在 nginx/caddy 后面」。在该拓扑 + 未设密码（现网状态）下，任何外部访问者都能读全量账号、导出备份（F2）。
-- **建议**：不要用「源地址」表达「本机用户」。改为：未设密码时**只允许**携带启动期一次性 token 的请求，或干脆拒绝所有业务请求（前端只显示「请在本机初始化」页），并在文档中明确「无密码模式不支持反代」。
-
-### `WEBUI_ALLOW_LOGIN` 的实际效果（**与面板鉴权无关**）
-
-这个名字极易被误读成「允许登录 WebUI」，但它**不是**面板鉴权开关，与 `api/auth.py`、`main.py:225-266` 的中间件没有任何关系。它是 **ChatGPT 注册引擎的 per-flow 环境变量覆盖**，只控制「号池邮箱被 OpenAI 判定为已有账号」这一分支的走向。
-
-- **读取点**：`platforms/chatgpt/protocol/auth_flow.py:602-620`
-  - `WEBUI_ALLOW_LOGIN ∈ {1,true,yes}` → 走 OTP 登录拿凭证（access_token / session），继续当前流程；
-  - 未设或其它值 → `mail_provider.mark_dead("OpenAI 识别为已有账号…")` 并把该邮箱标记死亡，抛错让外层 `register()` 自动 claim 下一个号。
-- **写入点**（全部是代码里**硬编码**的流程级覆盖，不是用户配置）：`platforms/chatgpt/rt_backfill.py:70,79`（补 RT 的 `_LOGIN_OVERRIDES` / 密码登录路线）、`platforms/chatgpt/registration_engine.py:482`、`platforms/chatgpt/login_refresh.py:176`、`services/chatgpt_two_factor.py:160`。
-- **作用域**：`auth_flow.py:111` 注释写明这是「本次流程专属的配置覆盖」；它不写回 `configs` 表（该表 143 行里没有这个键），也不在 `GET /api/config` 的响应里（实测响应中无此键）。
-- **安全含义**：
-  1. **不构成鉴权旁路** —— 面板是否需要密码、token 是否有效，完全由 `main.py:225-266` 决定，与该变量无关；
-  2. 它是**数据破坏性**开关：`=1` 时「已被注册」的邮箱会被继续复用/消耗，未设时会被 `mark_dead` 淘汰。对同一号池反复以 `=1` 跑补 RT，会让已被 OpenAI 标记的邮箱继续留在池里；
-  3. 因为它来自 `env_overrides`（流程级）而不是进程 env，`grep` 环境变量会漏掉 —— 排查「为什么某任务走了登录分支」要看 `platforms/chatgpt/rt_backfill.py:66-80` 的 `_LOGIN_OVERRIDES`，而不是 `.env`。
-- **建议**：改名（如 `CHATGPT_REUSE_EXISTING_ACCOUNT`）以消除与面板鉴权的歧义；在 `docs/` 补一张「env 覆盖 → 行为」表，避免下一个人再把它当成登录开关去审计。
+- **位置**：`main.py:225`（`if _is_loopback_client(request)`）
+- **证据**：判据只有 `request.client.host`（`core/net_utils.py:30-46`），不看任何头。同机 nginx/caddy `proxy_pass http://127.0.0.1:8000` 时，**所有**外部请求的源地址都是 `127.0.0.1` → 503 分支永不触发。
+- **影响**：在「未设密码（当前状态）+ 同机反代」这个组合下，`main.py:216-236` 那道兜底等于 fail-open，任何外部访问者都能读全量账号并下载含 `credential_key` 的备份包（F2）。
+- **建议**：不要把「源地址」当作「本机用户」。未设密码时**只允许携带启动期一次性 token** 的请求，或直接拒绝所有业务请求（前端只显示「请在本机初始化」页）；`docs/DEPLOYMENT.md` 明确写「无密码模式不支持反代」。
 
 ---
 
-## 3. (2) 敏感数据暴露
+## 3. 敏感数据暴露
 
-### 3.1 逐项结论
+### 3.1 一览
 
-| 数据 | 是否出现在响应 | 是否出现在日志/落盘 | 位置 |
-|------|----------------|--------------------|------|
-| 账号密码 | **是**：详情接口 + CSV 导出（明文） | 落盘为 `v1:` 密文（`password` 列），备份包内也是密文 | `api/accounts.py:724-735,420-443`；`core/db/models_account.py:71-77` |
-| AT / RT / id_token / session_token / totp_secret | 列表：否（换成 `has_*` 布尔）✅；详情：`extra_json` 为 `v1:` 密文 ✅；**`token` 列：列表和详情都明文** ❌ | `extra_json` 落盘密文 ✅；**`token` 列明文落盘** ❌ | `api/accounts.py:158-167,260-300`；`core/db/models_account.py:81` |
-| grok SSO | **列表明文**（`extra_json.sso` 未被瘦身）❌ | 落盘密文（`v1:`）✅ | `api/accounts.py:165`（`_LIST_HEAVY_EXTRA_KEYS` 漏 `sso`） |
-| 面板 key（cpa/sub2api/chatgpt2api/cliproxyapi/sms/yescaptcha…） | 否（`GET /api/config` 置空 + `<key>_set`）✅ | 落盘密文 ✅ | `api/config.py:97-103`；`core/config_store.py:20-34` |
-| 旧 provider key（`gptmail_api_key` / `maliapi_api_key`） | 否（不在 `CONFIG_KEYS`）✅ | **明文落盘** ❌ | `core/config_store.py:25`（`_seal` 只认当前 schema 的 secret 集合） |
-| 代理串（含 user:pass） | **是**：`/api/proxies`、`/api/proxies/balance`、账号 `extra_json.register_proxy` ❌ | 明文（`proxies.url`）❌ | `api/proxies.py:37-39,128-173` |
-| 代理账号密码 | **是**：任务日志 `使用代理: socks5h://user:pass@host` ❌ | 明文入库（`task_logs`/`task_runs`）❌ | `services/task_runners.py:259,568` |
-| 凭据加密密钥 | **是**：备份 ZIP 内 `secrets/credential_key` ❌ | 文件 0600（需确认部署权限） | `api/backup.py:37-54` |
-| 邮箱池 `share_token`（免登录邮件页凭证） | **是**：`/api/icloud/aliases` 每条都带 ❌ | 明文 | `api/icloud.py:338-346` |
+| 数据 | 响应里 | 落盘 | 位置 |
+|------|--------|------|------|
+| 账号密码 | 详情 ✅（明文）、CSV 导出 ❌（明文） | `v1:` 密文 ✅ | `api/accounts.py:444`；`core/db/models_account.py:76` |
+| AT / SSO（`token` 列） | **列表 + 详情都明文** ❌ | **明文** ❌ | `api/accounts.py:260-302`；`core/db/models_account.py:86` |
+| grok `sso`（extra_json） | **列表明文** ❌ | `v1:` 密文 ✅ | `api/accounts.py:165`（瘦身名单漏 `sso`） |
+| `extra_json` 内 AT/RT/ST/id_token/cookies/cpa_record | 列表已换成布尔/删除 ✅ | 密文 ✅ | `api/accounts.py:165-167,230-260` |
+| 面板口令（10 个 schema 键） | 置空 + `_set` ✅ | 密文 ✅ | `api/config.py:97-104`；`core/config_store.py:20-34` |
+| 代理 URL（含 user:pass） | **明文** ❌ | 明文 ❌ | `c93b71f:api/proxies.py:157` |
+| 代理凭据（任务日志） | **明文** ❌ | 明文 ❌ | `services/task_runners.py:259,568` |
+| 凭据加密密钥 | **备份 ZIP 内** ❌ | 文件 0600（未核） | `api/backup.py:37-54` |
+| `share_token`（免登录邮件页） | **列表逐条下发** ❌ | 明文 | `api/icloud.py:339-346` |
+| `auth_jwt_secret` / `auth_password_hash` | 不经 API 下发 ✅ | **明文** ❌（N4） | `core/config_store.py:20-27` |
 
-### F2（严重）备份导出 = 全量凭据 + 解密密钥，单请求可取
+### F2（严重）备份导出 = 全量凭据 + 解密密钥
 
-- **位置**：`api/backup.py:37-54`；打包逻辑 `services/data_bundle.py:265-324`
-- **证据**：
+- **位置**：`api/backup.py:37-54`；打包逻辑 `services/data_bundle.py`
+- **证据**（实测，未解包到磁盘，只在内存里读成员表）：
 
-```bash
-$ curl -s -o bundle.zip -w '%{http_code} %{size_download}\n' http://127.0.0.1:18000/api/backup/export
-200 7298220
-$ python - <<'PY'
-import zipfile; z=zipfile.ZipFile("bundle.zip")
-for n in z.namelist(): print(n, z.getinfo(n).file_size)
-PY
-account_manager.db            25825280
-platforms/chatgpt.db              4096
-platforms/grok.db                 4096
-platforms/icloud.db             659456
-platforms/outlook.db             16384
-accounts.json                       71
-secrets/credential_key              44      ← AES 密钥本身
-manifest.json                     1531
+```
+$ curl -s -o bundle.zip -w '%{http_code} %{size_download}\n' http://127.0.0.1:8000/api/backup/export
+200 7298029
+account_manager.db          25825280
+platforms/chatgpt.db             4096
+platforms/grok.db                4096
+platforms/icloud.db            659456
+platforms/outlook.db            16384
+secrets/credential_key             44      ← AES 密钥本身
+manifest.json                    1512
 ```
 
-- **影响**：ZIP 未加密。拿到它 = 拿到 `accounts` 全表（含明文 `token` 列，见 F8）+ `configs`（含加密后的面板 key）+ **解密这些密文的密钥**。任一读权限（含 F1 拿到的 token、任何本机进程、任何 SSRF 打到 localhost）都升级为「全部账号 + 全部配置」的离线完全控制。
-- **建议**：导出包默认**不含** `secrets/credential_key`（导入端允许用户单独提供密钥）；或导出时用用户输入的 passphrase 做 AES-GCM 封装（`zipfile` 无原生加密，可用 `pyzipper` 或先加密每个成员）；导出动作要求二次认证（重新输入密码）并写审计日志。
+  ZIP 未加密；包内 `account_manager.db` 的 `accounts.token` 仍是 **1057/1057 明文**（与 F8 同因）。
+- **影响**：一个 GET = 全库 + 配置 + **解密这些密文的密钥**。任一读权限（本机任意进程、F11 下的外部访问者、任何 SSRF 打到 localhost）都升级为「全部账号 + 全部配置」的离线完全控制。这也是为什么 N2/N3 的 SSRF 不只是「探内网」——`http://127.0.0.1:8000/api/backup/export` 就是一个可被 SSRF 直接取走的 URL（响应体经 `{"raw": …}` 回传）。
+- **建议**：导出默认**不含** `secrets/credential_key`（导入端允许单独提供）；或导出时用用户输入的 passphrase 做 AES-GCM 封装；导出动作要求二次认证（重输密码/TOTP）并写审计日志。
 
 ### F3（高）账号列表明文下发 `token` 列（AT / SSO）
 
-- **位置**：`api/accounts.py:260-300`（`_slim_account_row`）、`api/accounts.py:158-167`（注释承诺）
-- **证据**：文件里的注释明确写「列表页只拿 AT/RT 判有没有……把它们换成布尔，详情端点仍返回全量」，但 `_slim_account_row` 只处理了 `password*` 与 `extra_json`，**从未 pop `token` 字段**：
-
-```bash
-$ curl -s 'http://127.0.0.1:18000/api/accounts?page_size=1&platform=chatgpt' | jq '.items[0] | keys'
-["cashier_url","created_at","email","extra_json","has_password","id","legacy_id",
- "platform","region","status","token","updated_at","user_id"]        ← token 在
-$ … | jq -r '.items[0].token | length'
-1988                                                                  ← 完整 JWT
-```
-
-对该 JWT 解 payload（只读解码，未使用）：`iss=https://auth.openai.com`、`aud=["https://api.openai.com/v1"]`、`scp` 含 `model.request` / `model.read` / `offline_access` —— 这是可直接调 OpenAI API 的 **access_token**，不是展示用的 id。
-
-grok 侧更严重，`sso` 根本没进瘦身名单：
-
-```bash
-$ curl -s 'http://127.0.0.1:18000/api/accounts?page_size=1&platform=grok' | jq -r '.items[0].extra_json' | jq 'keys'
-["grok2api_ingested","grok2api_result","has_access_token","has_refresh_token",
- "mail_provider","register_mode","register_proxy","sso"]              ← sso 明文
-# token 与 sso 均为 152 字符、3 段 JWT（段长 36/71/43）
-```
-
-- **量化**：`GET /api/accounts?page_size=100000` → `200`，**3,802,989 B**，1057 条，每条带 1988 字符 AT。一次 GET 拖走全池 AT。
-- **影响**：与「列表不下发 AT」的设计目标完全相反；任何读接口的滥用（或 F1/F10 的接管）都直接等于交出 1057 个账号的 API 访问权。
-- **建议**：`_slim_account_row` 里 `payload.pop("token", None)` 并补 `has_token` 布尔；`_LIST_HEAVY_EXTRA_KEYS` 增加 `"sso"`；补一条契约测试（`tests/test_accounts_list_payload.py` 已有类似断言，扩展它：断言列表里不存在任何 ≥100 字符的 JWT 形状字符串）。
-
-### F4（高）任务日志把代理账号密码写进库并回吐
-
-- **位置**：写入 `services/task_runners.py:259`、`:568`（`_api.log(task_id, f"使用代理: {_proxy}")`）；读出 `api/tasks.py:636-657`（`/api/tasks/logs`）、`api/tasks.py:789-819`（`/api/tasks?include_logs=true`）、`api/tasks.py:783-787`（`/api/tasks/{id}` 的 snapshot）
+- **位置**：`api/accounts.py:260-302`（`_slim_account_row`）、`:165-167`（瘦身名单）、`:230-260`（`_slim_extra_for_list`）
 - **证据**：
 
-```bash
-$ curl -s 'http://127.0.0.1:18000/api/tasks?include_logs=true' > t.json   # 374,349 B / 837 个任务
-# 对响应做凭据形状扫描（JWT / v1: 密文 / socks5://user:pass@ / password=…）：
-secret-like hits: 75
-  [0].logs[2]   'socks5h://<user>:<pass>@'      ← 代理账号+密码
-  [4].logs[35]  'socks5h://<user>:<pass>@'
-  ...
-# 实际日志行（原文）：
-[16:51:36] 使用代理: socks5h://<user>:<pass>@<proxy-host>:6740
+```
+$ curl -s 'http://127.0.0.1:8000/api/accounts?page_size=2'
+items[0] keys = [cashier_url, created_at, email, extra_json, has_password, id,
+                 legacy_id, platform, region, status, token, updated_at, user_id]   ← token 在
+items[0].token  长度 1988，三段 JWT（eyJhbG…）
+$ curl -s 'http://127.0.0.1:8000/api/accounts?platform=grok&page_size=1'
+extra_json keys = [sso, register_mode, grok2api_ingested, …, register_proxy, has_access_token, …]
+extra_json.sso  长度 152（3 段 JWT）                                              ← sso 在
 ```
 
-- **影响**：日志同时存在于 `task_logs` / `task_runs`（备份包也带走）、`/api/tasks*` 响应、以及 uvicorn stdout（容器日志/`docker logs`）。代理服务商账号密码泄漏 = 出口 IP 池被他人白嫖或封禁。
-- **建议**：写日志前统一过 `mask_proxy_url()`（`core/proxy_utils.py` 已有归一化函数，加一个只保留 `socks5h://***@host:port` 的掩码版）；历史数据做一次性清洗（`UPDATE task_logs SET message=…` 或正则脱敏脚本）；日志列表接口再叠一层输出侧脱敏，防止旧数据继续外泄。
+- **根因**：`_slim_account_row` 只 `pop` 了 `password` / `password_cipher`（`:296-297`），**从未 pop `token`**；`_LIST_HEAVY_EXTRA_KEYS`（`:165`）里也没有 `"sso"`。文件内注释（`:158-167`）明确写「列表只拿 AT/RT 判有没有……换成布尔」，实现与承诺相反。
+- **量化**：`page_size=100000` → `200` / **3,802,434 B** / 2.35 s，1057 条每条带 1988 字符 AT。一次 GET 拖走全池。
+- **建议**：`payload.pop("token", None)` + 补 `has_token`；`_LIST_HEAVY_EXTRA_KEYS += ("sso",)`；补契约测试（断言列表里不存在 ≥100 字符的三段 JWT 形状字符串）。
 
-### F5（高）代理接口返回带账号密码的代理串
+### F8（高）`token` 列明文落盘
 
-- **位置**：`api/proxies.py:37-39`（`list_all` 原样返回）、`api/proxies.py:128-173`（`balance` 里 `"url": url`）、`api/proxies.py:176-192`（rebalance 的 `items` 也含 url）
-- **证据**：
-
-```bash
-$ curl -s http://127.0.0.1:18000/api/proxies
-[{"url":"socks5://<user>:<pass>@<proxy-host>:5328","id":2,"region":"","success_count":338,...}, …]
-$ curl -s http://127.0.0.1:18000/api/proxies/balance
-{"items":[{"id":2,"url":"socks5://<user>:<pass>@<proxy-host>:5328", … "bound_total":290}, …]}
-```
-
-- **影响**：与 F4 同一份凭据的第二条泄漏路径；`/api/proxies` 是页面轮询接口，出现频率远高于日志。
-- **建议**：响应统一返回 `masked_url`（`socks5://***:***@host:port`）+ `has_auth` 布尔；需要编辑时走单独的、要求重新认证的 `GET /api/proxies/{id}/secret`。
-
-### F8（高）`token` 列明文落盘，绕过「凭据加密」
-
-- **位置**：`core/db/models_account.py:81`（`token: str = ""`，无 `sa_column`、无加解密）；对照同文件 `:71-77` 的 `password_cipher` 与 `extra_json` 内的 `v1:` 密文
-- **证据**（只读查询沙箱副本）：
+- **位置**：`core/db/models_account.py:86`（`token: str = ""`，无 `sa_column`、无加解密）；对照同文件 `:76` 的 `password_cipher`
+- **证据**（只读 SQL，真实库）：
 
 ```sql
 select count(*) from accounts where token<>'' and token not like 'v1:%';   -- 1057
+select count(*) from accounts where token<>'';                             -- 1057
 select count(*) from accounts where password<>'' and password not like 'v1:%'; -- 0
--- 样例：chatgpt token_len=1497 head='eyJhbG'（JWT）；grok token_len=152 head='eyJ0eX'
+select platform, count(*) from accounts group by platform;                 -- chatgpt 667 / grok 390
 ```
 
-- **影响**：`core/credential_fields.py:25-26` 明确写着「`token` 列 = 平台主凭证的镜像（chatgpt → AT，grok → SSO）」。也就是说：即使攻击者**拿不到** `credential_key`，只要能读到 DB 文件（备份包、卷快照、SQLite 文件被顺手拷走），就能直接拿走全部 AT/SSO —— 「凭据加密落盘」在最关键的一列上没有生效。
-- **建议**：把 `token` 也纳入 `encrypt_text`/`decrypt_text`（属性化，像 `password_cipher` 那样保留列名以免迁移），或干脆取消该冗余列、统一从 `extra_json` 派生（`token_column_field()` 已定义映射规则，改为读时计算）；迁移脚本对存量 1057 行做一次加密回填。
+- **影响**：`core/credential_fields.py` 定义 `token` = 平台主凭证镜像（chatgpt→AT，grok→SSO）。即使攻击者拿不到 `credential_key`，只要能读到 DB 文件（备份包、卷快照、误拷），就能直接拿走全部 AT/SSO。**「凭据加密落盘」在最关键的一列上没生效**。
+- **建议**：把 `token` 纳入 `encrypt_text/decrypt_text`（属性化，列名不变），或取消该冗余列、统一从 `extra_json` 派生；对存量 1057 行做一次性加密回填。
+
+### F4（高）任务日志写入代理账号密码并回吐
+
+- **位置**：写 `services/task_runners.py:259`、`:568`；读 `api/tasks.py:637-657`、`:790-820`
+- **证据**：
+
+```
+$ curl -s 'http://127.0.0.1:8000/api/tasks?include_logs=true' > t.json   # 13,724,404 B / 837 任务
+logs scanned: 88,856   credential-shaped hits: 761
+task 0: [16:51:36] 使用代理: socks5h://<user>:<pass>@9.142.194.72:6740
+task 2: [15:46:05] 使用代理: socks5h://<user>:<pass>@9.142.43.158:5328
+```
+
+  账号行的 `extra_json.register_proxy` 也是同一条带凭据的串（`api/accounts.py` 未瘦身该键）。
+- **影响**：代理服务商账号密码同时存在于 `task_logs` / `task_runs` / `/api/tasks*` 响应 / uvicorn stdout / 备份包。泄漏 = 出口 IP 池被白嫖或封禁。
+- **建议**：写日志前统一过 `core/proxy_utils.redact_proxy_url`（本轮工作区已经在用它打码 `/api/proxies`，同一条纪律应下沉到写日志处）；历史数据一次性脱敏；列表接口再加一层输出侧脱敏。
+
+### F5（高）代理接口回带账号密码的 URL
+
+- **位置**：`c93b71f:api/proxies.py:157`（`"url": url`）、`:38`（`list_proxies` 原样返回仓储记录）
+- **证据**：
+
+```
+$ curl -s http://127.0.0.1:8000/api/proxies
+[{"url":"socks5://<user>:<pass>@9.142.43.158:5328","id":2,"region":"","success_count":338,…}]
+$ curl -s http://127.0.0.1:8000/api/proxies/balance
+{"items":[{"id":2,"url":"socks5://<user>:<pass>@9.142.43.158:5328", … "bound_total":290}]}
+```
+
+- **状态**：审计期间工作区出现了未提交补丁 `_public_proxy()`（`api/proxies.py` 的 `git diff`，23 行新增），已把两处 `url` 换成 `redact_proxy_url`。**补丁本身没问题，但要注意三点**：(a) 未提交；(b) 未重启前线上仍泄漏；(c) 打码后前端按 `url` 做 key 匹配的地方要同步改用 `id`（补丁注释里已提到，需实测）。
+- **建议**：合并 + 重启 + 补一条契约测试（`GET /api/proxies` 响应中不得出现 `://user:pass@`）。
 
 ### F9（中）明文密码 CSV 导出
 
-- **位置**：`api/accounts.py:419-443`
+- **位置**：`api/accounts.py:428-451`
 - **证据**：
 
-```bash
-$ curl -s -o exp.csv -w '%{http_code} %{size_download}B %{content_type}\n' \
-    'http://127.0.0.1:18000/api/accounts/export?platform=chatgpt'
-200 56588B text/csv; charset=utf-8
-$ head -2 exp.csv
-platform,email,password,user_id,region,status,cashier_url,created_at
-chatgpt,skyway-finale-6c@icloud.com,<明文密码>,…            # 667 行
+```
+$ curl -s -o exp.csv -w '%{http_code} %{size_download} %{content_type}\n' \
+    'http://127.0.0.1:8000/api/accounts/export?platform=chatgpt'
+200 56588 text/csv; charset=utf-8
+header: platform,email,password,user_id,region,status,cashier_url,created_at
+rows: 667，password 列 16 字符明文
 ```
 
-- **问题**：GET、无二次认证、无条数上限、无审计日志、响应无 `no-store`（F13）；密码列逐行 `acc.password` 解密（`api/accounts.py:434`）。
-- **建议**：导出改为 POST + 重新输入面板密码（或 TOTP）确认；默认**不含**密码列（提供显式 `include_password=true` 才带，并记审计）；响应加 `Cache-Control: no-store`；对大导出加分页/流式 + 限速。
+- **问题**：GET、无二次认证、无条数上限、无审计、响应无 `no-store`（F13）；密码列逐行解密（`:444` `acc.password`）。
+- **建议**：改 POST + 重输密码/TOTP；默认不含密码列（`include_password=true` 才带并记审计）；加 `Cache-Control: no-store`；大导出改流式分页。
 
-### F18（中）免登录邮件页的 `share_token` 被批量下发
+### F18（中）免登录邮件页的 `share_token` 批量下发
 
-- **位置**：`api/icloud.py:338-346`（列表含 `share_token`）、`api/shared_mail.py:149`（`GET /m/{share_token}` 无鉴权）
-- **证据**：`GET /api/icloud/aliases` → 712,390 B / 1941 条，每条形如
-  `{"id":2312,"address":"…@icloud.com","share_token":"<22 字符>", …}`；
-  `GET /m/<token>` → `200`（未登录，1883 B 邮件页）。
-- **影响**：`share_token` 是「链接即权限」的 bearer 凭证，被当成普通字段塞进列表 = 任何一次列表读取（含浏览器缓存、前端日志、截图、XSS）都会扩散 1941 个可读收件箱的永久链接；这些收件箱正是 OTP 的落点。
-- **建议**：列表只回 `has_share_link`；需要分享时单独 `POST /api/icloud/aliases/{id}/share` 返回一次性 token；`/m/` 侧加最小限速与 `Referrer-Policy: no-referrer`。
+- **位置**：`api/icloud.py:339-346`、`api/shared_mail.py:149-161`
+- **证据**：
 
-### 3.2 已确认**没有**泄漏的面（避免过度整改）
+```
+$ curl -s http://127.0.0.1:8000/api/icloud/aliases     # 712,390 B
+items[0] = {id, address, share_token:"<22 字符>", pool_status, registered_platforms, …}
+$ curl -s -o /dev/null -w '%{http_code} %{size_download}\n' http://127.0.0.1:8000/m/<share_token>
+200 1883          # 未登录，页面标题里直接是别名邮箱
+$ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8000/m/bogus
+404
+```
 
-- `GET /api/config`：10 个 schema 内口令键全部置空 + `<key>_set` 布尔（实测 `yescaptcha_key:""`、`cpa_api_key_set:true`，无明文）；
-- `GET /api/config/schema`：只有键名/分组/是否 secret；
-- 账号详情：`extra_json` 内 AT/RT/ST/id_token/totp_secret 均为 `v1:` 密文（`password` 例外，是明文，见 F9 说明）；
-- `POST /api/integrations/panels/{key}/comparison`：636 行对比结果只含 email/时间/差异项，**不含**任何凭据值（对响应做 JWT 形状扫描命中 0）；
-- 错误响应中未观察到 Python traceback（`debug` 未开）。
+- **影响**：`share_token` 是「链接即权限」的 bearer 凭证，被当普通字段塞进列表 → 任何一次列表读取（浏览器缓存、前端日志、截图、XSS）都会扩散成百上千个可读收件箱的永久链接；这些收件箱正是 OTP 的落点。token 本身 22 字符（≈132 bit）不可枚举，`/m/bogus` 也正确 404 —— 问题在**分发**不在强度。
+- **建议**：列表只回 `has_share_link`；分享走 `POST /api/icloud/aliases/{id}/share` 返回一次性 token；`/m/` 侧加最小限速 + `Referrer-Policy: no-referrer`。
+
+### F13 / F19（中/低）缓存与安全响应头
+
+- **证据**（实测）：
+
+```
+$ curl -s -D - -o /dev/null http://127.0.0.1:8000/api/accounts?page_size=1
+HTTP/1.1 200 OK
+content-length: 3445
+content-type: application/json
+vary: Origin
+      ← 无 cache-control / no-store，无 x-content-type-options，无 CSP，无 x-frame-options
+```
+
+- **影响**：凭据类响应可被浏览器「后退」、共享代理、磁盘缓存留存；面板 token 存在前端（`frontend/src/lib/utils.ts` 统一加 `Authorization`），缺 CSP 会放大任何 XSS。
+- **建议**：对 `/api/accounts*`、`/api/backup/export`、`/api/proxies*`、`/api/icloud/*` 统一加 `Cache-Control: no-store, private`；全局加 `X-Content-Type-Options: nosniff`、`X-Frame-Options: DENY`、`Referrer-Policy: no-referrer`、`Content-Security-Policy: default-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'`（`/m/**` 保留现有 iframe `srcdoc` + `script-src 'none'`，`api/shared_mail.py:72-95` 已做对）。
+
+### N4（中）`auth_jwt_secret` 明文落盘，并随备份外带
+
+- **位置**：`core/config_store.py:20-27`（`_seal` 只对 `SECRET_CONFIG_KEYS` 加密）+ `core/config_schema.py:135-137`（该集合由 `CONFIG_SCHEMA` 里 `secret=True` 的键派生，`auth_*` 不在其中）+ `api/auth.py:40-43,363-364`（首次签发 token 时 `cfg.set("auth_jwt_secret", …)`）
+- **证据**：静态。`_seal("auth_jwt_secret", value)` 因键不在集合里直接原样返回；`ConfigStore.get_all()` 会把它解密后交给所有调用方。真实库当前 0 行（还没登录过），首次登录后即写入。备份包里的 `account_manager.db` 就是明文 `configs` 表。
+- **影响**：拿到备份包（F2）或 DB 文件的人，**即使不拿 `credential_key`**，也能用这个 secret 离线签出任意 `{"sub":"admin"}` 的 HS256 token（`verify_token` 只校验签名与 exp，无 jti/版本），从而在服务上获得完整管理员权限。这把「离线读文件」升级成「在线接管」。
+- **建议**：把 `auth_jwt_secret` 加入 `SECRET_CONFIG_KEYS`（`_seal/_unseal` 自动生效），或存到 `data/secrets/`（0600）而不是 `configs`；`auth_password_hash` 也一并加密（PBKDF2 虽不可逆，但离线爆破面没必要白送）。
 
 ---
 
-## 4. (3) 输入校验
+## 4. 输入校验与资源上限
 
-### 4.1 批量接口条数上限一览
+### F14（中）分页与批量无上限
 
-| 端点 | 模型/参数 | 上限 | 评价 |
-|------|-----------|------|------|
-| `POST /api/accounts/batch-delete` | `ids: list[str\|int]` | 1000（`api/accounts.py:693`） | ✅ |
-| `POST /api/proxies/batch-delete` | `ids: list[int]` | 1000（`api/proxies.py:82`） | ✅ |
-| `POST /api/tasks/logs/batch-delete` | `ids` | 1000（`api/tasks.py:666`） | ✅ |
-| `POST /api/actions/{platform}/{action}/batch` | `account_ids` / `all_filtered` | 1000（`api/actions.py:138,167`） | ✅ |
-| `POST /api/accounts/import` | `lines: list[str]`（`api/accounts.py:40-46`） | **无** | ❌ F14 |
-| `POST /api/proxies/bulk` | `proxies: list[str]`（`api/proxies.py:18-21`） | **无** | ❌ F14 |
-| `POST /api/outlook/batch-import` | `data: str`（`api/outlook.py:9-12`） | **无**（仅字符串长度天然受限） | ❌ F14 |
-| `POST /api/outlook/pool-status/import` | `ids: List[int]`（`api/outlook.py:22-24`） | **无** | ❌ F14 |
-| `POST /api/icloud/aliases/batch-delete` | `ids`（`api/icloud.py:401-407`） | **无** | ❌ F14 |
-| `POST /api/mail-imports/batch-delete` | `items`（`services/mail_imports/schemas.py:90-99`） | **无** | ❌ F14 |
-| `GET /api/accounts?page_size=` | int（`api/accounts.py:312-315`） | **无上限**，只 `max(1, …)` | ❌ F14 |
-| `GET /api/tasks/logs?page_size=` | int（`api/tasks.py:636-657`） | **无上限** | ❌ F22 |
-| `GET /api/mail-imports/snapshot?preview_limit=` | int（`api/mail_imports.py:24`） | 1..500（但由 pydantic 事后校验，见 F16） | ⚠️ |
-| `POST /api/backup/import` | 原始 body | 2 GB + 强制 `Content-Length`（`api/backup.py:70-95`） | ✅ |
-
-**F14 证据**：
-
-```bash
-$ curl -s -o /dev/null -w '%{http_code} %{size_download}\n' \
-    'http://127.0.0.1:18000/api/accounts?page_size=100000'
-200 3802989                     # 1057 条全量 + 每条 1988 字符 token
-$ curl -s -o /dev/null -w '%{http_code}\n' 'http://127.0.0.1:18000/api/accounts?page_size=0'
-200                             # 被 `or 20` 兜成 20，不报错也不提示
-```
-
-**影响**：单进程 uvicorn（`docker-compose.yml` 无 `--workers`），一个 `page_size=10^7` 或 `lines=[…]` 十万条的请求就能把进程内存顶满；`/api/accounts` 还会顺带把 1057 个 AT 序列化一遍（F3 放大）。
-
-**建议**：统一引入 `PageParams`（`page_size: int = Field(20, ge=1, le=200)`）与批量 `max_length`（1000，和删除端点对齐）；`import` 用 `Field(max_length=5000)` 并把单行长度限制在 4 KB；`preview_limit` 直接声明成 `Query(100, ge=1, le=500)` 让 FastAPI 出 422。
-
-### 4.2 id 类型与路径参数
-
-- 账号 id 已 UUID 化，但 `BatchDeleteRequest.ids: list[str | int]`（`api/accounts.py:54-60`）接受任意字符串，无长度/格式校验；`delete_many` 内部 `str()` 归一，SQL 参数化 → **无注入**，但可用超长 id 制造无谓查询。建议 `ids: list[UUID]`。
-- 代理 id 为 `int`（`api/proxies.py:33-34,68-74`），`"notanint"` → 路由不匹配 → 404（实测），语义可接受。
-- 平台路径参数 `/{platform}/…`（`api/actions.py:291,312,436`）经 `platform_session_from_path` → `url_for()`；**未知平台回落默认库**（`core/db/registry.py:67-80`），不会拼出文件路径 → **无路径穿越**（详见 §7.2）。
-- `account_id` 作为路径参数直接进 `session.get(AccountModel, id)`（`api/actions.py:445`），参数化查询，安全。
-
-### 4.3 文件上传
-
-- 只有 `POST /api/backup/import` 是真「上传」，且刻意不用 multipart（`api/backup.py:1-13`），直接收 `application/zip` 字节体。
-- 校验链完整：`Content-Length` 必须存在（411）→ 声明值 ≤ 2 GB（413）→ 实读长度复核（413）→ ZIP 可打开 → 成员数 ≤ `MAX_MEMBERS` → 每个登记成员大小 ≤ `MAX_DB_BYTES` → sha256 比对 → SQLite 魔数校验（`services/data_bundle.py:417-458`）。
-- **zip-slip 已防**：`_safe_member_name` 拒绝绝对路径与 `..`（`services/data_bundle.py:409-414`）。
-- `X-Bundle-Filename` 头只截断 200 字符并回显到结果的 `source_filename`（`api/backup.py:97-100`、`services/data_bundle.py:757`），**不参与任何路径拼接** → 无穿越。
-- 唯一缺口：2 GB 上限在**单进程内存**里 `await request.body()`（`api/backup.py:89`）→ 一次合法但巨大的导入即可 OOM。建议降到 256 MB 并改成流式落盘到临时文件后再校验。
-
----
-
-## 5. (4) 错误语义：500 与 4xx 的边界
-
-### 5.1 现状（实测分类）
-
-| 请求 | 状态 | 响应 | 评价 |
+| 端点 | 参数 | 上限 | 实测 |
 |------|------|------|------|
-| `/api/accounts?page=abc` | 422 | FastAPI 标准 `int_parsing` 明细 | ✅ 合理 |
-| `/api/accounts/does-not-exist` | 404 | `{"detail":"账号不存在"}` | ✅ |
-| `/api/tasks/nope` | 404 | `{"detail":"任务不存在"}` | ✅ |
-| `/api/proxies/notanint` | 404 | `{"detail":"Not Found"}` | ✅（路由不匹配） |
-| `/api/mail-imports/snapshot?type=nope` | 400 | `{"detail":"不支持的邮箱导入类型: nope"}` | ✅ |
-| `/api/mail-imports/snapshot?preview_limit=100000` | 400 | `{"detail":"1 validation error for MailImportSnapshotRequest\npreview_limit\n Input should be less than or equal to 500 [type=less_than_equal, input_value=100000, …]"}` | ❌ F16 |
-| `/api/mail-imports/snapshot?preview_limit=abc` | 422 | 标准明细 | ✅ |
-| `/api/integrations/panels/nope/comparison` | 404 | `{"detail":"未知面板: nope"}` | ✅ |
-| `/api/definitely-not-a-route` | 404 | `{"detail":"Not Found"}` | ✅（未被 SPA 兜成 200，`main.py:583-584` 的排除生效） |
-| `/docs` | 200 | **SPA index.html**（1063 B），不是文档页 | ⚠️ 见 §7.3 |
+| `GET /api/accounts` | `page_size` | **无**（`api/accounts.py:315` 只 `max(1,…)`） | `100000` → 200 / 3,802,434 B / 2.35 s；`100000000` → 200 / 同 3.8 MB / 0.54 s |
+| `GET /api/tasks/logs` | `page_size` | **无**（`api/tasks.py:637`） | `999999` → 200 / 356,026 B |
+| `POST /api/accounts/import` | `lines` | **无**（`api/accounts.py:40-46`） | — |
+| `POST /api/proxies/bulk` | `proxies` | **无** | — |
+| `POST /api/outlook/batch-import` | `data: str` | **无** | — |
+| `POST /api/icloud/aliases/batch-delete` | `ids` | **无** | — |
+| `POST /api/mail-imports/batch-delete` | `items` | **无** | — |
+| 四个 batch-delete | `ids` | 1000 ✅ | `api/accounts.py:693`、`api/proxies.py`、`api/tasks.py:667`、`api/actions.py:138,167` |
 
-### F16（中）参数越界把 pydantic 内部细节当 `detail` 回给客户端
+- **影响**：单进程 uvicorn（compose 无 `--workers`），一个 `page_size=10^7` 就能把进程内存顶满；`/api/accounts` 还会顺带把 1057 个 AT 序列化一遍（F3 放大）。
+- **建议**：统一 `PageParams`（`page_size: int = Field(20, ge=1, le=200)`）+ 批量 `max_length=1000`；`import` 的 `lines` 限 5000 条、单行 4 KB。
 
-- **位置**：`api/mail_imports.py:26-38` —— 处理器里手工构造 `MailImportSnapshotRequest`，`ValidationError` 继承 `ValueError`，被 `except ValueError` 捕获后 `HTTPException(400, str(exc))`。
-- **证据**：上面表格第 6 行；文案里含**内部模型类名** `MailImportSnapshotRequest`、字段名、约束名 `less_than_equal`、以及回显的输入值。
-- **影响**：低危信息泄露（暴露内部 schema），且语义错误 —— 客户端参数问题应当是 422 而不是 400，前端无法统一处理。
-- **建议**：把 `preview_limit` 声明成 FastAPI 查询参数 `Query(100, ge=1, le=500)`；或捕获 `ValidationError` 后只回 `{"detail":"preview_limit 必须在 1..500"}`。
+### F16（中）参数越界把 pydantic 内部细节当 `detail`
 
-### F15（中）`str(exc)` 直接进响应体（500 与 200 两种）
-
-- **位置**（全部为 `f"…: {str(e)}"` 形式）：
-  - `api/accounts.py:713` `raise HTTPException(500, f"批量删除失败: {str(e)}")`
-  - `api/tasks.py:697` `raise HTTPException(500, f"批量删除任务历史失败: {str(e)}")`
-  - `api/backup.py:46,110,122` `f"导出失败/导入失败/读取数据概况失败: {exc}"`
-  - `api/actions.py:465-466` `return {"ok": False, "error": str(e)}`（**HTTP 200**）
-  - `api/integrations.py:232` `{"name":"error","ok":False,"msg":str(e)}`（**HTTP 200**）
-  - `api/sms.py:89,100` `f"查询余额失败: {exc}"` / `f"查询国家排名失败: {exc}"`（502）
-- **证据**：静态；典型 `str(exc)` 内容为 `sqlite3.OperationalError: no such column: …`、`sqlalchemy.exc.…`、`requests.exceptions.ConnectionError: … socks5h://user:pass@…`、`FileNotFoundError: /data/…` —— 三类内部信息（SQL 结构、代理凭据、绝对路径）都可能随之上屏。
-- **另**：`api/actions.py:465` 与 `api/integrations.py:232` 用 **200** 表达失败，调用方只能靠 `ok` 字段区分 —— 与仓库其它端点（4xx/5xx）不一致，属于契约缺陷。
-- **建议**：对外只回稳定的错误码 + 一句人话（`{"detail":"批量删除失败","code":"batch_delete_failed","request_id":…}`），原始异常只进 `logger.exception`；失败一律用 4xx/5xx（业务性失败用 409/422），不要 200。
-
-### 5.2 未捕获异常
-
-- `main.py` 未注册全局异常处理器，FastAPI 默认对未捕获异常返回 `500 {"detail":"Internal Server Error"}`（无 traceback）—— 这一点是好的。
-- **但 500 确实会从正常业务路径冒出来**。审计期间就抓到一个现成例子：`api/actions.py:263`（4680c8d）在批量同步 CLI 代理状态时写的是 `sync_results.get(int(acc_model.id or 0), {})`，而 `accounts.id` 早已 UUID 化（`core/db/models_account.py:44`），于是**任何账号**点「批量同步」都 `ValueError` → 500。该问题已由提交 `9630980` 修为 `str(...)`。它说明：批量端点里的 `int(id)` 假设、以及「一个坏行拖垮整批」的写法，是这个仓库 500 的主要来源；建议给批量动作逐账号 `try/except` 并回 `{id, ok:false, reason}`（`api/actions.py:416-425` 的外层循环已经这么做了，`_execute_batch_cliproxy_sync` 这条内层路径没做）。
-- 若响应已经开始流式输出（`api/accounts.py:439` 的 `StreamingResponse`、`api/tasks.py:738` 的 SSE），中途异常只会截断连接，客户端看到的是**不完整 CSV/事件流**而不是错误码。建议导出前先物化到临时文件再流式发送。
-
----
-
-## 6. (5) 破坏性接口的幂等与确认
-
-| 端点 | 破坏性 | 幂等 | 确认/dry-run | 结论 |
-|------|--------|------|--------------|------|
-| `POST /api/accounts/batch-delete`（`api/accounts.py:683-714`） | 删账号 | ✅ 二次调用回 `deleted:0` + `not_found:[…]` | ❌ 无 | 可接受（有上限、返回 not_found）；建议加 `confirm=true` 或预演 |
-| `POST /api/proxies/batch-delete`（`api/proxies.py:77-94`） | 删代理 | ✅ 同上 | ❌ | 同上 |
-| `POST /api/tasks/logs/batch-delete`（`api/tasks.py:660-697`） | 删历史 | ✅ | ❌ | 同上 |
-| `POST /api/proxies/balance`（`api/proxies.py:176-192`） | **批量改账号绑定** | ⚠️ 非幂等（每次重算） | ✅ `dry_run=True` 默认 | 设计良好；但 `dry_run=false` 一次调用即可给上千账号换出口，**无二次确认、无回滚** |
-| `POST /api/integrations/panels/{k}/sync`（`api/integrations.py:81-144`） | **覆盖本地 AT/RT/id_token** | ⚠️ | ❌ 无 dry-run | 缺确认；建议先出「将改动 N 个账号」预览 |
-| `POST /api/integrations/panels/{k}/push?delete_old=true`（`api/integrations.py:146-163`） | **删远端旧记录** | ⚠️ | ❌ 破坏性开关在 query 里 | 建议改 body 字段并默认 false + 显式确认 |
-| `POST /api/icloud/aliases/batch-delete`（`api/icloud.py:401-407`，`remote: bool = True` at `:135`） | **删 Apple 侧别名（不可逆）** | ⚠️ | ❌ 默认就删远端 | 最危险：默认值站在「不可逆」一侧，且 ids 无上限 |
-| `DELETE /api/icloud/aliases/{id}?remote=true`（`api/icloud.py:427-433`） | 同上 | ✅ | ❌ | 建议 `remote` 默认 false |
-| `POST /api/tasks/logs/cleanup`、`/runs/cleanup`（`api/tasks.py:700-737`） | 按天数删历史 | ✅ | ❌ | `older_than_days` 有 `ge=1,le=MAX`（`api/tasks.py:98`），可接受 |
-| `POST /api/backup/import`（`api/backup.py:57-112`） | **整库替换 + 换密钥** | ❌ | ⚠️ 自动备份 + 运行中任务 409 | 机制最完整的一个：导入前 `_backup_current_data("import")`（`services/data_bundle.py:609`）、原子替换（`:611-618`）、失败回滚。建议再加「包内容摘要 + 显式 confirm」 |
-| `POST /api/accounts/import`（`api/accounts.py:486-…`） | 覆盖同邮箱账号字段 | ✅（同邮箱更新） | ❌ | 无上限（F14）；`format=json` 会把 `lines` 直接 `"\n".join` 后 `json.loads`，十万行时内存翻倍 |
-
-**通用建议**：给所有「一次影响 >N 个对象」的写接口统一加两层保护 ——(a) `dry_run` 或 `preview` 必填其一；(b) 服务端生成 `confirm_token`（把请求体哈希进去，5 分钟内有效），客户端必须回传。这样既防误点，也防「CSRF 式」的自动化滥用。
-
----
-
-## 7. (6) CORS / 静态文件 / 路径穿越
-
-### 7.1 CORS（F12）
-
-- **位置**：`main.py:269-274` —— `allow_origins=["*"]`、`allow_methods=["*"]`、`allow_headers=["*"]`，未设 `allow_credentials`（默认 False）。
+- **位置**：`api/mail_imports.py:19-38`
 - **证据**：
 
-```bash
-$ curl -s -D - -o /dev/null -H 'Origin: https://evil.example' http://127.0.0.1:18000/api/auth/status | grep -i access-control
-access-control-allow-origin: *
-
-$ curl -s -D - -o /dev/null -X OPTIONS \
-    -H 'Origin: https://evil.example' \
-    -H 'Access-Control-Request-Method: POST' \
-    -H 'Access-Control-Request-Headers: authorization,content-type' \
-    http://127.0.0.1:18000/api/accounts | grep -i access-control
-access-control-allow-origin: *
-access-control-allow-methods: DELETE, GET, HEAD, OPTIONS, PATCH, POST, PUT, QUERY
-access-control-allow-headers: authorization,content-type
-access-control-max-age: 600
+```
+$ curl -s 'http://127.0.0.1:8000/api/mail-imports/snapshot?type=microsoft&preview_limit=100000'
+{"detail":"1 validation error for MailImportSnapshotRequest\npreview_limit\n
+ Input should be less than or equal to 500 [type=less_than_equal, input_value=100000,
+ input_type=int]\n For further information visit https://errors.pydantic.dev/2.13/v/less_than_equal"}
 ```
 
-- **影响评估**（不过度定级）：鉴权用 `Authorization` 头而非 Cookie，`allow_credentials` 为 False，因此**经典 CSRF 不成立**，恶意站点也读不到 `localStorage` 里的 token。真实风险是三条：
-  1. 任意站点可**跨域读** `/api/auth/status`，并可直接调用 `/api/auth/login` 读响应 → 浏览器内即可做密码枚举（受 F7 影响时还可绕过退避）；
-  2. 任何 token 泄漏（F3/F6/F10、XSS、日志、截图）都能被**任意源**直接使用，无 origin 约束这一层兜底；
-  3. 预检把 `DELETE/PATCH/PUT` 全放开，等于对外宣告「这些方法可用」。
-- **建议**：改成显式白名单（`APP_CORS_ORIGINS`，默认只允许同源 / `http://127.0.0.1:8000`）；`allow_methods` 收敛到实际用到的集合；生产环境同源部署时直接**不挂** CORS 中间件。
+  对比 `GET /api/accounts?page=abc` → 422 标准 `int_parsing` 明细（✅ 正常）。
+- **建议**：`preview_limit` 直接声明成 `Query(100, ge=1, le=500)`；或捕获 `ValidationError` 只回一句人话。
 
-### 7.2 静态文件与路径穿越（结论：**未发现穿越**）
-
-- `/assets` 用 `StaticFiles`（`main.py:566-571`），Starlette 内部做 `os.path.realpath` + 前缀校验；
-- SPA 兜底 `@app.get("/{full_path:path}")`（`main.py:573-610`）**只用 `full_path` 判断是否 `/api` 前缀**，随后固定返回 `static/index.html`，不拼接用户路径；
-- 实测（`--path-as-is`，保留原始编码）：
+### 路径穿越（结论：**未发现**）
 
 ```
-/assets/../../../../etc/passwd          404 {"detail":"Not Found"}
-/assets/%2e%2e/%2e%2e/etc/passwd        404 {"detail":"Not Found"}
-/api/../main.py                         404 {"detail":"Not Found"}
-/..%2f..%2fetc%2fpasswd                 200 text/html 1063B   ← SPA index，不是 /etc/passwd
-/%2e%2e/%2e%2e/etc/passwd               200 text/html 1063B   ← 同上
-```
-
-两个 200 是「未知前端路由回 index.html」的预期行为（`main.py:573-582` 的 docstring 明确说明），响应体是 SPA 外壳，**不含任何文件内容**。
-
-- 鉴权中间件的前缀判定同样不可穿越（实测）：
-
-```
-/api/auth/../accounts?page_size=1        404
+/api/auth/../accounts?page_size=1        404 {"detail":"Not Found"}
+/api/auth/..%2faccounts?page_size=1      404
 /api/auth/%2e%2e/accounts?page_size=1    404
 /api//accounts?page_size=1               404
 /api/./accounts?page_size=1              404
-/API/accounts?page_size=1                200 text/html（SPA，非 API）
+/api/accounts%2f?page_size=1             404
+/API/accounts?page_size=1                200 text/html 1063B   ← SPA 外壳，不是 API
+/%61pi/accounts?page_size=1              200 3445B            ← 解码后就是 /api/accounts，中间件同样看得到
 ```
 
-- 备份导入的 zip-slip 已防（§4.3）。
-- **唯一建议**：`/..%2f..%2fetc%2fpasswd` 这类明显畸形的路径回 200 HTML 会让扫描器/日志噪声很大，可在兜底里对「含 `..` 或 `%2e` 的路径」直接 404。
+结论：`request.url.path` 是**解码后**的路径，路由与中间件用的是同一个值，没有「中间件看到 A、路由匹配到 B」的缝隙。`/assets` 走 Starlette `StaticFiles`（内部 `realpath` + 前缀校验），SPA 兜底不拼接用户路径。
 
-### 7.3 其它静态/头部问题
+---
 
-- **F19（低）**：`/`、`/api/**` 均无 `Content-Security-Policy`、`X-Content-Type-Options: nosniff`、`X-Frame-Options`/`frame-ancestors`（实测响应头只有 `date/server/cache-control/etag/content-type/vary`）。SPA 里存着 token（localStorage），缺 CSP 会放大任何 XSS 的影响面。建议加 `default-src 'self'; script-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'`，并对 `/m/**` 保留现有 iframe `srcdoc` + `script-src 'none'` 策略（`api/shared_mail.py:72-95` 已做，值得保留）。
-- **`/docs` 返回 200**：不是文档泄漏（`docs_url=None`，`main.py:199`），只是 SPA 兜底把 `/docs` 当成了前端路由。若要更干净，把 `/docs`、`/redoc`、`/openapi.json` 也加进兜底的排除名单。
-- **F13（中）**：凭据类响应缺 `Cache-Control: no-store`（实测 `/api/accounts/{id}`、`/api/accounts/export`、`/api/proxies`、`/api/backup/export` 都只有 `content-type`）。浏览器「后退」、共享代理、磁盘缓存都可能留下明文密码/AT/备份包。建议对上述路径统一加 `Cache-Control: no-store, private` + `Pragma: no-cache`。
+## 5. SSRF 与外发（本轮新增的重点）
+
+### N2（中高）`/api/contribution/*`：`server_url` 由请求体控制 + 密钥外带
+
+- **位置**：`api/contribution.py:33-53`（`ContributionProxyRequest.server_url` / `_resolve_server_url`）、`:67-92`（`_request_json`）、调用点 `:126`、`:205`、`:239`、`:289`
+- **证据**：
+
+```python
+def _resolve_server_url(server_url: str | None) -> str:
+    raw = str(server_url or config_store.get("contribution_server_url","") or "").strip()
+    if not raw.startswith(("http://","https://")):
+        raw = f"http://{raw}"
+    return raw.rstrip("/") + "/"                      # 完全采信请求体
+
+headers["X-Public-Key"] = key
+headers["Authorization"] = f"Bearer {key}"            # 把已存的 contribution_key 发过去
+response = requests.request(method=..., url=url, timeout=15)
+data = response.json()  except → {"raw": response.text}   # 非 JSON 响应体原样回传
+```
+
+  4 个端点（`/quota-stats`、`/key-info`、`/redeem`、`/generate-key`）都接受 `server_url`；`/generate-key` 甚至不需要 key。
+- **影响**：
+  1. **SSRF**：服务端替调用方发 GET/POST 到任意 `http(s)` 地址 —— 内网面板、`169.254.169.254` 元数据、`127.0.0.1:8889`（solver，明确无鉴权）、以及 `127.0.0.1:8000/api/backup/export`（F2，7 MB 凭据包）。响应体（含非 JSON 的 `raw`）会回到调用方，是**带读回**的 SSRF，不只是盲打。
+  2. **密钥外带**：`Authorization: Bearer <contribution_key>` 会被送到调用方指定的 host。`GET /api/config` 是**看不到**这个 key 的（被置空），但这条路径能把它原样送到攻击者服务器 —— 即「能调接口」升级为「能读已存口令」。
+  3. 无重定向限制（`requests` 默认跟随），`http://attacker/302→http://169.254.169.254/` 同样成立。
+- **建议**：`server_url` 只允许来自配置（不接受请求体覆盖），或强制白名单 + 解析后校验 IP 不在私网/回环/链路本地段；禁用重定向（`allow_redirects=False`）；key 只发往配置里的固定 host；把「发往第三方的请求」记审计日志。
+
+### N3（中）`/api/icloud/remote-accounts*`：`base_url` 由请求体控制
+
+- **位置**：`api/icloud.py:104-119`（`RemoteAccountRequest` / `DiscoverRemoteRequest` 的 `base_url`）、`:257-270`（discover）、`:273-285`（add）
+- **证据**：`icloud_service.discover_remote_accounts(base_url=body.base_url, admin_password=body.admin_password, proxy=body.proxy)` —— 地址、密码、代理全部来自请求体；`add_remote_account` 同形。
+- **影响**：与 N2 同类（SSRF + 把 `admin_password` 发往任意 host + 响应回传）。区别是这里外发的是**调用方自己填的**密码，危害略低；但 SSRF 面相同，且 `proxy` 参数可以让请求走任意代理（可用来打只有特定出口能到的内网）。
+- **建议**：`base_url` 同样做私网/回环校验；或限定「必须是用户在设置页登记过的远端服务」。
+
+> 注：`api/integrations.py:66-79` 的面板地址来自 `configs`（`GET /api/integrations/panels` 也是读配置），**不是**逐请求可控，所以只算 F25（GET 有外部副作用），不算 SSRF。
+
+---
+
+## 6. 错误语义
+
+### F15（中）`str(exc)` 直接进响应体
+
+- **位置**：`api/accounts.py:713`、`api/tasks.py:697`、`api/backup.py:46,110,122`、`api/actions.py:426,469`、`api/integrations.py:232`、`api/sms.py:89,100`、`api/mail_imports.py:36-71`、`api/outlook.py:57-59`
+- **证据**：静态；典型 `str(exc)` 会带 `sqlite3.OperationalError: no such column: …`、`sqlalchemy.exc.…`、`requests.exceptions.ConnectionError: … socks5h://user:pass@…`、`FileNotFoundError: /data/…` —— SQL 结构、代理凭据、绝对路径三类内部信息都可能上屏。
+- **附带契约问题**：`api/actions.py:469` 与 `api/integrations.py:232` 用 **HTTP 200** 表达失败（靠 `ok:false` 区分），与其它端点的 4xx/5xx 不一致。
+- **建议**：对外只回稳定 `code` + 一句人话 + `request_id`，原始异常只进 `logger.exception`；业务性失败用 409/422，不要 200。
+
+### 未捕获异常
+
+`main.py` 未注册全局异常处理器，FastAPI 默认 500 只回 `{"detail":"Internal Server Error"}`（无 traceback）—— 这点是好的。但批量端点里「一个坏行拖垮整批」仍是 500 的主要来源（上一轮 `api/actions.py` 的 `int(uuid)` 就是实例，已由 `9630980` 修）。建议批量动作逐条 `try/except` 回 `{id, ok:false, reason}`。
+
+---
+
+## 7. 破坏性接口
+
+| 端点 | 破坏性 | 幂等 | 确认/dry-run | 结论 |
+|------|--------|------|--------------|------|
+| `POST /api/accounts/batch-delete` | 删账号 | ✅ | ❌ | 有 1000 上限 + `not_found`，可接受 |
+| `POST /api/proxies/batch-delete` | 删代理 | ✅ | ❌ | 同上 |
+| `POST /api/tasks/logs/batch-delete` | 删历史 | ✅ | ❌ | 同上 |
+| `POST /api/proxies/balance` | 批量改绑定 | ⚠️ | ✅ `dry_run=True` 默认 | 设计良好；`dry_run=false` 无二次确认、无回滚 |
+| `POST /api/integrations/panels/{k}/sync` | **覆盖本地 AT/RT/id_token** | ⚠️ | ❌ | 建议先出「将改动 N 个账号」预览 |
+| `POST /api/integrations/panels/{k}/push?delete_old=true` | **删远端旧记录** | ⚠️ | ❌ | 破坏性开关在 query 里，建议改 body + 默认 false |
+| `POST /api/icloud/aliases/batch-delete`（`remote: bool = True`） | **删 Apple 侧别名（不可逆）** | ⚠️ | ❌ 默认删远端 | 最危险：默认值站在不可逆一侧，且 `ids` 无上限 |
+| `POST /api/backup/import` | 整库替换 + 换密钥 | ❌ | ⚠️ 自动备份 + 运行中任务 409 | 机制最完整（原子替换 + 失败回滚） |
+| `POST /api/accounts/import` | 覆盖同邮箱字段 | ✅ | ❌ | 无上限（F14） |
+
+**通用建议**：一次影响 >N 个对象的写接口统一加两层 ——(a) `dry_run`/`preview` 必填其一；(b) 服务端签发 `confirm_token`（把请求体哈希进去，5 分钟有效），客户端必须回传。
 
 ---
 
 ## 8. 修复优先级
 
-**P0（当天，挡住接管链）**
+**P0（当天）**
 
-1. F1：`/api/auth/setup` 未设密码时只允许回环 / 一次性初始化 token；中间件改显式白名单。
-2. F2：备份导出不再默认携带 `secrets/credential_key`；导出要求二次认证。
-3. F8 + F3：`token` 列加密落盘；列表响应 `pop("token")` 且把 `sso` 加入瘦身名单。
-4. F4 + F5：日志与代理接口统一掩码 `socks5://***@host:port`。
+1. **N0**：确认线上跑的是哪个 commit。当前 `:8000` 实例 18:25 启动、`c93b71f` 18:36 提交 —— 五条鉴权修复全部没生效。部署流程需要「重启后校验」这一步（`/api/runtime` 的 `stale` 本该干这个，但见 N6）。
+2. **F2**：备份导出不再默认携带 `secrets/credential_key`；导出要求二次认证。
+3. **F3 + F8**：列表 `pop("token")` + `sso` 进瘦身名单；`token` 列加密落盘（存量 1057 行回填）。
+4. **F4 + F5**：日志与代理接口统一掩码；合并工作区里那份 `_public_proxy` 补丁并重启。
 
 **P1（本周）**
 
-5. F6 + F10：token 加版本号可吊销；`setup`/`disable` 要求旧密码。
-6. F7：退避计数改用 `request.client.host` + 可信代理配置。
-7. F9：密码导出改 POST + 二次认证 + 默认不含密码列。
-8. F14：统一分页与批量上限（200 / 1000）。
-9. F15 + F16：错误体只留稳定 code + 人话；4xx/5xx 语义统一。
+5. **N1**：`logout` 加认证，吊销粒度改成「只吊销自己」。
+6. **N5**：`disable` 要求旧密码 + TOTP。
+7. **N2 + N3**：`server_url` / `base_url` 不再由请求体决定，或强制私网/回环黑名单 + 禁重定向。
+8. **N4**：`auth_jwt_secret` / `auth_password_hash` 纳入 `SECRET_CONFIG_KEYS`（或单独加密）。
+9. **F9**：密码导出改 POST + 二次认证 + 默认不含密码列。
+10. **F14**：统一分页（≤200）与批量（≤1000）上限。
+11. **F15 + F16**：错误体只留稳定 code + 人话。
 
 **P2（两周内）**
 
-10. F11：无密码模式的「仅回环」判定改为「仅初始化 token」，并在文档中声明不支持反代。
-11. F12：CORS 白名单化。
-12. F13 + F19：`no-store` 与安全响应头。
-13. F17：破坏性接口加 `dry_run`/`confirm_token`，`remote` 默认改 false。
-14. F18：`share_token` 不再随列表下发。
-15. F20–F25：信息面收敛（`/api/runtime` 去掉绝对路径、`_login_failures` 清理、SMS 上游错误不直出）。
+12. **F11**：无密码模式的判据从「源地址」改成「初始化 token」，文档声明不支持反代。
+13. **F13 + F19**：`no-store` 与安全响应头。
+14. **F17**：破坏性接口加 `dry_run`/`confirm_token`，`remote` 默认改 false。
+15. **F18**：`share_token` 不再随列表下发。
+16. **F20–F25**：信息面收敛（`/api/runtime` 去掉绝对路径、`_login_failures` 清理、SMS 上游错误不直出、`tasks/logs` 的 total 改 `count()`）。
 
 ---
 
-## 附录 A：探测矩阵（全部 GET/HEAD，除标注外）
+## 附录 A：探测矩阵（全部 GET/HEAD，无一次写请求）
 
 | # | 请求 | 状态 | 关键观察 |
 |---|------|------|----------|
-| 1 | `GET /api/auth/status` | 200 | `{"has_password":false,"has_totp":false}` |
-| 2 | `GET /api/accounts?page_size=2` | 200 / 7,528 B | 行内 **含 `token`**（F3） |
-| 3 | `GET /api/accounts?page_size=100000` | 200 / 3,802,989 B | 1057 条全量 + AT |
-| 4 | `GET /api/accounts/{uuid}` | 200 | `password` 明文 16 字符；`extra_json` 为 `v1:` 密文 |
-| 5 | `GET /api/accounts/export?platform=chatgpt` | 200 / 56,588 B CSV | 667 行明文密码（F9） |
-| 6 | `GET /api/config` | 200 / 2,338 B | 口令键全空 + `*_set`（✅） |
-| 7 | `GET /api/proxies` | 200 / 926 B | 5 条 `socks5://user:pass@…`（F5） |
-| 8 | `GET /api/proxies/balance` | 200 | 同上 + 绑定计数 |
-| 9 | `GET /api/tasks?include_logs=true` | 200 / 374,349 B | 75 处凭据形状命中（F4） |
-| 10 | `GET /api/tasks/logs?page_size=999999` | 200 / 356,026 B | 无上限（F22） |
-| 11 | `GET /api/backup/export` | 200 / 7,298,220 B | 8 成员，含 `secrets/credential_key`（F2） |
-| 12 | `HEAD /api/backup/export` | 405 | 未实现 HEAD（GET-only 路由） |
-| 13 | `GET /api/backup/info` | 200 | 泄漏绝对路径 + 各库行数（低） |
-| 14 | `GET /api/icloud/aliases` | 200 / 712,390 B | 1941 条，每条带 `share_token`（F18） |
-| 15 | `GET /m/<share_token>` | 200 / 1,883 B | 未登录可读邮件（设计如此） |
-| 16 | `GET /api/integrations/panels/{cpa,sub2api,chatgpt2api,grok2api}/comparison` | 200 | 388 KB / 154 KB / 204 KB / 294 KB；触发外网请求；**不含凭据值** |
-| 17 | `GET /api/mail-imports/snapshot?preview_limit=100000` | 400 | 回显 pydantic 模型名（F16） |
-| 18 | `GET /api/openapi.json` | 404 | docs 已关（✅） |
-| 19 | `GET /docs` | 200 | SPA index，非文档页 |
-| 20 | `GET /api/definitely-not-a-route` | 404 | 未被 SPA 兜底（✅） |
-| 21 | `OPTIONS /api/accounts`（预检） | 200 | `allow-origin: *` + 全方法（F12） |
-| 22 | 5 条路径穿越变体 | 404/200 | 无文件读取（✅，§7.2） |
-| 23 | 4 条鉴权前缀穿越变体 | 404 | 无绕过（✅） |
-| 24 | `POST /api/auth/setup`（**仅一次性副本**，`TestClient` 非回环） | 200 | 未认证设密成功并返回 token（F1） |
+| 1 | `GET /` | 200 / 1063 B | 只有 `cache-control/content-type/vary`（F19） |
+| 2 | `GET /api/auth/status` | 200 | `{"has_password":false,"has_totp":false}` |
+| 3 | `GET /api/accounts?page_size=1` | 200 / 3445 B | **无 Authorization 也 200**；行内含 1988 字符 `token`（F3） |
+| 4 | `GET /api/accounts?page_size=2` | 200 / 7528 B | `items[0]` 13 个键，含 `token` |
+| 5 | `GET /api/accounts?platform=grok&page_size=1` | 200 | `extra_json.sso` 152 字符（F3） |
+| 6 | `GET /api/accounts?page_size=100000` | 200 / 3,802,434 B / 2.35 s | 无上限（F14） |
+| 7 | `GET /api/accounts/export?platform=chatgpt` | 200 / 56,588 B CSV | 667 行明文密码（F9） |
+| 8 | `GET /api/config` | 200 / 2,338 B | 口令键全空 + `_set`（✅） |
+| 9 | `GET /api/proxies` | 200 / 926 B | 5 条 `socks5://user:pass@…`（F5） |
+| 10 | `GET /api/tasks?include_logs=true` | 200 / 13,724,404 B | 837 任务 / 88,856 行日志 / 761 处凭据形状（F4） |
+| 11 | `GET /api/tasks/logs?page_size=999999` | 200 / 356,026 B | 无上限（F22） |
+| 12 | `GET /api/backup/export` | 200 / 7,298,029 B | 8 成员，含 `secrets/credential_key` 44 B（F2） |
+| 13 | `GET /api/backup/info` | 200 / 1,083 B | 回绝对 `data_dir` 与各库路径/行数（F21） |
+| 14 | `GET /api/runtime` | 200 / 176 B | `pid` / `python` 绝对路径 / `code_version:"未知"`（F21、N6） |
+| 15 | `GET /api/icloud/aliases` | 200 / 712,390 B | 每条带 22 字符 `share_token`（F18） |
+| 16 | `GET /m/<share_token>` | 200 / 1,883 B | 未登录可读邮件，标题即别名邮箱 |
+| 17 | `GET /m/bogus` | 404 | ✅ |
+| 18 | `GET /api/mail-imports/snapshot?type=microsoft&preview_limit=100000` | 400 | 回显 pydantic 模型名（F16） |
+| 19 | `GET /api/mail-imports/snapshot?type=nope` | 400 | `不支持的邮箱导入类型` ✅ |
+| 20 | `GET /api/accounts?page=abc` | 422 | 标准 `int_parsing` ✅ |
+| 21 | `GET /api/openapi.json`、`/docs`、`/redoc` | 404 / 200 HTML / 200 HTML | docs 已关；`/docs` 落到 SPA（低） |
+| 22 | `GET /api/definitely-not-a-route` | 404 | 未被 SPA 兜成 200 ✅ |
+| 23 | `GET /api/accounts` + `Origin: https://evil.example` | 200 + `access-control-allow-origin: *` | **进程仍跑旧代码**（N0） |
+| 24 | `OPTIONS /api/accounts`（预检，evil origin） | 200 | `allow-methods: … PUT, QUERY`、`max-age: 600`（N0） |
+| 25 | 9 条路径/前缀穿越变体 | 404 ×7 / 200 HTML ×2 | 无绕过（§4） |
+| 26 | `HEAD /api/accounts` | 405 | API 路由不支持 HEAD（低） |
 
-## 附录 B：未覆盖 / 需要下一轮补的
+## 附录 B：未覆盖 / 需要下一轮
 
-- **并发与竞态**：`_login_failures`、`_pending_2fa` 都是进程内 dict（`api/auth.py:197-266`），多 worker / 多副本部署下退避与 2FA 尝试计数**不共享**，可被「换 worker」绕过 —— 需要按部署形态确认是否真的单进程。
-- **`api/contribution.py`**：4 个 POST（`/quota-stats`、`/key-info`、`/redeem`、`/generate-key`）不在本次指定范围内，未审；它们会把 `contribution_key` 发往 `contribution_server_url`（默认 `http://new.xem8k5.top:7317/`，明文 HTTP），建议单独一轮看「密钥外发 + 明文传输」。
-- **Solver 端口 8889**：`docker-compose.yml:33-40` 明确写着「solver 接口**没有鉴权**，绝不能直接对外」，容器内绑 `0.0.0.0:8889`，仅靠 compose 的 `127.0.0.1:8889` 映射兜底。不走 compose（裸 `docker run -p 8889:8889`）时该无鉴权服务会直接暴露 —— 与本次 `api/*` 无关，但属于同一台机器上的旁路风险，建议下一轮并入。
-- **`api/actions.py` 的平台动作面**：`_execute_platform_action` 会调用 `platforms/**` 里的真实业务（含密码登录、改密、上传），本次只审了错误语义与批量上限，动作本身的行为安全（是否会把密码写日志）需结合 `platforms/chatgpt` 再看。
-- **真实 `:8000` 实例**：审计期间未运行，所有结论来自 HEAD 代码 + 数据副本；若线上跑的镜像与本 HEAD 不一致（工作区当时有未提交改动），需在部署机上复核 F1/F3/F8 三条。
+- **写路径一律未实测**（只读约束）：N1/N5 的「未认证即可 logout/disable」、F17 的破坏性默认值、F1 的 403 分支，全部来自代码路径而非请求验证。下一轮若允许在**一次性副本**上发 POST，建议优先复验这四条。
+- **多 worker / 多副本**：`_login_failures`、`_pending_2fa` 都是进程内 dict（`api/auth.py:210,227`）。当前 compose 是单进程，若改成 `--workers 4`，退避与 TOTP 尝试计数**不共享**，可被「换 worker」绕过。
+- **`api/actions.py` 的平台动作面**：只审了错误语义与批量上限；`_execute_platform_action` 调用的 `platforms/**` 真实业务（登录、改密、上传）是否把密码写日志，需结合 `platforms/chatgpt` 另审。
+- **Solver 端口 8889**：`docker-compose.yml` 明确「solver 接口没有鉴权」，仅靠 `127.0.0.1:8889` 映射兜底；裸 `docker run -p 8889:8889` 会直接暴露。与本报告无关但同机，建议并入下一轮。
+- **前端**：`share_token`、`token` 在浏览器侧的生命周期（是否进 localStorage / 是否被日志组件打印）属于 frontend 审计范围，本报告只覆盖服务端出口。

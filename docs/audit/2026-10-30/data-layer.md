@@ -6,7 +6,7 @@
 
 方法：静态审阅 + 只读真库（`data/account_manager.db`，`mode=ro`）+ **真库副本 / 空库上的可写实验**（`/root/.hermes/cache/scratch/dlaudit/`）+ 单文件测试（`tests/test_repository_backends.py`，11 passed / 22 subtests）。真库未被写入；所有 `alembic upgrade/downgrade`、并发、加密实验都在副本或临时库上执行。
 
-基线说明：任务书写的是 `4680c8d`，但审计开始时工作树已前进到 **`c2c502b`**（`fix(db): 模型与迁移链的索引漂移`，新增 `e5b2c8f71a34` 与两条复合索引声明）。本报告以 `c2c502b` 为准；与该提交相关的差异会在条目里单独标注。
+基线说明：任务书写的是 `4680c8d`，审计期间工作树前进了两次——**`c2c502b`**（`fix(db): 模型与迁移链的索引漂移`，新增 `e5b2c8f71a34` 与两条复合索引声明）与 **`a3470d3`**（列表类响应/任务日志不再下发凭据正文）。数据层代码在 `a3470d3` 里没有被改动；只有 `api/accounts.py` 行号偏移（本报告已按最新工作树校正 D-04 的引用）与 `services/task_runners.py:270,579` 的代理串打码（已在 D-20 标注）。其余条目以 `c2c502b` 的代码取证为准。
 
 结论先行：**SQLite 与 JSON 两个后端并不等价**——不是「个别字段没对齐」，而是账号写路径、Outlook 池导入、判重、任务日志形状四条主路径在 JSON 分支上行为不同，其中三条会明文落凭据或直接 500。迁移链在「空库」上能跑通，但**跑不进本应用自己建的库**，且 `c3f8a1d64b27` 的 downgrade 在真实数据形态下会把 `accounts` 表搞成空表。凭据加密覆盖了 `accounts.password` / `extra_json` 六键 / 配置口令 / TOTP 日志，但**没覆盖 `accounts.token`（1057/1057 明文）、`extra.cookies`（607 行明文）、Outlook 池的 password/refresh_token、代理 URL 内嵌口令**。UUID 化后仍有一处 `int(uuid)` 的必崩调用。
 
@@ -25,7 +25,7 @@
 
 **已验证成立、不重复报的项**（本轮只做回归确认）：
 
-- `accounts.password` 列：真库 1057 行，明文 0 行；`extra_json` 里 AT/RT/IDT/ST/SSO/totp 六键 1057 行均有 `v1:` 密文。
+- `accounts.password` 列：真库 1057 行，明文 0 行；`extra_json` 里 AT/RT/IDT/ST/SSO/totp 六键**出现时全部是 `v1:` 密文**（按 key 统计：明文 0 个）。
 - `configs` 里 `chatgpt2api_api_key` / `cpa_api_key` / `grok2api_password` 均为密文。
 - `data/secrets/totp_journal/*.json` 已是 `totp_secret_cipher`。
 - `accounts.id` 已是 UUID（1057/1057 长度 36），`legacy_id` 列与 `ix_accounts_legacy_id` 唯一索引存在。
@@ -145,7 +145,7 @@ password prefix: PLAINTEXT-
 
 #### D-04 [P0] JSON 后端下「编辑已有账号」必 500：`sess.refresh()` 对 detached 模型
 
-- 位置：`api/accounts.py:382-385`。
+- 位置：`api/accounts.py:391-394`（`sess.refresh(existing)` 在 `:394`）。
 - 证据：更新分支没有像新建分支那样判断 `sess.object_session(saved)`：
 
 ```python
@@ -161,7 +161,7 @@ with account_repository.session_for(body.platform) as sess:
 REFRESH RAISED: InvalidRequestError Instance '<AccountModel ...>' is not persistent within this Session
 ```
 
-- 影响：JSON 部署下「新增（邮箱已存在）→ 走更新分支」100% 500。新建分支已经修过同型问题（`:399-402` 的注释），更新分支漏了。
+- 影响：JSON 部署下「新增（邮箱已存在）→ 走更新分支」100% 500。新建分支已经修过同型问题（`:409-413` 的注释与 `if sess.object_session(saved) is not None` 守卫），更新分支漏了。
 - 建议：与新建分支同判据 `if sess.object_session(saved) is not None: sess.refresh(saved)`；或让 `AccountRepository.save()` 返回「已刷新」的模型并禁止调用方再 refresh。
 
 #### D-05 [P0] 混合后端（`STORAGE_BACKEND=json` + `STORAGE_BACKEND_ACCOUNTS=sqlite`）启动后**一张表都没有**
@@ -212,7 +212,7 @@ errors: 11     ['FileNotFoundError']   # accounts.json.tmp -> accounts.json
 
 ```
 registered_emails RAISED OperationalError (sqlite3.OperationalError) no such table: accounts
-# 副作用：在当前目录生成了一个空的 account_manager.db
+# 副作用：在 DATA_DIR 下生成了一个空的 account_manager.db
 ```
 
 - 影响：目前没有生产调用方（`grep registered_emails` 只命中定义），属于「公开 API 但一边没实现」。一旦有人用它做批量判重，JSON 部署即 500；同时它会**创建空的 `.db` 文件**，正好破坏 `all_tables_use_json` 想避免的「JSON 部署不该有 .db」。
@@ -419,7 +419,7 @@ maliapi_api_key    PLAINTEXT len=27
 - 影响：`config_store.set()` 接受任意 key，而 `_seal` 只认 10 个硬编码键。邮件渠道（freemail/duckmail/laoudo/gptmail/maliapi）的密码与 API key 全部落在白名单外，`GET /api/config` 还会回明文（`api/config.py` 只对 `SECRET_CONFIG_KEYS` 打码）。
 - 建议：`_seal` 改成「白名单 ∪ 键名正则」双判据（`(?:^|_)(key|token|secret|password|passwd|pwd|bearer|auth)$`），或把 78 个键补进 `CONFIG_SCHEMA`；补一条测试：对 schema 外但形似口令的键 `set()` 后，库里必须是 `v1:`。
 
-#### D-20 [P1] `proxies.url` 内嵌 `user:pass`，5/5 明文；并已被写进 59 条任务日志
+#### D-20 [P1] `proxies.url` 内嵌 `user:pass`，5/5 明文；历史任务日志里还有 59 条副本
 
 - 位置：`core/db/models_infra.py:59`（`url: str = Field(unique=True)`，无加密）；`services/task_runners.py` 的「使用代理: …」日志（与 `docs/audit/2026-10-30/proxy.md` P1-10 同一批）。
 - 证据（只读真库）：
@@ -428,6 +428,8 @@ maliapi_api_key    PLAINTEXT len=27
 proxies 5 行，url like '%@%' = 5
 task_runs logs_json like '%://%@%' = 59
 ```
+
+- 补充：`a3470d3` 已在写日志前调用 `_redact_proxy(...)`（`services/task_runners.py:270,579`），**新**日志不再含明文；但库里已有的 59 行历史记录不会自动消失，且 `proxies.url` 本身仍是明文。
 
 - 影响：代理出口是注册链路的网络身份，`user:pass` 泄露等于代理池被白嫖/被封。日志里的 59 条是同一份凭据的第二个副本（且 `GET /api/tasks/{id}` 会回给前端）。
 - 建议：代理 URL 拆成 `scheme/host/port/username/password_cipher` 四段存储（`ProxyRecord` 已集中，改动面可控），或至少对 `url` 整体 `encrypt_text` 并在 API 层脱敏；任务日志写入前用统一 `redact_proxy_url()` 打码。
@@ -601,7 +603,7 @@ except IntegrityError:
 
 | 优先级 | 条目 | 一句话 |
 |---|---|---|
-| 立刻 | D-01 / D-02 / D-03 / D-33 | 三条写路径会把 AT/RT/SSO/cookies/password 明文落盘；先堵住「新数据不再明文」 |
+| 立刻 | D-01 / D-02 / D-03（根因 D-33） | 三条写路径会把 AT/RT/SSO/cookies/password 明文落盘；先堵住「新数据不再明文」 |
 | 立刻 | D-04 / D-29 | 两个确定性 500（JSON 改账号、批量面板同步） |
 | 立刻 | D-12 / D-13 | 迁移链进不了应用库；downgrade 会把 `accounts` 变空表 |
 | 立刻 | D-15 | 老库大小写重复 → 启动崩溃 |

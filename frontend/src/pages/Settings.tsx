@@ -308,7 +308,7 @@ function SolverStatus() {
 type TotpSetupState = 'idle' | 'setup'
 
 function SecurityPanel() {
-  const { message: msg } = App.useApp()
+  const { message: msg, modal } = App.useApp()
   const [status, setStatus] = useState<{ has_password: boolean; has_totp: boolean } | null>(null)
   const [loading, setLoading] = useState(false)
 
@@ -351,18 +351,29 @@ function SecurityPanel() {
     }
   }
 
-  const handleDisableAuth = async () => {
-    setLoading(true)
-    try {
-      await apiFetch('/auth/disable', { method: 'POST' })
-      localStorage.removeItem('auth_token')
-      msg.success('密码保护已关闭')
-      await loadStatus()
-    } catch (e: any) {
-      msg.error(e.message)
-    } finally {
-      setLoading(false)
-    }
+  const handleDisableAuth = () => {
+    // 一键关闭面板密码保护 = 把全量凭据库敞开（非本机来源在未设密码时被
+    // 中间件挡成 503，但本机/隧道里就是全开）。必须二次确认（全量检测 F-05）。
+    modal.confirm({
+      title: '确认关闭访问密码保护？',
+      content: '关闭后，任何能访问面板端口的本机/隧道请求都能直接读取全部账号与凭据。',
+      okText: '关闭保护',
+      okButtonProps: { danger: true },
+      cancelText: '取消',
+      onOk: async () => {
+        setLoading(true)
+        try {
+          await apiFetch('/auth/disable', { method: 'POST' })
+          localStorage.removeItem('auth_token')
+          msg.success('密码保护已关闭')
+          await loadStatus()
+        } catch (e: any) {
+          msg.error(e.message)
+        } finally {
+          setLoading(false)
+        }
+      },
+    })
   }
 
   const handleChangePassword = async (values: { current_password: string; new_password: string; confirm: string }) => {
@@ -420,17 +431,26 @@ function SecurityPanel() {
     }
   }
 
-  const handleDisableTotp = async () => {
-    setLoading(true)
-    try {
-      await apiFetch('/auth/2fa/disable', { method: 'POST' })
-      msg.success('双因素认证已关闭')
-      await loadStatus()
-    } catch (e: any) {
-      msg.error(e.message)
-    } finally {
-      setLoading(false)
-    }
+  const handleDisableTotp = () => {
+    modal.confirm({
+      title: '确认关闭双因素认证？',
+      content: '关闭后仅凭密码即可登录面板。',
+      okText: '关闭 2FA',
+      okButtonProps: { danger: true },
+      cancelText: '取消',
+      onOk: async () => {
+        setLoading(true)
+        try {
+          await apiFetch('/auth/2fa/disable', { method: 'POST' })
+          msg.success('双因素认证已关闭')
+          await loadStatus()
+        } catch (e: any) {
+          msg.error(e.message)
+        } finally {
+          setLoading(false)
+        }
+      },
+    })
   }
 
   return (

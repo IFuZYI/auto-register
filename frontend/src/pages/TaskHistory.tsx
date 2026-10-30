@@ -47,11 +47,15 @@ export default function TaskHistory() {
   const [loading, setLoading] = useState(false)
   const [selectedRowKeys, setSelectedRowKeys] = useState<number[]>([])
   const [cleaning, setCleaning] = useState(false)
+  // 分页必须**走服务端**。原来固定拉 `page_size=50` 再交给表格按 20/页
+  // 客户端分页 —— `total` 显示 1661，但第 51 条以后永远翻不到（全量检测 F-03）。
+  const [page, setPage] = useState(1)
+  const [pageSize, setPageSize] = useState(20)
 
   const load = useCallback(async () => {
     setLoading(true)
     try {
-      const params = new URLSearchParams({ page: '1', page_size: '50' })
+      const params = new URLSearchParams({ page: String(page), page_size: String(pageSize) })
       if (platform) params.set('platform', platform)
       const data = await apiFetch(`/tasks/logs?${params}`) as TaskLogListResponse
       setLogs(data.items || [])
@@ -60,11 +64,16 @@ export default function TaskHistory() {
     } finally {
       setLoading(false)
     }
-  }, [platform])
+  }, [platform, page, pageSize])
 
   useEffect(() => {
     load()
   }, [load])
+
+  // 换平台等于换结果集，页码必须归位，否则会停在「第 40 页」的空列表上。
+  useEffect(() => {
+    setPage(1)
+  }, [platform])
 
   const handleBatchDelete = async () => {
     if (selectedRowKeys.length === 0) return
@@ -215,7 +224,18 @@ export default function TaskHistory() {
             selectedRowKeys,
             onChange: (keys) => setSelectedRowKeys(keys as number[]),
           }}
-          pagination={{ pageSize: 20, showSizeChanger: false }}
+          pagination={{
+            current: page,
+            pageSize,
+            total,
+            showSizeChanger: true,
+            pageSizeOptions: [20, 50, 100],
+            showTotal: (count) => `共 ${count} 条`,
+            onChange: (nextPage, nextSize) => {
+              setPage(nextSize !== pageSize ? 1 : nextPage)
+              setPageSize(nextSize)
+            },
+          }}
         />
       </Card>
     </div>
