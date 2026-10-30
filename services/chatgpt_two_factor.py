@@ -369,21 +369,23 @@ def _apply_journal_entry(email: str, secret: str) -> str:
     ``"conflict"``（库里是**另一把**，没动它）/ ``"missing"``（账号行还不存在）。
     调用方据此决定能不能删日志文件 —— 只有前两种能删。
     """
-    from core.db import platform_session
+    # **走仓储，不要开原生 session**：`platform_session("chatgpt")` 在 JSON 后端
+    # 下是一张空库（账号在 accounts.json 里）—— 启动时恢复日志会撞
+    # `no such table: accounts`，2FA 密钥永远补不回去（data-layer 审计 D-05 的
+    # 现场）。仓储是唯一一套双后端分派。
+    from core.db import account_repository
 
-    with platform_session("chatgpt") as s:
-        row = s.exec(select(AccountModel).where(AccountModel.email == email)).first()
-        if row is None:
-            return "missing"
-        extra = row.get_extra()
-        existing = str(extra.get("totp_secret") or "").strip()
-        if existing:
-            return "duplicate" if existing == secret.strip() else "conflict"
-        extra["totp_secret"] = secret
-        row.set_extra(extra)
-        row.updated_at = datetime.now(timezone.utc)
-        account_repository.save(row, session=s)
-        s.commit()
+    row = account_repository.find_by_email("chatgpt", email)
+    if row is None:
+        return "missing"
+    extra = row.get_extra()
+    existing = str(extra.get("totp_secret") or "").strip()
+    if existing:
+        return "duplicate" if existing == secret.strip() else "conflict"
+    extra["totp_secret"] = secret
+    # `update_extra` 只写 extra_json：不拿整行快照覆盖别处刚写进去的字段。
+    if not account_repository.update_extra(str(row.id), "chatgpt", extra):
+        return "missing"
     return "applied"
 
 
