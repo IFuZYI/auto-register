@@ -37,8 +37,20 @@ camoufox 浏览器未装（base commit 上逐条复现过）。
 | `accounts.password` 列**名不变**，值变成 `v1:` 密文 | 设 `CREDENTIAL_ENCRYPTION=0` 后重写即可（读侧兼容明文） |
 | `extra_json` 里六把凭证（AT/RT/IDT/ST/SSO/totp_secret）变成密文 | 同上 |
 
-**升级顺序**：`alembic upgrade head` → 启动服务。老库（无 `alembic_version`）
-先 `alembic stamp head` 再启动（`docs/refactor/T0.4-PRODUCTION-STEPS.md` 有步骤）。
+**升级顺序**（老库，已有数据、无 `alembic_version`）：
+
+```bash
+alembic stamp 77cc4baded71     # 只写版本行，不建表 —— 表已经在了
+alembic upgrade head           # 跑 b7c1e4a92d30（去重+唯一索引）+ c3f8a1d64b27（UUID）
+alembic current                # 必须是 c3f8a1d64b27 (head)
+```
+
+⚠️ **不要 `alembic stamp head`**：那会把库标成「已到最新」，两条真正的迁移
+（唯一索引、UUID）一条都不跑，服务启动后模型要 UUID 而库里还是整数。
+空库才直接 `alembic upgrade head`（基线迁移自己建表）。
+
+实测：拿生产库副本走这条路径，1056 行全部完成 UUID 化，`alembic check`
+报 `No new upgrade operations detected`。
 
 **密钥**：`secrets/credential_key`（或 `CREDENTIAL_ENCRYPTION_KEY`）。
 **丢了等于所有 RT/密码不可恢复**，必须与数据库一起备份。`data_bundle` 导出已包含。

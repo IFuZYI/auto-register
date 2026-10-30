@@ -5,9 +5,13 @@
 
 ## B-1 生产数据缺失 → T1.3 切流与 `dump diff` 无法验收
 
-**状态**：代码已完成，验收待生产侧执行。
+**状态**：**已结案（dump diff 部分）**。用主仓库 `data/` 的副本跑通了：
+1056 行、字段级差异 0（仅 `id` 变 UUID）。剩余待生产侧执行的只有「分库切流」
+那一步 —— 本机只有单库，没有 `PLATFORM_DATABASE_URLS` 可切。
 
-**事实**：本 worktree 的 `data/` 是空的（`find data -type f` 无输出）。
+**事实（已更新）**：本 worktree 自己的 `data/` 是空的（`find data -type f` 无输出）；
+真实数据在主仓库 `/data/workspace/Register/data/`（1056 账号 / 25 MB）。
+验证时拷到 scratch 用，**原库只读**。
 `T1.3` 的验收条件是「合并后行数守恒」，`equivalence` 的验收条件是
 「字段级 dump diff 为空」—— 两条都需要真实账号数据。
 

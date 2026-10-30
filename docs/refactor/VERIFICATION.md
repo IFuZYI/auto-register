@@ -14,6 +14,7 @@
 | 真 uvicorn 起服务 | 6 个主端点全 200，建账号/详情/列表契约正确 |
 | 注册任务真跑 | 建任务 → 执行 → `status=done` / 5 条日志 / 完成摘要，**与 base 逐字一致** |
 | pyflakes 静态检查 | `undefined name` **7 → 0**（其中 5 条是真 NameError） |
+| **真实生产库 dump diff** | **1056 行，字段级差异 0**（仅 `id` 按 H4 变 UUID） |
 
 ## 二、怎么验的
 
@@ -50,6 +51,43 @@ curl /api/runtime /api/accounts /api/actions/chatgpt /api/config /api/tasks /api
 
 全部 200；`POST /api/accounts` 返回 UUID；`GET /api/accounts/{id}` 带明文
 `password` 且不带 `password_cipher`；列表只有 `has_password`。
+
+### 4. 真实生产库的字段级 dump diff（最强的一条证据）
+
+主仓库 `data/` 里是**真数据**：1056 个账号 / 1658 条任务日志 / 834 个任务 /
+1941 条 iCloud 别名 / 5 个代理 / 143 项配置。
+
+做法：把 `data/` 拷两份到 scratch（**原库只读，一个字节没动**），
+一份用 base 代码 dump，一份用 refactor 代码迁移到 head 后 dump，按
+`(platform, lower(email))` 对齐逐字段比。
+
+```bash
+cp -a data $S/prod-base && cp -a data $S/prod-refactor
+cd /tmp/base-e2e        && DATA_DIR=$S/prod-base     python scripts/dump_accounts.py --indent 0 > /tmp/dump-base.json
+cd <refactor worktree>  && DATA_DIR=$S/prod-refactor alembic stamp 77cc4baded71
+                          DATA_DIR=$S/prod-refactor alembic upgrade head
+                          DATA_DIR=$S/prod-refactor python scripts/dump_accounts.py --indent 0 > /tmp/dump-refactor.json
+```
+
+结果：
+
+```
+base 行数: 1056 | refactor 行数: 1056
+键集合相同: True
+只在 base: 0 | 只在 refactor: 0
+=== 字段级差异 ===
+无差异（id 除外）
+ref 全是 UUID 字符串: True
+```
+
+即：**1056 行一行不少、一行不多，除 `id` 由整数变 UUID（H4 决策）外，
+platform / email / password / token / status / cashier_url / user_id /
+region / created_at / updated_at / extra 全部逐字相同。**
+
+> 顺带发现并修掉一个**会毁掉生产部署**的文档错误：原报告写「老库先
+> `alembic stamp head`」—— 那会把库标成已到最新，唯一索引与 UUID 两条迁移
+> 一条都不跑。正确顺序是 `stamp 77cc4baded71` → `upgrade head`。已改
+> `COMPLETION-REPORT.md` 与 `T0.4-PRODUCTION-STEPS.md`，并在副本上实跑验证。
 
 ## 三、这一步抓到的 4 个问题（单测全绿但功能是坏的）
 
