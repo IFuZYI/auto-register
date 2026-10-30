@@ -438,11 +438,32 @@ def get_stats(session: Session = Depends(get_session)):
 def export_accounts(
     platform: Optional[str] = None,
     status: Optional[str] = None,
+    confirm: bool = False,
 ):
+    """整库导出 CSV —— **含明文密码**。
+
+    这个端点前端并没有用（界面走 `/accounts/export-text` 的预览+按需导出），
+    但它一直是「一个 GET 就把全池密码拿走」且无上限、无确认
+    （api-security 审计 F9）。保留能力，但要求调用方显式 `?confirm=1`，
+    并给出条数上界与 `no-store`。
+    """
+    if not confirm:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "该导出包含明文密码。确认要导出请显式加 ?confirm=1；"
+                "只需要部分账号请用 POST /api/accounts/export-text。"
+            ),
+        )
     accounts = _filtered_accounts(
         platform=platform or "",
         status=status or "",
     )
+    if len(accounts) > 5000:
+        raise HTTPException(
+            status_code=400,
+            detail=f"单次最多导出 5000 条（当前 {len(accounts)} 条），请先按平台/状态筛选。",
+        )
 
     output = io.StringIO()
     writer = csv.writer(output)
@@ -456,7 +477,11 @@ def export_accounts(
     return StreamingResponse(
         iter([output.getvalue()]),
         media_type="text/csv",
-        headers={"Content-Disposition": "attachment; filename=accounts.csv"}
+        headers={
+            "Content-Disposition": "attachment; filename=accounts.csv",
+            # 明文密码不进任何缓存（浏览器/代理/磁盘）
+            "Cache-Control": "no-store",
+        }
     )
 
 
