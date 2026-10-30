@@ -315,6 +315,9 @@ class OutlookMailbox(BaseMailbox):
     def requeue_account(self, account: MailboxAccount) -> None:
         from sqlmodel import Session, select
         from core.db import OutlookAccountModel, _utcnow, mailbox_pool_session
+        # 这个 import 原来漏了：方法体里一路用 `outlook_repository.*`，
+        # 名字却从没绑过 —— 一进 `requeue_account` 就 `NameError`（base 上就有）。
+        from core.db.outlook_repository import outlook_repository
 
         email = str(getattr(account, "email", "") or "").strip()
         extra = getattr(account, "extra", None) or {}
@@ -372,6 +375,8 @@ class OutlookMailbox(BaseMailbox):
             mailbox_pool_session,
             mark_email_used_by,
         )
+        # 同上：`set_account_status` 里也在用 `outlook_repository`，同样没绑。
+        from core.db.outlook_repository import outlook_repository
 
         email = str(getattr(account, "email", "") or "").strip()
         account_id = str(getattr(account, "account_id", "") or "").strip()

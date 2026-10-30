@@ -35,7 +35,9 @@ from core.task_runtime import (
 if TYPE_CHECKING:  # 仅类型标注用（from __future__ import annotations 下运行时不需要）
     from api.tasks import (  # noqa: F401
         BackfillRtTaskRequest,
+        BatchActionTaskRequest,
         Bind2faTaskRequest,
+        ProbeStatusTaskRequest,
         RefreshTokenTaskRequest,
         RegisterTaskRequest,
     )
