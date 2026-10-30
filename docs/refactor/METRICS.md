@@ -207,3 +207,46 @@ API 层，归 T3.3（`PanelAdapter`）一起搬。
 | 两处注释 | 记录历史，不是代码 |
 
 即：**运行期的跨层 import 为 0**。
+
+## T1.4 记录：凭据字段级加密（默认开）
+
+`core/credential_crypto.py`（144 行）+ 两个卡点接线。加密的是 `extra_json` 里六把
+**可直接冒用身份**的 bearer 凭证：
+
+    access_token / refresh_token / id_token / session_token / sso / totp_secret
+
+其余键（`client_id`、`cookies`、同步状态、面板登记）保持明文 —— 它们要么不是秘密，
+要么需要被 SQL 查询（加密后 `WHERE extra_json LIKE '%x%'` 就失效）。
+
+### 三个卡点（缺一个就漏）
+
+| 位置 | 作用 |
+|---|---|
+| `AccountModel.set_extra()` | 写路径正门：落盘前加密 |
+| `AccountModel.__init__()` | **旁路**：导入/测试/面板回填直接 `AccountModel(extra_json=...)`，绕过正门。不补这道，明文照旧落盘 |
+| `AccountModel.get_extra()` | 读路径正门：返回前解密（老明文原样通过） |
+
+另外三处直接解析 `extra_json` 的地方也都改成走解密视图：
+`repository.merge_account_fields`（比较用 `get_extra()`，写回仍保留原始密文串）、
+`migrations` 的 grok token 修补（`except CredentialKeyError`，不吞其他异常）、
+`api/accounts._slim_extra_for_list`（不解密就解不出 AT 的 iat/exp，列表「AT 有效期」整列空掉）。
+
+### 一条测试被**改写**而不是修绿
+
+`test_chatgpt_two_factor_persistence::test_secret_is_written_to_the_database`
+原先断言 `json.loads(row.extra_json)["totp_secret"] == SECRET` —— **它把泄漏当成了契约**。
+现在断言三件事：落盘不是明文、有 `v1:` 信封、`get_extra()` 读出来是明文。
+
+### 没做的：`password` 列
+
+`password` 是独立列而不是 `extra_json` 的键。加密它要把列改名成 `password_cipher`
+再加一个 `password` 属性做透明解密 —— 那是 schema 变更，归到 T1.4b（需要一次
+`alembic` revision + 全量回填）。当前它仍是明文，**这一条是已知缺口，不要当成已完成**。
+
+### 开关
+
+`CREDENTIAL_ENCRYPTION=0` 关掉（默认开）。关掉后两个函数退化成恒等映射，
+用于排障：「解不开」时先确认是密钥文件丢了还是数据真坏了。
+密钥文件位置见 `core/secret_box.py`（`CREDENTIAL_ENCRYPTION_KEY` /
+`CREDENTIAL_ENCRYPTION_KEY_FILE`）。**密钥丢了 = 所有 RT 不可恢复**，
+备份策略必须把密钥文件与数据库一起备（`data_bundle` 已经这么做了）。
