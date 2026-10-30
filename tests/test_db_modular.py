@@ -451,7 +451,9 @@ class TestExtraJsonRobustness:
         )
         from api.accounts import export_accounts
 
-        resp = export_accounts(platform="grok", status=None)
+        # `confirm=True`：该端点现在要求显式确认（含明文密码，api-security F9）。
+        # 这条用例要验的是「脏 extra_json 不该 500」，不是「免确认」。
+        resp = export_accounts(platform="grok", status=None, confirm=True)
         assert resp is not None
 
 
