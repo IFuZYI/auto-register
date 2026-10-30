@@ -99,6 +99,11 @@ password/token 改成落盘密文（D-01/D-02）。
   时判断目录存在 → 18:46 构建、18:42 启动的进程在 18:49 整站 404。改成先 `makedirs`
   再无条件挂载。
 
+### 12. `7d04b14` 整库导出确认 + RT 路线收件渠道的行为断言
+- `GET /api/accounts/export` 必须 `?confirm=1`、≤5000 条、`no-store`（F9）。
+- 新增 6 条行为测试替换「源码里出现 `self.mailbox` 就算过」的断言；**变异验证**：
+  把两处 `mail_provider=self.mailbox` 改成 `None`，新增用例立刻红。
+
 ### 11. `c2c502b` 之外的迁移防护
 `test_migration_index_parity.py` 5 条 + 老库补 `tags` 1 条：空库/真库/老库三条路径
 都钉住（模型、迁移、生产形态三方一致）。
