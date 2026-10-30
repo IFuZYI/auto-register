@@ -120,6 +120,19 @@ def sync_panel_endpoint(panel_key: str, platform: str = "", account_ids: str = "
     summary = sync_local_from_remote(local_rows, remote_accounts, panel_key=key)
     summary["panel"] = key
     summary["remote_error"] = ""
+    # **空结果要说清楚为什么**（panels 审计 F-06）：一个都没登记时，上面这行
+    # 会安静地返回 `{pulled: 0, skipped: N}`，界面上就是「点了没反应」。
+    # 生产库实测 CPA 0/667 登记 —— 用户不知道要先登记，只会以为同步坏了。
+    from services.panel_enrollment import is_enrolled
+
+    enrolled = sum(1 for row in local_rows if is_enrolled(row.get("extra"), key))
+    summary["enrolled"] = enrolled
+    summary["candidates"] = len(local_rows)
+    if local_rows and enrolled == 0:
+        summary["reason"] = (
+            f"没有任何账号登记到「{key}」：先在该面板的对比页把账号推送/登记，"
+            "拉回才有对象（ADR-0002：只同步已登记账号）。"
+        )
     return summary
 
 

@@ -179,3 +179,66 @@ class SyncEndpointPlatformScopeTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class EmptyEnrollmentReasonTests(unittest.TestCase):
+    """一个账号都没登记时，拉回必须说明原因（panels 审计 F-06）。
+
+    原来返回 `{pulled: 0, skipped: N}`，界面上就是「点了没反应」——
+    生产库实测 CPA 0/667 登记。
+    """
+
+    def _client(self):
+        import main as main_mod
+        from fastapi.testclient import TestClient
+
+        return TestClient(main_mod.app)
+
+    def test_reason_is_returned_when_nothing_is_enrolled(self):
+        local_rows = [
+            {
+                "id": 1,
+                "email": "a@x.com",
+                "platform": "chatgpt",
+                "updated_at": "2026-10-01T00:00:00+00:00",
+                "extra": {"access_token": "at"},  # 没有 panel_uploads → 未登记
+            },
+            {
+                "id": 2,
+                "email": "b@x.com",
+                "platform": "chatgpt",
+                "updated_at": "2026-10-01T00:00:00+00:00",
+                "extra": {},
+            },
+        ]
+        with mock.patch(
+            "services.panel_comparison_cache.fetch_panel_raw",
+            return_value=(local_rows, [], ""),
+        ):
+            with self._client() as client:
+                r = client.post("/api/integrations/panels/cpa/sync")
+        self.assertEqual(r.status_code, 200, r.text[:300])
+        body = r.json()
+        self.assertEqual(body["enrolled"], 0)
+        self.assertEqual(body["candidates"], 2)
+        self.assertIn("没有任何账号登记到", body.get("reason", ""))
+
+    def test_no_reason_when_something_is_enrolled(self):
+        local_rows = [
+            {
+                "id": 1,
+                "email": "a@x.com",
+                "platform": "chatgpt",
+                "updated_at": "2026-10-01T00:00:00+00:00",
+                "extra": {"panel_uploads": {"cpa": {"at": "2026-10-01T00:00:00+00:00"}}},
+            }
+        ]
+        with mock.patch(
+            "services.panel_comparison_cache.fetch_panel_raw",
+            return_value=(local_rows, [], ""),
+        ):
+            with self._client() as client:
+                r = client.post("/api/integrations/panels/cpa/sync")
+        body = r.json()
+        self.assertEqual(body["enrolled"], 1)
+        self.assertNotIn("reason", body)
