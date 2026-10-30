@@ -187,6 +187,19 @@ def build_status_update(panel_key: str, account: Any, remote: Optional[RemoteAcc
     }
 
 
+#: 动作 id → 面板 key。**唯一的映射处**。
+#:
+#: 以前这份映射有三份：`api/actions.py:_PANEL_STATUS_ACTIONS`、ChatGPT 插件里的
+#: `"sub2api" if action_id == "sync_sub2api_status" else "chatgpt2api"` 三元式、
+#: Grok 插件里写死的 `"grok2api"`。加一个面板要改三处，漏一处就是「动作能点、
+#: 同步到错的面板」。
+ACTION_PANEL_KEYS: dict[str, str] = {
+    "sync_sub2api_status": "sub2api",
+    "sync_chatgpt2api_status": "chatgpt2api",
+    "sync_grok2api_status": "grok2api",
+}
+
+
 def sync_panel_status_batch(panel_key: str, accounts: list[Any]) -> dict[int, dict[str, Any]]:
     """批量：拉一次远端列表，把状态写回每个账号（返回 `{account_id: update}`）。
 
@@ -230,6 +243,7 @@ def sync_panel_status_batch(panel_key: str, accounts: list[Any]) -> dict[int, di
 
 
 __all__ = [
+    "ACTION_PANEL_KEYS",
     "build_status_update",
     "classify_remote_status",
     "sync_panel_status_batch",

@@ -118,11 +118,18 @@ def apply_action_result(
         raw_data = result.get("data")
         data: dict = raw_data if isinstance(raw_data, dict) else {}
         status_reason = ""
-        if action_id == "probe_local_status":
+        # 按**能力**分派，不再逐个比较动作 id：`check_plus_trial` 与
+        # `probe_local_status` 同属 PROBE，`sync_sub2api_status` /
+        # `sync_chatgpt2api_status` 与 `sync_cliproxyapi_status` 同属 SYNC_STATUS。
+        # 它们的结果里没有 `probe` / `sync` 键 → 策略函数收到 None → 返回空串
+        # → 不落库，与改造前逐 id 分派完全一致（`tests/test_capability_dispatch.py`
+        # 钉住了这一点，包括「禁用不被无信号的同步洗掉」）。
+        capability = capability_of(action_id)
+        if capability is Capability.PROBE:
             status_reason = apply_chatgpt_status_policy(acc_model, local_probe=data.get("probe"))
-        elif action_id == "sync_cliproxyapi_status":
+        elif capability is Capability.SYNC_STATUS:
             status_reason = apply_chatgpt_status_policy(acc_model, remote_sync=data.get("sync"))
-        elif action_id == "refresh_token":
+        elif capability is Capability.REFRESH:
             # 刷新链自己认过封禁措辞，这里只把结论交给共享策略落状态。
             # 刷新成功（ok）是正向信号 → usable=True 让过期/失效恢复「正常」。
             status_reason = apply_chatgpt_status_policy(

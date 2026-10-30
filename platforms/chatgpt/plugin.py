@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 
 from core.base_mailbox import BaseMailbox
 from core.models.account import AccountRecord
+from services.panel_status_sync import ACTION_PANEL_KEYS
 from core.base_platform import Account, BasePlatform, RegisterConfig
 from core.registry import register
 from modules.platforms import create_application_platform_registration_service
@@ -641,12 +642,13 @@ class ChatGPTPlatform(BasePlatform):
             )
             return {"ok": ok, "data": msg}
 
-        if action_id in ("sync_sub2api_status", "sync_chatgpt2api_status"):
+        if action_id in ACTION_PANEL_KEYS and action_id != "sync_grok2api_status":
             # 单账号版（批量端点有专用分支，一次拉列表写回所有账号）。
             # 读面板列表里的状态字段写回本地（不做探活 —— 面板自己跑 token 刷新）。
             from services.panel_status_sync import sync_panel_status_batch
 
-            panel_key = "sub2api" if action_id == "sync_sub2api_status" else "chatgpt2api"
+            # 面板 key 从共享映射取，不再写 `"sub2api" if ... else "chatgpt2api"`
+            panel_key = ACTION_PANEL_KEYS[action_id]
             account_id = str(a.id or (a.extra or {}).get("account_id") or "")
             probe = AccountRecord(platform="chatgpt", email=a.email, id=account_id)
             updates = sync_panel_status_batch(panel_key, [probe])

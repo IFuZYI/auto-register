@@ -16,6 +16,7 @@ from services.chatgpt_account_state import (
     filter_accounts_by_plus_status,
 )
 from services.chatgpt_sync import update_account_model_cliproxy_sync
+from services.panel_status_sync import ACTION_PANEL_KEYS
 
 router = APIRouter(prefix="/actions", tags=["actions"])
 
@@ -172,11 +173,9 @@ def _resolve_batch_accounts(platform: str, body: BatchActionRequest, session: Se
 #:
 #: 这三个面板的列表接口自带权威状态，读回来即可（不做探活 —— 它们自己跑
 #: token 刷新，再用本地 token 打一遍会与面板抢 RT，见 `services/panel_status_sync.py`）。
-_PANEL_STATUS_ACTIONS: dict[str, str] = {
-    "sync_sub2api_status": "sub2api",
-    "sync_chatgpt2api_status": "chatgpt2api",
-    "sync_grok2api_status": "grok2api",
-}
+#: 动作 id → 面板 key。映射本身住在服务层（`services/panel_status_sync.py`），
+#: 这里只转出 —— 两个插件也要用同一份，各写一份就会漂移。
+_PANEL_STATUS_ACTIONS: dict[str, str] = ACTION_PANEL_KEYS
 
 
 def _execute_batch_panel_status(

@@ -23,6 +23,8 @@ from pathlib import Path
 from typing import Any, Optional
 
 from core.base_mailbox import BaseMailbox
+from services.panel_status_sync import ACTION_PANEL_KEYS
+from core.models.account import AccountRecord
 from core.base_platform import Account, AccountStatus, BasePlatform, RegisterConfig
 from core.environment import EnvironmentNotReadyError
 from core.registry import register
@@ -627,11 +629,10 @@ class GrokPlatform(BasePlatform):
             # 读 grok2api 列表里的 `authStatus` + `enabled` 写回本地。
             from services.panel_status_sync import sync_panel_status_batch
 
-            account_id = getattr(account, "id", None) or int(extra.get("account_id") or 0) or 0
-            probe = type("A", (), {
-                "id": account_id, "email": account.email, "platform": "grok",
-            })()
-            updates = sync_panel_status_batch("grok2api", [probe])
+            # 主键是 UUID（ADR-0008）：`int(...)` 兜底会在拿到 UUID 时直接抛。
+            account_id = str(getattr(account, "id", None) or extra.get("account_id") or "")
+            probe = AccountRecord(platform="grok", email=account.email, id=account_id)
+            updates = sync_panel_status_batch(ACTION_PANEL_KEYS[action_id], [probe])
             update = updates.get(account_id, {})
             ok = bool(update.get("ok"))
             message = str(update.get("message") or "同步完成")
