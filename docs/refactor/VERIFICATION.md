@@ -7,12 +7,13 @@
 
 | 层面 | 结果 |
 |---|---|
-| 单元/集成测试 | **3006 passed**，11 failed（全部是 camoufox 浏览器未安装，见 §五） |
-| 黑盒冒烟（sqlite 后端） | **44/44 步通过** |
-| 黑盒冒烟（JSON 后端） | **44/44 步通过** |
-| 与 base commit `5ba4bac` 对比 | base **43/43**，refactor **44/44**（多的一条是新端点 `/api/config/schema`） |
+| 单元/集成测试 | **3020 passed / 0 failed / 16 skipped**（175s） |
+| 黑盒冒烟（sqlite 后端） | **45/45 步通过** |
+| 黑盒冒烟（JSON 后端） | **45/45 步通过** |
+| 与 base commit `5ba4bac` 对比 | base **44/44**，refactor **45/45**（多的一条是新端点 `/api/config/schema`） |
 | 真 uvicorn 起服务 | 6 个主端点全 200，建账号/详情/列表契约正确 |
 | 注册任务真跑 | 建任务 → 执行 → `status=done` / 5 条日志 / 完成摘要，**与 base 逐字一致** |
+| pyflakes 静态检查 | `undefined name` **7 → 0**（其中 5 条是真 NameError） |
 
 ## 二、怎么验的
 
@@ -80,21 +81,29 @@ curl /api/runtime /api/accounts /api/actions/chatgpt /api/config /api/tasks /api
 | JSON 后端导出 | **500** | 200 |
 | JSON 后端号池汇总 | **500** | 200 |
 
-## 五、11 个失败测试：环境，不是代码
+## 五、camoufox：从 11 failed 到 0 failed
+
+最初全量是 `2998 passed / 11 failed`，11 条全部同一个原因：
 
 ```
 EnvironmentNotReadyError: camoufox 浏览器未安装（包配对 156.0.1-beta.36）
 ```
 
-分布：`test_executor_drives_path.py`×4、`test_grok_pool_bookkeeping.py`×4、
-`test_grok_send_code_rejection.py`×2、`test_grok_platform.py`×1。
+这是 `platforms/grok/plugin.py` 的 fail-fast 预检**故意**报的错。在 base commit
+的独立 worktree 上逐条复现，**11 failed / 58 passed，一条不差** —— 所以它是环境，
+不是重构。
 
-这是 `platforms/grok/plugin.py` 的 fail-fast 预检**故意**报的错（注释原文：
-「包升级后没跑 `camoufox fetch` 是常见形态」）。在 base commit 的独立 worktree
-上逐条复现，**11 failed / 58 passed，一条不差**。
+装好浏览器（1.2 GB）之后：**10 条立刻转绿，剩 1 条**：
 
-浏览器二进制 1.2 GB，正在 `curl` 下载并装到 `~/.cache/camoufox/browsers/official/`。
-装好后这 11 条应当全绿 —— 届时本节更新为「0 failed」。
+| 测试 | 真因 | 处理 |
+|---|---|---|
+| `test_grok_platform.py::test_mint_script_ported` | 断言里写死 `/home/Register/scripts/...`（作者机器路径） | 改成仓库根相对，断言内容不变 |
+
+`camoufox fetch` 在本机装不上的原因也查清了：`camoufox_path()` 发现缓存目录
+非空但缺 `.0.5_FLAG` 会 **`rmtree` 整个目录**，于是边下边删。手工装法（含
+`version.json` 的字段陷阱）已写进 `register-repo-runbook` 技能。
+
+最终：**3020 passed / 0 failed / 16 skipped**。
 
 ## 六、本机验不了的（需要生产侧）
 
@@ -105,3 +114,4 @@ EnvironmentNotReadyError: camoufox 浏览器未安装（包配对 156.0.1-beta.3
 | 真实注册（出号） | 需要真邮箱服务 + 代理 + 打码平台账号 |
 | 面板推送 | 需要真面板地址与密钥 |
 | 前端 `tsc` | 无 `frontend/node_modules`（仓库从未有过这道门） |
+| Grok 真注册 | 浏览器已装、路径已通，但出号要真代理 + 真 xAI 账号 |

@@ -12,11 +12,22 @@ cd /data/workspace/Register/.worktrees/refactor
 
 ## 结果
 
+**最新（浏览器已装、全部修完）：**
+
+```
+3020 passed, 0 failed, 16 skipped, 190 subtests passed  (175 秒)
+```
+
+阶段 0 基线（当时 camoufox 未装）：
+
 ```
 2948 passed, 11 failed, 16 skipped, 186 subtests passed  (约 174 秒)
 ```
 
-## 这 11 个失败是**既有环境问题**，不是回归
+> 11 条已清零，经过见 `VERIFICATION.md` §五：10 条是浏览器二进制缺失，
+> 1 条是测试里写死作者机器的绝对路径。**「11 个失败」这个基线口径作废。**
+
+## 当时的 11 个失败是**既有环境问题**，不是回归
 
 在 base commit `5ba4bac` 的独立 worktree 上跑同一批测试，11 个**全部复现**：
 
