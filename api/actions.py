@@ -260,7 +260,11 @@ def _execute_batch_cliproxy_sync(accounts: list[AccountModel], session: Session)
     success_count = 0
     failed_count = 0
     for acc_model in accounts:
-        sync_result = sync_results.get(int(acc_model.id or 0), {})
+        # 主键是 UUID 字符串（accounts.id 在 c3f8a1d64b27 里改成了 UUID）。
+        # 这里原本写的是 `int(acc_model.id or 0)` —— 对 UUID 直接 ValueError，
+        # 于是「批量同步 cli 代理状态」对任何账号都是 500。上面那个
+        # `_execute_batch_panel_status` 用的是 `str(...)`，两兄弟不一致就是证据。
+        sync_result = sync_results.get(str(acc_model.id or ""), {})
         update_account_model_cliproxy_sync(acc_model, sync_result, session=session, commit=False)
         ok = is_sync_ok(sync_result)
         if ok:
