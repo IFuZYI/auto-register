@@ -399,12 +399,12 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
                 errors=errors,
                 error=str(e),
             )
-        except Exception:  # noqa: BLE001 - 收尾路径绝不能再抛
-            logger.exception("批量任务失败收尾 finish 失败: %s", task_id)
+        except Exception as exc:  # noqa: BLE001 - 收尾路径绝不能再抛
+            logger.exception("批量任务失败收尾 finish 失败: %s: %s", task_id, exc)
         try:
             persist_task_snapshot(task_id)
-        except Exception:  # noqa: BLE001
-            logger.exception("批量任务失败收尾快照失败: %s", task_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("批量任务失败收尾快照失败: %s: %s", task_id, exc)
         _api.task_store.cleanup()
         return
 
@@ -422,8 +422,8 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
     # （actions 审计 F-03，实测）。
     try:
         _api.log(task_id, summary)
-    except Exception:  # noqa: BLE001 - 日志写不进去也要把任务结束掉
-        logger.exception("任务收尾日志写入失败（继续结束任务）: %s", task_id)
+    except Exception as exc:  # noqa: BLE001 - 日志写不进去也要把任务结束掉
+        logger.exception("任务收尾日志写入失败（继续结束任务）: %s: %s", task_id, exc)
     finally:
         try:
             _api.task_store.finish(
@@ -434,12 +434,12 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
                 skipped=skipped,
                 errors=errors,
             )
-        except Exception:  # noqa: BLE001 - finish 自身失败只能记日志，不能二次抛出
-            logger.exception("任务 finish 失败: %s", task_id)
+        except Exception as exc:  # noqa: BLE001 - finish 自身失败只能记日志，不能二次抛出
+            logger.exception("任务 finish 失败: %s: %s", task_id, exc)
         try:
             persist_task_snapshot(task_id)
-        except Exception:  # noqa: BLE001
-            logger.exception("任务快照落库失败: %s", task_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("任务快照落库失败: %s: %s", task_id, exc)
         _api.task_store.cleanup()
 
 
@@ -718,8 +718,8 @@ def _run_account_batch_task(
     # 与 `_run_register` 同理：日志写失败不能把 finish() 一起带走（F-03）。
     try:
         _api.log(task_id, f"{prefix}: 成功 {success} 个, 跳过 {skipped} 个, 失败 {len(errors)} 个")
-    except Exception:  # noqa: BLE001
-        logger.exception("批量任务收尾日志写入失败（继续结束任务）: %s", task_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("批量任务收尾日志写入失败（继续结束任务）: %s: %s", task_id, exc)
     finally:
         try:
             _api.task_store.finish(
@@ -730,12 +730,12 @@ def _run_account_batch_task(
                 skipped=skipped,
                 errors=errors,
             )
-        except Exception:  # noqa: BLE001
-            logger.exception("批量任务 finish 失败: %s", task_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("批量任务 finish 失败: %s: %s", task_id, exc)
         try:
             persist_task_snapshot(task_id)
-        except Exception:  # noqa: BLE001
-            logger.exception("批量任务快照落库失败: %s", task_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("批量任务快照落库失败: %s: %s", task_id, exc)
         _api.task_store.cleanup()
 
 
