@@ -273,9 +273,14 @@ def _slim_account_row(row):
     # （复制入口在详情页，走 `GET /api/accounts/{id}`），而一次
     # `page_size=1000` 的列表请求就能拖走整个账号池的密码。
     # 列表只需要「有没有密码」—— 补一个布尔，删掉正文。
-    if "password" in payload:
-        has_password = bool(str(payload.pop("password", "") or "").strip())
-        payload["has_password"] = has_password
+    # T1.4b 之后 `password` 是 property（不再是 pydantic 字段），
+    # `jsonable_encoder` 吐出来的是 `password_cipher`。两个名字都要收，
+    # 否则「有没有密码」的标记会消失，列表页那一列变空白。
+    cipher = payload.pop("password_cipher", None)
+    if cipher is None:
+        cipher = payload.pop("password", None)
+    if cipher is not None:
+        payload["has_password"] = bool(str(cipher or "").strip())
     return payload
 
 

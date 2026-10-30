@@ -64,7 +64,13 @@ class AccountModel(SQLModel, table=True):
     # 邮箱是账号的唯一业务键（大小写无关，写入前经 normalize_email 规范化），
     # 与 platform 组成唯一约束：同一平台同一邮箱只允许一行。
     email: str = Field(index=True)
-    password: str
+    #: 密码的**密文**。数据库列名仍是 `password`（不换列，免一次迁移），
+    #: 但属性名改成 `password_cipher`，好让 `password` 变成一个透明加解密的
+    #: property —— 67 处 `account.password` 一行都不用改。
+    password_cipher: str = Field(
+        default="",
+        sa_column=Column("password", String, nullable=False, server_default=""),
+    )
     user_id: str = ""
     region: str = ""
     token: str = ""
@@ -88,7 +94,12 @@ class AccountModel(SQLModel, table=True):
         `encrypt_extra` 对已是 `v1:` 的值跳过，所以「从库里读出来再构造一次」
         不会套娃。
         """
+        # `password` 不是字段（是 property），pydantic 不认这个关键字 ——
+        # 先摘出来，构造完再经 setter 加密写进 `password_cipher`。
+        password = data.pop("password", None)
         super().__init__(**data)
+        if password is not None:
+            self.password = password
         raw = getattr(self, "extra_json", "") or ""
         if not raw.strip():
             return
@@ -103,6 +114,20 @@ class AccountModel(SQLModel, table=True):
         sealed = encrypt_extra(payload)
         if sealed != payload:
             self.extra_json = json.dumps(sealed, ensure_ascii=False)
+
+    # ------------------------------------------------------------ 密码
+    @property
+    def password(self) -> str:
+        """明文密码。落盘的是密文，这里透明解密（老明文原样通过）。"""
+        from core.credential_crypto import decrypt_text
+
+        return decrypt_text(self.password_cipher)
+
+    @password.setter
+    def password(self, value: Any) -> None:
+        from core.credential_crypto import encrypt_text
+
+        self.password_cipher = encrypt_text("" if value is None else str(value))
 
     def get_extra(self) -> dict:
         """解析 extra_json 为字典。

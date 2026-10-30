@@ -118,7 +118,9 @@ def json_record_to_model(record: dict[str, Any]) -> AccountModel:
         for key, value in record.items()
         if key not in _MODEL_SKIP_KEYS
     }
-    columns = set(AccountModel.model_fields.keys())
+    # `password` 不是 pydantic 字段（是透明加解密的 property），但构造器认这个
+    # 关键字 —— 不把它加回来，JSON 后端读出来的账号密码全是空串。
+    columns = set(AccountModel.model_fields.keys()) | {"password"}
     kwargs = {k: v for k, v in kwargs.items() if k in columns}
     return AccountModel(**kwargs)
 
@@ -487,7 +489,13 @@ class AccountRepository:
             "id": getattr(model, "id", None),
             "platform": str(getattr(model, "platform", "") or ""),
             "email": normalize_email(getattr(model, "email", "") or ""),
-            "password": str(getattr(model, "password", "") or ""),
+            # 写**密文**：JSON 后端与 SQLite 后端必须落同一种形态，
+            # 否则「SQLite 里是密文、JSON 里是明文」只在切换后端时才暴露。
+            "password": str(
+                getattr(model, "password_cipher", None)
+                or getattr(model, "password", "")
+                or ""
+            ),
             "user_id": str(getattr(model, "user_id", "") or ""),
             "region": str(getattr(model, "region", "") or ""),
             "token": str(getattr(model, "token", "") or ""),
