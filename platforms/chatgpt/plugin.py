@@ -37,7 +37,8 @@ def _access_token_claims(token: object) -> tuple[int, int]:
         iat = int(claims.get("iat") or 0)
         exp = int(claims.get("exp") or 0)
         return max(0, iat), max(0, exp)
-    except Exception:  # noqa: BLE001 - 解不出声明不影响刷新结论
+    except Exception as exc:  # noqa: BLE001 - 解不出声明不影响刷新结论
+        logger.debug("AT 声明解析失败（不影响刷新结论）: %s", exc)
         return 0, 0
 
 
