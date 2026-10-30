@@ -303,7 +303,10 @@ class TestTurnstileModes(unittest.TestCase):
     def test_mint_script_ported(self):
         from pathlib import Path
 
-        script = Path("/home/Register/scripts/grok_turnstile_mint.py")
+        # 相对仓库根，不写死 `/home/Register` —— 那个绝对路径只在作者机器上成立，
+        # 别的 checkout / CI 上这条永远红（同 `tests/test_api_integration.py:19`
+        # 已经写过的理由）。
+        script = Path(__file__).resolve().parents[1] / "scripts" / "grok_turnstile_mint.py"
         self.assertTrue(script.exists(), "屏外 mint 脚本未移植")
         content = script.read_text()
         for flag in ("--site-key", "--url", "--proxy", "--chrome", "--no-headless"):

@@ -23,6 +23,14 @@ EMAIL = "status-sync@example.com"
 
 class OutlookStatusSyncTests(unittest.TestCase):
     def setUp(self):
+        # 全量跑的时候，前面某些测试会把共享库的表整个删掉（迁移/建库类测试），
+        # 这条文件单独跑是绿的、全量跑就 `no such table: outlook_accounts`。
+        # `create_all` 幂等，自己把表兜住，别依赖执行顺序。
+        from sqlmodel import SQLModel
+
+        from core.db import OutlookAccountModel, current_engine  # noqa: F401 - 注册元数据
+
+        SQLModel.metadata.create_all(current_engine())
         self._drop()
 
     def tearDown(self):
