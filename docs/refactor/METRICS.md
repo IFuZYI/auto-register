@@ -285,3 +285,20 @@ API 层，归 T3.3（`PanelAdapter`）一起搬。
 SQLite 分支按 id 取 ORM 行再改（不再假设传进来的是 ORM 实例）。
 
 至此 M3（账号/代理鸭子类型空壳）= **0**。
+
+## T1.5 记录：2FA 写前日志的密钥加密
+
+`services/chatgpt_two_factor.py` 的写前日志（`SECRETS_DIR/totp_journal/<digest>.json`）
+原先把 `totp_secret` **明文**落盘，只有目录 0700 / 文件 0600 兜着。备份、同步盘、
+`data_bundle` 导出都会把它带走。
+
+现在写 `totp_secret_cipher`（`v1:` 信封）。**键名换掉而不是复用**：老版本的读侧会把
+`totp_secret` 直接当明文写进库，复用键名等于让旧进程把密文当密钥写进去（2FA 直接废掉）。
+
+读侧 `_read_journal_secret()` 两种格式都认：新格式解密，老格式（明文）原样返回 ——
+升级前写下的条目还在盘上。
+
+**解密失败不吞**：异常冒到逐条的 `except`，记一行「恢复失败」并**保留文件**。
+这条路径的文件是密钥的**唯一副本**（服务端不下发第二次），删掉等于把号永久锁死。
+`tests/test_totp_journal_crypto.py` 三条测试分别钉住「文件里没有明文」「老明文能恢复」
+「解不开保留文件」。
