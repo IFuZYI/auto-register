@@ -20,6 +20,10 @@
 """
 from __future__ import annotations
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 import re
 import time
 from typing import Any, Callable, Optional
@@ -153,7 +157,7 @@ def _log(fn: LogFn, msg: str) -> None:
         try:
             fn(msg)
         except Exception:
-            pass
+            logger.debug("忽略异常（保留原行为）", exc_info=True)
 
 
 def _wait_for_sso_cookie(
@@ -332,7 +336,7 @@ def _submit_signup_form(page: Any) -> None:
         page.locator("form button[type=submit], button[type=submit]").last.click(timeout=3000)
         return
     except Exception:
-        pass
+        logger.debug("忽略异常（保留原行为）", exc_info=True)
     page.keyboard.press("Enter")
 
 
@@ -400,7 +404,7 @@ def register_grok_via_browser(
                     cb.check(timeout=4000)
                     page.wait_for_timeout(700)
             except Exception:
-                pass
+                logger.debug("忽略异常（保留原行为）", exc_info=True)
 
             # 进邮箱注册视图。
             #
@@ -422,7 +426,7 @@ def register_grok_via_browser(
                 try:
                     page.get_by_role("button", name="Sign up with email").click(timeout=6000)
                 except Exception:
-                    pass
+                    logger.debug("忽略异常（保留原行为）", exc_info=True)
                 page.wait_for_timeout(2500)
                 if page.locator(email_input).count():
                     break
@@ -430,7 +434,7 @@ def register_grok_via_browser(
                 try:
                     page.reload(wait_until="domcontentloaded", timeout=70000)
                 except Exception:
-                    pass
+                    logger.debug("忽略异常（保留原行为）", exc_info=True)
             page.wait_for_timeout(800)
             _log(log, "[Grok] 已进入邮箱注册视图")
 

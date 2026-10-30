@@ -346,7 +346,7 @@ class TraceMixin:
             if matches:
                 return matches[0][1]
         except Exception:
-            pass
+            logger.debug("忽略异常（保留原行为）", exc_info=True)
         try:
             return (self.session.cookies.get(name, domain=".chatgpt.com") or "").strip()
         except Exception:
@@ -388,7 +388,7 @@ class TraceMixin:
             if parsed.scheme and parsed.netloc:
                 origin = f"{parsed.scheme}://{parsed.netloc}"
         except Exception:
-            pass
+            logger.debug("忽略异常（保留原行为）", exc_info=True)
 
         fp = self._fingerprint
         headers = {

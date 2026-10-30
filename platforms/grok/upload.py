@@ -7,6 +7,10 @@
 """
 from __future__ import annotations
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 import json
 from typing import Any, Optional
 
@@ -105,7 +109,7 @@ def upload_to_cpa(
             try:
                 mime.close()
             except Exception:
-                pass
+                logger.debug("忽略异常（保留原行为）", exc_info=True)
 
 
 def upload_to_sub2api(
@@ -186,7 +190,7 @@ def resolve_sub2api_group(
             except Exception:
                 continue
     except Exception:
-        pass
+        logger.debug("忽略异常（保留原行为）", exc_info=True)
     return None
 
 

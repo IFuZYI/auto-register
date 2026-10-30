@@ -1,6 +1,10 @@
 """微软邮箱的四种取码后端：IMAP / Graph / MailAPI URL（策略模式）。"""
 from __future__ import annotations
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 from abc import ABC, abstractmethod
 from typing import Any, Optional
 
@@ -81,7 +85,7 @@ class OutlookImapMailboxBackend(OutlookMailboxBackend):
                 if imap_conn:
                     imap_conn.logout()
             except Exception:
-                pass
+                logger.debug("忽略异常（保留原行为）", exc_info=True)
 
     def wait_for_code(
         self,
@@ -211,7 +215,7 @@ class OutlookImapMailboxBackend(OutlookMailboxBackend):
                         if imap_conn:
                             imap_conn.logout()
                     except Exception:
-                        pass
+                        logger.debug("忽略异常（保留原行为）", exc_info=True)
             return None
 
         return self.mailbox._run_polling_wait(
@@ -271,7 +275,7 @@ class OutlookGraphMailboxBackend(OutlookMailboxBackend):
                             if message_id:
                                 seen.add(f"{folder}:{message_id}")
                     except Exception:
-                        pass
+                        logger.debug("忽略异常（保留原行为）", exc_info=True)
                 else:
                     raise
         return seen

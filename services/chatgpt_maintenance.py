@@ -44,6 +44,10 @@
 
 from __future__ import annotations
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 from services.task_store_io import persist_task_snapshot
 
 from dataclasses import dataclass, field
@@ -377,7 +381,7 @@ def _default_execute(account_id: str) -> dict[str, Any]:
                     account_repository.save(row, session=s)
                     s.commit()
         except Exception:  # noqa: BLE001
-            pass
+            logger.debug("忽略异常（保留原行为）", exc_info=True)
 
     result = instance.execute_action("refresh_token", account, {})
     with platform_session("chatgpt") as s:
@@ -680,7 +684,7 @@ def _close_auto_task(
         persist_task_snapshot(task_id)
         _api.task_store.cleanup()
     except Exception:  # noqa: BLE001 - 收尾失败只影响可见性
-        pass
+        logger.debug("忽略异常（保留原行为）", exc_info=True)
 
 
 def _make_logger(

@@ -15,6 +15,10 @@
 """
 from __future__ import annotations
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 import json
 import os
 import threading
@@ -943,7 +947,7 @@ class GrokPlatform(BasePlatform):
 
                     return MailboxAccount(email=email, account_id=token)
                 except Exception:
-                    pass
+                    logger.debug("忽略异常（保留原行为）", exc_info=True)
         # 无凭证：交给调用方重新建邮（只有邮箱地址收不到码）
         return None
 

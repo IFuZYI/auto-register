@@ -300,7 +300,7 @@ def _credential_rejection_result(exc: Exception, checked_at: str) -> Optional[di
         if isinstance(body, dict):
             message = str(body.get("error") or "").strip()
     except Exception:
-        pass
+        logger.debug("忽略异常（保留原行为）", exc_info=True)
     if not message:
         message = str(getattr(response, "text", "") or "").strip()
     if "auth token" not in message and "auth credential" not in message:

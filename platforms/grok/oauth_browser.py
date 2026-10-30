@@ -18,6 +18,10 @@
 """
 from __future__ import annotations
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 import time
 import urllib.parse
 from typing import Any, Callable, Optional
@@ -30,7 +34,7 @@ def _log(fn: LogFn, msg: str) -> None:
         try:
             fn(msg)
         except Exception:
-            pass
+            logger.debug("忽略异常（保留原行为）", exc_info=True)
 
 
 # 授权按钮文案（多语言 + 多种变体）
@@ -89,7 +93,7 @@ def oauth_device_via_browser(
 
         exe = find_chrome() or ""
     except Exception:
-        pass
+        logger.debug("忽略异常（保留原行为）", exc_info=True)
 
     launch_kwargs: dict[str, Any] = {"headless": headless, "args": launch_args}
     if exe:
@@ -122,7 +126,7 @@ def oauth_device_via_browser(
                         {"name": "sso-rw", "value": sso_cookie, "domain": ".x.ai", "path": "/"},
                     ])
                 except Exception:
-                    pass
+                    logger.debug("忽略异常（保留原行为）", exc_info=True)
 
                 page = ctx.new_page()
 
@@ -159,7 +163,7 @@ def oauth_device_via_browser(
                     try:
                         page.wait_for_load_state("networkidle", timeout=15000)
                     except Exception:
-                        pass
+                        logger.debug("忽略异常（保留原行为）", exc_info=True)
                 except Exception as exc:
                     _log(log, f"[Grok] 授权页导航异常: {type(exc).__name__}")
 
@@ -199,7 +203,7 @@ def oauth_device_via_browser(
                         if "/device/done" in str(page.url):
                             approved = True
                     except Exception:
-                        pass
+                        logger.debug("忽略异常（保留原行为）", exc_info=True)
                 if sso_rejected:
                     # 明确拒绝 → 由调用方把账号标失效（需要重新登录）
                     return {"sso_rejected": True}
@@ -208,7 +212,7 @@ def oauth_device_via_browser(
                 try:
                     browser.close()
                 except Exception:
-                    pass
+                    logger.debug("忽略异常（保留原行为）", exc_info=True)
     except Exception as exc:
         _log(log, f"[Grok] 浏览器授权异常: {type(exc).__name__}: {str(exc)[:120]}")
         return None
@@ -274,7 +278,7 @@ def oauth_device_via_browser(
         try:
             sess.close()
         except Exception:
-            pass
+            logger.debug("忽略异常（保留原行为）", exc_info=True)
 
     _log(log, f"[Grok] token 轮询失败: {last_err}")
     return None

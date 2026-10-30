@@ -9,6 +9,10 @@
 
 from __future__ import annotations
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 import time as _time
 from typing import Any, Optional
 
@@ -22,7 +26,7 @@ def _read_extra(account: Any) -> dict:
             if isinstance(data, dict):
                 return data
         except Exception:  # noqa: BLE001 - 坏数据不该打断状态判定
-            pass
+            logger.debug("忽略异常（保留原行为）", exc_info=True)
     extra = getattr(account, "extra", None)
     return extra if isinstance(extra, dict) else {}
 

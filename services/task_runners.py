@@ -10,6 +10,10 @@
 """
 from __future__ import annotations
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 from services.task_store_io import persist_task_snapshot
 
 import threading
@@ -349,7 +353,7 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
         try:
             _api.log(task_id, f"致命错误: {e}")
         except Exception:
-            pass
+            logger.debug("忽略异常（保留原行为）", exc_info=True)
         _api.task_store.finish(
             task_id,
             status="failed",
@@ -608,7 +612,7 @@ def _run_account_batch_task(
         try:
             _api.log(task_id, f"致命错误: {e}")
         except Exception:
-            pass
+            logger.debug("忽略异常（保留原行为）", exc_info=True)
         _api.task_store.finish(
             task_id,
             status="failed",

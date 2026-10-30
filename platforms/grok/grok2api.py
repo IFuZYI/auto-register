@@ -21,6 +21,10 @@ API Key），token 有效期约 10 分钟，这里做进程内缓存并在 401 �
 """
 from __future__ import annotations
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 import json
 import threading
 import time
@@ -174,7 +178,7 @@ class Grok2ApiClient:
                 try:
                     multipart.close()
                 except Exception:
-                    pass
+                    logger.debug("忽略异常（保留原行为）", exc_info=True)
 
     def login(self, *, force: bool = False) -> str:
         """用户名+密码换 access token（进程内缓存）。"""
@@ -380,7 +384,7 @@ class Grok2ApiClient:
                 try:
                     log(msg)
                 except Exception:
-                    pass
+                    logger.debug("忽略异常（保留原行为）", exc_info=True)
 
         ok, msg = self.import_sso(sso)
         if not ok:

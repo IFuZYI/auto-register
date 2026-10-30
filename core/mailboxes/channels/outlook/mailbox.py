@@ -1,6 +1,10 @@
 """OutlookMailbox：微软邮箱本地账号池（号池取号、OAuth、Graph/IMAP 取件）。"""
 from __future__ import annotations
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 import threading
 import time
 from typing import Any, Optional
@@ -760,7 +764,7 @@ class OutlookMailbox(BaseMailbox):
                     try:
                         imap_conn.logout()
                     except Exception:
-                        pass
+                        logger.debug("忽略异常（保留原行为）", exc_info=True)
             if password:
                 try:
                     imap_conn = imaplib.IMAP4_SSL(host, self._imap_port, timeout=30)
@@ -771,7 +775,7 @@ class OutlookMailbox(BaseMailbox):
                     try:
                         imap_conn.logout()
                     except Exception:
-                        pass
+                        logger.debug("忽略异常（保留原行为）", exc_info=True)
 
         raise RuntimeError(f"微软邮箱 IMAP 登录失败: {last_error}")
 

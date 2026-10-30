@@ -7,6 +7,10 @@ UIDVALIDITY 变化时发生冲突。
 
 from __future__ import annotations
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 import imaplib
 import re
 from datetime import datetime, timezone
@@ -129,7 +133,7 @@ class _Connection:
         try:
             self.client.logout()
         except Exception:
-            pass
+            logger.debug("忽略异常（保留原行为）", exc_info=True)
 
 
 def _connect(target: IMAPTarget, timeout: float) -> _Connection:
@@ -143,7 +147,7 @@ def _connect(target: IMAPTarget, timeout: float) -> _Connection:
         try:
             client.logout()
         except Exception:
-            pass
+            logger.debug("忽略异常（保留原行为）", exc_info=True)
         raise ICloudError(
             "invalid_credentials", "iCloud IMAP 用户名或 App 专用密码错误", cause=exc
         ) from exc

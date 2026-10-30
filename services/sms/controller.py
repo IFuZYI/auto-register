@@ -4,6 +4,10 @@
 """
 from __future__ import annotations
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 from typing import Callable, Optional
 
 from services.sms.constants import (
@@ -201,28 +205,28 @@ class PhoneCallbackController:
             try:
                 self.provider.mark_code_failed(self.activation.activation_id, reason=reason)
             except Exception:
-                pass
+                logger.debug("忽略异常（保留原行为）", exc_info=True)
 
     def mark_send_succeeded(self) -> None:
         if self.activation and self.provider:
             try:
                 self.provider.mark_send_succeeded(self.activation.activation_id)
             except Exception:
-                pass
+                logger.debug("忽略异常（保留原行为）", exc_info=True)
 
     def mark_send_failed(self, reason: str = "") -> None:
         if self.activation and self.provider:
             try:
                 self.provider.mark_send_failed(self.activation.activation_id, reason=reason)
             except Exception:
-                pass
+                logger.debug("忽略异常（保留原行为）", exc_info=True)
 
     def stop_reuse(self, reason: str = "") -> None:
         if self.activation and self.provider:
             try:
                 self.provider.stop_reuse(self.activation.activation_id, reason=reason)
             except Exception:
-                pass
+                logger.debug("忽略异常（保留原行为）", exc_info=True)
 
     def cleanup(self) -> None:
         """流程结束（成功或失败）调用：释放未完成的号并解锁。"""
@@ -231,7 +235,7 @@ class PhoneCallbackController:
                 self.provider.cancel(self.activation.activation_id)
                 self.log(f"已释放未使用号码: activation_id={self.activation.activation_id}")
             except Exception:
-                pass
+                logger.debug("忽略异常（保留原行为）", exc_info=True)
             self.activation = None
         self._release_lock()
 

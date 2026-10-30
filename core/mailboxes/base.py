@@ -4,6 +4,10 @@
 modules/、services/、platforms/（依赖方向见 docs/EXTENDING.md）。"""
 from __future__ import annotations
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Optional, Callable
@@ -152,7 +156,7 @@ class BaseMailbox(ABC):
             decoded_bytes = quopri.decodestring(text)
             text = decoded_bytes.decode("utf-8", errors="ignore")
         except Exception:
-            pass
+            logger.debug("忽略异常（保留原行为）", exc_info=True)
         # 清除 HTML 标签并反转义
         text = html.unescape(text)
         text = re.sub(r"(?im)^content-(?:type|transfer-encoding):.*$", " ", text)
@@ -262,7 +266,7 @@ class BaseMailbox(ABC):
             decoded_bytes = quopri.decodestring(text)
             text = decoded_bytes.decode("utf-8", errors="ignore")
         except Exception:
-            pass
+            logger.debug("忽略异常（保留原行为）", exc_info=True)
         # 清除 HTML 标签并反转义
         text = html.unescape(text)
         text = re.sub(r"(?im)^content-(?:type|transfer-encoding):.*$", " ", text)

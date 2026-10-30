@@ -63,7 +63,7 @@ def _get_account_extra(account: Any) -> dict[str, Any]:
             if isinstance(extra, dict):
                 return extra
         except Exception:
-            pass
+            logger.debug("忽略异常（保留原行为）", exc_info=True)
     extra = getattr(account, "extra", {})
     return extra if isinstance(extra, dict) else {}
 
