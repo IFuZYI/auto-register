@@ -288,6 +288,57 @@ class MailImportServiceTests(unittest.TestCase):
             finally:
                 test_engine.dispose()
 
+    def test_microsoft_import_writes_through_the_outlook_repository(self):
+        """邮箱池导入必须走 `OutlookRepository`，不能借 `account_repository`。
+
+        原实现：在 `mailbox_pool_session("outlook")` 里建 `OutlookAccountModel`，
+        却用 `account_repository.save(...)` 落库。SQLite 下靠 session 碰巧写对；
+        JSON 后端下 `account_repository` 会把它当**账号**写进 `accounts.json`
+        —— 池表空着、账号表多出脏行、密码明文（data-layer 审计 D-03）。
+        """
+        from services.mail_imports.schemas import MailImportExecuteRequest
+        from services.mail_imports.providers import MicrosoftMailImportStrategy
+
+        strategy = MicrosoftMailImportStrategy()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            test_engine = create_engine(f"sqlite:///{Path(tmp_dir) / 'mail-imports-repo.db'}")
+            SQLModel.metadata.create_all(test_engine)
+            try:
+                with patch("core.db.engine", test_engine), \
+                     _use_pool_db(test_engine), \
+                     patch("services.mail_imports.providers.OutlookMailbox") as mailbox_cls, \
+                     patch(
+                         "core.db.outlook_repository.OutlookRepository.add",
+                         return_value={
+                             "id": 7,
+                             "email": "repo@outlook.com",
+                             "account_type": "microsoft_oauth",
+                             "client_id": "client-a",
+                             "refresh_token": "refresh-a",
+                             "enabled": True,
+                         },
+                     ) as repo_add, \
+                     patch("core.db.account_repository.save") as account_save:
+                    mailbox_cls.return_value.probe_oauth_availability.return_value = {
+                        "ok": True,
+                        "reason": "ok",
+                        "message": "微软邮箱可用性检测通过",
+                        "access_token": "token-a",
+                    }
+                    response = strategy.execute(
+                        MailImportExecuteRequest(
+                            type="microsoft",
+                            content="repo@outlook.com----password----client-a----refresh-a",
+                        )
+                    )
+
+                    self.assertEqual(response.summary.success, 1)
+                    repo_add.assert_called_once()
+                    account_save.assert_not_called()
+                    self.assertEqual(response.meta["accounts"][0]["id"], 7)
+            finally:
+                test_engine.dispose()
+
     def test_microsoft_strategy_supports_mixed_oauth_and_mailapi_rows(self):
         from services.mail_imports.schemas import MailImportExecuteRequest
         from services.mail_imports.providers import MicrosoftMailImportStrategy

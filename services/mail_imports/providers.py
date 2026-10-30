@@ -358,45 +358,52 @@ class MicrosoftMailImportStrategy(BaseMailImportStrategy):
                 continue
             passed_records.append(record)
 
-        with mailbox_pool_session("outlook") as session:
-            for record in passed_records:
-                try:
-                    account = OutlookAccountModel(
-                        email=record.email,
-                        password=record.password,
-                        client_id=record.client_id,
-                        refresh_token=record.refresh_token,
-                        account_type=str(record.account_type or ACCOUNT_TYPE_MICROSOFT_OAUTH),
-                        mailapi_url=str(record.mailapi_url or ""),
-                        enabled=bool(request.enabled),
-                        # 新导入的账号落 `unpooled`（未入池），不会立刻被注册任务领走。
-                        # 用户明确要求「账号邮箱要选择导入才能导入邮箱池，不是全部导入」：
-                        # 粘贴一屏邮箱的下一步是**在预览表里勾选**要用的那几个，而不是
-                        # 让它们全部进入可领取状态。iCloud 别名池用的是同一套号池状态语义（unpooled / available / in_use / used）。
-                        status="unpooled",
-                        created_at=_utcnow(),
-                        updated_at=_utcnow(),
-                    )
-                    account_repository.save(account, session=session)
-                    session.commit()
-                    session.refresh(account)
-                    existing_emails.add(normalize_import_email(record.email))
-                    accounts.append({
-                        "id": account.id,
-                        "email": account.email,
-                        "account_type": str(account.account_type or ACCOUNT_TYPE_MICROSOFT_OAUTH),
-                        "has_oauth": bool(
-                            str(account.account_type or ACCOUNT_TYPE_MICROSOFT_OAUTH) == ACCOUNT_TYPE_MICROSOFT_OAUTH
-                            and account.client_id
-                            and account.refresh_token
-                        ),
-                        "enabled": account.enabled,
-                    })
-                    success += 1
-                except Exception as exc:
-                    session.rollback()
-                    failed += 1
-                    errors.append(f"行 {record.line_number}: 创建失败: {str(exc)}")
+        # **必须走 OutlookRepository**：原来在 `mailbox_pool_session("outlook")` 里
+        # 建 `OutlookAccountModel` 却用 `account_repository.save(...)` 落库 ——
+        # SQLite 下靠 session 碰巧写对，JSON 后端下 `account_repository` 会把它
+        # 当成**账号**写进 `accounts.json`：池表空着、账号表多出脏行、密码明文
+        # （data-layer 审计 D-03）。仓储是唯一一套双后端分派。
+        from core.db.outlook_repository import OutlookRepository
+
+        for record in passed_records:
+            try:
+                account = OutlookRepository.add(
+                    email=record.email,
+                    password=record.password,
+                    client_id=record.client_id,
+                    refresh_token=record.refresh_token,
+                    account_type=str(record.account_type or ACCOUNT_TYPE_MICROSOFT_OAUTH),
+                    mailapi_url=str(record.mailapi_url or ""),
+                    enabled=bool(request.enabled),
+                    # 新导入的账号落 `unpooled`（未入池），不会立刻被注册任务领走。
+                    # 用户明确要求「账号邮箱要选择导入才能导入邮箱池，不是全部导入」：
+                    # 粘贴一屏邮箱的下一步是**在预览表里勾选**要用的那几个，而不是
+                    # 让它们全部进入可领取状态。iCloud 别名池用的是同一套号池状态语义
+                    # （unpooled / available / in_use / used）。
+                    status="unpooled",
+                    created_at=_utcnow(),
+                    updated_at=_utcnow(),
+                )
+                existing_emails.add(normalize_import_email(record.email))
+                accounts.append({
+                    "id": account.get("id"),
+                    "email": account.get("email"),
+                    "account_type": str(
+                        account.get("account_type") or ACCOUNT_TYPE_MICROSOFT_OAUTH
+                    ),
+                    "has_oauth": bool(
+                        str(account.get("account_type") or ACCOUNT_TYPE_MICROSOFT_OAUTH)
+                        == ACCOUNT_TYPE_MICROSOFT_OAUTH
+                        and account.get("client_id")
+                        and account.get("refresh_token")
+                    ),
+                    "enabled": bool(account.get("enabled")),
+                })
+                success += 1
+            except Exception as exc:
+                # 仓储自己管事务，这里没有共享 session 可回滚
+                failed += 1
+                errors.append(f"行 {record.line_number}: 创建失败: {exc}")
 
         snapshot = self.get_snapshot(
             MailImportSnapshotRequest(
