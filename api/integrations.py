@@ -32,7 +32,7 @@ router = APIRouter(prefix="/integrations", tags=["integrations"])
 
 class BackfillRequest(BaseModel):
     platforms: list[str] = Field(default_factory=lambda: ["chatgpt"])
-    account_ids: list[int] = Field(default_factory=list)
+    account_ids: list[str | int] = Field(default_factory=list)
     pending_only: bool = False
     status: Optional[str] = None
     email: Optional[str] = None
@@ -145,7 +145,7 @@ def _lookup_account_row(account_id):
     from core.db import account_repository
 
     try:
-        return account_repository.get(int(account_id))
+        return account_repository.get(account_id)
     except Exception:
         return None
 

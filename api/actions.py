@@ -10,6 +10,7 @@ from core.registry import get
 from core.base_platform import RegisterConfig
 from core.config_store import config_store
 from core.time_utils import UtcDatetime
+from services.chatgpt_account_selection import normalize_account_ids
 from services.chatgpt_account_state import (
     apply_chatgpt_status_policy,
     filter_accounts_by_plus_status,
@@ -24,7 +25,7 @@ class ActionRequest(BaseModel):
 
 
 class BatchActionRequest(BaseModel):
-    account_ids: list[int] = []
+    account_ids: list[str | int] = []
     all_filtered: bool = False
     email: str = ""
     status: str = ""
@@ -305,16 +306,12 @@ def _execute_platform_action(
     return result
 
 
-def _resolve_batch_accounts(platform: str, body: BatchActionRequest, session: Session) -> tuple[list[AccountModel], list[int]]:
+def _resolve_batch_accounts(platform: str, body: BatchActionRequest, session: Session) -> tuple[list[AccountModel], list[str]]:
     if body.account_ids:
-        account_ids = []
-        seen = set()
-        for raw in body.account_ids:
-            value = int(raw)
-            if value <= 0 or value in seen:
-                continue
-            seen.add(value)
-            account_ids.append(value)
+        # 与批量任务共用同一套归一（`services.chatgpt_account_selection`）：
+        # 此前这里是一份内联副本，只认正整数，主键换成 UUID 后直接把 422/500
+        # 甩给前端。同一语义只留一处。
+        account_ids = normalize_account_ids(body.account_ids)
 
         if not account_ids:
             raise HTTPException(400, "账号 ID 列表不能为空")
@@ -382,7 +379,7 @@ def _execute_batch_panel_status(
     success_count = 0
     failed_count = 0
     for acc_model in accounts:
-        update = updates.get(int(acc_model.id or 0), {})
+        update = updates.get(str(acc_model.id), {})
         ok = bool(update.get("ok"))
         if ok:
             success_count += 1
@@ -625,7 +622,7 @@ def execute_batch_action(
 @router.post("/{platform}/{account_id}/{action_id}")
 def execute_action(
     platform: str,
-    account_id: int,
+    account_id: str,
     action_id: str,
     body: ActionRequest,
     session: Session = Depends(platform_session_from_path),

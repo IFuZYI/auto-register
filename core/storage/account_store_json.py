@@ -7,17 +7,19 @@
 
 | SQLite | 这里 |
 | --- | --- |
-| `AUTOINCREMENT` 主键 | `_next_id()`：当前最大 id + 1，且**记在文件里** |
+| `AUTOINCREMENT` 主键 | `uuid4()` 字符串（与 SQLite 侧同口径，见 ADR-0008） |
 | `(platform, email)` 唯一 | 先查后决定插入或更新 |
-| `WHERE ... ORDER BY id` | Python 过滤 + 按 id 排序 |
+| `WHERE ... ORDER BY id` | Python 过滤 + 按 `(created_at, id)` 排序 |
 | `LIMIT / OFFSET` | 排序之后切片 |
 
-## id 不复用：为什么要单独记 `next_id`
+## id 形态
 
-SQLite 的 `AUTOINCREMENT` 保证删掉的行 id 不会被后来的行复用。JSON 若用
-「当前最大 id + 1」，删掉最后一个账号后新建就会拿到同一个 id —— 而任务日志、
-面板同步记录、对比页缓存里都可能引用着旧 id，复用会让它们**静默指向另一个
-账号**。所以把游标单独持久化，只增不减。
+主键是 UUID4 字符串，与 SQLite 侧完全一致 —— 两种后端可互换的前提是同一份
+数据搬过去 id 不变。
+
+`_cursor()` / `_next_id()` / `_max_existing_id()` 是 UUID 之前的自增游标，
+**只为读老文件保留**：老 JSON 里还是整数 id，读出来照常能用，写回去不再产生
+新的整数 id。
 
 ## 序列化
 
@@ -26,6 +28,8 @@ ISO 字符串，读回时还原成 datetime —— 否则调用方 `row.created_
 """
 
 from __future__ import annotations
+
+import uuid
 
 from datetime import datetime, timezone
 from pathlib import Path
@@ -65,11 +69,11 @@ def _from_storage(record: dict[str, Any]) -> dict[str, Any]:
                 out[name] = datetime.fromisoformat(value)
             except ValueError:
                 pass
-    if not isinstance(out.get("id"), int):
-        try:
-            out["id"] = int(out.get("id") or 0)
-        except (TypeError, ValueError):
-            pass
+    # 老文件里 id 可能是字符串形式的数字：还原成 int（保持老行为）。
+    # UUID 不能进 int()，否则会被静默吞成 0 —— 那会让所有账号指向同一行。
+    raw_id = out.get("id")
+    if isinstance(raw_id, str) and raw_id.isdigit():
+        out["id"] = int(raw_id)
     return out
 
 
@@ -108,7 +112,9 @@ class AccountStoreJson:
 
     def insert(self, record: dict[str, Any]) -> dict[str, Any]:
         row = _to_storage(record)
-        row["id"] = self._next_id()
+        # 调用方给了主键就用它（UUID 由模型构造时生成，两条后端必须落到同一个
+        # id 上，否则同一账号在 SQLite 与 JSON 里是两个人）。
+        row["id"] = str(row.get("id") or uuid.uuid4())
         now = datetime.now(timezone.utc).isoformat()
         row.setdefault("created_at", now)
         row.setdefault("updated_at", now)
@@ -180,7 +186,9 @@ class AccountStoreJson:
         if needle:
             rows = [r for r in rows if needle in str(r.get("email") or "").lower()]
 
-        rows.sort(key=lambda r: int(r.get("id") or 0))
+        # UUID 没有大小语义，`int(id)` 直接炸。用创建时间还原「先建的在前」，
+        # id 只做同一时刻的稳定 tiebreaker。
+        rows.sort(key=lambda r: (str(r.get("created_at") or ""), str(r.get("id") or "")))
 
         if offset:
             rows = rows[offset:]

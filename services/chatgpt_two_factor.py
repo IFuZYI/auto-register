@@ -367,7 +367,7 @@ def _apply_journal_entry(email: str, secret: str) -> str:
 
 
 def make_secret_persister(
-    account_id: Optional[int] = None,
+    account_id: Optional[str] = None,
     *,
     email: Optional[str] = None,
     log: Optional[Callable[[str], None]] = None,
@@ -401,7 +401,7 @@ def make_secret_persister(
         try:
             with platform_session("chatgpt") as s:
                 if account_id is not None:
-                    row = s.get(AccountModel, int(account_id))
+                    row = s.get(AccountModel, account_id)
                 else:
                     row = s.exec(
                         select(AccountModel).where(AccountModel.email == target_email)

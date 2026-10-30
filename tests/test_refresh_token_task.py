@@ -63,7 +63,7 @@ class RefreshTokenTaskEndpointTests(unittest.TestCase):
             row = session.exec(
                 select(AccountModel).where(AccountModel.email == email)
             ).first()
-            return int(row.id)
+            return str(row.id)
 
     def test_creates_task_for_selected_accounts(self):
         account_id = self._id_of("refresh-me@example.com")
@@ -137,7 +137,7 @@ class RefreshTokenRunnerTests(unittest.TestCase):
             row = session.exec(
                 select(AccountModel).where(AccountModel.email == email)
             ).first()
-            return int(row.id)
+            return str(row.id)
 
     def test_runner_persists_refresh_result_and_finishes_task(self):
         """TestClient 同步跑后台任务，整条链路串起来。"""

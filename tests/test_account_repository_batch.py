@@ -50,11 +50,24 @@ def isolated_db(tmp_path, monkeypatch):
     platform_database_registry.configure({})
 
 
-def _add(platform: str, email: str) -> int:
+def _add(platform: str, email: str) -> str:
     row = account_repository.upsert(
         AccountModel(platform=platform, email=email, password="pw")
     )
-    return int(row.id)
+    return str(row.id)
+
+
+def _add_with_id(platform: str, email: str, row_id: str) -> str:
+    """指定主键插入。
+
+    换成 UUID 之后两个库不可能再自然撞号（旧的自增 int 才会），但「指定
+    platform 时必须过滤 platform」这条保护仍然承重 —— 它防的是「拿别人的 id
+    读到、甚至删掉别人的账号」。所以人为把同一个 id 写进两个库，继续守这条线。
+    """
+    with platform_database_registry.session_for(platform) as sess:
+        sess.add(AccountModel(id=row_id, platform=platform, email=email, password="pw"))
+        sess.commit()
+    return row_id
 
 
 class TestGetMany:
@@ -76,7 +89,7 @@ class TestGetMany:
 
     def test_skips_missing_ids(self, isolated_db):
         present = _add("grok", "a@x.ai")
-        rows = account_repository.get_many([present, 99999])
+        rows = account_repository.get_many([present, "99999"])
         assert [r.id for r in rows] == [present]
 
     def test_deduplicates_repeated_ids(self, isolated_db):
@@ -90,7 +103,7 @@ class TestGetMany:
     def test_matches_individual_get(self, isolated_db):
         """批量结果必须与逐个 get 完全一致（含字段值）。"""
         ids = [_add("grok", f"u{i}@x.ai") for i in range(5)]
-        ids.append(99999)
+        ids.append("99999")
 
         bulk = account_repository.get_many(ids)
         one_by_one = [r for r in (account_repository.get(i) for i in ids) if r is not None]
@@ -139,9 +152,9 @@ class TestDeleteMany:
 
     def test_reports_missing_ids(self, isolated_db):
         present = _add("grok", "a@x.ai")
-        deleted, not_found = account_repository.delete_many([present, 4242])
+        deleted, not_found = account_repository.delete_many([present, "4242"])
         assert deleted == [present]
-        assert not_found == [4242]
+        assert not_found == ["4242"]
 
     def test_preserves_requested_order(self, isolated_db):
         ids = [_add("grok", f"u{i}@x.ai") for i in range(4)]
@@ -160,25 +173,26 @@ class TestDeleteMany:
     def test_matches_individual_delete(self, isolated_db):
         """批量删除的 deleted/not_found 口径必须与逐个 delete 一致。"""
         ids = [_add("grok", f"u{i}@x.ai") for i in range(4)]
-        mixed = [ids[0], 99999, ids[2], 88888]
+        mixed = [ids[0], "99999", ids[2], "88888"]
 
         deleted, not_found = account_repository.delete_many(mixed)
         assert deleted == [ids[0], ids[2]]
-        assert not_found == [99999, 88888]
+        assert not_found == ["99999", "88888"]
 
         # 逐个 delete 的口径：存在的删掉返回 True，不存在返回 False
         remaining = account_repository.get_many(ids)
         assert [r.id for r in remaining] == [ids[1], ids[3]]
         assert account_repository.delete(ids[1]) is True
-        assert account_repository.delete(99999) is False
+        assert account_repository.delete("99999") is False
 
     def test_scoped_to_platform_when_given(self, isolated_db):
         """指定 platform 时不碰别的平台——即便 ID 撞号。
 
         ID 是每库自增的：grok 库里的 1 与默认库里 chatgpt 的 1 是两回事。
         """
-        grok_id = _add("grok", "g@x.ai")
-        chatgpt_id = _add("chatgpt", "c@x.ai")
+        shared_id = "00000000-0000-4000-8000-000000000001"
+        grok_id = _add_with_id("grok", "g@x.ai", shared_id)
+        chatgpt_id = _add_with_id("chatgpt", "c@x.ai", shared_id)
         assert grok_id == chatgpt_id, "本测试前提：两库 ID 撞号"
 
         deleted, not_found = account_repository.delete_many(
@@ -199,8 +213,9 @@ class TestIdCollisionAcrossDatabases:
     """
 
     def test_get_with_platform_does_not_cross_platforms(self, isolated_db):
-        grok_id = _add("grok", "grok-a@x.ai")
-        chatgpt_id = _add("chatgpt", "chatgpt-b@x.ai")
+        shared_id = "00000000-0000-4000-8000-000000000002"
+        grok_id = _add_with_id("grok", "grok-a@x.ai", shared_id)
+        chatgpt_id = _add_with_id("chatgpt", "chatgpt-b@x.ai", shared_id)
         assert grok_id == chatgpt_id, "本测试前提：两库 ID 撞号"
 
         # 指定 chatgpt：不能因为 grok 库先被扫到就把 grok 的行交出来
@@ -211,8 +226,9 @@ class TestIdCollisionAcrossDatabases:
 
     def test_delete_with_platform_does_not_delete_other_platform(self, isolated_db):
         """核心回归：指定 platform 删除不得波及别的平台（数据丢失不可逆）。"""
-        grok_id = _add("grok", "grok-a@x.ai")
-        chatgpt_id = _add("chatgpt", "chatgpt-b@x.ai")
+        shared_id = "00000000-0000-4000-8000-000000000003"
+        grok_id = _add_with_id("grok", "grok-a@x.ai", shared_id)
+        chatgpt_id = _add_with_id("chatgpt", "chatgpt-b@x.ai", shared_id)
         assert grok_id == chatgpt_id
 
         assert account_repository.delete(chatgpt_id, platform="chatgpt") is True
@@ -223,8 +239,9 @@ class TestIdCollisionAcrossDatabases:
         assert survivor.email == "grok-a@x.ai"
 
     def test_get_many_with_platform_does_not_cross_platforms(self, isolated_db):
-        grok_id = _add("grok", "grok-a@x.ai")
-        chatgpt_id = _add("chatgpt", "chatgpt-b@x.ai")
+        shared_id = "00000000-0000-4000-8000-000000000004"
+        grok_id = _add_with_id("grok", "grok-a@x.ai", shared_id)
+        chatgpt_id = _add_with_id("chatgpt", "chatgpt-b@x.ai", shared_id)
         assert grok_id == chatgpt_id
 
         rows = account_repository.get_many([chatgpt_id], platform="chatgpt")
@@ -232,8 +249,9 @@ class TestIdCollisionAcrossDatabases:
         assert rows[0].platform == "chatgpt"
 
     def test_delete_many_with_platform_does_not_cross_platforms(self, isolated_db):
-        grok_id = _add("grok", "grok-a@x.ai")
-        chatgpt_id = _add("chatgpt", "chatgpt-b@x.ai")
+        shared_id = "00000000-0000-4000-8000-000000000005"
+        grok_id = _add_with_id("grok", "grok-a@x.ai", shared_id)
+        chatgpt_id = _add_with_id("chatgpt", "chatgpt-b@x.ai", shared_id)
         assert grok_id == chatgpt_id
 
         account_repository.delete_many([chatgpt_id], platform="chatgpt")
@@ -293,14 +311,14 @@ class TestSqlVariableLimit:
     def test_get_many_handles_ids_beyond_sqlite_variable_limit(self, isolated_db):
         # 33000 个 id：超过 32766 上限（其中只有 1 个真实存在）
         existing = _add("grok", "only-one@x.ai")
-        ids = [existing] + list(range(existing + 1, existing + 33001))
+        ids = [existing] + [f"missing-{i}" for i in range(33000)]
 
         rows = account_repository.get_many(ids)
         assert [r.id for r in rows] == [existing]
 
     def test_delete_many_handles_ids_beyond_sqlite_variable_limit(self, isolated_db):
         existing = _add("grok", "only-one@x.ai")
-        ids = [existing] + list(range(existing + 1, existing + 33001))
+        ids = [existing] + [f"missing-{i}" for i in range(33000)]
 
         deleted, not_found = account_repository.delete_many(ids)
         assert deleted == [existing]

@@ -501,7 +501,12 @@ class AccountRepository:
 
         if payload["id"]:
             updated = store.update(payload["id"], payload)
-            return json_record_to_model(updated or payload)
+            if updated is not None:
+                return json_record_to_model(updated)
+            # 有 id 但库里没有这一行：`AccountModel` 构造时就带上了 uuid4 默认值，
+            # 所以「有 id」不再等于「已存在」。按新建插入 —— 以前这里直接返回
+            # payload，JSON 文件里一个字都没写，接口 200 但账号查不到（实测）。
+            return json_record_to_model(store.insert(payload))
 
         # 没有 id：要么按唯一键更新，要么新建 —— 与 upsert 同语义
         existing = store.find_by_email(payload["platform"], payload["email"])
@@ -571,7 +576,7 @@ class AccountRepository:
                 sess.close()
 
     @staticmethod
-    def get(account_id: int, platform: str = "", *, session: Session | None = None) -> Optional[AccountModel]:
+    def get(account_id: str, platform: str = "", *, session: Session | None = None) -> Optional[AccountModel]:
         """按 id 取账号。
 
         给了 `platform` 只查该平台的库；没给就跨库查找（默认库 + 所有平台库）。
@@ -612,7 +617,7 @@ class AccountRepository:
         return AccountRepository._get_in_default(account_id, "")
 
     @staticmethod
-    def _get_in_default(account_id: int, platform: str) -> Optional[AccountModel]:
+    def _get_in_default(account_id: str, platform: str) -> Optional[AccountModel]:
         """在默认库里按 id 取，`platform` 非空时附加同平台约束（防 ID 撞号）。"""
         from .base import current_engine
 
@@ -626,7 +631,7 @@ class AccountRepository:
             ).first()
 
     @staticmethod
-    def delete(account_id: int, platform: str = "", *, session: Session | None = None) -> bool:
+    def delete(account_id: str, platform: str = "", *, session: Session | None = None) -> bool:
         """按 id 删除账号（没给 platform 时跨库查找）。
 
         与 `get` 同样的 ID 撞号问题：指定 `platform` 时默认库那一步要再按
@@ -673,7 +678,7 @@ class AccountRepository:
 
     @staticmethod
     def get_many(
-        ids: list[int], platform: str = "", *, session: Session | None = None
+        ids: list[str], platform: str = "", *, session: Session | None = None
     ) -> list[AccountModel]:
         """按 id 批量取账号，保持传入顺序。
 
@@ -683,11 +688,11 @@ class AccountRepository:
 
         去重语义与 `get()` 一致：平台库优先于默认库的历史遗留行。
         """
-        wanted = [int(v) for v in ids]
+        wanted = [str(v) for v in ids]
         if not wanted:
             return []
 
-        found: dict[int, AccountModel] = {}
+        found: dict[str, AccountModel] = {}
         wanted_platform = platform.strip().lower()
 
         # SQLite 变量上限 32766：id 列表超过后 IN 查询直接炸
@@ -707,7 +712,7 @@ class AccountRepository:
                 q = base.where(AccountModel.id.in_(chunk))
                 for row in sess.exec(q).all():
                     # 先到先得：平台库先扫，默认库的历史行不覆盖
-                    found.setdefault(int(row.id or 0), row)
+                    found.setdefault(str(row.id), row)
 
         if session is not None:
             _collect(session, enforce_platform=False)
@@ -728,18 +733,18 @@ class AccountRepository:
 
     @staticmethod
     def delete_many(
-        ids: list[int], platform: str = "", *, session: Session | None = None
-    ) -> tuple[list[int], list[int]]:
+        ids: list[str], platform: str = "", *, session: Session | None = None
+    ) -> tuple[list[str], list[str]]:
         """按 id 批量删除，返回 `(deleted, not_found)`。
 
         与逐个 `delete()` 的区别：每库只开一次会话、分块 IN 查询，避免
         N+1（批量删除接口一次最多 1000 个 id；仓储层不假设调用方已限流，
         分块到 SQLite 变量上限之下，传多大都安全）。
         """
-        wanted = list(dict.fromkeys(int(v) for v in ids))
+        wanted = list(dict.fromkeys(str(v) for v in ids))
         if not wanted:
             return [], []
-        deleted: list[int] = []
+        deleted: list[str] = []
         remaining = set(wanted)
         wanted_platform = platform.strip().lower()
 
@@ -763,8 +768,8 @@ class AccountRepository:
                     continue
                 rows = sess.exec(base.where(AccountModel.id.in_(chunk))).all()
                 for row in rows:
-                    remaining.discard(int(row.id or 0))
-                    deleted.append(int(row.id or 0))
+                    remaining.discard(str(row.id))
+                    deleted.append(str(row.id))
                     sess.delete(row)
                 if rows:
                     sess.commit()

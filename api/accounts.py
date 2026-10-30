@@ -10,6 +10,7 @@ from services.account_export import (
     render_accounts,
 )
 from services.chatgpt_account_state import filter_accounts_by_plus_status
+from services.chatgpt_account_selection import normalize_account_ids
 from core.credential_fields import export_names as _export_names
 from core.time_utils import UtcDatetime
 from typing import Optional
@@ -61,7 +62,7 @@ class ExportTextRequest(BaseModel):
 
     format: str = DEFAULT_EXPORT_FORMAT
     platform: str = ""
-    account_ids: list[int] = []
+    account_ids: list[str | int] = []
     status: str = ""
     email: str = ""
     plus_status: str = ""
@@ -425,7 +426,8 @@ def export_accounts_text(body: ExportTextRequest, session: Session = Depends(get
     if body.account_ids:
         from core.db import account_repository
 
-        ids = [int(v) for v in body.account_ids if int(v) > 0]
+        # 与批量任务共用同一套归一：主键是 UUID，不能再按正整数过滤。
+        ids = normalize_account_ids(body.account_ids)
         rows = account_repository.get_many(ids)
         # 按前端给的顺序回填，勾选顺序就是导出顺序
         row_map = {row.id: row for row in rows}
@@ -693,7 +695,7 @@ def check_all_accounts(platform: Optional[str] = None,
 
 
 @router.get("/{account_id}")
-def get_account(account_id: int, platform: str = ""):
+def get_account(account_id: str, platform: str = ""):
     from core.db import account_repository
 
     # 带上 platform 更准：账号 id 是每库自增的，不给平台时跨库扫到的可能是
@@ -705,7 +707,7 @@ def get_account(account_id: int, platform: str = ""):
 
 
 @router.patch("/{account_id}")
-def update_account(account_id: int, body: AccountUpdate, platform: str = ""):
+def update_account(account_id: str, body: AccountUpdate, platform: str = ""):
     from core.db import account_repository
 
     acc = account_repository.get(account_id, platform=platform)
@@ -729,7 +731,7 @@ def update_account(account_id: int, body: AccountUpdate, platform: str = ""):
 
 
 @router.delete("/{account_id}")
-def delete_account(account_id: int, platform: str = ""):
+def delete_account(account_id: str, platform: str = ""):
     from core.db import account_repository
 
     # 同 get_account：带上 platform 才不会因 ID 撞号删掉别的平台的账号
@@ -739,7 +741,7 @@ def delete_account(account_id: int, platform: str = ""):
 
 
 @router.post("/{account_id}/check")
-def check_account(account_id: int, background_tasks: BackgroundTasks):
+def check_account(account_id: str, background_tasks: BackgroundTasks):
     from core.db import account_repository
 
     acc = account_repository.get(account_id)
@@ -749,7 +751,7 @@ def check_account(account_id: int, background_tasks: BackgroundTasks):
     return {"message": "检测任务已启动"}
 
 
-def _do_check(account_id: int):
+def _do_check(account_id: str):
     from core.db import account_repository
 
     acc = account_repository.get(account_id)

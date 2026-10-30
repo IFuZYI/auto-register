@@ -632,7 +632,7 @@ class GrokPlatform(BasePlatform):
                 "id": account_id, "email": account.email, "platform": "grok",
             })()
             updates = sync_panel_status_batch("grok2api", [probe])
-            update = updates.get(int(account_id), {})
+            update = updates.get(account_id, {})
             ok = bool(update.get("ok"))
             message = str(update.get("message") or "同步完成")
             return {
@@ -916,7 +916,7 @@ class GrokPlatform(BasePlatform):
                 row = session.exec(
                     select(ICloudAliasModel).where(ICloudAliasModel.address == email)
                 ).first()
-            return int(row.id) if row is not None else None
+            return str(row.id) if row is not None else None
         except Exception as exc:  # noqa: BLE001
             log_fn = getattr(self, "_log_fn", None)
             if log_fn:

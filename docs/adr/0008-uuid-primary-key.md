@@ -40,3 +40,48 @@ JSON 后端也依赖这条：`core/storage/json_backend.py:131` 明确写「数�
   （已有索引，且模型注释写明列表默认按它倒序）。
 - 迁移：逐行 backfill uuid，保留 `legacy_id` int 列一个版本用于回滚；一个版本后删除。
 - 面板登记里的 `remote_id` 是**远端** id，与本决定无关；本地侧新增的引用一律用 UUID。
+
+## 实施记录（T1.0，revision `c3f8a1d64b27`）
+
+### 影响面：91 处是错的，实际 12 处
+
+上面「后果」里写的 91 处签名 / 13 路由 / 前端 5 处，是**按 `account_id: int` 字面
+grep 出来的**，其中 79 处属于 `icloud_accounts.id`（另一张表，仍是 int）。真正属于
+`accounts.id` 的是：
+
+| 位置 | 处数 |
+|---|---:|
+| `api/accounts.py` 路由 + `_do_check` | 5 |
+| `api/actions.py` 批量入口 | 2 |
+| `api/tasks.py` 五处 `[int(row.id) …]` | 5 |
+| `core/db/repository.py` `get_many` / `delete_many` | 2 |
+| `services/chatgpt_maintenance.py` | 4 |
+| `services/chatgpt_account_selection.py` | 1 |
+| `services/panel_sync.py` / `panel_status_sync.py` / `cliproxyapi_sync.py` / `chatgpt_two_factor.py` | 10 |
+| `platforms/chatgpt/plugin.py` / `platforms/grok/plugin.py` | 2 |
+| 前端 `Accounts.tsx` / `PanelComparisonPanel.tsx` | 2 |
+
+**没有任何外键指向 `accounts`**（`grep -r 'foreign_key="accounts'` 为空），所以重建
+表不牵连任何其他表 —— 这是这次改动比预估轻一个数量级的主因。
+
+### 两个必须记下来的坑
+
+1. **裸 SQL 插入拿不到 Python 默认值。**
+   `Field(default_factory=…)` 只在 ORM 里生效；导入脚本、手工修数、测试里模拟老数据
+   走的都是裸 `INSERT`，会直接 `NOT NULL constraint failed: accounts.id`。
+   所以主键同时挂 `server_default`（SQLite 用 `randomblob` 拼 UUIDv4），迁移建表时
+   也带上同一条 `DEFAULT` —— 两条路径生成的 id 都是合法 UUID。
+
+2. **「有 id」不再等于「已存在」，JSON 后端静默丢数据。**
+   `AccountModel()` 构造时就带上 uuid，`_json_save` 看到 `payload["id"]` 非空便只做
+   `store.update(...)`；库里没有这行 → `update` 返回 `None` → 原实现 `return
+   json_record_to_model(updated or payload)` 把未落盘的对象当成功返回。
+   **接口 200，JSON 文件里一个字没写**（`test_json_deployment_end_to_end` 抓到）。
+   修法：`update` 返回 `None` 时按新建 `insert`，且 `insert` 尊重调用方给的 id。
+
+### 兼容性：旧整数链接不再解析
+
+`normalize_account_ids` 仍放行「正整数」形态（老前端、老书签、外部脚本不会 422），
+但它们会被报成 `missing` —— **没有做 `legacy_id` 回查**。理由是 Q4「旧键只读一版」
+指的是数据可回滚，不是路由永久双读；双读会让 `get()` 在每次 miss 上多打一次库。
+回滚用 `alembic downgrade b7c1e4a92d30`，`legacy_id` 会把整数主键原样还原。

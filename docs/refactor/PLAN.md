@@ -87,7 +87,7 @@ UUID 签名会穿透到 `platforms/`（不再保证零平台改动），但**行
 
 | 任务 | 改动 | 验收 |
 |---|---|---|
-| T1.0 `accounts.id` → UUID | 见 ADR-0008：backfill uuid、保留 `legacy_id` 一版、91 处签名、13 路由、前端 5 处 | 全链路跑通；dump diff 为空；`legacy_id` 可回滚 |
+| T1.0 `accounts.id` → UUID | ✅ **已完成**（`c3f8a1d64b27`）。实际影响面比原估小得多：**12 处签名 + 5 个路由 + 前端 2 个类型**，不是 91 处 —— 那 91 里 79 处是 `icloud_accounts.id`（另一张表，仍是 int）。无任何外键指向 `accounts` | 全链路跑通；`legacy_id` 可回滚；`alembic check` 无变更 |
 | T1.1 `AccountRecord` + `Credentials` | 新建 `core/models/account.py`；`Account` / `AccountModel` 降级为适配器 | 三向往返等价测试（DTO↔ORM↔JSON） |
 | T1.2 删 13 个鸭子类型 shim | `_A`×2 / `_SyncAccount` / `_UploadAccount` / `_JsonProxy` / `_FacadeProxy` / `_LegacyProxyParts` 等 | `grep -c "class _[A-Z]"` = 3（只留三个真适配器） |
 | T1.3 分库塌缩 | `PlatformDatabaseRegistry` 保留接口、恒返回默认 engine；按 `uid` 去重合并 | 合并脚本把 N 个 db 文件并成 1 个；行数守恒 |

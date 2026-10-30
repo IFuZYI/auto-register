@@ -381,7 +381,7 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
     _api._task_store.cleanup()
 
 
-def _load_account_fields(account_id: int, platform: str = "chatgpt") -> Optional[dict]:
+def _load_account_fields(account_id: str, platform: str = "chatgpt") -> Optional[dict]:
     """把一行账号读成纯数据（含它注册时用的代理）。
 
     ``platform`` 必须由调用方传入：这里原来**两处**硬编码 ``"chatgpt"``
@@ -514,7 +514,7 @@ def _run_account_batch_task(
                 remaining -= chunk
             next_start_time = time.time() + delay_seconds
 
-    def _do_one(index: int, account_id: int) -> AttemptResult:
+    def _do_one(index: int, account_id: str) -> AttemptResult:
         attempt_id: int | None = None
         try:
             control.checkpoint()

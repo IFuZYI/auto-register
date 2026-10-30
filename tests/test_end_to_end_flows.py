@@ -230,7 +230,7 @@ class RefreshTokenFlowTests(unittest.TestCase):
 
     def test_refresh_chain_updates_credentials_and_reports(self):
         with Session(engine) as session:
-            account_id = int(
+            account_id = str(
                 session.exec(
                     select(AccountModel).where(AccountModel.email == "refresh-e2e@example.com")
                 ).first().id

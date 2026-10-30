@@ -36,7 +36,7 @@ interface ComparisonRow {
   platform: string
   state: string
   label: string
-  local_id: number | null
+  local_id: string | null
   local_status: string
   local_updated_at: string
   local_updated_hour: string

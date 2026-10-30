@@ -13,10 +13,11 @@
 from __future__ import annotations
 
 import json
+import uuid
 from datetime import datetime
 from typing import Any, Optional
 
-from sqlalchemy import Index, text
+from sqlalchemy import Column, Index, String, text
 from sqlmodel import Field, SQLModel
 
 from .base import _utcnow
@@ -40,7 +41,25 @@ class AccountModel(SQLModel, table=True):
         ),
     )
 
-    id: Optional[int] = Field(default=None, primary_key=True)
+    id: str = Field(
+        default_factory=lambda: str(uuid.uuid4()),
+        sa_column=Column(
+            "id",
+            String,
+            primary_key=True,
+            default=lambda: str(uuid.uuid4()),
+            # 服务端默认值：绕过 ORM 的裸 SQL INSERT（导入脚本、手工修数、
+            # 测试里模拟老数据）也必须拿到一个合法主键，否则直接 NOT NULL 失败。
+            server_default=text(
+                "(lower(hex(randomblob(4))||'-'||hex(randomblob(2))||'-4'||"
+                "substr(hex(randomblob(2)),2)||'-'||substr('89ab',abs(random())%4+1,1)||"
+                "substr(hex(randomblob(2)),2)||'-'||hex(randomblob(6))))"
+            ),
+        ),
+    )
+    #: 旧的自增整数主键，保留一个版本：回滚时用它还原，老日志/老面板记录也靠它对账。
+    #: 新代码不要再读它（除回滚脚本）。
+    legacy_id: Optional[int] = Field(default=None, index=True, unique=True)
     platform: str = Field(index=True)
     # 邮箱是账号的唯一业务键（大小写无关，写入前经 normalize_email 规范化），
     # 与 platform 组成唯一约束：同一平台同一邮箱只允许一行。

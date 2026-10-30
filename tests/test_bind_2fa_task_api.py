@@ -68,7 +68,7 @@ class TwoFactorTargetSelectionTests(unittest.TestCase):
             )
 
         self.assertEqual([row.email for row in accounts], ["no-2fa-1@example.com"])
-        self.assertEqual(missing, [999999])
+        self.assertEqual(missing, ["999999"])
 
     def test_no_scope_is_rejected(self):
         with Session(engine) as session:

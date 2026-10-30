@@ -370,11 +370,11 @@ class NormalizeAccountIdsTests(unittest.TestCase):
 
     def test_dedupes_drops_invalid_and_keeps_order(self):
         result = normalize_account_ids([3, "2", 3, -1, 0, "abc", None, 1, " 2 "])
-        self.assertEqual(result, [3, 2, 1], "去重保序，<=0 / 非数字丢弃")
+        self.assertEqual(result, ["3", "2", "1"], "去重保序，0 / 负数 / 非数字丢弃")
 
     def test_accepts_strings_and_ints(self):
-        self.assertEqual(normalize_account_ids(["5", 4, "6"]), [5, 4, 6])
-        self.assertEqual(normalize_account_ids([" 7 "]), [7])
+        self.assertEqual(normalize_account_ids(["5", 4, "6"]), ["5", "4", "6"])
+        self.assertEqual(normalize_account_ids([" 7 "]), ["7"])
 
 
 # ------------------------------------------------------ select_chatgpt_accounts
@@ -405,7 +405,7 @@ class _SelectionCase(unittest.TestCase):
             session.add(row)
             session.commit()
             session.refresh(row)
-            return int(row.id)
+            return str(row.id)
 
     def _select(self, **kwargs):
         from sqlmodel import Session
@@ -430,15 +430,15 @@ class SelectByIdsTests(_SelectionCase):
     def test_reports_missing_ids_and_keeps_partial_results(self):
         present = self._add("a@x.ai")
 
-        accounts, missing = self._select(account_ids=[present, 99999, 88888])
+        accounts, missing = self._select(account_ids=[present, "99999", "88888"])
 
         self.assertEqual([row.id for row in accounts], [present])
-        self.assertEqual(missing, [99999, 88888])
+        self.assertEqual(missing, ["99999", "88888"])
 
     def test_all_missing_returns_empty_accounts(self):
-        accounts, missing = self._select(account_ids=[99999, 88888])
+        accounts, missing = self._select(account_ids=["99999", "88888"])
         self.assertEqual(accounts, [])
-        self.assertEqual(missing, [99999, 88888])
+        self.assertEqual(missing, ["99999", "88888"])
 
     def test_ids_are_deduped_before_lookup(self):
         row_id = self._add("a@x.ai")
@@ -536,7 +536,7 @@ class SelectKeepAndLimitsTests(_SelectionCase):
         self._add("ok@x.ai", status="registered")
 
         accounts, _ = self._select(
-            account_ids=[keep_row, 99999],
+            account_ids=[keep_row, "99999"],
             keep=lambda row: row.status == "invalid",
         )
 
@@ -598,7 +598,8 @@ class SelectKeepAndLimitsTests(_SelectionCase):
         33000 个 id 里只有 1 个真实账号时正常返回（不触发超限）。
         """
         present = self._add("only@x.ai")
-        ids = [present] + list(range(present + 1, present + 33001))
+        # 用「正整数形态」的假 id：normalize_account_ids 会放行，但库里一个都没有
+        ids = [present] + [str(i) for i in range(1, 33001)]
 
         accounts, missing = self._select(account_ids=ids)
 

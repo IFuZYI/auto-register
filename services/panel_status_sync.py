@@ -205,7 +205,7 @@ def sync_panel_status_batch(panel_key: str, accounts: list[Any]) -> dict[int, di
             account_id = getattr(account, "id", None)
             if account_id is None:
                 continue
-            results[int(account_id)] = {
+            results[account_id] = {
                 "id": account_id,
                 "email": str(getattr(account, "email", "") or ""),
                 "ok": False,
@@ -225,7 +225,7 @@ def sync_panel_status_batch(panel_key: str, accounts: list[Any]) -> dict[int, di
         platform = str(getattr(account, "platform", "") or "")
         email = str(getattr(account, "email", "") or "")
         remote = remote_by_key.get(_match_key(platform, email))
-        results[int(account_id)] = build_status_update(panel_key, account, remote)
+        results[account_id] = build_status_update(panel_key, account, remote)
     return results
 
 

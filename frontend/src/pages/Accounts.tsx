@@ -431,7 +431,7 @@ export default function Accounts() {
    * RT 显示成占位串、甚至把占位串复制进剪贴板（复审实测）。
    * 详情端点仍返回全量，所以打开时补一次。
    */
-  const openDetail = async (record: { id: number; platform?: string }) => {
+  const openDetail = async (record: { id: string; platform?: string }) => {
     setDetailModalOpen(true)
     setCurrentAccount(normalizeAccount(record))  // 先用列表行占位，避免抽屉空白
     try {
@@ -448,8 +448,8 @@ export default function Accounts() {
     }
   }
 
-  const handleDelete = async (id: number) => {
-    // 带 platform：账号 id 是每库自增的，不带平台可能删到别的平台的同 id 账号
+  const handleDelete = async (id: string) => {
+    // 带 platform：账号分散在平台库与默认库，带平台才能定位到正确的那个库
     await apiFetch(`/accounts/${id}?platform=${encodeURIComponent(currentPlatform)}`, {
       method: 'DELETE',
     })

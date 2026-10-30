@@ -103,7 +103,7 @@ class BackfillRtTaskRequest(BaseModel):
     并发拉满等于主动送风控素材，宁可慢点。
     """
 
-    account_ids: list[int] = Field(default_factory=list)
+    account_ids: list[str | int] = Field(default_factory=list)
     all_filtered: bool = False
     email: str = ""
     status: str = ""
@@ -125,7 +125,7 @@ class Bind2faTaskRequest(BaseModel):
     并发拉满只会更快撞上风控。
     """
 
-    account_ids: list[int] = Field(default_factory=list)
+    account_ids: list[str | int] = Field(default_factory=list)
     all_filtered: bool = False
     email: str = ""
     status: str = ""
@@ -147,7 +147,7 @@ class RefreshTokenTaskRequest(BaseModel):
     登录链。默认串行 + 间隔几秒 —— 连着打 OpenAI 的会话/授权端点容易触发风控。
     """
 
-    account_ids: list[int] = Field(default_factory=list)
+    account_ids: list[str | int] = Field(default_factory=list)
     all_filtered: bool = False
     email: str = ""
     status: str = ""
@@ -178,7 +178,7 @@ class BatchActionTaskRequest(BaseModel):
     #: 任务页显示的标签（缺省时用动作 id）
     action_label: str = ""
 
-    account_ids: list[int] = Field(default_factory=list)
+    account_ids: list[str | int] = Field(default_factory=list)
     all_filtered: bool = False
     email: str = ""
     status: str = ""
@@ -198,7 +198,7 @@ class ProbeStatusTaskRequest(BaseModel):
     会把请求挂住几分钟且界面无反馈 —— 所以改成任务。
     """
 
-    account_ids: list[int] = Field(default_factory=list)
+    account_ids: list[str | int] = Field(default_factory=list)
     all_filtered: bool = False
     email: str = ""
     status: str = ""
@@ -409,7 +409,7 @@ def create_backfill_rt_task(req: BackfillRtTaskRequest, background_tasks: Backgr
             )
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
-        account_ids = [int(row.id) for row in accounts if row.id]
+        account_ids = [str(row.id) for row in accounts if row.id]
 
     if not account_ids:
         if missing_ids:
@@ -502,7 +502,7 @@ def create_batch_action_task(
             )
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
-    account_ids = [int(row.id) for row in accounts if row.id]
+    account_ids = [str(row.id) for row in accounts if row.id]
     if not account_ids:
         raise HTTPException(400, "所选账号不存在" if missing_ids else "没有匹配的账号")
 
@@ -559,7 +559,7 @@ def create_probe_status_task(
             )
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
-        account_ids = [int(row.id) for row in accounts if row.id]
+        account_ids = [str(row.id) for row in accounts if row.id]
 
     if not account_ids:
         raise HTTPException(400, "所选账号不存在" if missing_ids else "没有匹配的账号")
@@ -606,7 +606,7 @@ def create_bind_2fa_task(req: Bind2faTaskRequest, background_tasks: BackgroundTa
             )
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
-        account_ids = [int(row.id) for row in accounts if row.id]
+        account_ids = [str(row.id) for row in accounts if row.id]
 
     if not account_ids:
         if missing_ids:
@@ -663,7 +663,7 @@ def create_refresh_token_task(req: RefreshTokenTaskRequest, background_tasks: Ba
             )
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
-        account_ids = [int(row.id) for row in accounts if row.id]
+        account_ids = [str(row.id) for row in accounts if row.id]
 
     if not account_ids:
         detail = "所选账号不存在" if missing_ids else "没有匹配的账号"

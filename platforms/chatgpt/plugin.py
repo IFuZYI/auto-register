@@ -658,7 +658,7 @@ class ChatGPTPlatform(BasePlatform):
                 "id": account_id, "email": a.email, "platform": "chatgpt",
             })()
             updates = sync_panel_status_batch(panel_key, [probe])
-            update = updates.get(int(account_id), {})
+            update = updates.get(account_id, {})
             ok = bool(update.get("ok"))
             message = str(update.get("message") or "同步完成")
             return {

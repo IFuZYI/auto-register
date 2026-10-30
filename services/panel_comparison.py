@@ -326,7 +326,7 @@ class ComparisonRow:
     #: 前端按它把行分组，批量动作也按它分发到对应平台的接口。
     platform: str = ""
     #: 本地侧
-    local_id: Optional[int] = None
+    local_id: Optional[str] = None
     local_status: str = ""
     local_updated_at: Optional[datetime] = None
     local_updated_hour: str = ""

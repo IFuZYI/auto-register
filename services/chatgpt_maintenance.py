@@ -327,7 +327,7 @@ def get_chatgpt2api_auto_sync_interval_seconds() -> int:
     return CHATGPT2API_AUTO_SYNC_INTERVAL_SECONDS
 
 
-def _default_execute(account_id: int) -> dict[str, Any]:
+def _default_execute(account_id: str) -> dict[str, Any]:
     """生产执行器：走 `refresh_token` 动作的完整链（与手动批量刷新同路径）。
 
     代理规则与批量刷新一致（`_run_account_batch_task` 的
@@ -437,11 +437,11 @@ def run_auto_refresh_pass(
         )
         if plan.action == "schedule":
             extra[AUTO_REFRESH_STATE_KEY] = plan.state
-            _write_extra(int(row.id), extra)
+            _write_extra(str(row.id), extra)
             summary["scheduled"] += 1
         elif plan.action == "due":
             summary["due"] += 1
-            due_ids.append(int(row.id))
+            due_ids.append(str(row.id))
         else:
             summary["skipped"] += 1
             if plan.reason == "banned":
@@ -451,14 +451,14 @@ def run_auto_refresh_pass(
                 state = _state_from_extra(extra)
                 if state:
                     extra.pop(AUTO_REFRESH_STATE_KEY, None)
-                    _write_extra(int(row.id), extra)
+                    _write_extra(str(row.id), extra)
             # 清掉「针对旧 AT」的死计划：AT 被手动刷新后 exp 变了，旧计划
             # 已无意义 —— 保持「extra 里只有当前 AT 周期的计划」这一不变量。
             elif plan.reason == "not_expiring":
                 state = _state_from_extra(extra)
                 if state and _safe_int(state.get("for_exp")) != _safe_int(expires_at):
                     extra.pop(AUTO_REFRESH_STATE_KEY, None)
-                    _write_extra(int(row.id), extra)
+                    _write_extra(str(row.id), extra)
 
     to_run = due_ids[: max(0, int(max_accounts))]
     # 有实际执行才建任务记录（空轮不建 —— 每 5 分钟一条空任务会淹列表）。
@@ -605,7 +605,7 @@ def run_auto_refresh_pass(
     return summary
 
 
-def _write_extra(account_id: int, extra: dict[str, Any]) -> None:
+def _write_extra(account_id: str, extra: dict[str, Any]) -> None:
     """把 extra 写回账号行（短会话，不占网络链的连接）。"""
     from core.db import AccountModel, platform_session
 

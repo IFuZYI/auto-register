@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+import re
+
 from datetime import datetime
 from typing import Callable, Iterable, Optional
 
@@ -18,16 +20,30 @@ from services.chatgpt_account_state import filter_accounts_by_plus_status
 MAX_BATCH_ACCOUNTS = 1000
 
 
-def normalize_account_ids(account_ids: Optional[Iterable[int]]) -> list[int]:
-    """去重、去非法值，保持调用方给的顺序。"""
-    ids: list[int] = []
-    seen: set[int] = set()
+_UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+_POSITIVE_INT_RE = re.compile(r"^[1-9][0-9]*$")
+
+
+def normalize_account_ids(account_ids: Optional[Iterable[str]]) -> list[str]:
+    """去重、去非法值，保持调用方给的顺序。
+
+    主键换成 UUID 之后，合法形状有两种：
+
+    * UUID（36 位，小写）—— 新前端与新脚本传的；
+    * 正整数 —— 旧前端、老书签、外部脚本还在传 `legacy_id`。留着让它们能查，
+      查不到自然会进 `missing`，比 422 把整批任务打掉友好。
+
+    `0`、负数、非数字串、空值一律丢弃：那是「未选中」的占位，不是 id。
+    """
+    ids: list[str] = []
+    seen: set[str] = set()
     for raw in account_ids or []:
-        try:
-            value = int(raw)
-        except (TypeError, ValueError):
+        if raw is None:
             continue
-        if value <= 0 or value in seen:
+        value = str(raw).strip().lower()
+        if not value or value in seen:
+            continue
+        if not (_UUID_RE.match(value) or _POSITIVE_INT_RE.match(value)):
             continue
         seen.add(value)
         ids.append(value)
@@ -37,7 +53,7 @@ def normalize_account_ids(account_ids: Optional[Iterable[int]]) -> list[int]:
 def select_chatgpt_accounts(
     session: Session,
     *,
-    account_ids: Optional[Iterable[int]] = None,
+    account_ids: Optional[Iterable[str]] = None,
     all_filtered: bool = False,
     email: str = "",
     status: str = "",
@@ -62,14 +78,14 @@ def select_chatgpt_accounts(
     按同一组条件选号，否则实际处理数会大于显示数。
     """
     ids = normalize_account_ids(account_ids)
-    missing_ids: list[int] = []
+    missing_ids: list[str] = []
 
     if ids:
         # SQLite 变量上限 32766：id 列表超过后 IN 查询直接炸（实测 33000 个
         # id → OperationalError: too many SQL variables；调用方大多有 1000
         # 上限，但上限检查在**查询之后**，先炸就轮不到它）。分块查询，
         # 500 一批，与仓储层 get_many 同口径。
-        row_map: dict[int, AccountModel] = {}
+        row_map: dict[str, AccountModel] = {}
         for i in range(0, len(ids), 500):
             chunk = ids[i : i + 500]
             rows = session.exec(
@@ -78,7 +94,7 @@ def select_chatgpt_accounts(
                 .where(AccountModel.id.in_(chunk))
             ).all()
             for row in rows:
-                row_map[int(row.id or 0)] = row
+                row_map[str(row.id)] = row
         accounts = [row_map[account_id] for account_id in ids if account_id in row_map]
         missing_ids = [account_id for account_id in ids if account_id not in row_map]
     elif all_filtered:
