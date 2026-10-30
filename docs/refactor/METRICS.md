@@ -182,3 +182,28 @@ upload / sync_status），17 个动作 id 全部登记，`tests/test_capability_
 **还剩一处真违规**（不在这条指标口径里）：`services/chatgpt_maintenance.py:791`
 `from api.integrations import push_panel_endpoint`。那个函数有 ~100 行推送逻辑住在
 API 层，归 T3.3（`PanelAdapter`）一起搬。
+
+## T3.3 记录：推送编排下沉，最后一处分层倒置清掉
+
+`api/integrations.py` **481 → 237 行**，`services/panel_push.py` 333 → 630 行。
+
+搬下去的是整套推送编排：`_PANEL_PUSH_KIND`（覆盖式 vs 新建式）、
+`_push_account_uploader`（按「面板 × 平台」挑上传器）、`_panel_remote_deleter`、
+`_persist_push_results`（推送结果写回 `sync_statuses.<面板>` 并自动登记）、
+`_lookup_account_row` / `_password_for_row`，以及 `push_panel_endpoint` 本体
+（改名 `push_local_rows`）。
+
+**HTTP 语义留在 API 层**：未知面板在服务层抛 `ValueError`，端点翻译成 404。
+服务层不再 import `HTTPException` —— 之前为了这一行反向依赖 FastAPI。
+
+`services/chatgpt_maintenance.py` 的自动维护现在直接
+`from services.panel_push import push_local_rows`，不再绕 api。
+
+### 剩下的 `from api.*`
+
+| 位置 | 性质 |
+|---|---|
+| `services/task_runners.py:32` | `if TYPE_CHECKING:` 里的请求模型标注，**运行期不求值**（`from __future__ import annotations`） |
+| 两处注释 | 记录历史，不是代码 |
+
+即：**运行期的跨层 import 为 0**。
