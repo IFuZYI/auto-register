@@ -219,7 +219,8 @@ def _totp_journal_dir() -> "Path":
 
     d = SECRETS_DIR / "totp_journal"
     d.mkdir(parents=True, exist_ok=True)
-    # 里面是明文密钥：目录 0700、文件 0600（同目录下的 credential_key 也是这个待遇）
+    # 里面是**加密后**的密钥（T1.5）：目录 0700、文件 0600 再加一层文件权限
+    # （同目录下的 credential_key 也是这个待遇）
     try:
         d.chmod(0o700)
     except OSError:
@@ -246,10 +247,15 @@ def _write_secret_journal(email: str, secret: str) -> None:
     import os
     import tempfile
 
+    from core.credential_crypto import encrypt_text
+
     path = _journal_path(email)
     payload = {
         "email": email,
-        "totp_secret": secret,
+        # 密钥本体加密（T1.5）。键名换成 `totp_secret_cipher` 而不是沿用
+        # `totp_secret` —— 老版本的读侧会把这个字段直接当明文写进库，
+        # 复用键名等于让旧进程把密文当密钥写进去（2FA 直接废掉）。
+        "totp_secret_cipher": encrypt_text(secret),
         "at": datetime.now(timezone.utc).isoformat(),
     }
     fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
@@ -264,6 +270,21 @@ def _write_secret_journal(email: str, secret: str) -> None:
     finally:
         if os.path.exists(tmp):
             os.unlink(tmp)
+
+
+def _read_journal_secret(payload: dict) -> str:
+    """从日志条目取密钥。
+
+    新格式是密文（`totp_secret_cipher`），老格式是明文（`totp_secret`）——
+    升级前写下的条目还在盘上，必须能读。解密失败**不吞**：让外层逐条 except
+    记一行并保留文件，删掉等于把唯一副本扔了。
+    """
+    from core.credential_crypto import decrypt_text
+
+    sealed = str(payload.get("totp_secret_cipher") or "").strip()
+    if sealed:
+        return decrypt_text(sealed).strip()
+    return str(payload.get("totp_secret") or "").strip()
 
 
 def _journal_is_stale(payload: dict, *, max_age_days: int = 14) -> bool:
@@ -307,7 +328,7 @@ def recover_pending_totp_secrets(*, log: Optional[Callable[[str], None]] = None)
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
             email = str(payload.get("email") or "").strip()
-            secret = str(payload.get("totp_secret") or "").strip()
+            secret = _read_journal_secret(payload)
             if not email or not secret:
                 path.unlink(missing_ok=True)
                 continue

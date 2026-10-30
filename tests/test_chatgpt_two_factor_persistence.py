@@ -223,8 +223,13 @@ class SecretJournalTests(unittest.TestCase):
         persist(SECRET)
 
         payload = json.loads(mod._journal_path("later@example.com").read_text(encoding="utf-8"))
-        self.assertEqual(payload["totp_secret"], SECRET)
         self.assertEqual(payload["email"], "later@example.com")
+        # T1.5：日志里的密钥是密文。这条断言原先比对的是明文 ——
+        # 也就是把「写前日志明文落盘」当成了契约。
+        sealed = payload["totp_secret_cipher"]
+        self.assertNotEqual(sealed, SECRET, "写前日志里的密钥还是明文")
+        self.assertTrue(sealed.startswith("v1:"), f"密文信封不对: {sealed[:8]}")
+        self.assertEqual(mod._read_journal_secret(payload), SECRET, "读回来必须是明文")
 
     def test_startup_recovery_backfills_the_secret_once_the_row_appears(self):
         from services import chatgpt_two_factor as mod
