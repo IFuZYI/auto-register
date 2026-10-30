@@ -2,12 +2,12 @@
 
 [MODE: SANDBOX]
 
-- 仓库：`/data/workspace/Register`，分支 `main`，HEAD `c93b71f`（任务给的 `4680c8d` 是其祖先，之后落了 3 个提交，本文所有行号按 `c93b71f` 校准）
-- 范围：`api/ core/ modules/ platforms/ services/ scripts/ main.py` —— **223 个 `.py`，56,034 行**
-- ⚠️ 工作树状态：审计期间 `git status` 显示 `core/db/models_account.py`、`api/accounts.py`、`scripts/encrypt_existing_credentials.py`、`docs/audit/2026-10-30/frontend.md` 有**他人并发未提交修改**（另一路数据层审计正在改 AT 加密）。本文行号按「读取时的文件内容」校准；这两个 `.py` 的行号会随之漂移，复核请以符号名 + `git diff` 为准。
+- 仓库：`/data/workspace/Register`，分支 `main`，**审计快照 HEAD `e711c7c`**（任务给的 `4680c8d` 已是很早的祖先；审计过程中 main 还在前进：`c93b71f` → … → `e711c7c`，共 5 个提交。本文行号按 `e711c7c` 校准，符号级结论在两次快照间保持稳定）
+- 范围：`api/ core/ modules/ platforms/ services/ scripts/ main.py` —— **223 个 `.py`，56,222 行**
+- ⚠️ 并发修改：审计期间另有多路审计在同一工作树改代码并提交（`accounts.token` 加密、代理写回、列表分页）。`api/accounts.py` / `core/db/models_account.py` / `services/task_runners.py` 的行号在审计过程中发生过漂移；**复核请以符号名 + `git log -p` 为准**，不要只信行号。
 - 排除：`.venv/ .worktrees/ reference/ frontend/node_modules/ static/ tests/ migrations/`（tests 只作为「谁在引用」的证据，不计入死代码）
 - 方法：
-  1. `pyflakes 4.1.0`（venv 自带，无 ruff）全量扫描 → 255 条：**F401 223 / F811 25 / F841 5 / F-string 2**；
+  1. `pyflakes 4.1.0`（venv 自带，无 ruff）全量扫描 → 254 条：**F401 222 / F811 25 / F841 5 / F-string 2**；
   2. 自写 AST 扫描：符号表 + 全仓 `Load` 引用计数（区分生产/测试两份语料）、import 图（按模块名而非文件名，覆盖 `sys.path` 式裸 import）、**不可达语句检测**（terminal 语句后的同层语句）、**归一化函数体哈希**（去名/去常量/去 docstring）、路由表提取；
   3. 每条结论都用 `grep` 反查字符串引用、`__all__`、装饰器注册、`importlib`/`pkgutil` 动态加载、前端 `frontend/src` 与 `tests/`；
   4. 三条既有守卫实跑通过：`test_exception_handlers_not_too_wide.py`、`test_dependency_direction.py`、`test_capability_registry.py`（**13 passed**）；另跑 `test_storage_coverage_gate.py`、`test_annotation_resolvability.py`、`test_contrast_gate_contract.py`（**20 passed**）。
@@ -17,17 +17,17 @@
 | 类别 | 数量 | 体量 / 最值得先动的一条 |
 |---|---|---|
 | 整模块死（零 import、零调用） | 3 | `platforms/grok/upload.py` 197 行 —— CPA 下线后的整条残留上传链 |
-| 只被测试引用的生产代码 | 3 簇 + 20 个符号 | `platforms/grok/oauth_device.py` 426 行死 / 437 行（只有 11 行是活的） |
+| 只被测试引用的生产代码 | 3 簇 + 20 个符号（scanner 原始命中 40 个符号 / 1,286 行，剔掉路由与框架钩子后见 §1.2） | `platforms/grok/oauth_device.py` 426 行死 / 437 行（只有 11 行是活的） |
 | 真·不可达代码 | **1 处** | `protocol/mixins/trace.py:94-103`：`return` 之后 9 行永远不执行，**直接让 `AUTH_TRACE_DUMP` 功能失效** |
 | 声明了但从不读的参数 | 2 | `api/integrations.py` 的 `account_ids`（前端在传，后端丢弃） |
 | 死配置键 | 3 | `default_executor`（前端注释已写「已取消」） |
 | 无消费者端点 | 3 + 1 | `GET /api/config/schema`；`POST /auth/logout` 前端根本没接 |
-| 未使用 import / 变量 / 重定义 | 76 + 5 + 25 | 76 条是真未使用（其余 147 条是门面与测试重导出） |
-| 重复实现 | 28 组（≥10 行） | 归一化后逐字节相同，合并可减 **482 行** |
+| 未使用 import / 变量 / 重定义 | 75 + 5 + 25 | 75 条是真未使用（其余 147 条是门面与测试重导出） |
+| 重复实现 | 18 组（≥10 行；放宽到 6 行是 39 组） | 归一化后逐字节相同，合并可减 **482 行** |
 | 宽捕获 | 453 处（226 未绑定） | 另有 **2 处裸 `except:`**（守卫报 0，见 §3.3） |
 | 魔法数字 / 硬编码 | 5 类 | `timeout=30` 46 处；`SOLVER_PORT 8889` 6 处；URL 字面量 97 个/172 次 |
 | 注释漂移 | 7 处 + 1 半漂 | `platforms/chatgpt/constants.py` 的注释为「已死的 client_id」辩护 |
-| 分层越界 | 6 处 | `services/task_runners.py:44` 反向依赖 `api.tasks` 的 DTO |
+| 分层越界 | 6 处 | `services/task_runners.py:43` 反向依赖 `api.tasks` 的 DTO |
 
 ---
 
@@ -58,7 +58,7 @@
 - 证据：全仓 `grep -rn "storage_separator"` 在源码/测试/其他文档里 **0 命中**（只剩 `__pycache__/*.pyc` 与本审计文本自身）。
 - 注释（`:3-4`）称「`services/account_export.py` 与 `api/accounts.py` 都要用它」，实际：
   - `services/account_export.py:20` 自己又定义了一次 `SEPARATOR = "----"`；
-  - `api/accounts.py:517` 是 `from services.account_export import SEPARATOR, ...`。
+  - `api/accounts.py:520` 是 `from services.account_export import SEPARATOR, ...`。
 - 即「一个常量三处定义，其中一处没人用」。
 - 建议：删除模块（`services → core` 是正确方向，但为一个常量维持依赖不值）。
 
@@ -86,7 +86,7 @@
 | T9 | `services/mail_imports/microsoft_import_rules.py:231-253` `MicrosoftMailboxAvailabilityRule` | 23 | 未注册进 `mail_import_registry`（只注册了 `microsoft` provider），生产 0 引用 | 删或注册 |
 | T10 | `modules/platforms/icloud.py:16-38` `ICloudAliasWorkflow` | 23 | 只在 `modules/__init__.py:19` / `modules/platforms/__init__.py:3` 的 `__all__` 里出现，无调用 | 删 |
 | T11 | `core/mailboxes/channels/outlook/mailbox.py:666-680` `_fetch_oauth_token` | 15 | 生产 0 引用（Graph 刷新走 `backends.py`） | 删 |
-| T12 | `core/db/models_account.py:207-220` `AccountModel.update_extra` | 14 | 生产 0 引用；仓储层用的是 `account_repository.update_extra`（`core/proxy_pool.py:250,309`、`services/task_runners.py:551`），不是模型方法。注意该文件正被并发重构（AT 加密），删前先 rebase | 删，或让仓储改调它 |
+| T12 | `core/db/models_account.py:207-220` `AccountModel.update_extra` | 14 | 模型方法无调用方；仓储层用的是 `account_repository.update_extra`（`core/proxy_pool.py:250,309`、`services/task_runners.py:551`），不是模型方法。注意该文件正被并发重构（AT 加密），删前先 rebase | 删，或让仓储改调它 |
 | T13 | `platforms/chatgpt/protocol/response_summary.py:61-73` `describe_page` | 13 | 生产 0 引用，仅测试 | 删 |
 | T14 | `platforms/icloud/remote_client.py:284-292` `RemoteHMEClient.fetch_message` | 9 | 生产 0 引用；取信走 `web_mail` / `mailbox.py` | 删 |
 | T15 | `core/base_platform.py:318-325` `_make_executor` | 8 | 生产 0 引用（`create_executor` 在 `:311` 才是活的那条） | 删 |
@@ -164,7 +164,7 @@
 
 | # | 位置 | 证据 | 建议 |
 |---|---|---|---|
-| D7 | `core/config_schema.py:45` `default_executor` | 后端 0 读取；前端 `frontend/src/lib/configFields.ts:13` 注释「default_executor 已取消」、`Accounts.tsx:534` 也写「不回落已取消的全局 default_executor」 | 从 schema 删（否则设置页永远显示一个无效下拉） |
+| D7 | `core/config_schema.py:45` `default_executor` | 后端 0 读取；前端 `frontend/src/lib/configFields.ts:13` 注释「default_executor 已取消」、`Accounts.tsx:533` 也写「不回落已取消的全局 default_executor」 | 从 schema 删（否则设置页永远显示一个无效下拉） |
 | D8 | `core/config_schema.py:41` `twocaptcha_key` | `core/base_captcha.py` 只有 `YesCaptcha/ManualCaptcha/LocalSolverCaptcha` 三个类（`:25,58,67`），**没有 TwoCaptcha**；后端 `grep -i twocaptcha` 只命中 schema 本身；前端也只把它列进 `Settings.tsx:44` 的掩码数组 | 删，或真实现 TwoCaptcha（否则用户填的 key 永远不生效） |
 | D9 | `core/config_schema.py:99` `grok_register_mode` | 作为**全局配置** 0 读取；唯一读取点是 `platforms/grok/plugin.py:216` 的 `extra.get("grok_register_mode")`（任务级 extra，不是 config）；`config_store.py:156` 只把它当迁移源 | 从 schema 删；保留 `config_store` 的迁移映射即可 |
 | D10 | `core/config_schema.py:84-85` `cliproxyapi_base_url` / `cliproxyapi_management_key` | 仅作旧数据兜底（`core/config_store.py:139-140`、`services/cliproxyapi_sync.py:41`、`services/chatgpt_sync.py:46`），但仍渲染成两个可编辑字段，与 `cpa_api_url`/`cpa_api_key` 完全重复 | 设置页只留 `cpa_*`；别名键从 schema 移除、仅保留读取兜底 |
@@ -178,7 +178,7 @@
 | # | 位置 | 证据 | 建议 |
 |---|---|---|---|
 | D11 | `api/config.py:57-64` `GET /config/schema` | 端点 docstring 写「前端据此渲染设置页」；实测 `frontend/src` 里 `grep "config/schema"` **0 命中**，字段硬编码在 `PanelConfigPanel.tsx:70-100`；测试也 0 命中 | 删；或真让前端从 schema 渲染（那才能兑现 `core/config_schema.py:17` 的承诺） |
-| D12 | `api/accounts.py:725` 起 `POST /accounts/check-all`（行号随并发修改漂移） | 前端 0 引用、测试 0 引用；批量测活已改走批量动作任务（`/actions/{platform}/{action_id}/batch`） | 删 |
+| D12 | `api/accounts.py:728` 起 `POST /accounts/check-all`（行号随并发修改漂移） | 前端 0 引用、测试 0 引用；批量测活已改走批量动作任务（`/actions/{platform}/{action_id}/batch`） | 删 |
 | D13 | `api/icloud.py:317-332` `GET /icloud/accounts/{account_id}/messages` | 前端只用别名维度：`frontend/src/api/icloud.ts:325` `/icloud/aliases/${aliasId}/messages`；账号维度 0 引用 | 删（或前端补「按账号看信」入口） |
 | D14 | `api/auth.py:445-453` `POST /auth/logout` | 后端实现是「换 JWT 密钥吊销全部令牌」（本 HEAD 刚加的安全修复），但前端**根本没调**：`App.tsx:462`、`Settings.tsx:367` 都是 `clearToken()` 只删 localStorage | **不要删**，补上前端调用（否则「退出登录」依然无法吊销服务端令牌，等于 F6 只修了一半） |
 
@@ -186,11 +186,11 @@
 
 ### 1.9 未使用 import / 变量 / 重定义
 
-`pyflakes` 255 条拆解：
+`pyflakes` 254 条拆解：
 
-- **F401 223 条 = 147 条刻意重导出 + 76 条真未使用**
+- **F401 222 条 = 147 条刻意重导出 + 75 条真未使用**
   - 刻意：`services/icloud_service.py` 63、`services/sms_service.py` 16、`services/icloud/__init__.py` 25、`core/mailboxes/channels/outlook/__init__.py` 8、`core/db/__init__.py` 7（合计 119，注释都写明是兼容导入面）；`api/tasks.py:22-35` 28 条（`# noqa: E402` 缺 `F401`，测试按老名字 patch，见 `tests/test_backfill_rt_task_api.py:106,116`）。
-  - **真未使用 76 条**，代表项：
+  - **真未使用 75 条**，代表项：
 
 ```
 api/accounts.py:3 select, func          api/accounts.py:5 account_repository（模块级，见 F811）
@@ -223,20 +223,20 @@ services/icloud/{accounts,aliases,messages}.py 共 11 条
   - `services/action_execution.py:97,167,215,233,254` 局部重复 import `datetime/timezone/AccountStatus`（`:17,:22` 的模块级版本因此变死）；
   - `api/actions.py:211` 函数内 `import datetime`。
   - 这类重复 import 不是「无害噪声」：`:167` 与 `:233` 是两份 8 行相同的「更新时间戳」代码，属于复制粘贴痕迹（见 P5 同类）。
-- 建议：CI 接入 `ruff check --select F401,F841,F811`；先把 5 个门面文件的 `# noqa: F401` 补齐（现在 `api/tasks.py:22` 只有 `E402`，所以 28 条噪声一直挂着），再把 76 条真未使用的清掉。
+- 建议：CI 接入 `ruff check --select F401,F841,F811`；先把 5 个门面文件的 `# noqa: F401` 补齐（现在 `api/tasks.py:22` 只有 `E402`，所以 28 条噪声一直挂着），再把 75 条真未使用的清掉。
 
 ---
 
 ## 2. 重复实现
 
-> 判定方法：AST 归一化（函数名/变量名/属性名/字符串常量/docstring 全部抹平）后对函数体哈希，仅在**生产代码**内比对，且只报 ≥10 行的组。得到 **28 组**，合并可减 **482 行**。
+> 判定方法：AST 归一化（函数名/变量名/属性名/字符串常量/docstring 全部抹平）后对函数体哈希，仅在**生产代码**内比对，且只报 ≥10 行的组。得到 **18 组**（放宽到 6 行是 39 组），合并可减 **482 行**。
 
 ### 2.1 最大重复块
 
-**P1 `services/task_runners.py:751-832` 与 `:923-1002` —— 两个 runner 近乎逐行相同（82 / 80 行）**
+**P1 `services/task_runners.py:767-848` 与 `:939-1018` —— 两个 runner 近乎逐行相同（82 / 80 行）**
 
-- 归一化哈希相同：`_run_probe_status` 与 `_run_refresh_token` 只差动作 id（`probe_local_status` vs `refresh_token`）与 3 条文案；内部 `_handle` 闭包（`:767-822` / `:935-992`，56 / 58 行）同样几乎相同。
-- 而 `_run_batch_action`（`:835` 起）本来就是「动作 id 参数化」的通用实现，docstring 还写着「一个机制覆盖所有『批量点按钮』的场景」。
+- 归一化哈希相同：`_run_probe_status` 与 `_run_refresh_token` 只差动作 id（`probe_local_status` vs `refresh_token`）与 3 条文案；内部 `_handle` 闭包（`:783-838` / `:951-1008`，56 / 58 行）同样几乎相同。
+- 而 `_run_batch_action`（`:851-936`）本来就是「动作 id 参数化」的通用实现，docstring 还写着「一个机制覆盖所有『批量点按钮』的场景」。
 - 建议：两个 runner 直接委托 `_run_batch_action(task_id, ids, action_id=..., req=...)`，删掉两个闭包（约 **160 行**）。
 - 附带格式伤：`:768` 的 `from services.action_execution import (` 之后，`:769-771` 的参数只有 8 空格（比 `from` 少一级缩进），是复制粘贴留下的。
 
@@ -323,7 +323,7 @@ services/icloud/{accounts,aliases,messages}.py 共 11 条
 | `send_passwordless_otp` ↔ `resend_otp` | `platforms/chatgpt/protocol/mixins/signup.py:400-420 / :423-444` | 21+22 |
 | `_log` 5 份 | `platforms/grok/{oauth_device:107,grok2api:382,oauth_browser:32,turnstile_mint:34,register_browser:155}` | 6×5 |
 | `set_fields` 校验模板 6 次 | `core/db/icloud_{alias,account}_repository.py` | — |
-| URL 归一化 32 处手写 `rstrip("/")` | 代表：`platforms/grok/upload.py:57,63,126,166`、`services/icloud/remote.py:83,119`、`services/panel_comparison.py:772,1160`、`platforms/icloud/remote_client.py:94`、`services/cliproxyapi_sync.py:61`；`api/contribution.py:49-54` 有 `_resolve_server_url` 但只本地用 | 32 处 |
+| URL 归一化 32 处手写 `rstrip("/")` | 代表：`platforms/grok/upload.py:57,63,126,166`、`services/icloud/remote.py:83,119`、`services/panel_comparison.py:772,1160`、`platforms/icloud/remote_client.py:94`、`services/cliproxyapi_sync.py:61`；`api/contribution.py:47-52` 有 `_resolve_server_url` 但只本地用 | 32 处 |
 | 时间口径两套 | 主流 `datetime.now(timezone.utc)`；残留 naive：`platforms/chatgpt/token_refresh.py:340`、`platforms/chatgpt/protocol/mixins/trace.py:98`（`strftime` 命名）、`:198`（`isoformat()+"Z"` 手工补时区） | 3 处 |
 | 双存储后端 | `core/storage/__init__.py:1-25` 明说 SQLite/JSON 两套；`services/task_store_io.py:224 _finished_status_filter` 只服务 SQL 分支 | 结构性 |
 
@@ -380,7 +380,7 @@ except Exception:
 - 与 F841 的 `exc` 是同一处：捕获了异常对象却只 `logger.warning("...")`，`type(exc)` 丢失。
 - 建议：`logger.warning("...: %s: %s", type(exc).__name__, exc)`。
 
-**E5 `core/scheduler.py:58-61` —— 周期任务间隔算不出来就永不运行**
+**E5 `core/scheduler.py:59-62` —— 周期任务间隔算不出来就永不运行**
 
 ```python
 try:
@@ -392,14 +392,14 @@ except Exception:
 - `0.0` 的语义是「本次主动跳过」，配置写错的任务**永远不跑且无任何日志**。
 - 建议：记一次 `logger.error`（带 job name），并用显式 `disabled` 状态区分。
 
-**E6 `services/task_store_io.py:184-188` —— 任务快照落库失败静默返回**
+**E6 `services/task_store_io.py:185-189` —— 任务快照落库失败静默返回**
 
 - 后果：任务状态不落库、无日志；进程重启后任务从列表消失，用户只看到「任务没了」。
 - 建议：`logger.warning("任务快照落库失败 task=%s", task_id, exc_info=True)`。
 
 **E7 `platforms/grok/register_browser.py` 的选择器循环 `except Exception: continue`**
 
-- `:222-232`、`:283-294`、`:333`、`:443-449`、`:516`：逐选择器 try/except，全失败后只报「找不到邮箱输入框（已重试 3 轮）」；真实原因（选择器语法错、页面已崩、context 被关）全丢。
+- cookie banner `:223-233`、三字段填写 `:283-295`、readback `:333-338`、submit 按钮 `:443-449`：逐选择器 try/except，全失败后只报「找不到邮箱输入框（已重试 3 轮）」；真实原因（选择器语法错、页面已崩、context 被关）全丢。
 - 建议：捕 `playwright.async_api.TimeoutError` 与 `Error` 两类；循环结束把 `last_error` 拼进错误消息。
 
 **E8 `services/mail_imports/providers.py:396-400` —— 导入失败只 rollback + 计数**
@@ -466,7 +466,7 @@ except Exception:
 | C5 | `core/base_platform.py:148` | `captcha_solver: str = "yescaptcha"  # yescaptcha \| 2captcha \| manual` | 没有 TwoCaptcha 实现（`core/base_captcha.py` 只有 3 个类）；`_make_captcha` 对 `"2captcha"` 会 `raise ValueError` | **漂移** |
 | C6 | `docs/EXTENDING.md:248` | 「`_build_search_text(message)` 把各渠道 JSON 拼成可搜索文本」 | 该方法是死代码（§1.3） | **漂移** |
 | C7 | `docs/EXTENDING.md:154,160` | 「`RegistrationPipeline.from_application_defaults()` 是扩展入口」 | 仓内 0 调用，整簇只有测试用（§1.4） | **漂移** |
-| C8 | `api/tasks.py:637-639` | 「SQLite 版原来返回 `TaskLog`、JSON 版返回 dict…现在两种后端返回同一形状」 | `core/db/task_log_repository.py:27 _from_sqlite` 确实转 dict；`api/tasks.py:640-657` 两分支同形 | 准确 |
+| C8 | `api/tasks.py:640-642` | 「SQLite 版原来返回 `TaskLog`、JSON 版返回 dict…现在两种后端返回同一形状」 | `core/db/task_log_repository.py:27 _from_sqlite` 确实转 dict；`api/tasks.py:642-659` 两分支同形 | 准确 |
 | C9 | `core/base_captcha.py:33-39` | 「此前是 `verify=False` + `disable_warnings()`…现在 `verify=True`」 | 同文件 `:39`、`:47` 都是 `verify=True`，无 `disable_warnings` | 准确 |
 | C10 | `main.py:72-75` | 「`git diff` 不接受 `--untracked-files`（实测 exit 129）」 | 实测 `git diff --untracked-files=no` → exit **129** | 准确 |
 | C11 | `platforms/chatgpt/protocol/http_client.py:151-153` | 「代理链路 5.4% 偶发 TLS 瞬断，原 session 重试实测 8/8 一次即恢复」 | `_TlsRetrySession` 存在并包住 session（`:158`），`_is_tls_handshake_error` 在 `sentinel.py:90`、`sentinel_quickjs.py:327` 复用 | 准确 |
@@ -489,10 +489,10 @@ except Exception:
 
 | # | 位置 | 越界内容 | 影响 / 建议 |
 |---|---|---|---|
-| L1 | `services/task_runners.py:44-51` | `if TYPE_CHECKING: from api.tasks import (BackfillRtTaskRequest, ...)`（6 个请求 DTO） | 服务层认识 HTTP 层 DTO，方向反了。运行时不炸（`from __future__ import annotations`），但类型检查会把 api 拖进 services 依赖图。建议下沉到 `core/schemas.py` 或 `services/task_contracts.py` |
-| L2 | `api/tasks.py:648` | `from core.db.task_log_repository import _from_sqlite`（**私有**符号） | API 依赖 core 内部实现；`_from_sqlite` 改名就断。建议在仓储暴露公开 `to_dict(row)` |
+| L1 | `services/task_runners.py:43-51` | `if TYPE_CHECKING: from api.tasks import (BackfillRtTaskRequest, ...)`（6 个请求 DTO） | 服务层认识 HTTP 层 DTO，方向反了。运行时不炸（`from __future__ import annotations`），但类型检查会把 api 拖进 services 依赖图。建议下沉到 `core/schemas.py` 或 `services/task_contracts.py` |
+| L2 | `api/tasks.py:650` | `from core.db.task_log_repository import _from_sqlite`（**私有**符号） | API 依赖 core 内部实现；`_from_sqlite` 改名就断。建议在仓储暴露公开 `to_dict(row)` |
 | L3 | `api/outlook.py:69,77` | `from core.mailboxes.channels.outlook import OutlookMailbox`，直接调具体渠道类方法（`pool_status_summary` / `import_accounts_to_pool`） | 绕过 `core/mailboxes/registry.py` 的渠道抽象；换实现要改 API。建议加门面函数 |
-| L4 | `api/tasks.py:650-657`、`:676-682`、`:828-833` | 3 处 `with Session(current_engine())` + `select(TaskLog)` 裸 SQL，且同时存在 JSON/SQLite 两分支 | API 层直接写 SQL。建议收进 `core/db/task_log_repository.py` |
+| L4 | `api/tasks.py:652-659`、`:678-684`、`:830-835` | 3 处 `with Session(current_engine())` + `select(TaskLog)` 裸 SQL，且同时存在 JSON/SQLite 两分支 | API 层直接写 SQL。建议收进 `core/db/task_log_repository.py` |
 | L5 | `api/accounts.py:5` vs 函数内 13 处（`:98,135` 起） | 13 处函数内 `from core.db import account_repository`，遮蔽模块级 import | 模块级 import 实际是死的（F811×13）；「每进一个函数就重新 import 一次 DB 层」是重构残留。建议只留模块级 |
 | L6 | `services/panel_comparison.py:429 _match_key` | 被 4 个模块以**私有名**导入：`services/panel_sync.py:228`、`services/panel_status_sync.py:210`、`services/panel_push.py:192`、`services/panel_comparison_cache.py:284` | 事实上的公共 API 挂着下划线，且住在 1302 行的 `panel_comparison` 里（导入它=拖进整条对比链）。建议移到 `core/models/account.py` 或 `services/panel_keys.py` 并去掉下划线 |
 
@@ -518,7 +518,7 @@ except Exception:
 
 6. **D5 不可达块**（`trace.py:94-103`）—— 一处挪动修好 `AUTH_TRACE_DUMP`，并补测试。
 7. **D6 `account_ids` 未实现**（`api/integrations.py:82`、`:147`）—— 前端已在按筛选收窄，后端必须兑现，否则「看到的 ≠ 被改的」。
-8. **D14 `/auth/logout` 前端未接** —— 后端吊销能力已就绪，前端 `App.tsx:462`/`Settings.tsx:367` 仍只 `clearToken()`。
+8. **D14 `/auth/logout` 前端未接** —— 后端吊销能力已就绪，前端 `App.tsx:462` 仍只 `clearToken()`。
 9. E1（判重吞异常）与 E2（迁移吞异常）—— 这两条是**数据正确性**，优先级高于体量更大的 P2。
 
 **第三批（重复收敛，风险中）**
@@ -530,7 +530,7 @@ except Exception:
 
 **第四批（防回归）**
 
-14. CI 接入 `ruff check --select F401,F841,F811,E722,DTZ003`：先把 76 条真未使用 import、5 条 F841、2 条裸 `except:` 清到 0，再按文件加 `# noqa` 白名单（`icloud_service`/`sms_service`/`api/tasks`/各 `__init__`）。
+14. CI 接入 `ruff check --select F401,F841,F811,E722,DTZ003`：先把 75 条真未使用 import、5 条 F841、2 条裸 `except:` 清到 0，再按文件加 `# noqa` 白名单（`icloud_service`/`sms_service`/`api/tasks`/各 `__init__`）。
 15. 守卫扩围：`SCAN_DIRS` 加 `modules`、`scripts`、`main.py`；新增「裸 except」与「handler 只有 pass/continue」两条基线。
 
 **不需要动的**
@@ -544,17 +544,17 @@ except Exception:
 
 ## 附：本轮复核修正（与仓内既有草稿的出入）
 
-审计开始时 `docs/audit/2026-10-30/deadcode-quality.md` 已存在一版（随 `4680c8d..c93b71f` 一起提交）。下面这些结论在按 `c93b71f` 复核后**不成立**，已在上文改正：
+审计开始时 `docs/audit/2026-10-30/deadcode-quality.md` 已存在一版（随 `4680c8d..c93b71f` 一起提交）。下面这些结论在按 `e711c7c` 复核后**不成立**，已在上文改正：
 
 | 旧结论 | 实测 | 说明 |
 |---|---|---|
-| 「`chatgpt_executor` 是死配置键」 | **活的** | 前端用 `` cfg[`${platform}_executor`] `` 动态读（`RegisterTaskPage.tsx:266`、`Accounts.tsx:539`、`RegisterSettingsPanel.tsx:173`），后端只经 `executor_type` 中转 |
+| 「`chatgpt_executor` 是死配置键」 | **活的** | 前端用 `` cfg[`${platform}_executor`] `` 动态读（`RegisterTaskPage.tsx:266`、`Accounts.tsx:538`、`RegisterSettingsPanel.tsx:173`），后端只经 `executor_type` 中转 |
 | 「无 `except:` 裸捕获（0 处）」 | **2 处** | `platforms/chatgpt/token_refresh.py:254`、`services/turnstile_solver/api_solver.py:1080` |
 | 「URL 字面量 114 个 / 196 次 / 43 域名」 | **97 个 / 172 次 / 28 域名** | 按「纯 URL 字符串常量」重算（旧口径应含了 `reference/` 或拼接串） |
 | 「`core/db/repository.py:979` 判重吞异常」 | **`:1032`** | 979 是函数 docstring 区；`except Exception:` 在 1032 |
 | 「`_is_banned_status` 6 份含 `api/actions`」 | 5 份 + 1 个别名 | `api/actions.py:53` 已改为 `services.action_execution.is_banned_status` 的别名 |
 | 「`platforms/grok/upload.py` 未提及（只提 oauth_device）」 | **197 行整模块死** | 复核中发现的更大一块；`oauth_device` 的 `cpa_auth_filename` 正是靠它才「看起来活着」 |
 | 「`module/automation` 只是测试用」 | 准确，但漏了 **整簇 337 行** | `modules/__init__.py` 的 barrel 让它在启动路径上被白加载 |
-| 「重复 48 组 / 12 组 ≥14 行」 | **28 组 ≥10 行，可减 482 行** | 旧口径未排除测试、未设最小行数，短函数归一化后易误报 |
+| 「重复 48 组 / 12 组 ≥14 行」 | **18 组 ≥10 行（6 行口径 39 组），可减 482 行** | 旧口径未排除测试、未设最小行数，短函数归一化后易误报 |
 
 另外新增了三条旧稿没有的发现：**D5 不可达块（功能失效）**、**D6 `account_ids` 死参数（前后端契约断裂）**、**D14 `/auth/logout` 无前端调用（安全修复只做了一半）**。
