@@ -1191,6 +1191,24 @@ class AuthFlow(
                 if normalized and normalized != final_url:
                     callback_url, final_url = self.follow_redirect_chain(normalized)
 
+        # **callback 必须先被消费**（用户问题 2026-10-30「登录 RT 换不到新 AT」）。
+        #
+        # `run_register` 里有这一步（`:918-925`），登录链 `run_protocol_login`
+        # 里**没有** —— 这是两条链唯一实质性的差异，也是「登录链拿到的 AT 是旧的」
+        # 的真正原因：
+        #
+        # `follow_redirect_chain` 故意**不消费** callback（要把 code 留给后续的
+        # OAuth token exchange）。而 NextAuth 只在 callback 真正被 GET 时才
+        # 签发新的 session cookie 并**重新签发 access_token**。跳过这一步时，
+        # 紧接着的 `GET /api/auth/session` 拿的是**上一次会话残留的** AT ——
+        # 令牌未到期，服务端原样返回旧值（实测 2026-10-06 已记录该端点行为）。
+        #
+        # 于是「登录链跑完了、AT 也有了」，但这个 AT 是旧的。用户看到的
+        # 「记录停在 10-24、AT 是 10-29」的错位，一半是这个原因。
+        if (not refresh_only_mode) and callback_url:
+            logger.info("登录链：消费 callback 触发 NextAuth 重签 access_token")
+            self._consume_callback_for_session(callback_url)
+
         if not refresh_only_mode:
             self.get_auth_session()
 

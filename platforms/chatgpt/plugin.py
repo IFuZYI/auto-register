@@ -24,6 +24,33 @@ def _utcnow_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _access_token_claims(token: object) -> tuple[int, int]:
+    """从 AT（JWT）里取 `(iat, exp)`，解不出来返回 `(0, 0)`。
+
+    这是「AT 到底什么时候签发的」唯一可信来源 —— 服务端不会骗自己签的
+    JWT，而「刷新动作发生的时刻」只是我们这边的时间。
+    """
+    try:
+        from services.chatgpt_token_lifecycle import decode_jwt_claims
+
+        claims = decode_jwt_claims(token) or {}
+        iat = int(claims.get("iat") or 0)
+        exp = int(claims.get("exp") or 0)
+        return max(0, iat), max(0, exp)
+    except Exception:  # noqa: BLE001 - 解不出声明不影响刷新结论
+        return 0, 0
+
+
+def _epoch_to_iso(epoch: int) -> str:
+    """epoch 秒 → UTC ISO 串（与 `_utcnow_iso` 同格式，便于界面直接比）。"""
+    from datetime import datetime, timezone
+
+    try:
+        return datetime.fromtimestamp(int(epoch), timezone.utc).isoformat()
+    except (ValueError, OSError, OverflowError):
+        return ""
+
+
 @register
 class ChatGPTPlatform(BasePlatform):
     name = "chatgpt"
@@ -472,11 +499,31 @@ class ChatGPTPlatform(BasePlatform):
                     if refresh_failed_reason and refresh_failed_reason not in login_reason:
                         result.error_message = f"{refresh_failed_reason}；登录流程：{login_reason}"
 
-            stamp = {"ok": result.success, "verified": bool(result.verified),
-                     "refreshed": bool(result.refreshed),
-                     "strategy": str(result.strategy or ""),
-                     "message": result.error_message or result.verify_message or "",
-                     "at": _utcnow_iso()}
+            # **stamp 的时间必须与 AT 自身对得上**（用户问题 2026-10-30
+            # 「换到的 AT 是不是还是旧的」）。
+            #
+            # 原来 `at` 记的是「这次刷新动作发生的时刻」。当 AT 不是这次动作
+            # 签发的（服务端原样返回旧值、或 AT 由面板同步等别的路径写进来）
+            # 时，记录就与事实不符 —— 实测 45 个账号 AT 的 iat 是 10-29 17:33，
+            # 而 stamp 停在 10-24/10-25，差 4~5 天，看起来像「AT 没换」。
+            #
+            # 现在把 AT 的 iat 一并记下来（`at_iat` / `at_exp`，与列表接口给
+            # 前端渲染「AT 有效期」用的是同一对字段），并把 `at` 定成
+            # **AT 的签发时刻**（解不出来才退回动作时刻）—— 记录与凭证同源，
+            # 「记录说什么时候」和「令牌什么时候签的」不再是两件事。
+            _at_iat, _at_exp = _access_token_claims(result.access_token)
+            stamp = {
+                "ok": result.success,
+                "verified": bool(result.verified),
+                "refreshed": bool(result.refreshed),
+                "strategy": str(result.strategy or ""),
+                "message": result.error_message or result.verify_message or "",
+                "at": _utcnow_iso(),
+                "at_iat": _at_iat,
+                "at_exp": _at_exp,
+            }
+            if _at_iat:
+                stamp["issued_at"] = _epoch_to_iso(_at_iat)
 
             if not result.success:
                 return {

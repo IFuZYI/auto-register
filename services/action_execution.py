@@ -248,6 +248,18 @@ def _apply_credential_writes(acc_model, platform, result, session) -> None:
         if writes:
             extra = acc_model.get_extra()
             extra.update(writes)
+            # **换了 AT 就把「AT 什么时候签发的」记准**（用户问题 2026-10-30）。
+            #
+            # 这条路径（`_apply_credential_writes`）是所有「动作写回凭证」的
+            # 必经之处：刷新、补 RT、面板同步拉回远端 AT 都从这里过。
+            # 原来 `chatgpt_token_refresh.at` 只在**刷新动作**里写 —— 别的路径
+            # 更新了 AT 却不更新记录，于是记录说 10-24、AT 其实是 10-29 签的，
+            # 差 4~5 天（实测 45 个账号），看起来像「AT 没换」。
+            #
+            # 修法：只要写进来的 AT 与库里那个**不同**，就把 `at_iat` / `at_exp`
+            # 与 `at` 一起对齐到 AT 自身 —— 记录与凭证同源，不再两套时间。
+            if platform == "chatgpt":
+                _restamp_at_provenance(extra, writes)
             acc_model.set_extra(extra)
             # token 列 = 平台主凭证的镜像（chatgpt → AT，grok → SSO）
             sync_token_column(acc_model, platform, writes)
@@ -255,6 +267,47 @@ def _apply_credential_writes(acc_model, platform, result, session) -> None:
 
             acc_model.updated_at = datetime.now(timezone.utc)
             account_repository.save(acc_model, session=session)
+
+
+def _restamp_at_provenance(extra: dict, writes: dict) -> None:
+    """AT 换了 → 把 `chatgpt_token_refresh` 里的时间对齐到 AT 自身的 iat。
+
+    只动「时间/来源」这几个字段，**不改** `ok` / `verified` / `refreshed`
+    / `message` —— 那些是「上一次刷新动作」的结论，别的路径（面板同步）
+    不该冒充它。这里只回答一个问题：**这个 AT 是什么时候签发的**。
+
+    写入形态：
+        at          = AT 的签发时刻（ISO）；解不出 iat 才退回当前时刻
+        at_iat      = AT 的 iat（epoch 秒）
+        at_exp      = AT 的 exp（epoch 秒）
+        issued_at   = 同 at（历史字段，与列表接口 `_at_claims_for_list` 一致）
+        at_source   = 这条记录是「由凭证写入对齐」的，不是刷新动作写的
+    """
+    new_at = str(writes.get("access_token") or "").strip()
+    if not new_at:
+        return
+    from datetime import datetime, timezone
+
+    from services.chatgpt_token_lifecycle import decode_jwt_claims
+
+    claims = decode_jwt_claims(new_at) or {}
+    iat = int(claims.get("iat") or 0)
+    exp = int(claims.get("exp") or 0)
+    if iat <= 0:
+        # 解不出 iat（非 JWT 或被改写过的值）：只记「刚写入」，不冒充签发时间
+        return
+
+    stamp = extra.get("chatgpt_token_refresh")
+    if not isinstance(stamp, dict):
+        stamp = {}
+    else:
+        stamp = dict(stamp)
+    stamp["at"] = datetime.fromtimestamp(iat, timezone.utc).isoformat()
+    stamp["at_iat"] = iat
+    stamp["at_exp"] = exp
+    stamp["issued_at"] = stamp["at"]
+    stamp["at_source"] = "credential_write"
+    extra["chatgpt_token_refresh"] = stamp
 
 
 #: 平台 → 状态策略。加一个平台只加一行，不再往 `apply_action_result` 里嵌 `elif`。
