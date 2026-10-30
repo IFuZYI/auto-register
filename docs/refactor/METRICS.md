@@ -237,11 +237,23 @@ API 层，归 T3.3（`PanelAdapter`）一起搬。
 原先断言 `json.loads(row.extra_json)["totp_secret"] == SECRET` —— **它把泄漏当成了契约**。
 现在断言三件事：落盘不是明文、有 `v1:` 信封、`get_extra()` 读出来是明文。
 
-### 没做的：`password` 列
+### T1.4b：`password` 列也加密了（列名不变，免迁移）
 
-`password` 是独立列而不是 `extra_json` 的键。加密它要把列改名成 `password_cipher`
-再加一个 `password` 属性做透明解密 —— 那是 schema 变更，归到 T1.4b（需要一次
-`alembic` revision + 全量回填）。当前它仍是明文，**这一条是已知缺口，不要当成已完成**。
+做法：字段改名 `password_cipher`，但 `sa_column=Column("password", …)` ——
+**数据库列名保持 `password`**，所以不需要 Alembic revision、不需要回填。
+`password` 变成一个透明加解密的 property，67 处 `account.password` 一行没改。
+
+三个必须同时处理的旁路：
+
+| 旁路 | 症状 | 处理 |
+|---|---|---|
+| `AccountModel(password=…)` 关键字 | `password` 不是 pydantic 字段，构造直接报错 | `__init__` 里先 `pop("password")`，构造完经 setter 写入 |
+| `json_record_to_model` 的字段过滤 | 按 `model_fields` 过滤会把 `password` 丢掉 → JSON 后端读出来密码全空 | 过滤白名单补上 `{"password"}` |
+| `_json_save` 写 payload | 用 `getattr(model, "password")` 会写**明文**进 JSON 文件 | 改读 `password_cipher` |
+| `_slim_account_row` 的 `has_password` | `jsonable_encoder` 现在吐 `password_cipher`，标记消失 | 两个键名都收 |
+
+实测确认：`upsert` 后库里 `select password` 是 `v1:…`，`acc.password` 读回明文，
+明文串不出现在列值里。
 
 ### 开关
 
