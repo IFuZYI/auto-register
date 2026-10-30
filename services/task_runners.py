@@ -46,6 +46,7 @@ if TYPE_CHECKING:  # 仅类型标注用（from __future__ import annotations 下
         BatchActionTaskRequest,
         Bind2faTaskRequest,
         ProbeStatusTaskRequest,
+        RecoverAccountsTaskRequest,
         RefreshTokenTaskRequest,
         RegisterTaskRequest,
     )
@@ -1043,6 +1044,121 @@ def _run_refresh_token(task_id: str, account_ids: list[int], req: RefreshTokenTa
         task_id,
         account_ids,
         label="刷新 Token",
+        concurrency=req.concurrency,
+        delay_seconds=req.delay_seconds,
+        proxy=req.proxy,
+        handle_account=_handle,
+    )
+
+
+def _run_recover_accounts(
+    task_id: str, account_ids: list[str], req: "RecoverAccountsTaskRequest"
+):
+    """**异常账号尝试恢复**：逐个跑恢复链，救不回来的按退避计数、到上限落禁用。
+
+    与 `_run_refresh_token` 的差别只有两处，但这两处正是用户要的语义：
+
+    1. 恢复结果**写进退避计数器**（`record_auto_refresh_result`）—— 同一个号
+       连续失败 3 次后 `disabled=True`，并且**当场落 `banned`**
+       （`disabled_reason=recovery_exhausted`）。刷新任务不碰计数器，因为它
+       是「用户点一次」的语义，不该累计到自动恢复的预算上。
+    2. 成功时清掉计数器（`ok=True` → 清空），让号回到正常队列。
+    """
+    from services import task_service as _api
+    from core.config_store import config_store
+
+    base_config = config_store.get_all() or {}
+    import time as _time
+
+    def _handle(*, account_id, fields, proxy, control, attempt_id) -> AttemptResult:
+        from services.action_execution import (
+            apply_action_result as _apply_action_result,
+            result_message as _result_message,
+            to_platform_account as _to_platform_account,
+        )
+        from services.chatgpt_maintenance import record_auto_refresh_result
+        from core.base_platform import RegisterConfig
+        from core.db import AccountModel, account_repository, platform_session
+        from core.registry import get
+
+        email = fields["email"]
+        control.checkpoint(attempt_id=attempt_id)
+
+        PlatformCls = get("chatgpt")
+        instance = PlatformCls(config=RegisterConfig(extra=base_config))
+        if proxy:
+            instance.config.proxy = proxy
+        instance._log_fn = lambda msg: _api.log(task_id, f"  {msg}")
+        instance.bind_task_control(control)
+        instance._task_attempt_token = attempt_id
+
+        with platform_session("chatgpt") as s:
+            row = s.get(AccountModel, account_id)
+            if row is None:
+                _api.log(task_id, f"[SKIP] 账号 #{account_id} 不存在")
+                return AttemptResult.skipped("账号不存在")
+            before_status = str(row.status or "").strip().lower()
+            plat_account = _to_platform_account(row)
+
+        result = instance.execute_action("refresh_token", plat_account, {})
+
+        recovered = bool(result.get("ok"))
+        disabled_now = False
+        attempts = 0
+        with platform_session("chatgpt") as s:
+            row = s.get(AccountModel, account_id)
+            if row is not None:
+                _apply_action_result("chatgpt", "refresh_token", row, result, s)
+                # **退避计数 + 用尽落禁用**：这一步是「不成功则禁用」的落点。
+                # `record_auto_refresh_result` 会在 attempts 达上限时把
+                # `row.status` 改成 banned（并写 disabled_reason）。
+                extra = row.get_extra()
+                state = record_auto_refresh_result(
+                    extra, ok=recovered, now=int(_time.time()), row=row
+                )
+                row.set_extra(extra)
+                attempts = int((state or {}).get("attempts") or 0)
+                disabled_now = str(row.status or "").strip().lower() == "banned" and before_status != "banned"
+                account_repository.save(row, session=s)
+                s.commit()
+
+        if recovered:
+            message = _result_message(result) or "恢复成功"
+            _api.log(task_id, f"[OK] {email} {message}")
+            _api.save_task_log(
+                "chatgpt", email, "success", detail={"action": "recover"}
+            )
+            return AttemptResult.success()
+
+        message = str(result.get("error") or _result_message(result) or "恢复失败")
+        if disabled_now:
+            _api.log(
+                task_id,
+                f"[DISABLED] {email} {message}"
+                f" —— 连续恢复失败 {attempts} 次，已标注为禁用并移出恢复队列",
+            )
+            _api.save_task_log(
+                "chatgpt",
+                email,
+                "failed",
+                error=f"{message}（连续失败 {attempts} 次，已禁用）",
+                detail={"action": "recover", "disabled": True},
+            )
+        else:
+            _api.log(task_id, f"[FAIL] {email} {message}（第 {attempts} 次失败，将退避重试）")
+            _api.save_task_log(
+                "chatgpt",
+                email,
+                "failed",
+                error=message,
+                detail={"action": "recover", "attempts": attempts},
+            )
+        return AttemptResult.failed(f"{email}: {message}")
+
+    _run_account_batch_task(
+        task_id,
+        account_ids,
+        label="恢复账号",
         concurrency=req.concurrency,
         delay_seconds=req.delay_seconds,
         proxy=req.proxy,

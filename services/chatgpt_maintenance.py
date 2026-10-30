@@ -69,11 +69,14 @@ _RETRY_BACKOFF_SECONDS = (60 * 60, 6 * 60 * 60)
 #: 连续失败上限 —— 达到后同一 AT 周期内不再自动尝试。
 MAX_ATTEMPTS = 3
 
-#: 「失效/过期」状态：不管 AT 是否临期都进重试队列（用户要求 2026-10-10
+#: 「失效/过期/限流」状态：不管 AT 是否临期都进重试队列（用户要求 2026-10-10
 #: 「定期尝试自动刷新 gpt 失效的账号」）。这类账号的 AT 要么被吊销、要么
 #: 解不出 exp —— 按临期窗口判定会把它们永远挡在队列外，而刷新链（session →
 #: OAuth → 登录兜底）正是可能把它们救回来的路。
-RETRY_STATUSES = frozenset({"expired", "invalid"})
+#:
+#: `limited`（限流）也在里面：额度会重置，刷新/重登拿不到额度但**能确认
+#: 额度是否回来了** —— 不进队列的话，限流的号会永远停在 limited 没人再看。
+RETRY_STATUSES = frozenset({"expired", "invalid", "limited"})
 
 #: extra 里的状态键。
 AUTO_REFRESH_STATE_KEY = "chatgpt_auto_refresh"
@@ -266,14 +269,38 @@ def record_auto_refresh_result(
     state = _state_from_extra(extra)
     attempts = _safe_int(state.get("attempts")) + 1
     backoff = _RETRY_BACKOFF_SECONDS[min(attempts, len(_RETRY_BACKOFF_SECONDS)) - 1]
+    exhausted = attempts >= MAX_ATTEMPTS
     new_state = {
         "at": int(now) + backoff,
         "for_exp": for_exp,
         "attempts": attempts,
-        "disabled": attempts >= MAX_ATTEMPTS,
+        "disabled": exhausted,
     }
     extra[AUTO_REFRESH_STATE_KEY] = new_state
+    # **「不成功则禁用」**（用户要求 2026-10-30）：连续 MAX_ATTEMPTS 次都救不
+    # 回来，就落 `banned` —— 否则界面上永远显示「失效」，用户分不清
+    # 「还能救」和「已经放弃了」，而队列还会在下一个 AT 周期重新排一次。
+    #
+    # 为什么落 banned 而不是新增「已放弃」状态：banned 的既有语义就是
+    # 「怎么登都登不回来、移出所有重试队列」，正是这里要表达的；新增状态
+    # 会让判重/面板同步/恢复队列三处都要跟着改。
+    #
+    # 只在**确实是凭证问题**时落：`configuration`（我们 client 配错）不算
+    # 账号的错，落禁用会误杀一批好号（见 `classify_refresh_error` 的说明）。
+    if exhausted and row is not None and _refresh_kind_of(extra) != "configuration":
+        current = str(getattr(row, "status", "") or "").strip().lower()
+        if current != "banned":
+            setattr(row, "status", "banned")
+            new_state["disabled_reason"] = "recovery_exhausted"
     return new_state
+
+
+def _refresh_kind_of(extra: dict[str, Any]) -> str:
+    """从 stamp 里读最后一次刷新的失败分类（permanent / configuration / retryable）。"""
+    stamp = (extra or {}).get("chatgpt_token_refresh")
+    if not isinstance(stamp, dict):
+        return ""
+    return str(stamp.get("refresh_kind") or "").strip().lower()
 
 
 # ── 扫描执行（集成层）─────────────────────────────────────────────
@@ -318,7 +345,16 @@ def _config_text(key: str) -> str:
 
 
 def get_auto_refresh_interval_seconds() -> int:
-    """自动刷新任务的调度间隔；关闭时返回 0（scheduler 跳过）。"""
+    """**后台自动**刷新 / 恢复的调度间隔；关闭时返回 0（scheduler 跳过）。
+
+    默认**关**：这一趟会对真实账号打上游请求（1057 个号 × 每 5 分钟），
+    默认打开等于替用户决定「开始消耗出口 IP 和上游配额」。
+
+    但「异常账号尝试恢复」这个能力**不依赖它** —— 用户要恢复时走
+    `POST /api/tasks/recover`（见 `api/tasks.py`），那条路自己会跑、自己会
+    按退避计数、自己会在用尽后落禁用。这个开关只决定「要不要无人值守地
+    定期跑同一件事」。
+    """
     if not _config_bool("chatgpt_auto_refresh_enabled"):
         return 0
     return AUTO_REFRESH_INTERVAL_SECONDS
@@ -590,8 +626,12 @@ def run_auto_refresh_pass(
             summary["failed"] += 1
             reason = str(result.get("error") or "") or "未换发"
             suffix = ""
-            if state.get("disabled"):
-                suffix = "；已连续失败 3 次，本 AT 周期内不再自动尝试"
+            if state.get("disabled_reason") == "recovery_exhausted":
+                # 恢复用尽 → 已落禁用。日志必须说清楚「这是终局结论」，
+                # 否则用户看到「失败」会以为还能再点一次刷新。
+                suffix = "；连续恢复失败已达上限，已标注为禁用账号并移出恢复队列"
+            elif state.get("disabled"):
+                suffix = "；本 AT 周期内不再自动尝试"
             exec_errors.append(f"账号 #{account_id}: {reason}")
             log_fn(f"账号 #{account_id} 自动刷新失败: {reason}{suffix}")
 

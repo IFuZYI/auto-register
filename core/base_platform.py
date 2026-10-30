@@ -32,6 +32,14 @@ class AccountStatus(str, Enum):
     #: 判重语义上它与 registered 同侧：号虽然废了但**邮箱仍被这个平台占用**，
     #: 不该被当成"没注册过"再拿这个邮箱去注册一次。
     BANNED       = "banned"
+    #: 上游**限流 / 额度耗尽**（OpenAI 的 429、面板的「限流」标签）。
+    #:
+    #: 与 `invalid` 的区别：`invalid` 是凭证坏了（要重新登录），`limited` 是
+    #: 凭证**好的**、只是这一阵不让用 —— 额度会重置，所以它是**可恢复**的，
+    #: 不该被当成失效号反复重登（那只会白打上游），也不该被当成正常号继续派活。
+    #:
+    #: 判重语义上与 registered 同侧：邮箱仍被占用，不能拿它重新注册。
+    LIMITED      = "limited"
 
     @classmethod
     def values(cls) -> set[str]:
@@ -64,7 +72,12 @@ class AccountStatus(str, Enum):
 
     @classmethod
     def dead_values(cls) -> set[str]:
-        """明确「已失效」的状态值（黑名单）。"""
+        """明确「已失效」的状态值（黑名单）。
+
+        `limited` **不在这里**：限流的号凭证是好的，判重时必须算「已注册」
+        （`counts_as_registered` 是黑名单判定），否则会被当成没注册过、
+        拿同一个邮箱再注册一次 —— 而那个邮箱在 OpenAI 那边已经占用了。
+        """
         return {cls.INVALID.value, cls.EXPIRED.value}
 
     @classmethod

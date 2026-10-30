@@ -42,7 +42,8 @@ class ChatGPTAccountStateTests(unittest.TestCase):
             "remote_401",
         )
 
-    def test_payment_and_quota_do_not_mark_invalid(self):
+    def test_payment_is_not_treated_as_invalid_or_limited(self):
+        """付费问题既不是「凭证失效」也不是「限流」—— 保持无判定。"""
         self.assertEqual(
             classify_local_probe_state(
                 {
@@ -51,6 +52,29 @@ class ChatGPTAccountStateTests(unittest.TestCase):
                 }
             ),
             "",
+        )
+
+    def test_quota_exhausted_is_rate_limited_not_invalid(self):
+        """429 / 额度耗尽 → 限流（可恢复），**绝不能**判成凭证失效。
+
+        2026-10-30 用户要求「GPT 限流…尝试恢复」：限流的号凭证是好的，
+        判成 invalid 会把它排进「重新登录」队列 —— 重登解决不了额度问题，
+        只会白打上游。这条同时钉住「不是 invalid」与「有新落点」。
+        """
+        self.assertEqual(
+            classify_local_probe_state(
+                {"auth": {"http_status": 429, "state": "quota_exhausted"}}
+            ),
+            "auth_rate_limited",
+        )
+        self.assertEqual(
+            classify_local_probe_state(
+                {
+                    "auth": {"state": "access_token_valid", "http_status": 200},
+                    "codex": {"state": "quota_exhausted", "http_status": 429},
+                }
+            ),
+            "codex_rate_limited",
         )
         self.assertEqual(
             classify_remote_sync_state(
@@ -61,7 +85,7 @@ class ChatGPTAccountStateTests(unittest.TestCase):
                     "last_probe_message": "usage limit reached",
                 }
             ),
-            "",
+            "remote_rate_limited",
         )
 
     def test_deactivated_message_marks_invalid(self):

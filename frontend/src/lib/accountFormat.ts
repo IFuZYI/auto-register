@@ -163,7 +163,8 @@ export function formatStructuredText(value?: string) {
  * - `registered` 正常：正常能使用的账号；
  * - `expired` 过期：AT 已过期（刷新可能救回）；
  * - `invalid` 失效：需要重新登录的（凭证被拒），走流程登录；
- * - `banned` 禁用：被封了的账号。
+ * - `banned` 禁用：被封了的账号；
+ * - `limited` 限流：上游额度耗尽/429，凭证是好的，可恢复。
  *
  * 此前账号列表直接渲染英文原值（`<Tag>{status}</Tag>` → "registered"），
  * 且旧文案是「已注册 / 已过期 / 已失效 / 已封禁」—— 统一收敛到这里，
@@ -179,6 +180,10 @@ export function accountStatusMeta(status?: string): { label: string; color: stri
       return { label: '失效', color: 'error' }
     case 'banned':
       return { label: '禁用', color: 'default' }
+    case 'limited':
+      // 限流 = 上游额度耗尽/429。凭证是好的，额度会重置 —— 与「失效」区分开，
+      // 否则用户会以为号坏了、去反复重登（重登解决不了额度）。
+      return { label: '限流', color: 'warning' }
     default:
       // 历史库可能带任意字符串 —— 原样显示比吞掉强（能看到真实值）
       return { label: String(status || '未知'), color: 'default' }

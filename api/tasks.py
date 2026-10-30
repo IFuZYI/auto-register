@@ -162,6 +162,36 @@ class RefreshTokenTaskRequest(BaseModel):
     proxy: Optional[str] = None
 
 
+#: 哪些状态算「可恢复」：凭证失效（重登可能救回）/ 过期 / 限流（额度会重置）。
+#: `banned` **不在里面** —— 那是终局结论，恢复链只会被同样拒绝，白打上游。
+RECOVERABLE_STATUSES = frozenset({"invalid", "expired", "limited"})
+
+
+class RecoverAccountsTaskRequest(BaseModel):
+    """**异常账号尝试恢复**的任务参数（用户要求 2026-10-30）。
+
+    与「刷新 Token」的区别：那个是用户点一次就跑一次；这个是**恢复语义** ——
+    专门挑 `invalid` / `expired` / `limited` 这些「凭证或额度出问题、但理论上
+    还有救」的账号，逐个试一次，**失败的按退避计数、达到上限就落禁用**
+    （用户原话：「若不成功则禁用」）。
+
+    `account_ids` 为空时按 `statuses` 自动挑（默认三种可恢复状态）。
+    """
+
+    account_ids: list[str | int] = Field(default_factory=list)
+    #: 自动挑选的状态集合；`account_ids` 给了就忽略它。
+    statuses: list[str] = Field(
+        default_factory=lambda: sorted(RECOVERABLE_STATUSES)
+    )
+    #: 只挑「还没被禁用重试」的（`chatgpt_auto_refresh.disabled=True` 的跳过）。
+    skip_exhausted: bool = True
+    #: 单次最多恢复多少个（防止误点把 400 个号全打一遍上游）。
+    limit: int = Field(default=50, ge=1, le=500)
+    concurrency: int = Field(default=1, ge=1, le=8)
+    delay_seconds: float = Field(default=5, ge=0)
+    proxy: Optional[str] = None
+
+
 class BatchActionTaskRequest(BaseModel):
     """**通用**批量动作任务参数。
 
@@ -237,6 +267,7 @@ from services.task_runners import (  # noqa: E402,F401
     _run_batch_action,
     _run_bind_2fa,
     _run_probe_status,
+    _run_recover_accounts,
     _run_refresh_token,
     _run_register,
 )
@@ -600,6 +631,142 @@ def create_refresh_token_task(req: RefreshTokenTaskRequest, background_tasks: Ba
         _log(task_id, f"忽略不存在的账号: {missing_ids}")
     background_tasks.add_task(_run_refresh_token, task_id, account_ids, req)
     return {"task_id": task_id, "total": len(account_ids), "missing_ids": missing_ids}
+
+
+@router.post("/recover")
+def create_recover_accounts_task(
+    req: RecoverAccountsTaskRequest, background_tasks: BackgroundTasks
+):
+    """**异常账号尝试恢复**（用户要求 2026-10-30）。
+
+    挑出 `invalid` / `expired` / `limited` 的账号，逐个跑一次恢复链
+    （refresh_token 的完整路径：session → OAuth → 登录兜底）；**救不回来的
+    按退避计数，达到上限就落 `banned`** —— 这就是用户要的「若不成功则禁用」。
+
+    与 `/refresh-token` 的差别：
+
+    - 选号是**按状态自动挑**（不用先筛列表再勾选）；
+    - 结果的语义是「恢复」，失败要累计到退避计数器上（`record_auto_refresh_result`），
+      所以同一个号连续三次恢复失败会自动禁用，不会无限重试。
+
+    `dry_run` 由 `?preview=1` 走单独的分支（见 `GET /recover/candidates`）。
+    """
+    from core.db import AccountModel, platform_session
+    from services.chatgpt_account_selection import normalize_account_ids
+
+    wanted_ids = [str(i) for i in normalize_account_ids(req.account_ids)] if req.account_ids else []
+    statuses = {str(s or "").strip().lower() for s in (req.statuses or []) if str(s or "").strip()}
+    # **显式传了 statuses 就以它为准**（哪怕交集为空 → 没有可恢复的号 → 400）。
+    # 之前写成 `statuses & RECOVERABLE or 默认三种`：传 `statuses=["banned"]`
+    # 时交集为空 → 回退到默认三种 → 反而把 invalid 号挑出来跑了。显式指定
+    # 却被静默换成默认值，是最难查的那类「参数不起作用」。
+    if statuses:
+        allowed = statuses & RECOVERABLE_STATUSES
+    else:
+        allowed = set(RECOVERABLE_STATUSES)
+
+    with platform_session("chatgpt") as s:
+        rows = s.exec(
+            select(AccountModel).where(AccountModel.platform == "chatgpt")
+        ).all()
+
+    candidates: list[str] = []
+    skipped_exhausted = 0
+    for row in rows:
+        if wanted_ids and str(row.id) not in wanted_ids:
+            continue
+        if not wanted_ids and str(row.status or "").strip().lower() not in allowed:
+            continue
+        if req.skip_exhausted:
+            state = (row.get_extra() or {}).get("chatgpt_auto_refresh")
+            if isinstance(state, dict) and state.get("disabled"):
+                skipped_exhausted += 1
+                continue
+        candidates.append(str(row.id))
+
+    if not candidates:
+        raise HTTPException(
+            400,
+            "没有需要恢复的账号"
+            + (f"（{skipped_exhausted} 个已达重试上限，已跳过）" if skipped_exhausted else ""),
+        )
+
+    candidates = candidates[: int(req.limit)]
+    task_id = f"recover_{int(time.time() * 1000)}"
+    _task_store.create(
+        task_id,
+        platform="chatgpt",
+        total=len(candidates),
+        source="recover",
+        meta={
+            "kind": "recover",
+            "statuses": sorted(allowed),
+            "skipped_exhausted": skipped_exhausted,
+        },
+    )
+    _persist_task_snapshot(task_id)
+    _log(task_id, f"待恢复账号 {len(candidates)} 个（状态: {', '.join(sorted(allowed))}）")
+    if skipped_exhausted:
+        _log(task_id, f"跳过 {skipped_exhausted} 个已达重试上限的账号")
+    background_tasks.add_task(
+        _run_recover_accounts,
+        task_id,
+        candidates,
+        req,
+    )
+    return {
+        "task_id": task_id,
+        "total": len(candidates),
+        "skipped_exhausted": skipped_exhausted,
+    }
+
+
+@router.get("/recover/candidates")
+def preview_recover_candidates():
+    """预览「异常账号尝试恢复」会挑中哪些账号（不改任何状态）。"""
+    from core.db import AccountModel, platform_session
+
+    allowed = {"invalid", "expired", "limited"}
+    with platform_session("chatgpt") as s:
+        rows = s.exec(
+            select(AccountModel).where(AccountModel.platform == "chatgpt")
+        ).all()
+
+    by_status: dict[str, int] = {}
+    exhausted = 0
+    items: list[dict] = []
+    for row in rows:
+        status = str(row.status or "").strip().lower()
+        state = (row.get_extra() or {}).get("chatgpt_auto_refresh")
+        is_exhausted = isinstance(state, dict) and bool(state.get("disabled"))
+        # 「用尽」要**独立于状态**统计：老数据里失败的号还是 invalid
+        # （旧实现只置 disabled、不改状态），新数据里已经落 banned ——
+        # 只看可恢复状态的话，后者永远数不到，界面上会显示「0 个已放弃」。
+        if is_exhausted:
+            exhausted += 1
+            if status not in allowed:
+                continue
+        if status not in allowed:
+            continue
+        by_status[status] = by_status.get(status, 0) + 1
+        if is_exhausted:
+            continue
+        items.append(
+            {
+                "id": str(row.id),
+                "email": row.email,
+                "status": status,
+                "attempts": int((state or {}).get("attempts") or 0)
+                if isinstance(state, dict)
+                else 0,
+            }
+        )
+    return {
+        "recoverable": len(items),
+        "exhausted": exhausted,
+        "by_status": by_status,
+        "items": items[:100],
+    }
 
 
 @router.post("/register")

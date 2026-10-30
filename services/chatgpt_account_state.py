@@ -19,6 +19,11 @@ INVALID_ACCOUNT_STATUS = "invalid"
 #: 号已删除/停用（OpenAI 原话 "deleted or deactivated"）。与 `invalid` 的区别见
 #: `apply_chatgpt_status_policy` —— 判重时封禁的邮箱仍算被占用。
 BANNED_ACCOUNT_STATUS = "banned"
+#: 上游限流 / 额度耗尽（429、面板的「限流」标签）。
+#:
+#: 凭证是好的，只是这一阵不让用 —— 额度会重置，所以**可恢复**。与 `invalid`
+#: 的区别：invalid 要重新登录，limited 重登没用（只会白打上游）。
+LIMITED_ACCOUNT_STATUS = "limited"
 
 
 def _lower_text(value: Any) -> str:
@@ -105,6 +110,10 @@ def classify_local_probe_state(probe: dict[str, Any] | None) -> str:
 
     if auth_state == "missing_access_token":
         return "auth_missing"
+    # 429 / 额度耗尽：凭证没坏，只是被限流 —— **不能**落到 invalid
+    # （invalid 会把它推进「重新登录」队列，而重登解决不了限流）。
+    if auth_status == 429 or auth_state == "quota_exhausted":
+        return "auth_rate_limited"
     if auth_status == 401 or auth_state in {"access_token_invalidated", "unauthorized"}:
         return "auth_401"
     if is_account_deactivated_message(auth_error_code, auth_message):
@@ -117,6 +126,8 @@ def classify_local_probe_state(probe: dict[str, Any] | None) -> str:
     codex_error_code = codex.get("error_code")
     codex_message = codex.get("message")
 
+    if codex_status == 429 or codex_state == "quota_exhausted":
+        return "codex_rate_limited"
     if codex_status == 401 or codex_state in {"access_token_invalidated", "unauthorized"}:
         return "codex_401"
     if is_account_deactivated_message(codex_error_code, codex_message):
@@ -136,6 +147,8 @@ def classify_remote_sync_state(sync: dict[str, Any] | None) -> str:
     error_code = sync.get("last_probe_error_code")
     message = sync.get("last_probe_message") or sync.get("status_message") or sync.get("message")
 
+    if status_code == 429 or remote_state in {"quota_exhausted", "rate_limited", "limited"}:
+        return "remote_rate_limited"
     if status_code == 401 or remote_state in {"access_token_invalidated", "unauthorized"}:
         return "remote_401"
     if is_account_deactivated_message(error_code, message):
@@ -159,6 +172,30 @@ def _is_banned_reason(reason: str) -> bool:
     其余（401 / 403 无封禁措辞）只是凭证失效，重登还有救。
     """
     return "deactivated" in str(reason or "").lower()
+
+
+def probe_confirms_usable_strongly(probe: dict[str, Any] | None) -> bool:
+    """探测是否**双路**确认可用 —— 只有这种证据才允许 banned 复活。
+
+    `probe_confirms_usable` 是「任一路确认」：auth 有效**或** codex 可用。
+    那是给 expired/invalid 用的宽松判据。禁用（banned）是终局结论，要复活它
+    必须两路都验过：`auth=access_token_valid` **且** `codex=usable`。
+
+    为什么这么严：封禁被弱信号洗掉是实测事故（「刚发掘的封禁被下一次状态同步
+    写成正常」）。但反过来的事故也存在 —— 真可用的号被永久锁死在禁用里
+    （实测 14 个账号：`auth=access_token_valid` + `codex=usable` 却仍 banned，
+    它们从此再没被任何流程碰过）。双证据是两边都能接受的判据。
+    """
+    if not isinstance(probe, dict):
+        return False
+    auth_raw = probe.get("auth")
+    codex_raw = probe.get("codex")
+    auth = auth_raw if isinstance(auth_raw, dict) else {}
+    codex = codex_raw if isinstance(codex_raw, dict) else {}
+    return (
+        _lower_text(auth.get("state")) == "access_token_valid"
+        and _lower_text(codex.get("state")) == "usable"
+    )
 
 
 def probe_confirms_usable(probe: dict[str, Any] | None) -> bool:
@@ -241,6 +278,10 @@ def apply_chatgpt_status_policy(
             # 封禁要人工确认才解除（同「不因一次可用探测复活」的强判断语义）；
             # 降级会让刚发掘出的封禁被下一次状态同步洗掉、账号重新进重试队列。
             return ""
+        elif "rate_limited" in str(reason or "").lower():
+            # 限流：凭证是好的，落 limited（可恢复、可筛选），**不要**落 invalid
+            # —— invalid 会把它排进「重新登录」队列，而重登解决不了限流。
+            setattr(account, "status", LIMITED_ACCOUNT_STATUS)
         elif reason == "auth_missing":
             # 没有 AT 可探测 —— 需要重新登录拿凭证
             setattr(account, "status", INVALID_ACCOUNT_STATUS)
@@ -259,7 +300,15 @@ def apply_chatgpt_status_policy(
     )
     if usable or probe_confirms_usable(local_probe) or remote_usable:
         current = str(getattr(account, "status", "") or "").strip().lower()
-        if current in {"expired", "invalid"}:
+        if current in {"expired", "invalid", LIMITED_ACCOUNT_STATUS}:
             setattr(account, "status", "registered")
             return "recovered"
+        if current == BANNED_ACCOUNT_STATUS and probe_confirms_usable_strongly(local_probe):
+            # **强证据**才允许 banned 复活：`auth` 明确 `access_token_valid`
+            # **且** `codex` 明确 `usable` —— 两路都验过，不是「没查出问题」。
+            # 弱信号（单条 401/缺凭证/远端失效）仍然不得降级，那是防止封禁被
+            # 下一次同步洗掉的原意；但双证据确认可用的号若永远锁在 banned，
+            # 用户就再也用不了它（实测 14 个账号：探测 usable 却仍标禁用）。
+            setattr(account, "status", "registered")
+            return "recovered_from_banned"
     return reason

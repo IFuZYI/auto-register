@@ -40,6 +40,7 @@ import {
 } from 'antd'
 import type { MenuProps } from 'antd'
 import {
+  MedicineBoxOutlined,
   ReloadOutlined,
   CopyOutlined,
   LinkOutlined,
@@ -233,6 +234,7 @@ export default function Accounts() {
   const [createdAtStart, setCreatedAtStart] = useState('')
   const [createdAtEnd, setCreatedAtEnd] = useState('')
   const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([])
+  const [recoverLoading, setRecoverLoading] = useState(false)
 
   const [registerModalOpen, setRegisterModalOpen] = useState(false)
   const [addModalOpen, setAddModalOpen] = useState(false)
@@ -810,6 +812,62 @@ export default function Accounts() {
     }
   }
 
+  /**
+   * 「恢复异常账号」：不用先勾选 —— 按状态自动挑 invalid/expired/limited，
+   * 逐个试一次恢复链，救不回来的累计到退避计数，达上限自动落「禁用」。
+   * 先拉预览让用户看清会动哪些号，再执行（不可逆的批量动作都要先预览）。
+   */
+  const startRecover = async () => {
+    setRecoverLoading(true)
+    try {
+      const preview = await apiFetch('/tasks/recover/candidates')
+      const recoverable = Number(preview.recoverable || 0)
+      if (recoverable === 0) {
+        message.info(
+          preview.exhausted > 0
+            ? `没有可恢复的账号（${preview.exhausted} 个已达重试上限，已标注禁用）`
+            : '没有需要恢复的账号',
+        )
+        return
+      }
+      const byStatus = preview.by_status || {}
+      const detail = Object.entries(byStatus)
+        .map(([k, v]) => `${accountStatusMeta(k).label} ${v}`)
+        .join(' / ')
+      Modal.confirm({
+        title: `确认尝试恢复 ${recoverable} 个异常账号？`,
+        content: (
+          <div>
+            <p>{detail}</p>
+            <p style={{ marginTop: 8, fontSize: 12, color: '#888' }}>
+              逐个走刷新链（session → OAuth → 登录兜底）。失败的会累计重试次数，
+              连续 3 次失败后自动标注为「禁用」并移出恢复队列。
+              {preview.exhausted > 0 ? `（另有 ${preview.exhausted} 个已达上限，本次跳过）` : ''}
+            </p>
+          </div>
+        ),
+        okText: '开始恢复',
+        cancelText: '取消',
+        onOk: async () => {
+          try {
+            const result = await apiFetch('/tasks/recover', {
+              method: 'POST',
+              body: JSON.stringify({}),
+            })
+            message.success(`已开始恢复 ${result.total} 个账号`)
+            load()
+          } catch (e: unknown) {
+            message.error(`恢复启动失败: ${e instanceof Error ? e.message : String(e)}`)
+          }
+        },
+      })
+    } catch (e: unknown) {
+      message.error(`读取可恢复账号失败: ${e instanceof Error ? e.message : String(e)}`)
+    } finally {
+      setRecoverLoading(false)
+    }
+  }
+
   const closeRefreshTokenModal = () => {
     setRefreshTokenModalOpen(false)
     setRefreshTokenTaskId(null)
@@ -1170,6 +1228,13 @@ export default function Accounts() {
                     icon: <SyncOutlined />,
                     label: selectedRowKeys.length > 0 ? `刷新 Token (${selectedRowKeys.length})` : '刷新 Token',
                     disabled: total === 0,
+                  }, {
+                    // 「恢复异常账号」与「刷新 Token」的区别：前者按状态自动挑
+                    // （invalid/expired/limited），失败的累计退避、用尽自动落禁用。
+                    key: 'recover',
+                    icon: <MedicineBoxOutlined />,
+                    label: '恢复异常账号',
+                    disabled: recoverLoading,
                   }] : []),
                   { key: 'import', icon: <UploadOutlined />, label: '导入' },
                   ...(currentPlatform === 'chatgpt' ? [{
@@ -1195,6 +1260,7 @@ export default function Accounts() {
                 onClick: ({ key }) => {
                   if (key === 'rt') setBackfillRtModalOpen(true)
                   else if (key === 'refresh_token') setRefreshTokenModalOpen(true)
+                  else if (key === 'recover') void startRecover()
                   else if (key === 'import') setImportModalOpen(true)
                   else if (key === 'panel_upload') setPanelUploadOpen(true)
                   else if (key === 'export') setExportModalOpen(true)
@@ -1238,6 +1304,7 @@ export default function Accounts() {
             { value: 'registered', label: '正常' },
             { value: 'expired', label: '过期' },
             { value: 'invalid', label: '失效' },
+            { value: 'limited', label: '限流' },
             { value: 'banned', label: '禁用' },
           ]}
         />
@@ -1606,6 +1673,7 @@ export default function Accounts() {
                     { value: 'registered', label: '正常' },
                     { value: 'expired', label: '过期' },
                     { value: 'invalid', label: '失效' },
+                    { value: 'limited', label: '限流' },
                     { value: 'banned', label: '禁用' },
                   ]}
                 />
