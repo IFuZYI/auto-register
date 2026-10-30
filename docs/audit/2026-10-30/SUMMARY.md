@@ -115,7 +115,10 @@ password/token 改成落盘密文（D-01/D-02）。
    `SENSITIVE_EXTRA_KEYS`，存量 607 行已加密（verify 全 0，读回 377 字符）。
 2. ~~`c3f8a1d64b27` downgrade 会把 `accounts` 变空表~~ —— **已修（`8d3c1eb`）**：
    降级前预检主键映射，撞主键直接拒绝（`ALLOW_DESTRUCTIVE_DOWNGRADE=1` 才放行）。
-3. **JSON 后端主路径仍不等价**（D-04/D-05）：改账号 500、混合后端不建表。
+3. **JSON 后端主路径仍不等价**（D-05）：混合后端（`STORAGE_BACKEND=json` +
+   `STORAGE_BACKEND_ACCOUNTS=sqlite`）启动后一张表都没有。
+   ~~D-04 改账号 500~~ **已修（`7d620d9`）**：更新分支的 `sess.refresh()` 打在没有
+   持久化的模型上，已按新建分支的判据修掉；真机 JSON 实例复现 500 → 200。
    ~~D-03 Outlook 池写错表~~ **已修（`55edd14`）**：改走 `OutlookRepository.add`，
    不再借 `account_repository.save`（JSON 下会把邮箱池记录写进 `accounts.json`）。
    凭据明文那半条已修（`c539dda` 落盘封口）。
