@@ -50,14 +50,24 @@ class AccountStoreJsonTests(unittest.TestCase):
     # ---------------------------------------------------------------- 基础
 
     def test_insert_assigns_id(self):
+        """主键是 UUID4 字符串 —— 与 SQLite 侧同口径（ADR-0008）。"""
         row = self.store.insert(self._acct())
-        self.assertIsInstance(row["id"], int)
-        self.assertGreater(row["id"], 0)
+        self.assertIsInstance(row["id"], str)
+        self.assertRegex(
+            row["id"],
+            r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+        )
 
-    def test_ids_increase(self):
+    def test_ids_are_unique(self):
+        """UUID 没有「递增」这回事，唯一性才是承重语义。"""
         a = self.store.insert(self._acct(email="a@x.c"))
         b = self.store.insert(self._acct(email="b@x.c"))
-        self.assertGreater(b["id"], a["id"])
+        self.assertNotEqual(b["id"], a["id"])
+
+    def test_insert_keeps_caller_supplied_id(self):
+        """调用方给了主键就用它：同一账号在 SQLite 与 JSON 里必须是同一个 id。"""
+        row = self.store.insert(self._acct(id="11111111-1111-4111-8111-111111111111"))
+        self.assertEqual(row["id"], "11111111-1111-4111-8111-111111111111")
 
     def test_ids_are_not_reused_after_delete(self):
         """删掉后新建不能复用旧 id（任务日志里会引用它）。"""
@@ -108,10 +118,11 @@ class AccountStoreJsonTests(unittest.TestCase):
         ]):
             self.store.insert(self._acct(platform=plat, email=email, status=status))
 
-    def test_list_all_sorted_by_id(self):
+    def test_list_all_sorted_by_created_at(self):
+        """UUID 没有大小语义，排序改用 created_at：先建的在前。"""
         self._seed()
         rows = self.store.list_all()
-        self.assertEqual([r["id"] for r in rows], sorted(r["id"] for r in rows))
+        self.assertEqual([r["email"] for r in rows], ["a@x.c", "b@x.c", "c@x.c"])
 
     def test_filter_by_platform(self):
         self._seed()

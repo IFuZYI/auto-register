@@ -1,8 +1,11 @@
 """AuthFlow 的方法分组（Mixin）。
 
-`AuthFlow` 自身 76 个方法 + PhoneRegisterMixin 24 个，同名冲突为 0，因此可以安全
-按职责切成 Mixin。MRO 顺序即依赖顺序：`PhoneRegisterMixin` 放最前（保持现状行为），
+`AuthFlow` 自身 76 个方法 + 7 个 mixin，同名冲突为 0，因此可以安全
+按职责切成 Mixin。MRO 顺序即依赖顺序：`TraceMixin` 放最前（保持现状行为），
 其余按「后定义的可覆盖前面的」排。
+
+手机注册链（`PhoneRegisterMixin`，原 24 个方法）已随手机号注册一起删除，
+见 `docs/adr/0007-email-only-registration.md`。
 
 拆分的硬约束（见 tests/test_auth_flow_module_patching.py）：
 * 每个搬走的模块**必须各自 import `time` 与 `create_http_session`**，否则

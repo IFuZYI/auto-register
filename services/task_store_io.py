@@ -25,10 +25,15 @@ logger = logging.getLogger(__name__)
 
 
 def _store():
-    """延迟取 api.tasks 的 `_task_store` 单例（打破 api.tasks ↔ 本模块的循环）。"""
-    from api import tasks as _api
+    """取任务表单例。
 
-    return _api._task_store
+    以前是「延迟反向取路由层的任务表单例」——服务层为了一个内存字典
+    反向依赖 HTTP 层。单例已搬到 `services/task_service`，这里直接 import；
+    `task_service` 反过来只在 `log()` 里延迟 import 本模块，所以不构成循环。
+    """
+    from services.task_service import task_store
+
+    return task_store
 
 
 def _utcnow() -> datetime:
@@ -173,7 +178,7 @@ def _upsert_task_run(snapshot: dict) -> None:
         s.commit()
 
 
-def _persist_task_snapshot(task_id: str) -> None:
+def persist_task_snapshot(task_id: str) -> None:
     if not _store().exists(task_id):
         return
     try:
@@ -181,6 +186,10 @@ def _persist_task_snapshot(task_id: str) -> None:
     except Exception:
         return
     _upsert_task_run(snapshot)
+
+
+#: 兼容别名：`api/tasks.py` 与若干测试按老名字引用。
+_persist_task_snapshot = persist_task_snapshot
 
 
 def _get_persisted_task(task_id: str) -> Optional[dict]:

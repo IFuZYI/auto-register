@@ -321,9 +321,10 @@ class RegistrationModesDeclarationTests(unittest.TestCase):
         self.assertEqual(
             resolve_chatgpt_rt_route({"chatgpt_registration_mode": declared}), "login"
         )
-        self.assertEqual(
-            by_key["chatgpt_register_flow"]["default"], DEFAULT_CHATGPT_REGISTER_FLOW
-        )
+        # `chatgpt_register_flow` 已不再是声明项（手机号注册删除，ADR-0007）。
+        # 但运行时的默认值仍必须是 email —— 存量任务提交旧值时由它归一。
+        self.assertNotIn("chatgpt_register_flow", by_key)
+        self.assertEqual(DEFAULT_CHATGPT_REGISTER_FLOW, "email")
 
     def test_mode_keys_are_writable_config(self):
         """声明了配置键就必须在白名单里，否则界面选了保存不生效。"""

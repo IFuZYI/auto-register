@@ -6,6 +6,10 @@
 """
 from __future__ import annotations
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 import json
 import sys
 import time
@@ -370,7 +374,7 @@ class SmsActivateProvider(BaseSmsProvider):
             try:
                 path.unlink(missing_ok=True)
             except Exception:
-                pass
+                logger.debug("忽略异常（保留原行为）", exc_info=True)
             return
         serializable = dict(cache)
         serializable["used_codes"] = sorted(serializable.get("used_codes") or [])
@@ -751,7 +755,7 @@ class SmsActivateProvider(BaseSmsProvider):
         try:
             self._request({"action": "setStatus", "id": activation_id, "status": 1})
         except Exception:
-            pass
+            logger.debug("忽略异常（保留原行为）", exc_info=True)
 
     def stop_reuse(self, activation_id: str, reason: str = "") -> None:
         with _facade._SMS_CACHE_LOCK:

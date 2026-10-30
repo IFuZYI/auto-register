@@ -1,4 +1,7 @@
 """验证码解决器基类"""
+import logging
+
+logger = logging.getLogger(__name__)
 from abc import ABC, abstractmethod
 import os
 
@@ -125,5 +128,5 @@ class LocalSolverCaptcha(BaseCaptcha):
                 requests.get(f"http://localhost:{port}/", timeout=2)
                 return
             except Exception:
-                pass
+                logger.debug("忽略异常（保留原行为）", exc_info=True)
         raise RuntimeError("LocalSolver 启动超时")

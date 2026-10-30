@@ -135,7 +135,7 @@ class AddPhoneMixin:
                 try:
                     self._sms_callback.cleanup()
                 except Exception:
-                    pass
+                    logger.debug("忽略异常（保留原行为）", exc_info=True)
         return self._handle_add_phone_via_env(continue_url)
 
 
@@ -156,11 +156,11 @@ class AddPhoneMixin:
             try:
                 ctrl.cleanup()
             except Exception:
-                pass
+                logger.debug("忽略异常（保留原行为）", exc_info=True)
             try:
                 ctrl._release_lock()
             except Exception:
-                pass
+                logger.debug("忽略异常（保留原行为）", exc_info=True)
 
 
     def _do_sms_loop(self, ctrl, *, continue_url: str = "") -> str:
@@ -365,7 +365,7 @@ class AddPhoneMixin:
             try:
                 ctrl.cleanup()
             except Exception:
-                pass
+                logger.debug("忽略异常（保留原行为）", exc_info=True)
             # cleanup 清掉 controller.activation，下一轮 get_phone 会租新号
 
         # 所有号都失败

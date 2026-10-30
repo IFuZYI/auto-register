@@ -23,18 +23,6 @@ router = APIRouter(prefix="/config", tags=["config"])
 #:
 #: 写入侧配套：提交空串表示「不修改」（见 `update_config`），否则页面一保存就会
 #: 把已存的口令抹成空。要清空口令请显式提交 `null`。
-SECRET_CONFIG_KEYS: frozenset[str] = frozenset({
-    "yescaptcha_key",
-    "twocaptcha_key",
-    "cpa_api_key",
-    "chatgpt2api_api_key",
-    "cliproxyapi_management_key",  # `cpa_api_key` 的别名键（老数据兜底）
-    "sub2api_api_key",
-    "grok2api_password",
-    "sms_api_key",
-    "contribution_key",
-    "custom_contribution_token",
-})
 
 #: `GET /api/config` 额外回给前端的「是否已设置」标记：`<key>_set`。
 #: 界面靠它显示「已配置 / 未配置」，不必看到明文。
@@ -49,107 +37,31 @@ def _secret_set_flags(all_cfg: dict) -> dict:
     }
 
 
-CONFIG_KEYS = [
-    "yescaptcha_key",
-    "twocaptcha_key",
-    "default_executor",
-    "default_captcha_solver",
-    "register_retry_times",
-    # 注册任务的默认参数（任务页打开时预填这些值，仍可临时改）
-    "register_count",
-    "register_concurrency",
-    "register_delay_seconds",
-    # 各平台的执行器（按平台单独设置，没有全局默认 —— 各平台支持的集合不同）
-    "chatgpt_executor",
-    "grok_executor",
-    "mail_provider",
-    "mail_import_source",
-    "outlook_backend",
-    "mailbox_otp_timeout_seconds",
-    # 本地 iCloud 渠道（主号在 data/platforms/icloud.db，别名由本项目生成）
-    "icloud_local_account_id",
-    "icloud_local_label",
-    "icloud_local_note",
-    # 远程 iCloud 渠道（主号在远程 icloud-hme 仓库，别名经它的 API 生成）
-    "icloud_remote_account_id",
-    "icloud_remote_label",
-    "icloud_remote_note",
-    "cpa_enabled",
-    "cpa_api_url",
-    "cpa_api_key",
-    # CPA 自动上传按平台分开开关。`cpa_enabled` 是历史单开关，作为两者都未设置时
-    # 的兜底（老配置 cpa_enabled=true 的语义是「都传」，见 services/external_sync.py）。
-    "cpa_upload_chatgpt_enabled",
-    # 上传凭据时是否带上账号绑定的代理（`register_proxy`）。CPA 的 auth 文件
-    # 顶层支持 `proxy_url`、chatgpt2api 的导入对象支持 `proxy` 字段 —— 开关
-    # 按面板分开（导入格式各自独立，合成一个会连带另一边）。默认关。
-    "cpa_upload_proxy_enabled",
-    "chatgpt2api_upload_proxy_enabled",
-    "sub2api_enabled",
-    "sub2api_api_url",
-    "sub2api_api_key",
-    "sub2api_group_ids",
-    "chatgpt2api_enabled",
-    "chatgpt2api_api_url",
-    "chatgpt2api_api_key",
-    # ChatGPT 自动维护（用户要求 2026-10-06）：
-    # - chatgpt_auto_refresh_enabled：临期/过期 AT 的自动刷新（临期窗口内随机时刻），
-    #   失效（invalid）账号同样进重试队列（用户要求 2026-10-10，不看临期窗口）；
-    # - chatgpt2api_auto_sync_enabled：本地较新凭证自动推送 chatgpt2api。
-    # 见 services/chatgpt_maintenance.py 的周期任务。
-    "chatgpt_auto_refresh_enabled",
-    "chatgpt2api_auto_sync_enabled",
-    "cliproxyapi_base_url",
-    "cliproxyapi_management_key",
-    "grok2api_base_url",
-    "grok2api_username",
-    "grok2api_password",
-    # grok2api 的自动上传开关（注册完自动把账号推过去）。与 `cpa_enabled` /
-    # `sub2api_enabled` 同一个语义：留空按「已配置就开」处理。
-    "grok2api_enabled",
-    # 兼容键：注册方式已并入「执行器」（`grok_executor`）。协议注册路径删除后
-    # 这个键对行为**没有影响**（只有一条浏览器路径），但老任务/脚本仍会提交它 ——
-    # 保留在白名单里，免得那些调用整批被静默忽略（响应会回 ignored 列表）。
-    "grok_register_mode",
-    # `grok_send_code_mode` / `grok_send_code_timeout` 已随协议路径删除：
-    # 它们只被那条路读取，留着会让用户以为能调（实际无人读）。
-    "grok_send_code_min_interval",
-    # 注册时是否换 build 凭据（OAuth device flow → AT/RT）。默认关：注册只产
-    # Web SSO。面板在「注册设置 → 各平台设置 → Grok」渲染（见
-    # `GrokPlatform.registration_modes`）；不在白名单里的话面板保存会被静默丢弃。
-    "grok_oauth_exchange",
-    # ChatGPT 的注册方式全局默认值（原先只在任务页 localStorage 里选，
-    # 换机器就丢）。见 platforms/chatgpt/plugin.py 的 registration_modes。
-    "chatgpt_registration_mode",
-    "chatgpt_rt_route",
-    "chatgpt_register_flow",
-    "sms_enabled",
-    "sms_provider",
-    "sms_api_key",
-    "sms_service",
-    "sms_country",
-    "sms_auto_country",
-    "sms_allowed_countries",
-    "sms_auto_min_stock",
-    "sms_auto_max_price",
-    "sms_max_price",
-    "sms_fixed_price",
-    "sms_reuse_phone",
-    "sms_phone_success_max",
-    "sms_per_phone_timeout",
-    "sms_max_phone_attempts",
-    "sms_code_retries_per_phone",
-    "contribution_enabled",
-    "contribution_server_url",
-    "contribution_key",
-    "contribution_mode",
-    "custom_contribution_url",
-    "custom_contribution_token",
-]
+#: 配置键的**唯一定义处**是 `core/config_schema.py`（键名 + 分组 + 是否口令）。
+#: 以前 69 个键的白名单和 10 个口令键是两份独立手写列表，加一个键忘了加进
+#: 白名单，前端能填、后端静默丢弃。
+from core.config_schema import (  # noqa: E402  (常量区，与旧结构对齐)
+    CONFIG_KEYS as _SCHEMA_KEYS,
+    SECRET_CONFIG_KEYS,
+    schema_payload,
+)
+
+#: 保持 `list` 类型（历史调用方 `for key in CONFIG_KEYS` 与 `in` 判断都兼容）。
+CONFIG_KEYS = list(_SCHEMA_KEYS)
 
 
 class ConfigUpdate(BaseModel):
     data: dict
+
+
+@router.get("/schema")
+def get_config_schema():
+    """配置键的身份表：键名 / 分组 / 是否口令。**不含任何值**。
+
+    前端据此渲染设置页，不必再维护第三份键名列表；加键只改
+    `core/config_schema.py` 一处。
+    """
+    return schema_payload()
 
 
 @router.get("")

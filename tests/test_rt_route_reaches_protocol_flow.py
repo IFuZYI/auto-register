@@ -100,8 +100,8 @@ class RealCallSitesGoThroughTheRouteTests(unittest.TestCase):
     **必须扫整个 `platforms/chatgpt/` 目录**：第一版只扫了 `auth_flow.py`，
     于是 `phone_flow.py`（手机注册链）里两处裸调完全不在覆盖内 ——
     `chatgpt_register_flow=phone` 时设置选「密码登录」仍然全程走 Codex
-    （代码审查 2026-10-27 C4 抓到）。`PhoneRegisterMixin` 是 `AuthFlow` 的
-    基类，两个 helper 直接可用。
+    （代码审查 2026-10-27 C4 抓到）。手机注册链已删除（ADR-0007），
+    但「扫整个目录」这条约束保留：新增的 mixin 同样可能在里层裸调。
     """
 
     def _sources(self) -> list[tuple[str, str]]:

@@ -4,6 +4,8 @@ import time
 import uuid
 import random
 import logging
+
+logger = logging.getLogger(__name__)
 import asyncio
 from typing import Optional, Union
 import argparse
@@ -210,7 +212,7 @@ class TurnstileAPIServer:
                 _auth, address = rest.split("@", 1)
                 return f"{scheme}://***:***@{address}" if scheme else f"***:***@{address}"
         except Exception:
-            pass
+            logger.debug("忽略异常（保留原行为）", exc_info=True)
         return proxy
 
     def display_welcome(self):
@@ -1076,7 +1078,7 @@ class TurnstileAPIServer:
                     sitekey_elem = await page.locator('[data-sitekey]').get_attribute('data-sitekey')
                     logger.debug(f"Browser {index}: Found sitekey: {sitekey_elem}")
                 except:
-                    pass
+                    logger.debug("忽略异常（保留原行为）", exc_info=True)
             
             inject_result = await self._inject_captcha_directly(page, sitekey, action or '', cdata or '', index)
             

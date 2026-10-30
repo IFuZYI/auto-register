@@ -17,6 +17,10 @@
 """
 from __future__ import annotations
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 from sqlmodel import Session
 
 from .base import (
@@ -167,7 +171,7 @@ def close_all() -> None:
     try:
         engine.dispose()
     except Exception:
-        pass
+        logger.debug("忽略异常（保留原行为）", exc_info=True)
 
 from .proxy_repository import proxy_repository
 from .task_repository import task_repository

@@ -44,6 +44,12 @@
 
 from __future__ import annotations
 
+import logging
+
+logger = logging.getLogger(__name__)
+
+from services.task_store_io import persist_task_snapshot
+
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Optional
 
@@ -327,7 +333,7 @@ def get_chatgpt2api_auto_sync_interval_seconds() -> int:
     return CHATGPT2API_AUTO_SYNC_INTERVAL_SECONDS
 
 
-def _default_execute(account_id: int) -> dict[str, Any]:
+def _default_execute(account_id: str) -> dict[str, Any]:
     """生产执行器：走 `refresh_token` 动作的完整链（与手动批量刷新同路径）。
 
     代理规则与批量刷新一致（`_run_account_batch_task` 的
@@ -335,7 +341,10 @@ def _default_execute(account_id: int) -> dict[str, Any]:
     从池里取备用（惰性来源 —— 避免白推轮转游标）并**写回** `register_proxy`
     （用户要求「不再是仅有注册才绑定」）。
     """
-    from api.actions import _apply_action_result, _to_platform_account
+    from services.action_execution import (
+        apply_action_result as _apply_action_result,
+        to_platform_account as _to_platform_account,
+    )
     from core.base_platform import RegisterConfig
     from core.config_store import config_store
     from core.db import AccountModel, platform_session
@@ -372,7 +381,7 @@ def _default_execute(account_id: int) -> dict[str, Any]:
                     account_repository.save(row, session=s)
                     s.commit()
         except Exception:  # noqa: BLE001
-            pass
+            logger.debug("忽略异常（保留原行为）", exc_info=True)
 
     result = instance.execute_action("refresh_token", account, {})
     with platform_session("chatgpt") as s:
@@ -437,11 +446,11 @@ def run_auto_refresh_pass(
         )
         if plan.action == "schedule":
             extra[AUTO_REFRESH_STATE_KEY] = plan.state
-            _write_extra(int(row.id), extra)
+            _write_extra(str(row.id), extra)
             summary["scheduled"] += 1
         elif plan.action == "due":
             summary["due"] += 1
-            due_ids.append(int(row.id))
+            due_ids.append(str(row.id))
         else:
             summary["skipped"] += 1
             if plan.reason == "banned":
@@ -451,14 +460,14 @@ def run_auto_refresh_pass(
                 state = _state_from_extra(extra)
                 if state:
                     extra.pop(AUTO_REFRESH_STATE_KEY, None)
-                    _write_extra(int(row.id), extra)
+                    _write_extra(str(row.id), extra)
             # 清掉「针对旧 AT」的死计划：AT 被手动刷新后 exp 变了，旧计划
             # 已无意义 —— 保持「extra 里只有当前 AT 周期的计划」这一不变量。
             elif plan.reason == "not_expiring":
                 state = _state_from_extra(extra)
                 if state and _safe_int(state.get("for_exp")) != _safe_int(expires_at):
                     extra.pop(AUTO_REFRESH_STATE_KEY, None)
-                    _write_extra(int(row.id), extra)
+                    _write_extra(str(row.id), extra)
 
     to_run = due_ids[: max(0, int(max_accounts))]
     # 有实际执行才建任务记录（空轮不建 —— 每 5 分钟一条空任务会淹列表）。
@@ -605,7 +614,7 @@ def run_auto_refresh_pass(
     return summary
 
 
-def _write_extra(account_id: int, extra: dict[str, Any]) -> None:
+def _write_extra(account_id: str, extra: dict[str, Any]) -> None:
     """把 extra 写回账号行（短会话，不占网络链的连接）。"""
     from core.db import AccountModel, platform_session
 
@@ -632,19 +641,19 @@ def _open_auto_task(
     try:
         import time as _time
 
-        from api import tasks as _api
+        from services import task_service as _api
 
         task_id = f"{source}_{int(_time.time() * 1000)}"
-        _api._task_store.create(
+        _api.task_store.create(
             task_id,
             platform=platform,
             total=max(0, int(total)),
             source=source,
             meta=dict(meta or {}),
         )
-        _api._task_store.mark_running(task_id)
-        _api._persist_task_snapshot(task_id)
-        return task_id, _api._task_store.control_for(task_id)
+        _api.task_store.mark_running(task_id)
+        persist_task_snapshot(task_id)
+        return task_id, _api.task_store.control_for(task_id)
     except Exception:  # noqa: BLE001 - 记录失败不影响本轮执行
         return None, None
 
@@ -662,9 +671,9 @@ def _close_auto_task(
     if task_id is None:
         return
     try:
-        from api import tasks as _api
+        from services import task_service as _api
 
-        _api._task_store.finish(
+        _api.task_store.finish(
             task_id,
             status=status,
             success=max(0, int(success)),
@@ -672,10 +681,10 @@ def _close_auto_task(
             skipped=max(0, int(skipped)),
             errors=[str(e) for e in errors],
         )
-        _api._persist_task_snapshot(task_id)
-        _api._task_store.cleanup()
+        persist_task_snapshot(task_id)
+        _api.task_store.cleanup()
     except Exception:  # noqa: BLE001 - 收尾失败只影响可见性
-        pass
+        logger.debug("忽略异常（保留原行为）", exc_info=True)
 
 
 def _make_logger(
@@ -689,9 +698,9 @@ def _make_logger(
         if sink is not None:
             sink(msg)
         if task_id is not None:
-            from api import tasks as _api
+            from services import task_service as _api
 
-            _api._log(task_id, msg)
+            _api.log(task_id, msg)
         elif sink is None:
             print(f"{prefix} {msg}")
 
@@ -783,9 +792,9 @@ def run_chatgpt2api_auto_sync(
 
 def _default_chatgpt2api_push() -> dict[str, Any]:
     """生产推送：直接调用接口层的 push 端点函数（同一份管线）。"""
-    from api.integrations import push_panel_endpoint
+    from services.panel_push import push_local_rows
 
-    return push_panel_endpoint("chatgpt2api", platform="chatgpt", delete_old=True)
+    return push_local_rows("chatgpt2api", platform="chatgpt", delete_old=True)
 
 
 # ── 周期任务自注册（core.scheduler 不认识具体业务，见其模块 docstring）──

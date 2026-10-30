@@ -22,8 +22,6 @@ from core.base_mailbox import BaseMailbox
 from core.base_platform import Account, AccountStatus
 from platforms.chatgpt.registration_engine import (
     REGISTER_FLOW_EMAIL,
-    REGISTER_FLOW_PHONE,
-    REGISTER_FLOW_PHONE_WITH_EMAIL,
     REGISTRATION_MODE_ACCESS_TOKEN_ONLY,
     REGISTRATION_MODE_REFRESH_TOKEN,
     ChatGPTRegistrationEngine,
@@ -35,8 +33,6 @@ CHATGPT_REGISTRATION_MODE_ACCESS_TOKEN_ONLY = REGISTRATION_MODE_ACCESS_TOKEN_ONL
 DEFAULT_CHATGPT_REGISTRATION_MODE = CHATGPT_REGISTRATION_MODE_REFRESH_TOKEN
 
 CHATGPT_REGISTER_FLOW_EMAIL = REGISTER_FLOW_EMAIL
-CHATGPT_REGISTER_FLOW_PHONE = REGISTER_FLOW_PHONE
-CHATGPT_REGISTER_FLOW_PHONE_WITH_EMAIL = REGISTER_FLOW_PHONE_WITH_EMAIL
 DEFAULT_CHATGPT_REGISTER_FLOW = CHATGPT_REGISTER_FLOW_EMAIL
 
 # 邮箱链路失效的特征串，命中就换下一个邮箱重试而不是把整轮判死
@@ -218,17 +214,13 @@ def resolve_chatgpt_registration_mode(extra: Optional[dict]) -> str:
 
 
 def normalize_chatgpt_register_flow(value) -> str:
-    normalized = str(value or "").strip().lower().replace("-", "_")
-    if normalized in {
-        CHATGPT_REGISTER_FLOW_PHONE_WITH_EMAIL,
-        "phone_bind_email",
-        "phone_and_email",
-        "phone_email",
-    }:
-        return CHATGPT_REGISTER_FLOW_PHONE_WITH_EMAIL
-    if normalized in {CHATGPT_REGISTER_FLOW_PHONE, "phone_number", "sms"}:
-        return CHATGPT_REGISTER_FLOW_PHONE
-    return DEFAULT_CHATGPT_REGISTER_FLOW
+    """注册身份只剩邮箱（手机号注册已删除，见 ADR-0007）。
+
+    旧值 `phone` / `phone_with_email` 一律归一到 `email` —— 它们只可能来自
+    存量任务的配置。存量账号的 `extra.chatgpt_register_flow` 是**观测**值，
+    不经过这里，原样保留。
+    """
+    return CHATGPT_REGISTER_FLOW_EMAIL
 
 
 def resolve_chatgpt_register_flow(extra: Optional[dict]) -> str:

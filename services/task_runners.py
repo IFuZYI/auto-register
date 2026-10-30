@@ -1,14 +1,20 @@
-"""    from api import tasks as _api  # 延迟 import：patch 打在 api.tasks 上必须被看到
+"""    from services import task_service as _api  # 延迟 import：patch 打在 task_service 上必须被看到
 注册 / 回填 RT / 绑定 2FA 的任务执行实现（原 api/tasks.py 的 470–1165 行）。
 
 ⚠️ 本模块的函数大量调用 `api/tasks.py` 里的辅助（`_api._log`/`_api._save_task_log`/
-`_api._task_store`/`_api._persist_task_snapshot`/`_api._account_already_registered`/
+`_api.task_store`/`_api._persist_task_snapshot`/`_api._account_already_registered`/
 `_api._auto_upload_integrations`/`_api.normalize_register_retry_times`/`_api.MAX_DEAD_END_ROUNDS`），
-统一在**函数内** `from api import tasks as _api` 取门面 —— 这样
+统一在**函数内** `from services import task_service as _api` 取门面 —— 这样
 `patch("api.tasks._save_task_log")` 才能生效。这是全仓唯一需要函数内 import 的
 地方：api.tasks → 本模块（模块级）与本模块 → api.tasks（函数级）构成单向循环。
 """
 from __future__ import annotations
+
+import logging
+
+logger = logging.getLogger(__name__)
+
+from services.task_store_io import persist_task_snapshot
 
 import threading
 import time
@@ -29,14 +35,16 @@ from core.task_runtime import (
 if TYPE_CHECKING:  # 仅类型标注用（from __future__ import annotations 下运行时不需要）
     from api.tasks import (  # noqa: F401
         BackfillRtTaskRequest,
+        BatchActionTaskRequest,
         Bind2faTaskRequest,
+        ProbeStatusTaskRequest,
         RefreshTokenTaskRequest,
         RegisterTaskRequest,
     )
 
 
 def _run_register(task_id: str, req: RegisterTaskRequest):
-    from api import tasks as _api  # 延迟 import：patch 打在 api.tasks 上必须被看到
+    from services import task_service as _api  # 延迟 import：patch 打在 task_service 上必须被看到
     from core.registry import get
     from core.base_platform import RegisterConfig
     from core.db import save_account
@@ -44,9 +52,9 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
     from modules.mail import create_mailbox
     from core.proxy_utils import normalize_proxy_url
 
-    control = _api._task_store.control_for(task_id)
-    _api._task_store.mark_running(task_id)
-    _api._persist_task_snapshot(task_id)
+    control = _api.task_store.control_for(task_id)
+    _api.task_store.mark_running(task_id)
+    persist_task_snapshot(task_id)
     success = 0
     skipped = 0
     errors = []
@@ -76,7 +84,7 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
         if callable(preflight):
             verdict = preflight()
             if not verdict.ok:
-                _api._log(
+                _api.log(
                     task_id,
                     f"[环境预检] 环境未就绪，任务终止（重开一轮同样结局）：{verdict.message}",
                 )
@@ -130,7 +138,7 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
         retry_times = _api.normalize_register_retry_times(req.register_retry_times)
         total_rounds = 1 + retry_times
         if total_rounds > 1:
-            _api._log(
+            _api.log(
                 task_id,
                 f"失败重试轮数 {retry_times}：每个账号失败后最多重开 {retry_times} 轮，"
                 f"连同首轮共 {total_rounds} 轮（每轮都是全新的代理/邮箱/号码/会话）",
@@ -153,7 +161,7 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
                 if control.is_stop_requested():
                     break
                 if dead_end_rounds >= _api.MAX_DEAD_END_ROUNDS:
-                    _api._log(
+                    _api.log(
                         task_id,
                         f"[RETRY] 第 {i + 1} 个账号连续 {dead_end_rounds} 轮都栽在"
                         f"「重开也是同样结局」的失败上，剩下 "
@@ -161,7 +169,7 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
                         f"（再开只会多几个没人认领的号）: {result.message}",
                     )
                     break
-                _api._log(
+                _api.log(
                     task_id,
                     f"[RETRY] 第 {i + 1} 个账号第 {round_no - 1}/{total_rounds} 轮失败，"
                     f"开始第 {round_no}/{total_rounds} 轮重试（全新会话）: {result.message}",
@@ -171,7 +179,7 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
             if result.outcome == AttemptOutcome.FAILED:
                 # 注册记录按"一个序号一条结果"记，所以只有跑完所有轮次才落一条
                 # failed；否则重试成功了还会在统计里留下一条失败
-                _api._save_task_log(
+                _api.save_task_log(
                     req.platform,
                     result.email,
                     "failed",
@@ -196,7 +204,7 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
                         now = time.time()
                         wait_seconds = max(0.0, next_start_time - now)
                         if wait_seconds > 0:
-                            _api._log(
+                            _api.log(
                                 task_id,
                                 f"第 {i + 1} 个账号启动前延迟 {wait_seconds:g} 秒",
                             )
@@ -224,7 +232,7 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
                     _mailbox = None
                 _platform = PlatformCls(config=_config, mailbox=_mailbox)
                 _platform._task_attempt_token = attempt_id
-                _platform._log_fn = lambda msg: _api._log(task_id, msg)
+                _platform._log_fn = lambda msg: _api.log(task_id, msg)
                 _platform.bind_task_control(control)
                 if getattr(_platform, "mailbox", None) is not None:
                     _platform.mailbox._task_attempt_token = attempt_id
@@ -233,16 +241,16 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
                     # 同一个地址注册过 ChatGPT 之后还能注册 Grok。不注入的话
                     # 渠道退回旧的全局行为，会把地址对所有平台一起锁死。
                     _platform.mailbox._platform_name = req.platform
-                _api._task_store.set_progress(task_id, f"{i + 1}/{req.count}")
-                _api._persist_task_snapshot(task_id)
-                _api._log(task_id, f"开始注册第 {i + 1}/{req.count} 个账号{round_suffix}")
+                _api.task_store.set_progress(task_id, f"{i + 1}/{req.count}")
+                persist_task_snapshot(task_id)
+                _api.log(task_id, f"开始注册第 {i + 1}/{req.count} 个账号{round_suffix}")
                 if _proxy:
-                    _api._log(task_id, f"使用代理: {_proxy}")
+                    _api.log(task_id, f"使用代理: {_proxy}")
 
                 # 已注册的邮箱不重复注册：邮箱是账号唯一业务键，
                 # 指定邮箱时先判重，命中就跳过（省掉整轮注册与验证码）。
-                if req.email and _api._account_already_registered(req.platform, req.email):
-                    _api._log(task_id, f"[SKIP] 该邮箱已注册，跳过: {req.email}")
+                if req.email and _api.account_already_registered(req.platform, req.email):
+                    _api.log(task_id, f"[SKIP] 该邮箱已注册，跳过: {req.email}")
                     return AttemptResult.skipped(f"邮箱已注册: {req.email}")
 
                 account = _platform.register(
@@ -267,18 +275,18 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
                 saved_account = save_account(account)
                 if _proxy:
                     _proxy_pool.report_success(_proxy)
-                _api._log(task_id, f"[OK] 注册成功: {account.email}")
-                _api._save_task_log(req.platform, account.email, "success")
-                _api._auto_upload_integrations(task_id, saved_account or account)
+                _api.log(task_id, f"[OK] 注册成功: {account.email}")
+                _api.save_task_log(req.platform, account.email, "success")
+                _api.auto_upload_integrations(task_id, saved_account or account)
                 cashier_url = (account.extra or {}).get("cashier_url", "")
                 if cashier_url:
-                    _api._log(task_id, f"  [升级链接] {cashier_url}")
-                    _api._task_store.add_cashier_url(task_id, cashier_url)
-                    _api._persist_task_snapshot(task_id)
+                    _api.log(task_id, f"  [升级链接] {cashier_url}")
+                    _api.task_store.add_cashier_url(task_id, cashier_url)
+                    persist_task_snapshot(task_id)
                 return AttemptResult.success()
             except SkipCurrentAttemptRequested as e:
-                _api._log(task_id, f"[SKIP] 已跳过当前账号: {e}")
-                _api._save_task_log(
+                _api.log(task_id, f"[SKIP] 已跳过当前账号: {e}")
+                _api.save_task_log(
                     req.platform,
                     current_email,
                     "skipped",
@@ -286,12 +294,12 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
                 )
                 return AttemptResult.skipped(str(e))
             except StopTaskRequested as e:
-                _api._log(task_id, f"[STOP] {e}")
+                _api.log(task_id, f"[STOP] {e}")
                 return AttemptResult.stopped(str(e))
             except Exception as e:
                 if _proxy:
                     _proxy_pool.report_fail(_proxy)
-                _api._log(task_id, f"[FAIL] 注册失败{round_suffix}: {e}")
+                _api.log(task_id, f"[FAIL] 注册失败{round_suffix}: {e}")
                 # 环境类错误（浏览器/Node 缺失等）即使以字符串形态传上来
                 # （register_browser 的兜底 except 会把异常文本化）也判成
                 # 不可重试 —— 重开一轮是同样的结局。
@@ -318,7 +326,7 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
                 except CancelledError:
                     continue
                 except Exception as e:
-                    _api._log(task_id, f"[ERROR] 任务线程异常: {e}")
+                    _api.log(task_id, f"[ERROR] 任务线程异常: {e}")
                     errors.append(str(e))
                     continue
                 if result.outcome == AttemptOutcome.SUCCESS:
@@ -329,12 +337,12 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
                     stopped = True
                 else:
                     errors.append(result.message)
-                _api._task_store.update_counters(
+                _api.task_store.update_counters(
                     task_id,
                     success=success,
                     registered=success + skipped + len(errors),
                 )
-                _api._persist_task_snapshot(task_id)
+                persist_task_snapshot(task_id)
                 if stopped or control.is_stop_requested():
                     stopped = True
                     for pending in futures:
@@ -345,10 +353,10 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
         # finish() 会被整个跳过，任务永远停在 running —— 实测过的
         # `[Errno 32] Broken pipe` 事故正是这样：日志只有两行、DB 状态卡死。
         try:
-            _api._log(task_id, f"致命错误: {e}")
+            _api.log(task_id, f"致命错误: {e}")
         except Exception:
-            pass
-        _api._task_store.finish(
+            logger.debug("忽略异常（保留原行为）", exc_info=True)
+        _api.task_store.finish(
             task_id,
             status="failed",
             success=success,
@@ -357,8 +365,8 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
             errors=errors,
             error=str(e),
         )
-        _api._persist_task_snapshot(task_id)
-        _api._task_store.cleanup()
+        persist_task_snapshot(task_id)
+        _api.task_store.cleanup()
         return
 
     final_status = "stopped" if control.is_stop_requested() or stopped else "done"
@@ -368,8 +376,8 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
         )
     else:
         summary = f"完成: 成功 {success} 个, 跳过 {skipped} 个, 失败 {len(errors)} 个"
-    _api._log(task_id, summary)
-    _api._task_store.finish(
+    _api.log(task_id, summary)
+    _api.task_store.finish(
         task_id,
         status=final_status,
         success=success,
@@ -377,11 +385,11 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
         skipped=skipped,
         errors=errors,
     )
-    _api._persist_task_snapshot(task_id)
-    _api._task_store.cleanup()
+    persist_task_snapshot(task_id)
+    _api.task_store.cleanup()
 
 
-def _load_account_fields(account_id: int, platform: str = "chatgpt") -> Optional[dict]:
+def _load_account_fields(account_id: str, platform: str = "chatgpt") -> Optional[dict]:
     """把一行账号读成纯数据（含它注册时用的代理）。
 
     ``platform`` 必须由调用方传入：这里原来**两处**硬编码 ``"chatgpt"``
@@ -392,7 +400,7 @@ def _load_account_fields(account_id: int, platform: str = "chatgpt") -> Optional
     会把面板其它请求一起拖住。代理字段也一并读出来 —— 复用账号时要优先回到
     它出生时的那个出口（见 `_run_account_batch_task` 里的代理选择）。
     """
-    from api import tasks as _api  # 延迟 import：patch 打在 api.tasks 上必须被看到
+    from services import task_service as _api  # 延迟 import：patch 打在 task_service 上必须被看到
     from core.db import AccountModel, platform_session
 
     with platform_session(platform) as s:
@@ -428,13 +436,13 @@ def _run_account_batch_task(
     排队限速、可停可跳、计数收尾这些每个批量任务都一样，只有每个号具体做什么
     不同 —— 那部分由 ``handle_account`` 提供，进度和日志复用注册任务那套。
     """
-    from api import tasks as _api  # 延迟 import：patch 打在 api.tasks 上必须被看到
+    from services import task_service as _api  # 延迟 import：patch 打在 task_service 上必须被看到
     from core.proxy_pool import proxy_pool
     from core.proxy_utils import normalize_proxy_url, redact_proxy_url
 
-    control = _api._task_store.control_for(task_id)
-    _api._task_store.mark_running(task_id)
-    _api._persist_task_snapshot(task_id)
+    control = _api.task_store.control_for(task_id)
+    _api.task_store.mark_running(task_id)
+    persist_task_snapshot(task_id)
 
     total = len(account_ids)
     success = 0
@@ -465,12 +473,12 @@ def _run_account_batch_task(
         )
         if should_bind and chosen:
             if saved:
-                _api._log(
+                _api.log(
                     task_id,
                     f"原代理不可用，改用 {redact_proxy_url(chosen)}（已更新账号的代理字段）",
                 )
             else:
-                _api._log(
+                _api.log(
                     task_id,
                     f"账号未绑定代理，绑定 {redact_proxy_url(chosen)}（已写回账号的代理字段）",
                 )
@@ -498,7 +506,7 @@ def _run_account_batch_task(
                 s.add(row)
                 s.commit()
         except Exception as exc:  # noqa: BLE001 - 记账失败不该让整轮任务失败
-            _api._log(task_id, f"写回代理字段失败（忽略）: {exc}")
+            _api.log(task_id, f"写回代理字段失败（忽略）: {exc}")
 
     def _wait_turn(attempt_id: int | None) -> None:
         nonlocal next_start_time
@@ -514,7 +522,7 @@ def _run_account_batch_task(
                 remaining -= chunk
             next_start_time = time.time() + delay_seconds
 
-    def _do_one(index: int, account_id: int) -> AttemptResult:
+    def _do_one(index: int, account_id: str) -> AttemptResult:
         attempt_id: int | None = None
         try:
             control.checkpoint()
@@ -524,7 +532,7 @@ def _run_account_batch_task(
 
             fields = _load_account_fields(account_id, platform)
             if fields is None:
-                _api._log(task_id, f"[SKIP] 账号 #{account_id} 不存在")
+                _api.log(task_id, f"[SKIP] 账号 #{account_id} 不存在")
                 return AttemptResult.skipped("账号不存在")
 
             # 代理按账号定：优先它注册时那个，不可用才换（换完写回字段）。
@@ -532,10 +540,10 @@ def _run_account_batch_task(
             # 把 `_index` 往前走一格，白消耗一个轮转位。
             account_proxy = _resolve_proxy_for_account(fields)
 
-            _api._task_store.set_progress(task_id, f"{index + 1}/{total}")
-            _api._log(task_id, f"开始{label} {index + 1}/{total}: {fields['email']}")
+            _api.task_store.set_progress(task_id, f"{index + 1}/{total}")
+            _api.log(task_id, f"开始{label} {index + 1}/{total}: {fields['email']}")
             if account_proxy:
-                _api._log(task_id, f"使用代理: {account_proxy}")
+                _api.log(task_id, f"使用代理: {account_proxy}")
 
             result = handle_account(
                 account_id=account_id,
@@ -551,13 +559,13 @@ def _run_account_batch_task(
                     proxy_pool.report_success(account_proxy)
             return result
         except SkipCurrentAttemptRequested as e:
-            _api._log(task_id, f"[SKIP] 已跳过当前账号: {e}")
+            _api.log(task_id, f"[SKIP] 已跳过当前账号: {e}")
             return AttemptResult.skipped(str(e))
         except StopTaskRequested as e:
-            _api._log(task_id, f"[STOP] {e}")
+            _api.log(task_id, f"[STOP] {e}")
             return AttemptResult.stopped(str(e))
         except Exception as e:
-            _api._log(task_id, f"[FAIL] 账号 #{account_id} {label}异常: {e}")
+            _api.log(task_id, f"[FAIL] 账号 #{account_id} {label}异常: {e}")
             return AttemptResult.failed(str(e))
         finally:
             control.finish_attempt(attempt_id)
@@ -577,7 +585,7 @@ def _run_account_batch_task(
                 except CancelledError:
                     continue
                 except Exception as e:
-                    _api._log(task_id, f"[ERROR] 任务线程异常: {e}")
+                    _api.log(task_id, f"[ERROR] 任务线程异常: {e}")
                     errors.append(str(e))
                     continue
                 if result.outcome == AttemptOutcome.SUCCESS:
@@ -588,12 +596,12 @@ def _run_account_batch_task(
                     stopped = True
                 else:
                     errors.append(result.message)
-                _api._task_store.update_counters(
+                _api.task_store.update_counters(
                     task_id,
                     success=success,
                     registered=success + skipped + len(errors),
                 )
-                _api._persist_task_snapshot(task_id)
+                persist_task_snapshot(task_id)
                 if stopped or control.is_stop_requested():
                     stopped = True
                     for pending in futures:
@@ -604,10 +612,10 @@ def _run_account_batch_task(
         # finish() 会被整个跳过，任务永远停在 running —— 实测过的
         # `[Errno 32] Broken pipe` 事故正是这样：日志只有两行、DB 状态卡死。
         try:
-            _api._log(task_id, f"致命错误: {e}")
+            _api.log(task_id, f"致命错误: {e}")
         except Exception:
-            pass
-        _api._task_store.finish(
+            logger.debug("忽略异常（保留原行为）", exc_info=True)
+        _api.task_store.finish(
             task_id,
             status="failed",
             success=success,
@@ -616,14 +624,14 @@ def _run_account_batch_task(
             errors=errors,
             error=str(e),
         )
-        _api._persist_task_snapshot(task_id)
-        _api._task_store.cleanup()
+        persist_task_snapshot(task_id)
+        _api.task_store.cleanup()
         return
 
     final_status = "stopped" if control.is_stop_requested() or stopped else "done"
     prefix = f"{label}已停止" if final_status == "stopped" else f"{label}完成"
-    _api._log(task_id, f"{prefix}: 成功 {success} 个, 跳过 {skipped} 个, 失败 {len(errors)} 个")
-    _api._task_store.finish(
+    _api.log(task_id, f"{prefix}: 成功 {success} 个, 跳过 {skipped} 个, 失败 {len(errors)} 个")
+    _api.task_store.finish(
         task_id,
         status=final_status,
         success=success,
@@ -631,13 +639,13 @@ def _run_account_batch_task(
         skipped=skipped,
         errors=errors,
     )
-    _api._persist_task_snapshot(task_id)
-    _api._task_store.cleanup()
+    persist_task_snapshot(task_id)
+    _api.task_store.cleanup()
 
 
 def _run_backfill_rt(task_id: str, account_ids: list[int], req: BackfillRtTaskRequest):
     """批量补 RT。逐号跑，可停可跳，进度和日志复用注册任务那套。"""
-    from api import tasks as _api  # 延迟 import：patch 打在 api.tasks 上必须被看到
+    from services import task_service as _api  # 延迟 import：patch 打在 task_service 上必须被看到
     from core.config_store import config_store
     from core.db import AccountModel
     from services.chatgpt_rt_backfill import apply_backfill_result, backfill_account_data
@@ -654,7 +662,7 @@ def _run_backfill_rt(task_id: str, account_ids: list[int], req: BackfillRtTaskRe
             config=base_config,
             proxy=proxy,
             allow_login=req.allow_login,
-            log_fn=lambda msg: _api._log(task_id, f"  {msg}"),
+            log_fn=lambda msg: _api.log(task_id, f"  {msg}"),
             task_control=control,
             attempt_id=attempt_id,
         )
@@ -667,12 +675,12 @@ def _run_backfill_rt(task_id: str, account_ids: list[int], req: BackfillRtTaskRe
                 apply_backfill_result(account, result, session=s, commit=True)
 
         if result.success:
-            _api._log(task_id, f"[OK] {email} {result.summary()}")
-            _api._save_task_log("chatgpt", email, "success", detail={"action": "backfill_rt"})
+            _api.log(task_id, f"[OK] {email} {result.summary()}")
+            _api.save_task_log("chatgpt", email, "success", detail={"action": "backfill_rt"})
             return AttemptResult.success()
 
-        _api._log(task_id, f"[FAIL] {email} {result.summary()}")
-        _api._save_task_log(
+        _api.log(task_id, f"[FAIL] {email} {result.summary()}")
+        _api.save_task_log(
             "chatgpt",
             email,
             "failed",
@@ -703,13 +711,17 @@ def _run_probe_status(task_id: str, account_ids: list[int], req: "ProbeStatusTas
     所以默认间隔可以很小（1 秒）；但探测本身要打一次 CLI Proxy，仍然串行
     更稳（并发可调）。
     """
-    from api import tasks as _api  # 延迟 import：patch 打在 api.tasks 上必须被看到
+    from services import task_service as _api  # 延迟 import：patch 打在 task_service 上必须被看到
     from core.config_store import config_store
 
     base_config = config_store.get_all() or {}
 
     def _handle(*, account_id, fields, proxy, control, attempt_id) -> AttemptResult:
-        from api.actions import _apply_action_result, _result_message, _to_platform_account
+        from services.action_execution import (
+        apply_action_result as _apply_action_result,
+        result_message as _result_message,
+        to_platform_account as _to_platform_account,
+    )
         from core.base_platform import RegisterConfig
         from core.db import AccountModel, platform_session
         from core.registry import get
@@ -721,7 +733,7 @@ def _run_probe_status(task_id: str, account_ids: list[int], req: "ProbeStatusTas
         instance = PlatformCls(config=RegisterConfig(extra=base_config))
         if proxy:
             instance.config.proxy = proxy
-        instance._log_fn = lambda msg: _api._log(task_id, f"  {msg}")
+        instance._log_fn = lambda msg: _api.log(task_id, f"  {msg}")
         instance.bind_task_control(control)
         instance._task_attempt_token = attempt_id
 
@@ -729,7 +741,7 @@ def _run_probe_status(task_id: str, account_ids: list[int], req: "ProbeStatusTas
         with platform_session("chatgpt") as s:
             row = s.get(AccountModel, account_id)
             if row is None:
-                _api._log(task_id, f"[SKIP] 账号 #{account_id} 不存在")
+                _api.log(task_id, f"[SKIP] 账号 #{account_id} 不存在")
                 return AttemptResult.skipped("账号不存在")
             plat_account = _to_platform_account(row)
 
@@ -744,15 +756,15 @@ def _run_probe_status(task_id: str, account_ids: list[int], req: "ProbeStatusTas
 
         if result.get("ok"):
             message = _result_message(result) or "检测完成"
-            _api._log(task_id, f"[OK] {email} {message}")
-            _api._save_task_log(
+            _api.log(task_id, f"[OK] {email} {message}")
+            _api.save_task_log(
                 "chatgpt", email, "success", detail={"action": "probe_local_status"}
             )
             return AttemptResult.success()
 
         message = str(result.get("error") or _result_message(result) or "检测失败")
-        _api._log(task_id, f"[FAIL] {email} {message}")
-        _api._save_task_log(
+        _api.log(task_id, f"[FAIL] {email} {message}")
+        _api.save_task_log(
             "chatgpt",
             email,
             "failed",
@@ -781,7 +793,7 @@ def _run_batch_action(task_id: str, account_ids: list[int], req: "BatchActionTas
     与 `_run_refresh_token` 的差别只在动作 id 是参数化的：那边是为刷新单独
     优化过（状态策略、token 列镜像），这里走通用 `_apply_action_result`。
     """
-    from api import tasks as _api  # 延迟 import：patch 打在 api.tasks 上必须被看到
+    from services import task_service as _api  # 延迟 import：patch 打在 task_service 上必须被看到
     from core.config_store import config_store
 
     base_config = config_store.get_all() or {}
@@ -789,7 +801,11 @@ def _run_batch_action(task_id: str, account_ids: list[int], req: "BatchActionTas
     platform = str(req.platform or "").strip().lower()
 
     def _handle(*, account_id, fields, proxy, control, attempt_id) -> AttemptResult:
-        from api.actions import _apply_action_result, _result_message, _to_platform_account
+        from services.action_execution import (
+        apply_action_result as _apply_action_result,
+        result_message as _result_message,
+        to_platform_account as _to_platform_account,
+    )
         from core.base_platform import RegisterConfig
         from core.db import AccountModel, platform_session
         from core.registry import get
@@ -801,7 +817,7 @@ def _run_batch_action(task_id: str, account_ids: list[int], req: "BatchActionTas
         instance = PlatformCls(config=RegisterConfig(extra=base_config))
         if proxy:
             instance.config.proxy = proxy
-        instance._log_fn = lambda msg: _api._log(task_id, f"  {msg}")
+        instance._log_fn = lambda msg: _api.log(task_id, f"  {msg}")
         instance.bind_task_control(control)
         instance._task_attempt_token = attempt_id
 
@@ -809,13 +825,16 @@ def _run_batch_action(task_id: str, account_ids: list[int], req: "BatchActionTas
         with platform_session(platform) as s:
             row = s.get(AccountModel, account_id)
             if row is None:
-                _api._log(task_id, f"[SKIP] 账号 #{account_id} 不存在")
+                _api.log(task_id, f"[SKIP] 账号 #{account_id} 不存在")
                 return AttemptResult.skipped("账号不存在")
             # 禁用账号不参与面板上传（与 `_UPLOAD_ACTIONS` 的既有口径一致）
-            from api.actions import _UPLOAD_ACTIONS, _is_banned_status
+            from services.action_execution import (
+            UPLOAD_ACTIONS as _UPLOAD_ACTIONS,
+            is_banned_status as _is_banned_status,
+        )
 
             if action_id in _UPLOAD_ACTIONS and _is_banned_status(row.status):
-                _api._log(task_id, f"[SKIP] {email} 已禁用，不参与面板凭据上传")
+                _api.log(task_id, f"[SKIP] {email} 已禁用，不参与面板凭据上传")
                 return AttemptResult.skipped("账号已禁用")
             plat_account = _to_platform_account(row)
 
@@ -830,13 +849,13 @@ def _run_batch_action(task_id: str, account_ids: list[int], req: "BatchActionTas
 
         if result.get("ok"):
             message = _result_message(result) or "完成"
-            _api._log(task_id, f"[OK] {email} {message}")
-            _api._save_task_log(platform, email, "success", detail={"action": action_id})
+            _api.log(task_id, f"[OK] {email} {message}")
+            _api.save_task_log(platform, email, "success", detail={"action": action_id})
             return AttemptResult.success()
 
         message = str(result.get("error") or _result_message(result) or "失败")
-        _api._log(task_id, f"[FAIL] {email} {message}")
-        _api._save_task_log(
+        _api.log(task_id, f"[FAIL] {email} {message}")
+        _api.save_task_log(
             platform, email, "failed", error=message, detail={"action": action_id}
         )
         return AttemptResult.failed(f"{email}: {message}")
@@ -860,13 +879,17 @@ def _run_refresh_token(task_id: str, account_ids: list[int], req: RefreshTokenTa
     与单账号按钮同一条路径 —— 结果落库也复用 `_apply_action_result`
     （状态策略、token 列镜像、凭证写回全在那一处）。
     """
-    from api import tasks as _api  # 延迟 import：patch 打在 api.tasks 上必须被看到
+    from services import task_service as _api  # 延迟 import：patch 打在 task_service 上必须被看到
     from core.config_store import config_store
 
     base_config = config_store.get_all() or {}
 
     def _handle(*, account_id, fields, proxy, control, attempt_id) -> AttemptResult:
-        from api.actions import _apply_action_result, _result_message, _to_platform_account
+        from services.action_execution import (
+        apply_action_result as _apply_action_result,
+        result_message as _result_message,
+        to_platform_account as _to_platform_account,
+    )
         from core.base_platform import RegisterConfig
         from core.db import AccountModel, platform_session
         from core.registry import get
@@ -878,7 +901,7 @@ def _run_refresh_token(task_id: str, account_ids: list[int], req: RefreshTokenTa
         instance = PlatformCls(config=RegisterConfig(extra=base_config))
         if proxy:
             instance.config.proxy = proxy
-        instance._log_fn = lambda msg: _api._log(task_id, f"  {msg}")
+        instance._log_fn = lambda msg: _api.log(task_id, f"  {msg}")
         # 停止/跳过开关透进登录兜底（等码最长一个 OTP 超时，批量任务里要能
         # 当场打断）—— 与注册 runner 同款接线。
         instance.bind_task_control(control)
@@ -890,7 +913,7 @@ def _run_refresh_token(task_id: str, account_ids: list[int], req: RefreshTokenTa
         with platform_session("chatgpt") as s:
             row = s.get(AccountModel, account_id)
             if row is None:
-                _api._log(task_id, f"[SKIP] 账号 #{account_id} 不存在")
+                _api.log(task_id, f"[SKIP] 账号 #{account_id} 不存在")
                 return AttemptResult.skipped("账号不存在")
             plat_account = _to_platform_account(row)
 
@@ -905,13 +928,13 @@ def _run_refresh_token(task_id: str, account_ids: list[int], req: RefreshTokenTa
 
         if result.get("ok"):
             message = _result_message(result) or "刷新完成"
-            _api._log(task_id, f"[OK] {email} {message}")
-            _api._save_task_log("chatgpt", email, "success", detail={"action": "refresh_token"})
+            _api.log(task_id, f"[OK] {email} {message}")
+            _api.save_task_log("chatgpt", email, "success", detail={"action": "refresh_token"})
             return AttemptResult.success()
 
         message = str(result.get("error") or _result_message(result) or "刷新失败")
-        _api._log(task_id, f"[FAIL] {email} {message}")
-        _api._save_task_log(
+        _api.log(task_id, f"[FAIL] {email} {message}")
+        _api.save_task_log(
             "chatgpt",
             email,
             "failed",
@@ -933,7 +956,7 @@ def _run_refresh_token(task_id: str, account_ids: list[int], req: RefreshTokenTa
 
 def _run_bind_2fa(task_id: str, account_ids: list[int], req: Bind2faTaskRequest):
     """批量绑 2FA。和补 RT 同一套调度，区别只在每个号跑什么。"""
-    from api import tasks as _api  # 延迟 import：patch 打在 api.tasks 上必须被看到
+    from services import task_service as _api  # 延迟 import：patch 打在 task_service 上必须被看到
     from core.config_store import config_store
     from core.db import AccountModel
     from services.chatgpt_two_factor import (
@@ -954,13 +977,13 @@ def _run_bind_2fa(task_id: str, account_ids: list[int], req: Bind2faTaskRequest)
             config=base_config,
             proxy=proxy,
             allow_login=req.allow_login,
-            log_fn=lambda msg: _api._log(task_id, f"  {msg}"),
+            log_fn=lambda msg: _api.log(task_id, f"  {msg}"),
             task_control=control,
             attempt_id=attempt_id,
             # 密钥一到手就落库：从「拿到」到下面那次 apply 之间还隔着 activate
             # 和复核两次网络往返，中间任务被停/进程退出都会丢密钥（丢了就锁死）
             persist_secret=make_secret_persister(
-                account_id, log=lambda msg: _api._log(task_id, f"  {msg}")
+                account_id, log=lambda msg: _api.log(task_id, f"  {msg}")
             ),
         )
 
@@ -972,19 +995,19 @@ def _run_bind_2fa(task_id: str, account_ids: list[int], req: Bind2faTaskRequest)
                 apply_two_factor_result(account, result, session=s, commit=True)
 
         if result.ok:
-            _api._log(task_id, f"[OK] {email} {result.summary()}")
+            _api.log(task_id, f"[OK] {email} {result.summary()}")
             # 密钥只下发这一次，任务日志是用户当场导入验证器的唯一途径
             if result.secret:
-                _api._log(task_id, f"  TOTP 密钥: {result.secret}")
-            _api._save_task_log("chatgpt", email, "success", detail={"action": "bind_2fa"})
+                _api.log(task_id, f"  TOTP 密钥: {result.secret}")
+            _api.save_task_log("chatgpt", email, "success", detail={"action": "bind_2fa"})
             return AttemptResult.success()
 
         if result.already_bound:
-            _api._log(task_id, f"[SKIP] {email} {result.summary()}")
+            _api.log(task_id, f"[SKIP] {email} {result.summary()}")
             return AttemptResult.skipped(f"{email}: {result.summary()}")
 
-        _api._log(task_id, f"[FAIL] {email} {result.summary()}")
-        _api._save_task_log(
+        _api.log(task_id, f"[FAIL] {email} {result.summary()}")
+        _api.save_task_log(
             "chatgpt",
             email,
             "failed",

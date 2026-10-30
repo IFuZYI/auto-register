@@ -111,6 +111,57 @@ class RepositoryContractTests(unittest.TestCase):
 
     # ------------------------------------------------------------ 契约
 
+    def test_outlook_pool_summary_works_on_both_backends(self):
+        """号池汇总不能因为后端切换而 500。
+
+        原先直接对 `outlook_accounts` 发 `GROUP BY`，JSON 部署下那张表不存在
+        （`no such table: outlook_accounts`）—— 接口 500，而单测全绿。
+        改成走仓储层后两条后端都能算。
+        """
+        for fixture in self._cases():
+            with self.subTest(backend=fixture.name), fixture:
+                from core.mailboxes.channels.outlook import OutlookMailbox
+
+                summary = OutlookMailbox.pool_status_summary()
+
+                self.assertIn("total", summary)
+                for key in ("unpooled", "available", "in_use", "used", "failed"):
+                    self.assertIn(key, summary, f"号池汇总缺 {key}")
+
+    def test_get_many_and_delete_many_work_on_both_backends(self):
+        """批量取/批量删在两条后端上都要工作。
+
+        这条是补的**既有缺口**：`get_many` / `delete_many` 原先只有 sqlite 分支，
+        JSON 部署下导出与批量删除会去查一张不存在的表
+        （`no such table: accounts`，base commit 上就复现）。
+        """
+        for fixture in self._cases():
+            with self.subTest(backend=fixture.name), fixture:
+                from core.base_platform import Account
+                from core.db import account_repository
+
+                first = account_repository.upsert(
+                    Account(platform="chatgpt", email="contract-many-a@example.com", password="p")
+                )
+                second = account_repository.upsert(
+                    Account(platform="chatgpt", email="contract-many-b@example.com", password="p")
+                )
+
+                rows = account_repository.get_many([str(second.id), str(first.id)])
+                self.assertEqual(
+                    [str(r.id) for r in rows], [str(second.id), str(first.id)],
+                    "批量取要保持调用方给的顺序",
+                )
+
+                deleted, missing = account_repository.delete_many(
+                    [str(first.id), "00000000-0000-4000-8000-000000000000"]
+                )
+                self.assertEqual(deleted, [str(first.id)])
+                self.assertEqual(missing, ["00000000-0000-4000-8000-000000000000"])
+
+                account_repository.delete_many([str(second.id)])
+        self._cleanup_sqlite()
+
     def test_upsert_then_find(self):
         for fixture in self._cases():
             with self.subTest(backend=fixture.name), fixture:

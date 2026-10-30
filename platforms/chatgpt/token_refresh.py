@@ -243,7 +243,7 @@ class TokenRefreshManager:
                         path="/",
                     )
                 except Exception:  # noqa: BLE001 - cookie jar 写失败不阻断刷新结果
-                    pass
+                    logger.debug("忽略异常（保留原行为）", exc_info=True)
 
             # 提取过期时间
             expires_at = None
@@ -252,7 +252,7 @@ class TokenRefreshManager:
                 try:
                     expires_at = datetime.fromisoformat(expires_str.replace("Z", "+00:00"))
                 except:
-                    pass
+                    logger.debug("忽略异常（保留原行为）", exc_info=True)
 
             result.success = True
             result.access_token = access_token

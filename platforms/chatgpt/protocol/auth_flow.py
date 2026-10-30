@@ -27,7 +27,6 @@ from platforms.chatgpt.protocol.fingerprint import (
 )
 from platforms.chatgpt.protocol.mail_provider import MailProvider
 from platforms.chatgpt.protocol.http_client import create_http_session
-from platforms.chatgpt.protocol.phone_flow import PhoneRegisterMixin
 from platforms.chatgpt.protocol.mixins import add_phone as __add_phone_mixin
 from platforms.chatgpt.protocol.mixins import platform_rt as __platform_rt_mixin
 from platforms.chatgpt.protocol.mixins import codex as __codex_mixin
@@ -96,7 +95,6 @@ class AuthFlow(
     __codex_mixin.CodexMixin,
     __session_mixin.SessionMixin,
     __signup_mixin.SignupMixin,
-    PhoneRegisterMixin,
 ):
     """注册/登录协议流"""
 

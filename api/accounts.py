@@ -10,6 +10,7 @@ from services.account_export import (
     render_accounts,
 )
 from services.chatgpt_account_state import filter_accounts_by_plus_status
+from services.chatgpt_account_selection import normalize_account_ids
 from core.credential_fields import export_names as _export_names
 from core.time_utils import UtcDatetime
 from typing import Optional
@@ -51,7 +52,11 @@ class ImportRequest(BaseModel):
 
 
 class BatchDeleteRequest(BaseModel):
-    ids: list[int]
+    # UUID 化（T1.0）之后账号 id 是字符串。这里原来写死 `list[int]`，
+    # 前端传 `Array.from(selectedRowKeys)`（UUID）会被 422 挡掉 ——
+    # 也就是「批量删除」整个按钮失效，而单测里没有一条走这个端点。
+    # 保留 int 是为了兼容旧调用方（`delete_many` 内部本来就 `str()` 归一）。
+    ids: list[str | int]
     # 账号 id 是每库自增的，指定 platform 才能保证不误删别的平台的同 id 账号
     platform: str = ""
 
@@ -61,7 +66,7 @@ class ExportTextRequest(BaseModel):
 
     format: str = DEFAULT_EXPORT_FORMAT
     platform: str = ""
-    account_ids: list[int] = []
+    account_ids: list[str | int] = []
     status: str = ""
     email: str = ""
     plus_status: str = ""
@@ -211,7 +216,13 @@ def _slim_extra_for_list(raw: str) -> str:
     if not isinstance(data, dict):
         return raw
 
-    slim = dict(data)
+    # 凭证字段落盘是密文（T1.4）：不先解密，`access_token` 就是 `v1:…`，
+    # `_at_claims_for_list` 解不出 iat/exp，列表的「AT 有效期」整列空掉。
+    # 解密只在本函数内发生；下面会把 AT/RT/ST/IDT 的**正文**全部 pop 掉，
+    # 客户端拿到的只有 `has_*` 布尔与 iat/exp。
+    from core.credential_crypto import decrypt_extra
+
+    slim = decrypt_extra(data)
     for key in _LIST_HEAVY_EXTRA_KEYS:
         slim.pop(key, None)
     # 把 AT 的 iat/exp 提出来放进列表（约 20 字节），前端据此渲染「AT 有效期」。
@@ -266,9 +277,14 @@ def _slim_account_row(row):
     # （复制入口在详情页，走 `GET /api/accounts/{id}`），而一次
     # `page_size=1000` 的列表请求就能拖走整个账号池的密码。
     # 列表只需要「有没有密码」—— 补一个布尔，删掉正文。
-    if "password" in payload:
-        has_password = bool(str(payload.pop("password", "") or "").strip())
-        payload["has_password"] = has_password
+    # T1.4b 之后 `password` 是 property（不再是 pydantic 字段），
+    # `jsonable_encoder` 吐出来的是 `password_cipher`。两个名字都要收，
+    # 否则「有没有密码」的标记会消失，列表页那一列变空白。
+    cipher = payload.pop("password_cipher", None)
+    if cipher is None:
+        cipher = payload.pop("password", None)
+    if cipher is not None:
+        payload["has_password"] = bool(str(cipher or "").strip())
     return payload
 
 
@@ -425,7 +441,8 @@ def export_accounts_text(body: ExportTextRequest, session: Session = Depends(get
     if body.account_ids:
         from core.db import account_repository
 
-        ids = [int(v) for v in body.account_ids if int(v) > 0]
+        # 与批量任务共用同一套归一：主键是 UUID，不能再按正整数过滤。
+        ids = normalize_account_ids(body.account_ids)
         rows = account_repository.get_many(ids)
         # 按前端给的顺序回填，勾选顺序就是导出顺序
         row_map = {row.id: row for row in rows}
@@ -693,7 +710,7 @@ def check_all_accounts(platform: Optional[str] = None,
 
 
 @router.get("/{account_id}")
-def get_account(account_id: int, platform: str = ""):
+def get_account(account_id: str, platform: str = ""):
     from core.db import account_repository
 
     # 带上 platform 更准：账号 id 是每库自增的，不给平台时跨库扫到的可能是
@@ -705,7 +722,7 @@ def get_account(account_id: int, platform: str = ""):
 
 
 @router.patch("/{account_id}")
-def update_account(account_id: int, body: AccountUpdate, platform: str = ""):
+def update_account(account_id: str, body: AccountUpdate, platform: str = ""):
     from core.db import account_repository
 
     acc = account_repository.get(account_id, platform=platform)
@@ -729,7 +746,7 @@ def update_account(account_id: int, body: AccountUpdate, platform: str = ""):
 
 
 @router.delete("/{account_id}")
-def delete_account(account_id: int, platform: str = ""):
+def delete_account(account_id: str, platform: str = ""):
     from core.db import account_repository
 
     # 同 get_account：带上 platform 才不会因 ID 撞号删掉别的平台的账号
@@ -739,7 +756,7 @@ def delete_account(account_id: int, platform: str = ""):
 
 
 @router.post("/{account_id}/check")
-def check_account(account_id: int, background_tasks: BackgroundTasks):
+def check_account(account_id: str, background_tasks: BackgroundTasks):
     from core.db import account_repository
 
     acc = account_repository.get(account_id)
@@ -749,7 +766,7 @@ def check_account(account_id: int, background_tasks: BackgroundTasks):
     return {"message": "检测任务已启动"}
 
 
-def _do_check(account_id: int):
+def _do_check(account_id: str):
     from core.db import account_repository
 
     acc = account_repository.get(account_id)
@@ -759,10 +776,7 @@ def _do_check(account_id: int):
         try:
             PlatformCls = get(acc.platform)
             plugin = PlatformCls(config=RegisterConfig())
-            obj = Account(platform=acc.platform, email=acc.email,
-                         password=acc.password, user_id=acc.user_id,
-                         region=acc.region, token=acc.token,
-                         extra=acc.get_extra())
+            obj = acc.to_record()
             valid = plugin.check_valid(obj)
             # 重新取一次：check_valid 期间可能已被别处改动
             fresh = account_repository.get(account_id)

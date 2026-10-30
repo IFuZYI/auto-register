@@ -15,6 +15,10 @@
 """
 from __future__ import annotations
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 import json
 import os
 import threading
@@ -23,6 +27,8 @@ from pathlib import Path
 from typing import Any, Optional
 
 from core.base_mailbox import BaseMailbox
+from services.panel_status_sync import ACTION_PANEL_KEYS
+from core.models.account import AccountRecord
 from core.base_platform import Account, AccountStatus, BasePlatform, RegisterConfig
 from core.environment import EnvironmentNotReadyError
 from core.registry import register
@@ -627,12 +633,11 @@ class GrokPlatform(BasePlatform):
             # 读 grok2api 列表里的 `authStatus` + `enabled` 写回本地。
             from services.panel_status_sync import sync_panel_status_batch
 
-            account_id = getattr(account, "id", None) or int(extra.get("account_id") or 0) or 0
-            probe = type("A", (), {
-                "id": account_id, "email": account.email, "platform": "grok",
-            })()
-            updates = sync_panel_status_batch("grok2api", [probe])
-            update = updates.get(int(account_id), {})
+            # 主键是 UUID（ADR-0008）：`int(...)` 兜底会在拿到 UUID 时直接抛。
+            account_id = str(getattr(account, "id", None) or extra.get("account_id") or "")
+            probe = AccountRecord(platform="grok", email=account.email, id=account_id)
+            updates = sync_panel_status_batch(ACTION_PANEL_KEYS[action_id], [probe])
+            update = updates.get(account_id, {})
             ok = bool(update.get("ok"))
             message = str(update.get("message") or "同步完成")
             return {
@@ -916,7 +921,7 @@ class GrokPlatform(BasePlatform):
                 row = session.exec(
                     select(ICloudAliasModel).where(ICloudAliasModel.address == email)
                 ).first()
-            return int(row.id) if row is not None else None
+            return str(row.id) if row is not None else None
         except Exception as exc:  # noqa: BLE001
             log_fn = getattr(self, "_log_fn", None)
             if log_fn:
@@ -942,7 +947,7 @@ class GrokPlatform(BasePlatform):
 
                     return MailboxAccount(email=email, account_id=token)
                 except Exception:
-                    pass
+                    logger.debug("忽略异常（保留原行为）", exc_info=True)
         # 无凭证：交给调用方重新建邮（只有邮箱地址收不到码）
         return None
 

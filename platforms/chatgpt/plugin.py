@@ -4,6 +4,8 @@ import logging
 from datetime import datetime, timezone
 
 from core.base_mailbox import BaseMailbox
+from core.models.account import AccountRecord
+from services.panel_status_sync import ACTION_PANEL_KEYS
 from core.base_platform import Account, BasePlatform, RegisterConfig
 from core.registry import register
 from modules.platforms import create_application_platform_registration_service
@@ -62,17 +64,6 @@ class ChatGPTPlatform(BasePlatform):
                 {"value": "access_token_only", "label": "无 RT"},
             ],
         },
-        {
-            "key": "chatgpt_register_flow",
-            "label": "注册流程",
-            "desc": "邮箱注册用邮箱池收码；手机注册进 add-phone 后自动租号、等短信。任务页可临时覆盖",
-            "default": "email",
-            "options": [
-                {"value": "email", "label": "邮箱注册（默认）"},
-                {"value": "phone", "label": "手机注册（需要接码）"},
-                {"value": "phone_with_email", "label": "手机 + 邮箱（需要接码）"},
-            ],
-        },
     ]
 
     def __init__(self, config: RegisterConfig = None, mailbox: BaseMailbox = None):
@@ -101,19 +92,24 @@ class ChatGPTPlatform(BasePlatform):
         try:
             from platforms.chatgpt.status_probe import probe_local_chatgpt_status
 
-            class _A:
-                pass
-
-            a = _A()
-            extra = account.extra or {}
             from core.credential_fields import get_credential, token_column_credential
 
-            a.access_token = get_credential(extra, "access_token") or token_column_credential(
-                account, "chatgpt", "access_token"
+            # 不再现造空壳对象：`AccountRecord` 自带探针要读的
+            # `access_token` / `cookies`（读写都落在 extra 上）。
+            probe_account = AccountRecord(
+                platform=account.platform,
+                email=account.email,
+                user_id=account.user_id,
+                token=account.token,
+                extra=dict(account.extra or {}),
             )
-            a.cookies = extra.get("cookies", "")
-            a.user_id = account.user_id
-            probe = probe_local_chatgpt_status(a, proxy=self.config.proxy if self.config else None)
+            probe_account.access_token = get_credential(
+                probe_account.extra, "access_token"
+            ) or token_column_credential(account, "chatgpt", "access_token")
+            probe_account.cookies = probe_account.extra.get("cookies", "")
+            probe = probe_local_chatgpt_status(
+                probe_account, proxy=self.config.proxy if self.config else None
+            )
             # status_probe 认证通过时写 "access_token_valid"（见 status_probe.py:472）
             return str(probe.get("auth", {}).get("state") or "") == "access_token_valid"
         except Exception:
@@ -341,35 +337,23 @@ class ChatGPTPlatform(BasePlatform):
         proxy = self.config.proxy if self.config else None
         extra = account.extra or {}
 
-        class _A:
-            """把 Account 摊平成 token_refresh / 登录链认识的字段形状。"""
-
-            email = ""
-            password = ""
-            access_token = ""
-            refresh_token = ""
-            id_token = ""
-            session_token = ""
-            client_id = ""
-            cookies = ""
-            user_id = ""
-            extra: dict = {}
-
-        a = _A()
-        a.email = account.email
-        a.password = account.password
+        # 不再现造空壳：`AccountRecord` 自带 `access_token` / `refresh_token` /
+        # `id_token` / `session_token` / `cookies` / `client_id`，读写都落在 extra 上。
+        a = AccountRecord(
+            platform=account.platform,
+            email=account.email,
+            password=account.password,
+            user_id=account.user_id,
+            token=account.token,
+            extra=dict(extra),
+        )
         from core.credential_fields import get_credential, token_column_credential
 
         a.access_token = get_credential(extra, "access_token") or token_column_credential(
             account, "chatgpt", "access_token"
         )
-        a.refresh_token = get_credential(extra, "refresh_token")
-        a.id_token = get_credential(extra, "id_token")
-        a.session_token = get_credential(extra, "session_token")
         a.client_id = extra.get("client_id", "app_EMoamEEZ73f0CkXaXp7hrann")
         a.cookies = extra.get("cookies", "")
-        a.user_id = account.user_id
-        a.extra = extra
 
         if action_id == "probe_local_status":
             from platforms.chatgpt.status_probe import probe_local_chatgpt_status
@@ -658,18 +642,17 @@ class ChatGPTPlatform(BasePlatform):
             )
             return {"ok": ok, "data": msg}
 
-        if action_id in ("sync_sub2api_status", "sync_chatgpt2api_status"):
+        if action_id in ACTION_PANEL_KEYS and action_id != "sync_grok2api_status":
             # 单账号版（批量端点有专用分支，一次拉列表写回所有账号）。
             # 读面板列表里的状态字段写回本地（不做探活 —— 面板自己跑 token 刷新）。
             from services.panel_status_sync import sync_panel_status_batch
 
-            panel_key = "sub2api" if action_id == "sync_sub2api_status" else "chatgpt2api"
-            account_id = getattr(a, "id", None) or int((a.extra or {}).get("account_id") or 0) or 0
-            probe = type("A", (), {
-                "id": account_id, "email": a.email, "platform": "chatgpt",
-            })()
+            # 面板 key 从共享映射取，不再写 `"sub2api" if ... else "chatgpt2api"`
+            panel_key = ACTION_PANEL_KEYS[action_id]
+            account_id = str(a.id or (a.extra or {}).get("account_id") or "")
+            probe = AccountRecord(platform="chatgpt", email=a.email, id=account_id)
             updates = sync_panel_status_batch(panel_key, [probe])
-            update = updates.get(int(account_id), {})
+            update = updates.get(account_id, {})
             ok = bool(update.get("ok"))
             message = str(update.get("message") or "同步完成")
             return {

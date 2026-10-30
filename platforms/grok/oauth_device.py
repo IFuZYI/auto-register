@@ -10,6 +10,10 @@
 """
 from __future__ import annotations
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 import json
 import time
 import urllib.parse
@@ -79,7 +83,7 @@ class _NoRedirectSession:
             try:
                 self.s.cookies.set(k, v)
             except Exception:
-                pass
+                logger.debug("忽略异常（保留原行为）", exc_info=True)
 
     def set_cookie_for_domains(self, name: str, value: str, domains: tuple) -> None:
         """按域名写入 cookie。
@@ -91,13 +95,13 @@ class _NoRedirectSession:
             try:
                 self.s.cookies.set(name, value, domain=domain)
             except Exception:
-                pass
+                logger.debug("忽略异常（保留原行为）", exc_info=True)
 
     def close(self) -> None:
         try:
             self.s.close()
         except Exception:
-            pass
+            logger.debug("忽略异常（保留原行为）", exc_info=True)
 
 
 def _log(fn: LogFn, msg: str) -> None:
@@ -105,7 +109,7 @@ def _log(fn: LogFn, msg: str) -> None:
         try:
             fn(msg)
         except Exception:
-            pass
+            logger.debug("忽略异常（保留原行为）", exc_info=True)
 
 
 def _device_location_error(loc: str) -> Optional[str]:

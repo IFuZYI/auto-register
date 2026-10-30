@@ -11,6 +11,10 @@
 """
 from __future__ import annotations
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 import os
 import subprocess
 import sys
@@ -32,7 +36,7 @@ def _log(fn: LogFn, msg: str) -> None:
         try:
             fn(msg)
         except Exception:
-            pass
+            logger.debug("忽略异常（保留原行为）", exc_info=True)
 
 
 def _is_snap_wrapper(path: str) -> bool:
@@ -97,7 +101,7 @@ def _find_chrome_cached() -> str:
             if exe and Path(exe).exists():
                 return exe
     except Exception:
-        pass
+        logger.debug("忽略异常（保留原行为）", exc_info=True)
 
     # 最后才接受 snap 脚本（至少路径是对的，失败时错误信息也算明确）
     return existing[0] if existing else ""

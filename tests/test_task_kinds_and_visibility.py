@@ -88,7 +88,7 @@ class AutoRefreshTaskRecordTests(unittest.TestCase):
             session.add(model)
             session.commit()
             session.refresh(model)
-        return int(model.id)
+        return str(model.id)
 
     def _run(self, **kwargs):
         from services.chatgpt_maintenance import run_auto_refresh_pass

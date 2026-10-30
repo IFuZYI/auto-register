@@ -90,7 +90,7 @@ class RedirectMixin:
                                 if wid:
                                     return wid
         except Exception:
-            pass
+            logger.debug("忽略异常（保留原行为）", exc_info=True)
         return ""
 
 
@@ -170,7 +170,7 @@ class RedirectMixin:
                         j = resp.json() if resp is not None else {}
                         next_url = j.get("continue_url", "") if isinstance(j, dict) else ""
                     except Exception:
-                        pass
+                        logger.debug("忽略异常（保留原行为）", exc_info=True)
                     if not next_url and loc:
                         next_url = loc
                     if next_url:
@@ -372,7 +372,7 @@ class RedirectMixin:
             if v:
                 return v
         except Exception:
-            pass
+            logger.debug("忽略异常（保留原行为）", exc_info=True)
         # 路径2：遍历 jar
         try:
             for c in self.session.cookies:
@@ -382,7 +382,7 @@ class RedirectMixin:
                     if val:
                         return val
         except Exception:
-            pass
+            logger.debug("忽略异常（保留原行为）", exc_info=True)
         # 路径3：用 _get_cookie_value_by_name（不挑 domain）
         try:
             return self._get_cookie_value_by_name(target)
@@ -496,7 +496,7 @@ class RedirectMixin:
                     try:
                         self.session.get(current, timeout=20, allow_redirects=True)
                     except Exception:
-                        pass
+                        logger.debug("忽略异常（保留原行为）", exc_info=True)
                     break
             # 与 `get_auth_session` 同一套兜底读法（朴素 get 在 curl_cffi 的
             # 分域隔离下可能读不到，那样会把「已成功」误报成「失败」）。

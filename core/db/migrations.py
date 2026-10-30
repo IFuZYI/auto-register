@@ -5,6 +5,12 @@
 """
 from __future__ import annotations
 
+import logging
+
+logger = logging.getLogger(__name__)
+
+from core.secret_box import CredentialKeyError
+
 from sqlalchemy.engine import Engine
 from sqlmodel import Session, select
 
@@ -413,7 +419,7 @@ def _ensure_account_email_unique(engine: Engine | None = None) -> None:
             )
         except Exception:
             # 仍有重复（并发写入等极端情况）时不阻塞启动
-            pass
+            logger.debug("忽略异常（保留原行为）", exc_info=True)
 
 
 def _ensure_hot_query_indexes(engine: Engine | None = None) -> None:
@@ -516,7 +522,7 @@ def _ensure_hot_query_indexes(engine: Engine | None = None) -> None:
                     conn.exec_driver_sql(sql)
                 except Exception:
                     # 索引建不上（列缺失等）不该阻塞启动
-                    pass
+                    logger.debug("忽略异常（保留原行为）", exc_info=True)
 
 
 def _migrate_icloud_remote_schema(engine: Engine | None = None) -> None:
@@ -693,7 +699,7 @@ def _drop_trial_end_time_column(engine: Engine | None = None) -> None:
         try:
             conn.exec_driver_sql("ALTER TABLE accounts DROP COLUMN trial_end_time")
         except Exception:  # noqa: BLE001 - 旧版 SQLite 不支持 DROP COLUMN 时保留该列
-            pass
+            logger.debug("忽略异常（保留原行为）", exc_info=True)
 
 
 def _normalize_grok_token_column(engine: Engine | None = None) -> None:
@@ -732,6 +738,16 @@ def _normalize_grok_token_column(engine: Engine | None = None) -> None:
                 continue
             if not isinstance(extra, dict):
                 continue
+            # 凭证字段落盘是密文（T1.4）：不先解密的话 sso/access_token 都是
+            # `v1:…`，比较恒不相等，这条修补会静默失效。
+            try:
+                from core.credential_crypto import decrypt_extra
+
+                extra = decrypt_extra(extra)
+            except CredentialKeyError:
+                # 解不开就按原样判断：这条修补只修「token 被 AT 盖过」的老行，
+                # 不该因为密钥文件缺失把启动迁移整个打断。
+                pass
             sso = str(extra.get("sso") or "").strip()
             access = str(extra.get("access_token") or "").strip()
             # 只修「被 AT 盖过」的行：token == AT 且与 SSO 不符

@@ -36,7 +36,7 @@ interface ComparisonRow {
   platform: string
   state: string
   label: string
-  local_id: number | null
+  local_id: string | null
   local_status: string
   local_updated_at: string
   local_updated_hour: string
@@ -508,7 +508,7 @@ export function PanelComparisonPanel({
     async (
       fallbackActionId: string,
       actionLabel: string,
-      accountIds: number[],
+      accountIds: string[],
       key: string,
       actionMap?: Record<string, string>,
     ) => {
@@ -522,7 +522,7 @@ export function PanelComparisonPanel({
       // 还会把远端状态写回本地（代码审查 2026-10-27 C1）。
       const actionFor = (plat: string) =>
         actionMap?.[plat] || (plat === platform ? fallbackActionId : '')
-      const idsByPlatform = new Map<string, number[]>()
+      const idsByPlatform = new Map<string, string[]>()
       for (const row of payload?.rows || []) {
         if (!row.local_id || !accountIds.includes(row.local_id)) continue
         const plat = row.platform || platform
@@ -541,7 +541,7 @@ export function PanelComparisonPanel({
         for (const [plat, ids] of idsByPlatform) {
           const actionId = actionFor(plat)
           // 后端单次上限 1000（`api/actions.py` 的 `_resolve_batch_accounts`）
-          const chunks: number[][] = []
+          const chunks: string[][] = []
           for (let i = 0; i < ids.length; i += BATCH_ACTION_LIMIT) {
             chunks.push(ids.slice(i, i + BATCH_ACTION_LIMIT))
           }
@@ -699,7 +699,7 @@ export function PanelComparisonPanel({
                   // 的动作。读 `platformRows`：筛了 Grok 就只同步 Grok 的账号。
                   const ids = platformRows
                     .filter((row) => row.local_id)
-                    .map((row) => row.local_id as number)
+                    .map((row) => row.local_id as string)
                   void runBatch(
                     syncAction, '同步远端状态', ids, 'sync-remote',
                     platformActions.sync,

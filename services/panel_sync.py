@@ -200,7 +200,7 @@ def _persist_extra_only(
     if not account_id:
         return
     with platform_database_registry.session_for(platform) as session:
-        model = session.get(AccountModel, int(account_id))
+        model = session.get(AccountModel, account_id)
         if model is None:
             return
         model.set_extra(extra)
@@ -297,7 +297,7 @@ def _persist_local(row: dict[str, Any], merged_extra: dict[str, Any], platform: 
 
     session = platform_database_registry.session_for(platform)
     try:
-        model = session.get(AccountModel, int(account_id))
+        model = session.get(AccountModel, account_id)
         if model is None:
             raise ValueError(f"账号 {account_id} 不在 {platform} 库里")
         model.set_extra(merged_extra)

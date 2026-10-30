@@ -24,6 +24,10 @@ Plus 状态、2FA、支付链接，iCloud 有主号+别名两层）。把它们�
 """
 from __future__ import annotations
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 import threading
 from typing import Iterator
 
@@ -143,7 +147,7 @@ class PlatformDatabaseRegistry:
                 try:
                     engine.dispose()
                 except Exception:
-                    pass
+                    logger.debug("忽略异常（保留原行为）", exc_info=True)
             self._engines.clear()
             self._schema_ready.clear()
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from core.models.account import AccountRecord
+
 import logging
 from typing import Any
 
@@ -100,24 +102,33 @@ def _build_chatgpt_upload_account_for_tests(account):
     return _build_chatgpt_upload_account(account)
 
 
-def _build_chatgpt_upload_account(account):
-    extra = _get_account_extra(account)
+def _build_chatgpt_upload_account(account) -> AccountRecord:
+    """收敛成 `AccountRecord`（不再现造空壳类挂属性）。
 
-    class _UploadAccount:
-        pass
+    password 在独立列、totp_secret 在 extra —— 两处都要带上（对端 2.2.0 靠它们
+    做失效后自动重登）。extra 整个带过去，上传器各取所需。
+    """
+    extra = dict(_get_account_extra(account))
 
-    a = _UploadAccount()
-    a.email = getattr(account, "email", "")
-    a.access_token = _pick_text(extra, "access_token", "accessToken") or getattr(account, "token", "")
-    a.refresh_token = _pick_text(extra, "refresh_token", "refreshToken")
-    a.id_token = _pick_text(extra, "id_token", "idToken")
-    a.session_token = _pick_text(extra, "session_token", "sessionToken")
-    a.client_id = _pick_text(extra, "client_id", "clientId", default="app_EMoamEEZ73f0CkXaXp7hrann")
-    # password 在独立列、totp_secret 在 extra —— 两处都要带上（对端 2.2.0 靠它们
-    # 做失效后自动重登）。extra 整个带过去，上传器各取所需。
-    a.password = str(getattr(account, "password", "") or "")
-    a.extra = dict(extra)
-    return a
+    record = AccountRecord(
+        platform=str(getattr(account, "platform", "") or "chatgpt"),
+        email=str(getattr(account, "email", "") or ""),
+        password=str(getattr(account, "password", "") or ""),
+        user_id=str(getattr(account, "user_id", "") or ""),
+        token=str(getattr(account, "token", "") or ""),
+        extra=extra,
+    )
+    record.access_token = _pick_text(extra, "access_token", "accessToken") or str(
+        getattr(account, "token", "") or ""
+    )
+    # `_pick_text` 认 camelCase 别名（`refreshToken` 等），与旧空壳同口径。
+    record.refresh_token = _pick_text(extra, "refresh_token", "refreshToken")
+    record.id_token = _pick_text(extra, "id_token", "idToken")
+    record.session_token = _pick_text(extra, "session_token", "sessionToken")
+    record.client_id = _pick_text(
+        extra, "client_id", "clientId", default="app_EMoamEEZ73f0CkXaXp7hrann"
+    )
+    return record
 
 
 def sync_account(account) -> list[dict[str, Any]]:

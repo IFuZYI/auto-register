@@ -30,7 +30,7 @@ class PushAccountUploaderDispatchTests(unittest.TestCase):
     """上传器按（面板, 平台）分发 —— 分发错会传错凭据类型。"""
 
     def test_grok2api_requires_sso(self):
-        from api.integrations import _push_account_uploader
+        from services.panel_push import _push_account_uploader
 
         ok, msg = _push_account_uploader(
             "grok2api", "grok", {"email": "a@b.com", "extra": {}}
@@ -45,7 +45,7 @@ class PushAccountUploaderDispatchTests(unittest.TestCase):
         已随 CPA 支持一起删除。现在该明确拒绝并说明去哪传，而不是静默跳过：
         批量推送时用户需要知道「为什么这个号没传」。
         """
-        from api.integrations import _push_account_uploader
+        from services.panel_push import _push_account_uploader
 
         ok, msg = _push_account_uploader(
             "cpa",
@@ -58,7 +58,7 @@ class PushAccountUploaderDispatchTests(unittest.TestCase):
 
     def test_cpa_grok_without_credential_is_also_rejected(self):
         """没有凭据时也是同一句拒绝 —— 不再区分「有没有可重建的 AT」。"""
-        from api.integrations import _push_account_uploader
+        from services.panel_push import _push_account_uploader
 
         ok, msg = _push_account_uploader(
             "cpa", "grok", {"email": "a@b.com", "extra": {}}
@@ -67,7 +67,7 @@ class PushAccountUploaderDispatchTests(unittest.TestCase):
         self.assertIn("grok2api", msg)
 
     def test_cpa_chatgpt_uses_generate_token_json(self):
-        from api import integrations
+        from services import panel_push
 
         captured = {}
 
@@ -80,7 +80,7 @@ class PushAccountUploaderDispatchTests(unittest.TestCase):
             mock.patch("platforms.chatgpt.cpa_upload.generate_token_json", return_value={"access_token": "at"}),
             mock.patch("services.chatgpt_sync.upload_proxy_for", return_value=""),
         ):
-            ok, _ = integrations._push_account_uploader(
+            ok, _ = panel_push._push_account_uploader(
                 "cpa", "chatgpt", {"email": "a@b.com", "extra": {"access_token": "at"}}
             )
 
@@ -88,7 +88,7 @@ class PushAccountUploaderDispatchTests(unittest.TestCase):
         self.assertEqual(captured["token_json"], {"access_token": "at"})
 
     def test_chatgpt2api_dispatch(self):
-        from api import integrations
+        from services import panel_push
 
         captured = {}
 
@@ -100,7 +100,7 @@ class PushAccountUploaderDispatchTests(unittest.TestCase):
             mock.patch("platforms.chatgpt.chatgpt2api_upload.upload_to_chatgpt2api", side_effect=fake_upload),
             mock.patch("services.chatgpt_sync.upload_proxy_for", return_value=""),
         ):
-            ok, _ = integrations._push_account_uploader(
+            ok, _ = panel_push._push_account_uploader(
                 "chatgpt2api", "chatgpt", {"email": "a@b.com", "extra": {"access_token": "at"}}
             )
 
@@ -108,7 +108,7 @@ class PushAccountUploaderDispatchTests(unittest.TestCase):
         self.assertEqual(captured["email"], "a@b.com")
 
     def test_unknown_panel_reports_no_uploader(self):
-        from api.integrations import _push_account_uploader
+        from services.panel_push import _push_account_uploader
 
         ok, msg = _push_account_uploader("nope", "chatgpt", {"email": "a@b.com", "extra": {}})
         self.assertFalse(ok)
@@ -117,7 +117,7 @@ class PushAccountUploaderDispatchTests(unittest.TestCase):
 
 class PushKindTests(unittest.TestCase):
     def test_overwrite_vs_append_panels(self):
-        from api.integrations import _PANEL_PUSH_KIND
+        from services.panel_push import _PANEL_PUSH_KIND
 
         self.assertEqual(_PANEL_PUSH_KIND["cpa"], "overwrite")
         self.assertEqual(_PANEL_PUSH_KIND["grok2api"], "overwrite")
@@ -125,7 +125,7 @@ class PushKindTests(unittest.TestCase):
         self.assertEqual(_PANEL_PUSH_KIND["chatgpt2api"], "append")
 
     def test_deleter_only_for_append_panels(self):
-        from api.integrations import _panel_remote_deleter
+        from services.panel_push import _panel_remote_deleter
 
         self.assertIsNone(_panel_remote_deleter("cpa"))
         self.assertIsNone(_panel_remote_deleter("grok2api"))
@@ -150,7 +150,7 @@ class PersistPushResultsTests(unittest.TestCase):
             session.commit()
 
     def test_skipped_items_leave_no_trace(self):
-        from api.integrations import _persist_push_results
+        from services.panel_push import _persist_push_results
 
         self._add("skip@example.com")
         _persist_push_results("chatgpt2api", [
@@ -166,7 +166,7 @@ class PersistPushResultsTests(unittest.TestCase):
 
     def test_pushed_item_is_recorded_with_normalized_email(self):
         """远端回传的大小写与本地不同也要能落库（实测大小写落空 bug）。"""
-        from api.integrations import _persist_push_results
+        from services.panel_push import _persist_push_results
 
         self._add("case@example.com")
         _persist_push_results("chatgpt2api", [
@@ -183,7 +183,7 @@ class PersistPushResultsTests(unittest.TestCase):
 
     def test_missing_account_row_is_tolerated(self):
         """本地行不存在时跳过，不炸整批。"""
-        from api.integrations import _persist_push_results
+        from services.panel_push import _persist_push_results
 
         _persist_push_results("chatgpt2api", [
             {"email": "ghost@example.com", "platform": "chatgpt", "push": True,

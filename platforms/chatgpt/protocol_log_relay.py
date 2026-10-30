@@ -10,6 +10,8 @@
 from __future__ import annotations
 
 import logging
+
+logger = logging.getLogger(__name__)
 import threading
 from contextlib import contextmanager
 from typing import Callable, Iterator, Optional
@@ -43,7 +45,7 @@ class _ThreadScopedLogRelay(logging.Handler):
         try:
             self._sink(f"{self._prefix} {record.getMessage()}")
         except Exception:
-            pass
+            logger.debug("忽略异常（保留原行为）", exc_info=True)
 
 
 @contextmanager

@@ -365,7 +365,7 @@ class TaskLevelPreflightTests(unittest.TestCase):
         with mock.patch("core.registry.get", return_value=platform_cls), mock.patch(
             "core.base_mailbox.create_mailbox", return_value=mock.Mock()
         ), mock.patch("core.db.save_account", side_effect=lambda account: account), mock.patch(
-            "api.tasks._save_task_log", side_effect=lambda *a, **k: None
+            "services.task_service.save_task_log", side_effect=lambda *a, **k: None
         ):
             _run_register(task_id, req)
 

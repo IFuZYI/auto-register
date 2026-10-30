@@ -2,7 +2,6 @@ import { useEffect, useState } from 'react'
 
 import {
   loadChatGPTRegisterFlow,
-  registerFlowUsesPhone,
   saveChatGPTRegisterFlow,
   type ChatGPTRegisterFlow,
 } from '@/lib/chatgptRegisterFlow'
@@ -19,6 +18,5 @@ export function usePersistentChatGPTRegisterFlow() {
   return {
     registerFlow,
     setRegisterFlow,
-    usesPhone: registerFlowUsesPhone(registerFlow),
   }
 }

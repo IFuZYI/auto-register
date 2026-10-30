@@ -6,6 +6,8 @@ from enum import Enum
 import os
 import time
 
+from core.models.account import AccountRecord
+
 
 #: 已删除的状态值 → 归一目标（用户要求删除「试用中 / 已订阅」）。
 #: 老库、旧导入文件里可能还带着这两个值 —— 统一归一到 registered
@@ -126,17 +128,13 @@ def resolve_mailbox_otp_timeout(extra_config: Any, *, default: int = 180) -> int
     return default
 
 
-@dataclass
-class Account:
-    platform: str
-    email: str
-    password: str
-    user_id: str = ""
-    region: str = ""
-    token: str = ""
-    status: AccountStatus = AccountStatus.REGISTERED
-    extra: dict = field(default_factory=dict)  # 平台自定义字段
-    created_at: int = field(default_factory=lambda: int(time.time()))
+#: 账号的领域模型只有一处定义：`core/models/account.py`。
+#:
+#: 这里保留 `Account` 这个名字是**别名**而不是子类 —— 200+ 处
+#: `from core.base_platform import Account` 一行都不用改，而 `isinstance` /
+#: `type()` 只有一种结果，不会再出现「两个 Account 类互相不认」的问题。
+#: 字段顺序与旧 dataclass 完全一致，位置参数不会错位。
+Account = AccountRecord
 
 
 @dataclass

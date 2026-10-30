@@ -39,7 +39,7 @@ def _mk_account(email: str, status: str, *, platform: str = "chatgpt") -> int:
         m.set_extra({"access_token": "at-x", "refresh_token": "rt-x"})
         s.add(m)
         s.commit()
-        return int(m.id)
+        return str(m.id)
 
 
 def _client():

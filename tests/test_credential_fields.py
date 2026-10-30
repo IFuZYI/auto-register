@@ -258,9 +258,11 @@ class ImportExportWiringTests(unittest.TestCase):
         """动作结果落库（api/actions）不再用手写集合 —— 走注册表归一。"""
         import inspect
 
-        from api import actions
+        from services import action_execution
 
-        src = inspect.getsource(actions._apply_action_result)
+        # T2.3 把「凭证写入」从 `apply_action_result` 拆成了独立函数
+        # （主函数现在是四步分派）。守卫的**对象**跟着代码走，断言内容不变。
+        src = inspect.getsource(action_execution._apply_credential_writes)
         self.assertNotIn(
             "tracked_keys", src,
             "还留着旧的 tracked_keys 手写集合 —— 字段口径会与注册表漂移",

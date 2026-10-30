@@ -300,7 +300,7 @@ def _credential_rejection_result(exc: Exception, checked_at: str) -> Optional[di
         if isinstance(body, dict):
             message = str(body.get("error") or "").strip()
     except Exception:
-        pass
+        logger.debug("忽略异常（保留原行为）", exc_info=True)
     if not message:
         message = str(getattr(response, "text", "") or "").strip()
     if "auth token" not in message and "auth credential" not in message:
@@ -591,7 +591,7 @@ def sync_grok_cliproxyapi_status_batch(
         for account in accounts:
             account_id = getattr(account, "id", None)
             if account_id is not None:
-                results[int(account_id)] = dict(fallback)
+                results[account_id] = dict(fallback)
         logger.warning("CLIProxyAPI Grok 批量同步失败：无法获取 auth-files, accounts=%s, error=%s", len(accounts), exc)
         return results
 
@@ -601,7 +601,7 @@ def sync_grok_cliproxyapi_status_batch(
             continue
         matched = _match_auth_file(account, files, provider="xai")
         if not matched:
-            results[int(account_id)] = {
+            results[account_id] = {
                 "uploaded": False,
                 "last_synced_at": synced_at,
                 "message": "未在 CLIProxyAPI 找到匹配的 xai auth-file",
@@ -644,7 +644,7 @@ def sync_grok_cliproxyapi_status_batch(
             remote["message"] = remote["status_message"]
         elif remote.get("last_probe_message"):
             remote["message"] = remote["last_probe_message"]
-        results[int(account_id)] = remote
+        results[account_id] = remote
         if index < len(accounts) - 1:
             time.sleep(BATCH_PROBE_DELAY_SECONDS)
 
@@ -681,7 +681,7 @@ def sync_chatgpt_cliproxyapi_status_batch(
         for account in accounts:
             account_id = getattr(account, "id", None)
             if account_id is not None:
-                results[int(account_id)] = dict(fallback)
+                results[account_id] = dict(fallback)
         logger.warning("CLIProxyAPI 批量同步失败：无法获取 auth-files, accounts=%s, error=%s", len(accounts), exc)
         return results
 
@@ -690,7 +690,7 @@ def sync_chatgpt_cliproxyapi_status_batch(
         if account_id is None:
             continue
         matched = _match_auth_file(account, files, provider=provider)
-        results[int(account_id)] = _build_remote_sync_result(account, matched, synced_at, api_url=api_url, api_key=api_key)
+        results[account_id] = _build_remote_sync_result(account, matched, synced_at, api_url=api_url, api_key=api_key)
         if index < len(accounts) - 1 and matched:
             time.sleep(BATCH_PROBE_DELAY_SECONDS)
 

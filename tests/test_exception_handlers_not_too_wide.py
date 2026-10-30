@@ -29,7 +29,9 @@ BASELINE: dict[str, int] = {
     "api/accounts.py": 4,
     "api/auth.py": 1,
     "api/contribution.py": 1,
-    "api/integrations.py": 1,
+    # `_persist_push_results` 的「落库失败不该毁整批结果」随代码搬到
+    # `services/panel_push.py`（T3.3），基线跟着搬。
+    "services/panel_push.py": 1,
     "api/shared_mail.py": 1,
     "core/base_captcha.py": 1,
     "core/config_store.py": 1,
@@ -57,7 +59,6 @@ BASELINE: dict[str, int] = {
     "platforms/chatgpt/protocol/mixins/redirect.py": 12,
     "platforms/chatgpt/protocol/mixins/signup.py": 5,
     "platforms/chatgpt/protocol/mixins/trace.py": 8,
-    "platforms/chatgpt/protocol/phone_flow.py": 14,
     "platforms/chatgpt/protocol/two_factor.py": 3,
     "platforms/chatgpt/protocol_log_relay.py": 1,
     "platforms/chatgpt/registration_engine.py": 1,

@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from typing import Any, Iterable, Optional
 
 from sqlalchemy import func
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
 from .base import _utcnow, normalize_email
@@ -117,7 +118,9 @@ def json_record_to_model(record: dict[str, Any]) -> AccountModel:
         for key, value in record.items()
         if key not in _MODEL_SKIP_KEYS
     }
-    columns = set(AccountModel.model_fields.keys())
+    # `password` 不是 pydantic 字段（是透明加解密的 property），但构造器认这个
+    # 关键字 —— 不把它加回来，JSON 后端读出来的账号密码全是空串。
+    columns = set(AccountModel.model_fields.keys()) | {"password"}
     kwargs = {k: v for k, v in kwargs.items() if k in columns}
     return AccountModel(**kwargs)
 
@@ -148,11 +151,12 @@ def merge_account_fields(
     """
     is_model = isinstance(incoming, AccountModel)
     if is_model:
+        # `extra_json` **原样保留**（见上面的说明）：模型里的密文不该被解析再
+        # 序列化，否则凭证会以明文形态写回。
+        # 但**比较用的 `extra`** 必须走 `get_extra()`（解密后的视图）——
+        # 直接 json.loads 会把 `v1:…` 当明文参与合并。
         extra_json = str(getattr(incoming, "extra_json", "") or "{}")
-        try:
-            extra = json.loads(extra_json) if extra_json else {}
-        except (json.JSONDecodeError, TypeError):
-            extra = {}
+        extra = incoming.get_extra()
     else:
         extra = getattr(incoming, "extra", None) or {}
         extra_json = json.dumps(extra, ensure_ascii=False)
@@ -392,7 +396,40 @@ class AccountRepository:
 
             row = AccountModel(platform=platform, email=email, **fields)
             sess.add(row)
-            sess.commit()
+            try:
+                sess.commit()
+            except IntegrityError:
+                # 唯一索引 `uq_accounts_platform_email` 撞了：另一个线程/进程
+                # 在我们 select 与 insert 之间插了同一 (platform, email)。
+                #
+                # 加索引之前这里是「静默插两行」，加之后变成抛异常 —— 不能让
+                # 并发注册因为一个索引直接失败，所以回滚后按「已存在」重做一次，
+                # 与串行语义一致（后写的那份字段胜出）。
+                sess.rollback()
+                existing = sess.exec(
+                    select(AccountModel)
+                    .where(AccountModel.platform == platform)
+                    .where(AccountModel.email == email)
+                ).first()
+                if existing is None:
+                    raise
+                retry_fields = merge_account_fields(
+                    incoming=account,
+                    existing={
+                        "password": existing.password,
+                        "user_id": existing.user_id,
+                        "region": existing.region,
+                        "token": existing.token,
+                        "cashier_url": existing.cashier_url,
+                    },
+                )
+                for name, value in retry_fields.items():
+                    setattr(existing, name, value)
+                existing.updated_at = _utcnow()
+                sess.add(existing)
+                sess.commit()
+                sess.refresh(existing)
+                return existing
             sess.refresh(row)
             return row
         finally:
@@ -452,7 +489,13 @@ class AccountRepository:
             "id": getattr(model, "id", None),
             "platform": str(getattr(model, "platform", "") or ""),
             "email": normalize_email(getattr(model, "email", "") or ""),
-            "password": str(getattr(model, "password", "") or ""),
+            # 写**密文**：JSON 后端与 SQLite 后端必须落同一种形态，
+            # 否则「SQLite 里是密文、JSON 里是明文」只在切换后端时才暴露。
+            "password": str(
+                getattr(model, "password_cipher", None)
+                or getattr(model, "password", "")
+                or ""
+            ),
             "user_id": str(getattr(model, "user_id", "") or ""),
             "region": str(getattr(model, "region", "") or ""),
             "token": str(getattr(model, "token", "") or ""),
@@ -467,7 +510,12 @@ class AccountRepository:
 
         if payload["id"]:
             updated = store.update(payload["id"], payload)
-            return json_record_to_model(updated or payload)
+            if updated is not None:
+                return json_record_to_model(updated)
+            # 有 id 但库里没有这一行：`AccountModel` 构造时就带上了 uuid4 默认值，
+            # 所以「有 id」不再等于「已存在」。按新建插入 —— 以前这里直接返回
+            # payload，JSON 文件里一个字都没写，接口 200 但账号查不到（实测）。
+            return json_record_to_model(store.insert(payload))
 
         # 没有 id：要么按唯一键更新，要么新建 —— 与 upsert 同语义
         existing = store.find_by_email(payload["platform"], payload["email"])
@@ -537,7 +585,7 @@ class AccountRepository:
                 sess.close()
 
     @staticmethod
-    def get(account_id: int, platform: str = "", *, session: Session | None = None) -> Optional[AccountModel]:
+    def get(account_id: str, platform: str = "", *, session: Session | None = None) -> Optional[AccountModel]:
         """按 id 取账号。
 
         给了 `platform` 只查该平台的库；没给就跨库查找（默认库 + 所有平台库）。
@@ -578,7 +626,7 @@ class AccountRepository:
         return AccountRepository._get_in_default(account_id, "")
 
     @staticmethod
-    def _get_in_default(account_id: int, platform: str) -> Optional[AccountModel]:
+    def _get_in_default(account_id: str, platform: str) -> Optional[AccountModel]:
         """在默认库里按 id 取，`platform` 非空时附加同平台约束（防 ID 撞号）。"""
         from .base import current_engine
 
@@ -592,7 +640,7 @@ class AccountRepository:
             ).first()
 
     @staticmethod
-    def delete(account_id: int, platform: str = "", *, session: Session | None = None) -> bool:
+    def delete(account_id: str, platform: str = "", *, session: Session | None = None) -> bool:
         """按 id 删除账号（没给 platform 时跨库查找）。
 
         与 `get` 同样的 ID 撞号问题：指定 `platform` 时默认库那一步要再按
@@ -639,7 +687,7 @@ class AccountRepository:
 
     @staticmethod
     def get_many(
-        ids: list[int], platform: str = "", *, session: Session | None = None
+        ids: list[str], platform: str = "", *, session: Session | None = None
     ) -> list[AccountModel]:
         """按 id 批量取账号，保持传入顺序。
 
@@ -649,11 +697,24 @@ class AccountRepository:
 
         去重语义与 `get()` 一致：平台库优先于默认库的历史遗留行。
         """
-        wanted = [int(v) for v in ids]
+        wanted = [str(v) for v in ids]
         if not wanted:
             return []
 
-        found: dict[int, AccountModel] = {}
+        # JSON 后端：单文件、没有「每库一次 IN 查询」这回事，直接全量取再按 id
+        # 过滤。**以前这里没有分支** —— JSON 部署下导出/批量动作会去查一个根本
+        # 不存在的 sqlite 表，报 `no such table: accounts`（base commit 上就有）。
+        store = AccountRepository._json_store()
+        if store is not None:
+            wanted_platform = platform.strip().lower()
+            rows = store.list_all(platform=wanted_platform) if wanted_platform else store.list_all()
+            found_json = {
+                str(row.get("id")): json_record_to_model(row) for row in rows
+            }
+            ordered_json = list(dict.fromkeys(wanted))
+            return [found_json[i] for i in ordered_json if i in found_json]
+
+        found: dict[str, AccountModel] = {}
         wanted_platform = platform.strip().lower()
 
         # SQLite 变量上限 32766：id 列表超过后 IN 查询直接炸
@@ -673,7 +734,7 @@ class AccountRepository:
                 q = base.where(AccountModel.id.in_(chunk))
                 for row in sess.exec(q).all():
                     # 先到先得：平台库先扫，默认库的历史行不覆盖
-                    found.setdefault(int(row.id or 0), row)
+                    found.setdefault(str(row.id), row)
 
         if session is not None:
             _collect(session, enforce_platform=False)
@@ -694,18 +755,39 @@ class AccountRepository:
 
     @staticmethod
     def delete_many(
-        ids: list[int], platform: str = "", *, session: Session | None = None
-    ) -> tuple[list[int], list[int]]:
+        ids: list[str], platform: str = "", *, session: Session | None = None
+    ) -> tuple[list[str], list[str]]:
         """按 id 批量删除，返回 `(deleted, not_found)`。
 
         与逐个 `delete()` 的区别：每库只开一次会话、分块 IN 查询，避免
         N+1（批量删除接口一次最多 1000 个 id；仓储层不假设调用方已限流，
         分块到 SQLite 变量上限之下，传多大都安全）。
         """
-        wanted = list(dict.fromkeys(int(v) for v in ids))
+        wanted = list(dict.fromkeys(str(v) for v in ids))
         if not wanted:
             return [], []
-        deleted: list[int] = []
+
+        # JSON 后端：同 `get_many` —— 不补这条，批量删除会去打 sqlite。
+        store = AccountRepository._json_store()
+        if store is not None:
+            wanted_platform = platform.strip().lower()
+            deleted_json: list[str] = []
+            missing_json: list[str] = []
+            for account_id in wanted:
+                record = store.get(account_id)
+                if record is None:
+                    missing_json.append(account_id)
+                    continue
+                if wanted_platform and str(record.get("platform") or "").strip().lower() != wanted_platform:
+                    missing_json.append(account_id)
+                    continue
+                if store.delete(account_id):
+                    deleted_json.append(account_id)
+                else:
+                    missing_json.append(account_id)
+            return deleted_json, missing_json
+
+        deleted: list[str] = []
         remaining = set(wanted)
         wanted_platform = platform.strip().lower()
 
@@ -729,8 +811,8 @@ class AccountRepository:
                     continue
                 rows = sess.exec(base.where(AccountModel.id.in_(chunk))).all()
                 for row in rows:
-                    remaining.discard(int(row.id or 0))
-                    deleted.append(int(row.id or 0))
+                    remaining.discard(str(row.id))
+                    deleted.append(str(row.id))
                     sess.delete(row)
                 if rows:
                     sess.commit()

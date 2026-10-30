@@ -1,5 +1,8 @@
 """Proxy pool backed by the application database."""
 
+import logging
+
+logger = logging.getLogger(__name__)
 from datetime import datetime, timezone
 import threading
 from typing import Optional
@@ -194,7 +197,7 @@ class ProxyPool:
                     results["ok"] += 1
                     continue
             except Exception:
-                pass
+                logger.debug("忽略异常（保留原行为）", exc_info=True)
             self.report_fail(p.url)
             results["fail"] += 1
         return results

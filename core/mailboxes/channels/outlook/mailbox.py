@@ -1,6 +1,10 @@
 """OutlookMailbox：微软邮箱本地账号池（号池取号、OAuth、Graph/IMAP 取件）。"""
 from __future__ import annotations
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 import threading
 import time
 from typing import Any, Optional
@@ -311,6 +315,9 @@ class OutlookMailbox(BaseMailbox):
     def requeue_account(self, account: MailboxAccount) -> None:
         from sqlmodel import Session, select
         from core.db import OutlookAccountModel, _utcnow, mailbox_pool_session
+        # 这个 import 原来漏了：方法体里一路用 `outlook_repository.*`，
+        # 名字却从没绑过 —— 一进 `requeue_account` 就 `NameError`（base 上就有）。
+        from core.db.outlook_repository import outlook_repository
 
         email = str(getattr(account, "email", "") or "").strip()
         extra = getattr(account, "extra", None) or {}
@@ -368,6 +375,8 @@ class OutlookMailbox(BaseMailbox):
             mailbox_pool_session,
             mark_email_used_by,
         )
+        # 同上：`set_account_status` 里也在用 `outlook_repository`，同样没绑。
+        from core.db.outlook_repository import outlook_repository
 
         email = str(getattr(account, "email", "") or "").strip()
         account_id = str(getattr(account, "account_id", "") or "").strip()
@@ -442,24 +451,22 @@ class OutlookMailbox(BaseMailbox):
 
     @staticmethod
     def pool_status_summary() -> dict:
-        """号池状态计数，含 `unpooled`（未入池）与 `total`。"""
-        from sqlalchemy import func
-        from sqlmodel import select
-        from core.db import OutlookAccountModel, mailbox_pool_session
+        """号池状态计数，含 `unpooled`（未入池）与 `total`。
 
-        with mailbox_pool_session("outlook") as session:
-            rows = session.exec(
-                select(OutlookAccountModel.status, func.count(OutlookAccountModel.id)).group_by(
-                    OutlookAccountModel.status
-                )
-            ).all()
+        走 `outlook_repository.list_all()` 而不是裸 SQL：那张表在 JSON 部署下
+        不存在（`mailbox_pool_session` 连的是 SQLite），直接查会
+        `no such table: outlook_accounts` → `/api/outlook/pool-summary` 500
+        （base commit 上就有）。仓储层两条后端都有实现，计数在内存里做 ——
+        号池规模是千级，比维护两条查询路径划算。
+        """
+        from core.db.outlook_repository import outlook_repository
 
         summary = {"unpooled": 0, "available": 0, "in_use": 0, "used": 0, "failed": 0}
         total = 0
-        for status, count in rows:
-            key = str(status or "available").strip().lower() or "available"
-            summary[key] = summary.get(key, 0) + int(count or 0)
-            total += int(count or 0)
+        for row in outlook_repository.list_all():
+            key = str(row.get("status") or "available").strip().lower() or "available"
+            summary[key] = summary.get(key, 0) + 1
+            total += 1
         summary["total"] = total
         return summary
 
@@ -760,7 +767,7 @@ class OutlookMailbox(BaseMailbox):
                     try:
                         imap_conn.logout()
                     except Exception:
-                        pass
+                        logger.debug("忽略异常（保留原行为）", exc_info=True)
             if password:
                 try:
                     imap_conn = imaplib.IMAP4_SSL(host, self._imap_port, timeout=30)
@@ -771,7 +778,7 @@ class OutlookMailbox(BaseMailbox):
                     try:
                         imap_conn.logout()
                     except Exception:
-                        pass
+                        logger.debug("忽略异常（保留原行为）", exc_info=True)
 
         raise RuntimeError(f"微软邮箱 IMAP 登录失败: {last_error}")
 

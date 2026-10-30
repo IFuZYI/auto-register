@@ -425,7 +425,7 @@ class RunAutoRefreshPassTests(unittest.TestCase):
             session.add(model)
             session.commit()
             session.refresh(model)
-        return int(model.id)
+        return str(model.id)
 
     def _extra_of(self, account_id):
         from sqlmodel import Session
@@ -822,7 +822,7 @@ class DefaultExecuteBannedTests(unittest.TestCase):
             session.add(model)
             session.commit()
             session.refresh(model)
-        return int(model.id)
+        return str(model.id)
 
     def test_refresh_banned_result_marks_account_banned(self):
         from services.chatgpt_maintenance import _default_execute
@@ -1205,7 +1205,7 @@ class CredentialReadPathTests(unittest.TestCase):
             session.add(model)
             session.commit()
             session.refresh(model)
-        aid = int(model.id)
+        aid = str(model.id)
 
         calls = []
         summary = run_auto_refresh_pass(

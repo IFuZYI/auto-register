@@ -9,6 +9,10 @@
 """
 from __future__ import annotations
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 import json
 import os
 import secrets
@@ -67,7 +71,7 @@ def current_engine() -> Engine:
         if patched is not None:
             return patched
     except Exception:
-        pass
+        logger.debug("忽略异常（保留原行为）", exc_info=True)
     return engine
 
 
