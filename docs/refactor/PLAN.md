@@ -111,11 +111,11 @@ UUID 签名会穿透到 `platforms/`（不再保证零平台改动），但**行
 |---|---|---|
 | T2.1 `Capability` / `CapabilitySpec` / `Outcome` | 新建 `core/platform_contract.py` | 两平台跑同一套参数化断言 |
 | T2.2 `execute_action` 降级为适配器 | 查表 → 调新方法，签名不变 | 前端零改动；17 个旧 id 全部可调 |
-| T2.3 `_apply_action_result` 9 分支 → 1 行 | 由 `Outcome.status_patch` 驱动 | `api/actions.py` 该函数 ≤ 15 行 |
-| T2.4 `PROBE_STATE_TO_STATUS` 表 | 合并 `classify_local_probe_state` + `apply_chatgpt_status_policy` | 12 个探测态 × 期望状态表驱动测试 |
-| T2.5 `ErrorKind` + `Policy` | 统一 chatgpt `refresh_kind` 与 grok 同名概念 | 新增错误类型只改一张表 |
-| T2.6 `TokenPlan` 枚举 | 5 个函数 → 1 枚举 + 2 派生属性 | 旧值（`refresh_token` / `rt` / `1`）仍可解析 |
-| T2.7 `AccountProxyBinder` | 3 处绑定实现 → 1 处 | 三处调用点行为一致（表驱动测试） |
+| T2.3 `_apply_action_result` 拆四步分派 | ✅ **已完成**：120 行 → 22 行（8 条语句），平台差异进 `_STATUS_APPLIERS` 表 | 四步各一函数；守卫测试跟着代码搬家 |
+| T2.4 `PROBE_STATE_TO_STATUS` 表 | ⛔ **不做**：分类器与落状态各已是一处实现；「禁用粘性」「AT 是否过期」是动态判断，表表达不了（C1 禁止为对齐清单重写） | — |
+| T2.5 `ErrorKind` + `Policy` | ⛔ **不做**：新增分类法而非收敛重复路径；要改 447 处异常语义，风险等同 M5 | — |
+| T2.6 `TokenPlan` 枚举 | ✅ **已满足**：`resolve_chatgpt_token_plan()` 就是那个「1」，旧值全可解析（`tests/test_chatgpt_token_plan_settings.py`） | — |
+| T2.7 `AccountProxyBinder` | ⛔ **不做**：三处语义不同（注册路径不判「可绑定」），合并会重挖 field-notes 记过的「补绑是负优化」 | — |
 
 **门禁 G2**：
 - `test_panel_*` 15 个文件全绿
@@ -131,7 +131,7 @@ UUID 签名会穿透到 `platforms/`（不再保证零平台改动），但**行
 | T3.1 `TaskService` | 任务状态机从 `api/tasks.py` 下沉 | `api/tasks.py` 每个端点 ≤ 5 行 |
 | T3.2 去 `api` 依赖 | 12 处 `from api import tasks` → 注入 `TaskContext` | `grep -r "from api import" services/` = 0 |
 | T3.3 `PanelAdapter` | 4 处注册 → 1 处；`FETCHERS` 并入适配器 | 新增面板只改 1 个文件 |
-| T3.4 测试改写 | 12 个 B 类测试从 patch 模块状态改为构造注入 | B 类清单清空 |
+| T3.4 测试改写 | ✅ **已失效**：B 类前提是「挡住 T3.2」，实际靠搬状态 + 改 patch 目标完成，13 个文件全绿 | — |
 
 **门禁 G3**：新增 `test_task_service_without_web`（不 import fastapi 能跑通一次任务）；4 个指标全部达标。
 
