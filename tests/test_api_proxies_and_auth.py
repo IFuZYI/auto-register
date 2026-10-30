@@ -350,22 +350,50 @@ def test_setup_rejects_short_password(client, auth_state):
     assert "6" in response.json()["detail"]
 
 
-def test_setup_requires_token_when_password_already_set(client, auth_state):
-    from api.auth import _hash_pw, create_token, verify_password
+def test_setup_requires_token_and_old_password_when_password_already_set(client, auth_state):
+    """已设密码时改密：**令牌 + 当前密码**两样都要（安全审查 2026-10-30 F10）。
+
+    原断言是「只有令牌就能改密」—— 那等于「令牌泄露一次 = 永久接管」，
+    所以这条测试本身钉的是错的契约，随实现一起改。
+    """
+    from api.auth import _hash_pw, create_token, verify_password, verify_token
 
     auth_state.set("auth_password_hash", _hash_pw("oldsecret"))
     response = client.post("/api/auth/setup", json={"password": "newsecret"})
     assert response.status_code == 401
 
+    old_token = create_token()
     response = client.post(
         "/api/auth/setup",
         json={"password": "newsecret"},
-        headers=_bearer(create_token()),
+        headers=_bearer(old_token),
+    )
+    assert response.status_code == 400, "只有令牌、没有当前密码也能改密"
+    assert "当前密码" in response.text
+
+    response = client.post(
+        "/api/auth/setup",
+        json={"password": "newsecret", "old_password": "wrong"},
+        headers=_bearer(old_token),
+    )
+    assert response.status_code == 400, "当前密码错误也放行了"
+
+    response = client.post(
+        "/api/auth/setup",
+        json={"password": "newsecret", "old_password": "oldsecret"},
+        headers=_bearer(old_token),
     )
     assert response.status_code == 200, response.text
     assert verify_password("newsecret", auth_state.get("auth_password_hash", "")), (
         "改密码后新密码应能通过校验（哈希是加盐的，不能直接比相等）"
     )
+    # 改密后旧令牌必须失效（换 JWT 密钥）
+    try:
+        verify_token(old_token)
+    except Exception:
+        pass
+    else:  # pragma: no cover - 失败路径
+        raise AssertionError("改密后旧令牌仍然有效")
 
 
 def test_login_without_password_returns_403(client, auth_state):

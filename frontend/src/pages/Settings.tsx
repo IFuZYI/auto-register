@@ -14,6 +14,7 @@ import {
   MobileOutlined,
   MailOutlined,
 } from '@ant-design/icons'
+import { setToken } from '@/lib/utils'
 import { parseBooleanConfigValue } from '@/lib/configValueParsers'
 import { parseCountryIdList } from '@/lib/smsCountries'
 import {
@@ -371,10 +372,13 @@ function SecurityPanel() {
     }
     setLoading(true)
     try {
-      await apiFetch('/auth/change-password', {
+      const changed = await apiFetch('/auth/change-password', {
         method: 'POST',
         body: JSON.stringify({ current_password: values.current_password, new_password: values.new_password }),
       })
+      // 改密后服务端会轮换 JWT 密钥（吊销所有旧令牌），旧 token 立刻失效。
+      // 必须把响应里的新令牌存回去，否则用户改完密码下一次请求就被踢回登录页。
+      if (changed?.access_token) setToken(changed.access_token)
       msg.success('密码已更新')
       pwForm.resetFields()
     } catch (e: any) {

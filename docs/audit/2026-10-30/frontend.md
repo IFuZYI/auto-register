@@ -5,7 +5,7 @@
 - 仓库/基线：`/data/workspace/Register`，分支 `main`，HEAD `4680c8d`
 - 范围：`frontend/src/`（`pages/`、`components/`、`lib/`、`api/`、`App.tsx`），共 48 个 `.ts/.tsx`，14 577 行
 - 方式：只读静态阅读 + 只读 `GET` 实测（`http://127.0.0.1:8000`）+ 构建产物核对；未改任何源码
-- 结论速览：**P0 × 5、P1 × 19、P2 × 16**
+- 结论速览：**P0 × 5、P1 × 16、P2 × 19**
 - 工具链：`npx tsc --noEmit` **0 error（exit 0，零输出）**；`npm run lint` **exit 1，39 problems（34 errors / 5 warnings），12 个文件**
 
 ## 0. 结论摘要
@@ -17,8 +17,8 @@
 | P0 | F-03 | 任务历史只取 50 条却按 20/页做客户端分页，`total=1661` 中 1611 条**永远不可达** |
 | P0 | F-04 | 「删除选中 N 个」账号**一点即删、无二次确认**（单次最多 1000 条，不可恢复） |
 | P0 | F-05 | 关闭「访问密码保护」/「双因素」**一键生效、无确认** |
-| P1 | F-06…F-24 | 竞态、无 catch 的静默失败、重复请求、错误态=空态、契约字段被忽略等 |
-| P2 | F-25…F-40 | 死代码、四套时间格式化、a11y 缺口、长列表、打包副作用等 |
+| P1 | §1–§5（16 条） | 竞态、无 catch 的静默失败、重复请求、错误态=空态、契约字段被忽略、图标按钮无名字等 |
+| P2 | §1–§5（19 条） | 死代码、四套时间格式化、a11y 细节、长列表、打包副作用等 |
 
 > 已修项（**不重复报**，本次仅复核）：59 → 5 个 chunk、空闲预取、`/api/tasks` 的 ETag —— 见 §7。
 
@@ -45,14 +45,14 @@
 
 ### F-02 [P0] 同一根因：三个「按所选执行」的批量动作必然失败，第四个必然误报「请先选择」
 
-- **位置**：`frontend/src/pages/Accounts.tsx:598-601`（同步状态）、`670-671`（上传到面板）、`721-722`（补 RT）、`764-765`（刷新 Token）
+- **位置**：`frontend/src/pages/Accounts.tsx:598-600`（同步状态）、`670-672`（上传到面板）、`721-723`（补 RT）、`764-766`（刷新 Token）
 - **证据**：四处都是
   ```tsx
   body.account_ids = Array.from(selectedRowKeys)
     .map((value) => Number(value))
     .filter((value) => Number.isInteger(value) && value > 0)
   ```
-  而 `scope = selectedRowKeys.length > 0 ? 'selected' : 'all'`（`Accounts.tsx:667`、`718`、`761`）—— 只要用户勾了行，`scope==='selected'`，但 `account_ids` 恒为 `[]` 且不带 `all_filtered`。
+  而 `scope = selectedRowKeys.length > 0 ? 'selected' : 'all'`（`Accounts.tsx:664`、`710`、`755`）—— 只要用户勾了行，`scope==='selected'`，但 `account_ids` 恒为 `[]` 且不带 `all_filtered`。
   后端 `services/chatgpt_account_selection.py:113-115`：`ids` 为空且 `all_filtered` 为假 → `raise ValueError("请提供 account_ids，或指定 all_filtered=true")` → 400。
   「同步所选」更直观：`Accounts.tsx:601-603` 的守卫把它变成 `message.warning('请先选择要同步的账号')` —— 用户明明勾了行。
 - **影响**：账号页 4 个主要批量入口在「选中」路径上 100% 不可用；错误文案还指向用户操作。
@@ -74,14 +74,14 @@
   …
   else if (key === 'delete') { void handleBatchDelete() }   // 无 Popconfirm / modal.confirm
   ```
-  单条删除有 `Popconfirm`（`Accounts.tsx:1103-1115`），批量删除反而没有。后端上限 1000 条（`api/accounts.py:690-691`）。
+  单条删除有 `Popconfirm`（`Accounts.tsx:1063-1073`），批量删除反而没有。后端上限 1000 条（`api/accounts.py:690-691`）。
 - **影响**：一次误点 = 最多 1000 个账号不可恢复；与同仓 `Proxies.tsx:527-538`、`TaskHistory.tsx:165-175`、`ICloud.tsx:841-852` 的确认习惯不一致。
 - **建议**：套 `modal.confirm`，正文写清「将删除 N 个账号（含密码/Token），不可恢复」，并要求输入数量或勾选「我确认」。
 
 ### F-05 [P0] 关闭「访问密码保护」与「双因素认证」一键生效，无确认
 
 - **位置**：`frontend/src/pages/Settings.tsx:353-365`（`handleDisableAuth`）、`Settings.tsx:419-427`（`handleDisableTotp`）
-- **证据**：两个 handler 都是 `await apiFetch('/auth/disable' | '/auth/2fa/disable', {method:'POST'})` 直接执行，按钮 `danger` 但无 `Popconfirm`/`modal.confirm`；对比同页「清理日志」是有确认的（`TaskHistory.tsx:86-109`）。
+- **证据**：两个 handler 都是 `await apiFetch('/auth/disable' | '/auth/2fa/disable', {method:'POST'})` 直接执行，按钮 `danger` 但无 `Popconfirm`/`modal.confirm`；对比同仓「清理日志」是有确认的（`TaskHistory.tsx:86-109`）。
 - **影响**：安全姿态降级只需一次误点，且没有任何「刚刚发生了什么」的强提示（只有一条 toast）。
 - **建议**：加 `modal.confirm`，要求重新输入当前密码；关闭 2FA 时额外提示「之后仅凭密码即可登录」。
 
@@ -100,7 +100,7 @@
   - 静默：接口 500/断网 → unhandled promise rejection，`loading` 归 false，表格保留旧数据，**没有任何 message**。
   - 全仓只有 `TaskLogPanel.tsx:139` 用了 `AbortController`，列表页一个都没有。
 - **影响**：筛选结果与筛选条件不一致（用户按「banned」筛却看到 registered 行）；后端故障时界面看起来「正常但空/旧」。
-- **建议**：抽 `useListQuery(fetcher, deps)`：内部 `AbortController` + 序号 + `catch → message.error` + `error` state；或在每个 `load` 里 `try/catch` 并把错误渲染成 `<Alert>`（参考 `MailServicePage.tsx:156-165` 的 `loadFailed` 写法，那一页是全仓唯一做对的）。
+- **建议**：抽 `useListQuery(fetcher, deps)`：内部 `AbortController` + 序号 + `catch → message.error` + `error` state；或在每个 `load` 里 `try/catch` 并把错误渲染成 `<Alert>`（参考 `MailServicePage.tsx:161-166` 的 `loadFailed` 写法，那一页是全仓唯一做对的）。
 
 ### F-08 [P1] 重复请求：同一份数据在启动/切页时被拉多次
 
@@ -119,7 +119,7 @@
 
 | 接口 | 实测体积 | 问题 |
 |---|---|---|
-| `GET /api/accounts?page_size=50` | **242 653 B** | 单行 3 436 B，其中 `token` 占 **1 990 B（58%）**；列表只用它做 AT 列的兜底（`Accounts.tsx:423`），`_slim_account_row`（`api/accounts.py:265-305`）只瘦了 `extra_json` 和 `password`，没动 `token` |
+| `GET /api/accounts?page_size=50` | **242 653 B** | 单行 3 436 B，其中 `token` 占 **1 990 B（58%）**；列表只用它做 AT 列的兜底（`Accounts.tsx:423`），`_slim_account_row`（`api/accounts.py:260-305`）只瘦了 `extra_json` 和 `password`，没动 `token` |
 | `GET /api/icloud/aliases` | **712 390 B / 1 941 条** | `ICloud.tsx:106-130` 每次挂载、每次切主号筛选都全量重拉；筛选是纯客户端（`ICloud.tsx:173-183`），注释也承认「一次性拉全量」 |
 | `GET /api/tasks` | **374 349 B / 837 条** | `RunningTasks` 有运行中任务时 2.5 s 一次（ETag 已挡住重复体，但排序/解析仍全量） |
 | `GET /api/config` | 81 键 | `Proxies` 只为 2 个键、`RegisterTaskPage` 只为 1 个键就整份拉 |
@@ -165,14 +165,14 @@
 - **位置**：`frontend/src/pages/Settings.tsx:617`、`frontend/src/components/mail/MailServicePage.tsx:206`、`frontend/src/pages/Proxies.tsx:294`
 - **证据**：后端 `api/config.py:115-118` 明确把被丢弃的未知键收集起来，`api/config.py:196-200` 返回 `{"ok": true, "updated": [...], "ignored": [...]}`，注释写着「前端可据此提示『这些字段没生效』」。三处调用方都是 `await apiFetch(...)` 后直接 `message.success('保存成功')`，响应体被丢弃。
 - **影响**：字段名写错/后端白名单漏加时，用户得到「保存成功」但配置没生效 —— 这正是后端注释里描述过的线上事故形态。
-- **建议**：`const res = await apiFetch(...); if (res?.ignored?.length) message.warning(\`以下字段未生效：${res.ignored.join(', ')}\`)`。
+- **建议**：`const res = await apiFetch(...)` 后检查 `res.ignored?.length`，非空则 `message.warning` 列出「未生效的字段」，而不是无条件「保存成功」。
 
 ### F-14 [P1] `apiFetch` 对 FastAPI 422 的 `detail` 数组直接 `new Error(array)` → 用户看到 `[object Object]`
 
 - **位置**：`frontend/src/lib/utils.ts:35-44`
 - **证据**：`throw new Error(json.detail || text)`。实测 `GET /api/accounts?page=abc` → 422 `{"detail":[{"type":"int_parsing","loc":["query","page"],"msg":"…"}]}`，`String(array)` = `"[object Object]"`。
-  可达路径：`Accounts.tsx:1275-1281` 的注册数量用 `<Input type="number" min max>`（HTML `min/max` 不参与 antd 校验），填 `20000` 直接 422；`handleRegister` 又没有 `catch`（见 F-19），于是**连 `[object Object]` 都看不到**。
-- **建议**：`const detail = Array.isArray(json.detail) ? json.detail.map(d => \`${(d.loc||[]).join('.')}: ${d.msg}\`).join('; ') : json.detail`；同时给 `count/concurrency` 加 `rules={[{type:'number', min:1, max:MAX_REGISTER_COUNT}]}`。
+  可达路径：`Accounts.tsx:1275-1281` 的注册数量用 `<Input type="number" min max>`（HTML `min/max` 不参与 antd 校验），填 `20000` 直接 422；`handleRegister` 又没有 `catch`（见 F-22），于是**连 `[object Object]` 都看不到**。
+- **建议**：在 `apiFetch` 里判断 `Array.isArray(json.detail)`，把每项的 `loc.join('.')` 与 `msg` 拼成可读串；同时给 `count/concurrency` 加 `rules={[{ type: 'number', min: 1, max: MAX_REGISTER_COUNT }]}`。
 
 ### F-15 [P1] 批量删除账号忽略 `{deleted, not_found}` → 删 0 条也报「批量删除成功」
 
@@ -217,7 +217,7 @@
 ### F-21 [P2] 前端注释与后端实际契约不一致（列表 `token` 并未裁掉）
 
 - **位置**：`frontend/src/pages/Accounts.tsx:426-432`（注释：「列表响应已把 token 正文裁掉」）、`Accounts.tsx:423`（仍读 `record.token`）
-- **证据**：实测单行 `token` 字段 1 990 B 仍在；`api/accounts.py:265-305` 只处理 `extra_json` 与 `password`。
+- **证据**：实测单行 `token` 字段 1 990 B 仍在；`api/accounts.py:260-305` 只处理 `extra_json` 与 `password`。
 - **影响**：后来者按注释理解会误判「列表不含凭证」，安全评审结论会错。
 - **建议**：要么后端真裁（配 `has_access_token`），要么改注释并说明「列镜像 AT 仍随列表下发，grok 列是 SSO」。
 
@@ -225,7 +225,7 @@
 
 ## 3. 交互缺陷
 
-### F-22 [P1] 危险动作缺 `catch`：失败时用户得不到任何反馈（4 个 handler）
+### F-22 [P1] 危险动作缺 `catch`：失败时用户得不到任何反馈（8 处）
 
 - **位置**：`Accounts.tsx:451-458`（删除）、`460-469`（批量删除）、`471-481`（新增）、`514-568`（注册）、`572-583`（详情保存）；`TaskHistory.tsx:69-83`（批量删除历史）；`Settings.tsx:587-636`（保存配置）；`RegisterTaskPage.tsx:167-229`（提交注册）
 - **证据**：全部是 `try { … } finally { setLoading(false) }`，**没有 `catch`**。以 `handleRegister` 为例：`await apiFetch('/tasks/register')` 抛 422 → `finally` 复位 loading → 异常冒泡成 unhandled rejection → 弹窗原地不动、无 toast。
@@ -242,8 +242,8 @@
 ### F-24 [P1] 长列表：代理表 `pagination={false}` 全量渲染；列定义每次渲染重建
 
 - **位置**：`Proxies.tsx:540-550`（`pagination={false}`，无 `virtual`）、`Proxies.tsx:311`、`Accounts.tsx:820`、`TaskHistory.tsx:112`
-- **证据**：代理表一次渲染全部行；`const columns = [...]` 在组件体内定义（未 `useMemo`），父组件每次 `setState`（含 2.5 s 轮询页）都生成新数组 → antd Table 全表重算。
-- **影响**：代理上千条时首屏卡顿；`Accounts` 50 行 × 13 列每次筛选都整表 diff。
+- **证据**：代理表一次渲染全部行；`const columns = [...]` 在组件体内定义（未 `useMemo`），父组件每次 `setState`（输入代理地址、切筛选、动作后刷新）都生成新数组 → antd Table 全表重算。
+- **影响**：代理上千条时首屏卡顿；`Accounts` 50 行 × 11 列每次筛选都整表 diff。
 - **建议**：`pagination={{ pageSize: 50, showSizeChanger: true }}`（或 `virtual` + `scroll.y`）；`columns` 用 `useMemo` 并把它依赖的 handler 用 `useCallback` 固定。
 
 ### F-25 [P1] 收银台链接在定时器回调里 `window.open`，会被浏览器拦截
@@ -256,7 +256,7 @@
 ### F-26 [P1] 长任务日志无上限、O(n²) 追加
 
 - **位置**：`frontend/src/components/TaskLogPanel.tsx:247`（`setLines(prev => [...prev, line])`）
-- **证据**：SSE 每行一次浅拷贝；无 `MAX_LINES` 截断。后端 `TaskSnapshot.logs` 可到数千行，注册任务日志实测单任务上百行且长跑任务持续增长。
+- **证据**：SSE 每行一次浅拷贝；无 `MAX_LINES` 截断。服务端 `api/tasks.py:738-777` 把内存里的 `logs` 全量逐行推送，`core/task_runtime.py` 的日志列表没有 `maxlen` —— 长跑任务可持续输出上千行。
 - **影响**：长任务页面越来越卡（每次新行复制整个数组 + 全量重渲染），移动端尤其明显。
 - **建议**：保留环形缓冲（`prev.length > 2000 ? prev.slice(-1500) : prev` 再 concat），或把行渲染改成 `useMemo` + 虚拟列表。
 
@@ -276,7 +276,7 @@
 
 ### F-29 [P2] Solver 状态卡：5 s 轮询无可见性判断；重启无确认/无 catch；失败显示「未运行」
 
-- **位置**：`frontend/src/pages/Settings.tsx:243-277`
+- **位置**：`frontend/src/pages/Settings.tsx:252-278`
 - **证据**：`window.setInterval(checkSolver, 5000)` 无 `document.hidden` 判断；`restartSolver` 只有 `await apiFetch('/solver/restart')`（无 catch、无 loading、无确认）；`checkSolver` 的 `catch { setRunning(false) }` 把「请求失败」显示成「未运行」。
 - **建议**：`catch → setRunning(null)` + 显示「状态未知」；轮询加 `visibilitychange` 暂停；重启加确认与 loading。
 
@@ -304,11 +304,11 @@
 - **证据**：全仓仅 `lib/chatgptTokenPlan.ts:10-13` 引用它的两个常量与类型；`CHATGPT_REGISTRATION_MODE_STORAGE_KEY`、`DEFAULT_CHATGPT_REGISTRATION_MODE`、`normalizeChatGPTRegistrationMode`、`loadChatGPTRegistrationMode`、`saveChatGPTRegistrationMode` 零引用（「Token 方案」合并后遗留）。
 - **建议**：删掉 5 个死导出，只留两个常量 + 类型；或整文件并入 `chatgptTokenPlan.ts`。
 
-### F-33 [P2] 四套时间格式化并存，语义还不一致
+### F-33 [P2] 六处时间格式化并存，语义还不一致
 
 | 实现 | 位置 | 语义 |
 |---|---|---|
-| `formatLocalTime` / `parseTimeValue` | `lib/time.ts:63-84` | 无时区串按 UTC 解析，再转本地 + 标注 `UTC+8`（唯一正确的口径） |
+| `formatLocalTime` / `parseTimeValue` | `lib/time.ts:42-84` | 无时区串按 UTC 解析，再转本地 + 标注 `UTC+8`（唯一正确的口径） |
 | `formatSyncTime` | `lib/accountFormat.ts:47-51` | `new Date(value).toLocaleString()`，无时区串按**本地**解析 |
 | `formatCreatedAt` | `lib/accountFormat.ts:53-63` | 同上，拆成 date/time 两行 |
 | `formatDateTime` / `formatRelativeTime` | `lib/icloud.ts:80-104` | 同上 + 相对时间 |
@@ -322,13 +322,13 @@
 ### F-34 [P2] 过度导出：一批只在本文件使用的符号被 `export`
 
 - **位置**：`lib/finishedTasks.ts:10,16,21`（`FinishedTask`/`FINISHED_PAGE_SIZE`/`needsAttention`）、`lib/pollBackoff.ts:14,16`（两个 `POLL_INTERVAL_*`）、`lib/secretConfig.ts`（`SECRET_SET_SUFFIX`）、`lib/registerRetry.ts`（`MAX_REGISTER_RETRY_TIMES`）等
-- **证据**：脚本扫描 78 个导出符号在定义文件之外零引用（其中多数是类型，可接受；上述几个是运行期常量/函数）。
+- **证据**：脚本扫描：全仓 248 个导出符号，其中 **73 个**在定义文件之外零引用（59 个是类型/常量，可接受；**14 个**是小写函数/常量 —— 多数属过度导出，如 `needsAttention`、`parsePlatformField` 仅在本文件内使用；真死代码如 `formatCountryIdList`，全仓只有定义处一行）。
 - **影响**：轻微 —— 增加公共 API 面，重构时不敢删。
 - **建议**：非必要不 `export`；类型可保留（跨文件契约有用）。
 
 ### F-35 [P2] 打包副作用：`pages` 单组让路由级 `lazy()` 实际失效（不是重报 59→5）
 
-- **位置**：`frontend/vite.config.ts:40-47`（`{ name: 'pages', test: /src[\\/]pages[\\/]/ }`）、`frontend/src/App.tsx:24-46`（11 个 `lazy()` + 注释「首屏只付它自己那一份」）
+- **位置**：`frontend/vite.config.ts:29-48`（`{ name: 'pages', test: /src[\\/]pages[\\/]/ }`）、`frontend/src/App.tsx:24-46`（11 个 `lazy()` + 注释「首屏只付它自己那一份」）
 - **证据**：`static/assets` 实际产物只有 5 个 JS：`index 10.7 KB`、`pages 201.8 KB`、`vendor-react 229.8 KB`、`vendor-antd 1 140.4 KB`、`runtime 0.7 KB`（gzip 合计 484 KB，其中 antd 347 KB）。所有页面被合进**一个** `pages` chunk → 首屏仍要下载 `Accounts`(1723 行)/`ICloud`(928)/`PanelComparison`(889) 的全部代码，`lazy()` 只省了「执行」不省「下载」。
 - **影响**：首屏 JS 1.51 MB（gzip 473 KB），其中业务页面 200 KB 是全量；弱网首屏 TTI 受损。
 - **建议**：保留 59→5 的收敛目标，但把 `pages` 组拆成 `pages-core`（Dashboard/Login/Accounts）与 `pages-rest`（其余），或按 `PAGE_LOADERS` 的 key 用 `manualChunks` 分 3 组；同时把 `App.tsx:24-27` 的注释改成与现状一致（现在写的是「首屏只付它自己那一份」，已不成立）。
@@ -356,18 +356,19 @@
 - **影响**：键盘用户无法给代理打「注册/绑定」标签，而这是「均衡绑定」的前置条件（`Proxies.tsx:470-478` 的告警会一直存在）。
 - **建议**：改用 `Tag.CheckableTag`（本页 `:504` 已经在用）或加 `role="button" tabIndex={0} onKeyDown={e => (e.key==='Enter'||e.key===' ') && toggleTag(...)}`。
 
-### F-39 [P1] 账号详情只能双击行打开，没有键盘/可见入口
+### F-39 [P2] 开关/数值输入/可勾选标签没有可访问名，且部分不可键盘操作
 
-- **位置**：`Accounts.tsx:1258-1262`（`onRow={{ onDoubleClick }}`）
-- **证据**：表格没有「详情」按钮列，`onRow` 只有 `onDoubleClick`；行不可聚焦，键盘用户无法打开详情（也就无法复制密码/Token）。
-- **影响**：WCAG 2.1.1（Keyboard）不达标；新用户也不知道要双击。
-- **建议**：加一列「详情」`<Button type="link">`，或给行加 `tabIndex={0}` + `onKeyDown(Enter)`，并在工具栏提示「双击查看详情」。
+- **位置**：`Proxies.tsx:452-456`（`<Switch>` 无 `aria-label`）、`Proxies.tsx:461-466`（`<InputNumber>` 无 `aria-label`）、`Proxies.tsx:504-513`（`<Tag.CheckableTag>`）、`Proxies.tsx:332-342`（`<Tag onClick>`，见 F-38）
+- **证据**：antd `Switch` 渲染 `<button role="switch">`、`InputNumber` 渲染 `<input role="spinbutton">`，二者都靠旁边的 `<span>按负载均衡</span>` / `<span>单代理上限</span>` 表达语义，但没有 `aria-labelledby`/`aria-label`，读屏朗读为空名控件。
+  `Tag.CheckableTag` 的源码（`node_modules/antd/es/tag/CheckableTag.js:41-44`）是 `<span onClick={handleClick}>` —— 无 `tabIndex`、无 `role`、无键盘事件，与 F-38 同源。
+- **影响**：键盘用户无法在「添加代理」时选择标签（只能接受默认标签），读屏用户听到两个无名开关。
+- **建议**：`<Switch aria-label="按负载均衡绑定" />`、`<InputNumber aria-label="单代理绑定上限" />`；标签选择改用 `Checkbox.Group`（antd 原生支持键盘）或在 `Tag` 上补 `role/tabIndex/onKeyDown`。
 
 ### F-40 [P2] 筛选控件只有 placeholder，没有可访问名；分页缺 `showTotal`
 
 - **位置**：`Accounts.tsx:1209-1243`（4 个 `Select`/`DatePicker` 只有 `placeholder`）、`Proxies.tsx:496-501`（地区输入）、`TaskHistory.tsx:177-185`
 - **证据**：antd `Select` 的 `placeholder` 不进入 `aria-label`，读屏朗读为「combobox」；`DatePicker` 同理。搜索框是唯一加了 `aria-label` 的（`Accounts.tsx:1202`）。
-- **建议**：逐个加 `aria-label="状态筛选"` / `"Plus 试用筛选"` / `"开始时间"` / `"结束时间"`；分页加 `showTotal={(t,r)=>`${r[0]}-${r[1]} / 共 ${t} 条`}`。
+- **建议**：逐个加 `aria-label="状态筛选"` / `"Plus 试用筛选"` / `"开始时间"` / `"结束时间"`；分页加 `showTotal`（形如「1-50 / 共 1661 条」）。
 
 > 正面：`App.tsx:488` 有 skip-link，`index.css:599-601` 有 `:focus-visible` 描边，`App.tsx:279-295` 给可横向滚动的表格补了 `tabindex/role=region`，`PageHeader.tsx:51` 汉堡按钮有 `aria-label`。这几处不用改。
 
@@ -400,7 +401,7 @@ exit code = 1
 | 文件 | 条数 | 主要规则 |
 |---|---|---|
 | `src/pages/Accounts.tsx` | 15 | `no-explicit-any` ×15（`columns: any[]`、`accounts: any[]`、`currentAccount: any`） |
-| `src/pages/Settings.tsx` | 11 | `no-explicit-any` ×8、`no-empty`(326)、`set-state-in-effect`(271)、`exhaustive-deps` |
+| `src/pages/Settings.tsx` | 10 | `no-explicit-any` ×8、`no-empty`(326)、`set-state-in-effect`(271) |
 | `src/App.tsx` | 3 | `exhaustive-deps`(147)、`no-explicit-any`(230)、`set-state-in-effect`(249) |
 | `src/pages/Login.tsx` | 2 | `no-explicit-any`(32,51) |
 | `src/components/settings/MailImportPanel.tsx` | 2 | `exhaustive-deps`(284,620) |
@@ -433,7 +434,7 @@ static/assets/rolldown-runtime-*.js    716 B   (gzip     459)
 
 | 既有修复 | 复核结果 | 证据 |
 |---|---|---|
-| 打包 59 → 5 个 chunk | ✅ 生效 | `static/assets/*.js` 恰好 5 个；`vite.config.ts:21-52` 的 `codeSplitting.groups` |
+| 打包 59 → 5 个 chunk | ✅ 生效 | `static/assets/*.js` 恰好 5 个；`vite.config.ts:29-48` 的 `codeSplitting.groups` |
 | 空闲预取 | ✅ 生效 | `App.tsx:202-217`（`requestIdleCallback` + `setTimeout` 兜底，`PAGE_LOADERS` 共用 `import()` 缓存） |
 | `/api/tasks` ETag | ✅ 生效 | `curl -D -` 返回 `etag: "381ace…"` + `cache-control: no-cache`；同参数二次请求由浏览器缓存层返回 304 并复用 200 体 |
 
@@ -443,7 +444,7 @@ static/assets/rolldown-runtime-*.js    716 B   (gzip     459)
 
 ## 8. 建议修复顺序
 
-1. **今天**：F-01/F-02（UUID `Number()` 强转，4 处 + 导出 1 处）—— 数据外泄与批量功能全废，改动最小、收益最大。
+1. **今天**：F-01/F-02（UUID `Number()` 强转：`Accounts.tsx` 5 处 + 导出弹窗 1 处）—— 数据外泄与批量功能全废，改动最小、收益最大。
 2. **今天**：F-04/F-05（批量删除、关闭密码/2FA 的二次确认）—— 纯 UI，零风险。
 3. **本周**：F-03（任务历史服务端分页）、F-13/F-15/F-16（契约字段与平台切换状态）、F-22（统一 `catch`）。
 4. **本周**：F-06/F-07（竞态 + 错误态），抽 `useListQuery` 一次性覆盖 6 个页面。

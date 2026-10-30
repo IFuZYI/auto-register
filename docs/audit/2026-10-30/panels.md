@@ -5,8 +5,9 @@
 - 仓库：`/data/workspace/Register`，分支 `main`，HEAD `4680c8d`
 - 解释器：`.venv/bin/python`（3.12）
 - 生产库：`data/account_manager.db`（**只读**；`file:...?mode=ro` 打开，本报告未写入任何一行）
-- 方式：静态通读 + 只读 SQL 抽样（1057 行账号）+ 1 个纯内存探针 + 7 个测试文件回归（152 passed）
+- 方式：静态通读 + 只读 SQL 抽样（1057 行账号）+ 1 个纯内存探针 + 8 个测试文件回归（192 passed，全绿）
 - 本报告是唯一写入的文件
+- **审计期间 HEAD 前进了两格**（并发修复）：`c2c502b`（`core/db/models_account.py` 补两条索引，该文件行号 +5）、`9630980`（把 F-14 的 `int(uuid)` 改成了 `str(uuid)`）。本报告的行号与证据以基线 `4680c8d` 为准，受影响的条目已在正文标注。
 
 ## 范围与定位
 
@@ -40,7 +41,7 @@
 | 2 | 推/拉状态机 | **方向判定本身正确，但有一个活锁 + 一个删除顺序错误**：拉回被「登记」闸门锁死（生产库 CPA 0/667 登记）；`delete_old` 在幂等跳过时会删掉唯一记录 | F-06 / F-07 |
 | 3 | 上传代理开关 | **语义与文档不符**：代理只写进上传**记录字段**，不用于请求出口；仅 2/4 面板支持；chatgpt2api 的键在 schema 里归错分组 | F-10 |
 | 4 | 对比 local_id/remote_id 匹配 | **(平台,邮箱) 键可靠；重复远端记录被静默折叠**，只暴露一条 id（删不干净）；平台清单两处不一致（390 个 Grok 行进 CPA 对比且推不上去） | F-11 / F-13 |
-| 5 | 失败隔离 | **两个批量端点没有逐账号隔离**，其中一个必现 500；推送批次无总时限 | F-14 / F-15 / F-16 |
+| 5 | 失败隔离 | **两个批量端点没有逐账号隔离**，其中一个必现 500（F-14，基线 `4680c8d`；`9630980` 已修）；推送批次无总时限 | F-14 / F-15 / F-16 |
 | 6 | 敏感信息暴露面 | **密钥本身不泄露**（配置接口只回 `_set` 布尔、对比响应不含 AT/RT）；但**面板返回的错误文本会落库并经列表接口下发** | F-18 |
 
 一句话：**方向判定（谁较新动谁）这段是这次审计里质量最高的部分 —— iat 优先、单侧回落、banned 排除都做对了；出问题的是它的外围：登记闸门把「更新本地」锁死、批量端点没有逐账号隔离、以及「推成功后删旧记录」与 chatgpt2api 的幂等跳过语义互相打架。**
@@ -53,13 +54,21 @@
 
 | 维度 | CPA (CLIProxyAPI) | Sub2API | grok2api | chatgpt2api |
 |---|---|---|---|---|
-| 鉴权 | `Authorization: Bearer <cpa_api_key>`<br>`cpa_upload.py:249`、`cliproxyapi_sync.py:83` | `x-api-key: <sub2api_api_key>`<br>`sub2api_upload.py:160`、`panel_comparison.py:781` | 用户名+密码换 token（TTL 9min 进程内缓存）→ `authorization: Bearer`<br>`grok2api.py:187-220` | `Authorization: Bearer <chatgpt2api_api_key>`<br>`chatgpt2api_upload.py:257`、`panel_comparison.py:1170` |
+| 鉴权 | `Bearer <cpa_api_key>` ¹ | `x-api-key` ² | 用户名+密码换 token ³ | `Bearer <chatgpt2api_api_key>` ⁴ |
 | 未配置时 | 上传发 `Bearer `（空）→ 401；状态同步回落默认口令 `cliproxyapi`（`cliproxyapi_sync.py:78`） | 直接报「未配置」 | 直接报「未配置」 | 直接报「未配置」 |
 | 分页 | **无**（一次 GET 全量；服务端 `page/page_size` 是 opt-in，`reference/panel/CLIProxyAPI/internal/api/handlers/management/auth_files.go:176-198`） | `page/page_size=100`，`len<100` 停（`panel_comparison.py:779-849`） | `page/pageSize=100`（`panel_comparison.py:884-931`） | `page/page_size=500`，整页重复也停（`panel_comparison.py:1175-1248`） |
 | 错误判定 | 只看 HTTP（`raise_for_status` / 200-201） | HTTP 200 **且** `code==0`（`panel_comparison.py:789-794`） | HTTP 200 **且** SSE `created/updated/skipped`（`grok2api.py:265-283`） | HTTP <400 **且** 不是 `errors && !added && !skipped`（`chatgpt2api_upload.py:314-322`） |
 | 超时 | 上传 30 / 列表 30 / 探活 30 | 上传 30 / 列表 20 | 登录 15 / 列表 20 / 导入 60 / 导出 30 | 上传 60 / 列表 20 / 导出 60 |
 | 重试 | 仅探活（3 次，0.4s，只认连接/超时，`cliproxyapi_sync.py:170-190`） | **无** | **无** | 上传 4 次（连接类异常，sleep 2/4/6，`chatgpt2api_upload.py:262-278`）；导出遇 400 去缺失 id 重试 1 次（`panel_comparison.py:1100-1110`） |
 | TLS | `verify_for("cpa"/"cliproxyapi")` | `verify_for("sub2api")` | **无 `verify=` 参数**（默认 True，但忽略 CA bundle） | `verify_for("chatgpt2api")` |
+
+
+鉴权实现位置（表格里的 ¹²³⁴）：
+
+1. CPA：`platforms/chatgpt/cpa_upload.py:249`、`services/cliproxyapi_sync.py:83`（未配置时上传发空 Bearer，状态同步回落默认口令 `cliproxyapi`，`cliproxyapi_sync.py:78`）
+2. Sub2API：`platforms/chatgpt/sub2api_upload.py:160`、`services/panel_comparison.py:784`（只认 `x-api-key`，无 Bearer 兜底）
+3. grok2api：`platforms/grok/grok2api.py:187-220`（`/api/admin/v1/auth/login` 换 token，TTL 9 分钟，进程内缓存并复用实例）
+4. chatgpt2api：`platforms/chatgpt/chatgpt2api_upload.py:247`、`services/panel_comparison.py:1166`
 
 ### F-01（P2）超时/重试矩阵不对称：4 个面板 4 套策略，且只有 chatgpt2api 会重试上传
 
@@ -120,7 +129,7 @@ def fetch_grok2api_remote_accounts(*, api_url: str = "", api_key: str = "", emai
 
 ### F-05（P3）三处静默截断：CPA 无分页、grok2api 导出固定 `limit=1000`、凭证抓取上限 200
 
-- 位置：`services/cliproxyapi_sync.py:194-197`（`list_auth_files` 只读一次 `files`）、`services/panel_comparison.py:954`（`export?provider=...&limit=1000` 不分页）、`:621` + `:697` + `:1254-1261`（`_MAX_CREDENTIAL_FETCH = 200`）
+- 位置：`services/cliproxyapi_sync.py:194-197`（`list_auth_files` 只读一次 `files`）、`services/panel_comparison.py:958`（`export?provider=...&limit=1000` 不分页）、`:621` + `:697` + `:1254-1261`（`_MAX_CREDENTIAL_FETCH = 200`）
 - 证据：`_MAX_CREDENTIAL_FETCH` 只在 chatgpt2api 分支打了 warning（`:1256-1261`），CPA 分支（`:697`）**超限时一句话都不说**，只是悄悄不再抓第 201 个账号的凭证。
 - 影响：超过 200 个「两边都有」的账号时，第 201 个之后全部落 `unknown_credential`（`panel_comparison.py:120-125`），界面显示「无法比对」，而 `plan_push` 对 `unknown_credential` 是**直接不推**（`panel_push.py:146-151`）。也就是说：**大面板（生产库 667 个 chatgpt 账号）里有一部分账号永远推不上去，且界面不解释为什么**。
 - 建议：CPA 分支补同一条 warning；把 `_MAX_CREDENTIAL_FETCH` 做成配置项并在响应里回 `credential_truncated: true`，让前端显示「凭证比对已截断（前 200 个）」；长期方案是分页拉凭证或按需（点开某行时）拉。
@@ -227,7 +236,7 @@ if (pushIds.length) params.set('account_ids', pushIds.join(','))
 
 - 证据（历史）：`git show eb1bc23 -- api/integrations.py` 的提交说明写着「端点加 `account_ids`（逗号分隔），前端传 `pushIds`/`pullIds`」，但同一提交里 `/push` 的签名就只有 `(panel_key, platform, delete_old)` —— 这个修复**从来只做了前端一半**。
 - 影响：用户在对比页筛了「凭证不同 · 本地较新 12 行」再点「更新远程」，后端实际推的是**该面板全部** `local_only + local_newer` 行（可能几百个）。方向没错（不会用旧覆盖新），但：① 会产生大量用户没预期的远端写入/新记录；② 弹窗数量与实际不符；③ 拉回同理，会改动筛选范围外的账号。这正是代码审查 I1 要修的那个 bug，现在回归了。
-- 建议：`push_panel_endpoint` 增加 `account_ids: str = ""`，两个端点都在 `fetch_panel_raw` 之后按 `local_id` 过滤（与 `platform` 过滤同一个位置，`api/integrations.py:107-113` / `services/panel_push.py:565-572`）；补两条端点级用例（传 2 个 id → 只处理 2 个）。
+- 建议：`push_panel_endpoint` 增加 `account_ids: str = ""`，两个端点都在 `fetch_panel_raw` 之后按 `local_id` 过滤（与 `platform` 过滤同一个位置，`api/integrations.py:113-119` / `services/panel_push.py:571-576`）；补两条端点级用例（传 2 个 id → 只处理 2 个）。
 
 ### F-09（P3，信息）两处「永远不收敛」的行，且没有强制方向入口
 
@@ -244,8 +253,8 @@ if (pushIds.length) params.set('account_ids', pushIds.join(','))
 
 | 面板 | 开关键 | 支持 | 代理去向 |
 |---|---|---|---|
-| CPA | `cpa_upload_proxy_enabled` | ✅ | 写进 auth 记录顶层 `proxy_url`（`cpa_upload.py:238-242`），**上传请求本身 `proxies=None`**（`:265`） |
-| chatgpt2api | `chatgpt2api_upload_proxy_enabled` | ✅ | 写进导入对象 `proxy` 字段（`chatgpt2api_upload.py:191-193`），请求 `proxies=None`（`:270`） |
+| CPA | `cpa_upload_proxy_enabled` | ✅ | 写进 auth 记录顶层 `proxy_url`（`cpa_upload.py:241-243`），**上传请求本身 `proxies=None`**（`:266`） |
+| chatgpt2api | `chatgpt2api_upload_proxy_enabled` | ✅ | 写进导入对象 `proxy` 字段（`chatgpt2api_upload.py:179`），请求 `proxies=None`（`:267`） |
 | Sub2API | — | ❌ | `proxies=None` 硬编码（`sub2api_upload.py:168`），无开关 |
 | grok2api | — | ❌ | 导入格式不含代理字段，请求用 `Grok2ApiClient.proxy`（默认空，`grok2api.py:143`） |
 
@@ -269,8 +278,8 @@ if (pushIds.length) params.set('account_ids', pushIds.join(','))
 
 - 键 = `f"{platform}|{email.lower()}"`（`services/panel_comparison.py:429-438`），平台参与是因为 CPA 上同一邮箱可能同时有 `codex` 与 `xai` 两条凭据；
 - `local_id` = `accounts.id`（UUID），只用于动作回传，不参与匹配（`panel_comparison.py:518`）；
-- `remote_id` 逐面板取自对端主键：CPA `auth_index or name`（`:715`）、Sub2API `id|db_id|account_id`（`:833`）、grok2api `id`（`:918`）、chatgpt2api `id|management_id`（`:1197`）；
-- 本地重复行由唯一索引 `uq_accounts_platform_email` 挡住（`core/db/models_account.py:33-42`），远端重复由 fetcher 各自处理（见 F-11）。
+- `remote_id` 逐面板取自对端主键：CPA `auth_index or name`（`:713`）、Sub2API `id|db_id|account_id`（`:834`）、grok2api `id`（`:918`）、chatgpt2api `id|management_id`（`:1197`）；
+- 本地重复行由唯一索引 `uq_accounts_platform_email` 挡住（`core/db/models_account.py:36-43`（基线 4680c8d 为 33-42）），远端重复由 fetcher 各自处理（见 F-11）。
 
 ### F-11（P2）远端重复记录被静默折叠成一条：`remote_id` 只暴露一条，删除只能删一条，且四个面板四种去重口径
 
@@ -292,7 +301,7 @@ if (pushIds.length) params.set('account_ids', pushIds.join(','))
 
 ### F-12（P3）chatgpt2api 的 `id` 与 `management_id` 混用：两者不一致时凭证全空 → 全部「无法比对」
 
-- 位置：`services/panel_comparison.py:1197`（列表侧 `remote_id = id or management_id`）、`:1120-1123`（导出侧 `account_id = management_id or id`）、`:1266-1270`（`fetched.get(account.remote_id)`）
+- 位置：`services/panel_comparison.py:1197`（列表侧 `remote_id = id or management_id`）、`:1130-1133`（导出侧 `account_id = management_id or id`）、`:1266`（`fetched.get(account.remote_id)`）
 - 证据：列表优先 `id`，导出结果优先 `management_id`，回填时按 `account.remote_id` 查表。若对端两个字段都存在且不相等（yukkcat 变体里 `id` 是 DB 主键、`management_id` 是另一套标识），查表必然落空。
 - 影响：落空是**静默**的（`if credentials:` 才赋值，`:1268`），结果是这些账号全部 `unknown_credential`；又因为 `plan_push` 对 `unknown_credential` 不推（`panel_push.py:146-151`），表现为「对比显示无法比对 + 推送说没有需要推的」，两个症状都指向不了真正原因。
 - 建议：回填时同时尝试 `account.remote_id` 与 `account.extra.get("management_id")`；列表侧把两个 id 都存进 `extra`，并在两者不等时打一条 warning。
@@ -318,7 +327,7 @@ if plat == "grok":
 - 影响（结合生产库）：
   - `shouldShowPlatformFilter(["chatgpt"])` → `unique.size > 1` 为假（`frontend/src/lib/panelComparison.ts:101-107`）→ **CPA 对比页没有平台选择器**；
   - 但 `_PANEL_PLATFORMS["cpa"]` 会把 390 个 Grok 账号全部拉进对比表（`panel_comparison_cache.py:107-135`）；
-  - 其中 21（`sync_statuses.cpa.uploaded`）+ 32（`cliproxyapi`）个历史上传过、能匹配上远端 xai 记录，剩下约 350 个显示「未上传」；
+  - 其中 21（`sync_statuses.cpa.uploaded`）+ 32（`cliproxyapi`）个历史上传过、能匹配上远端 xai 记录，剩下 337 个显示「未上传」；
   - 用户点「上传未上传」→ `selectPushIds` 把这些 Grok 行全部选中（`panelComparison.ts:133-143`，不区分平台）→ 逐个返回 `ok=False`「Grok 已不再支持 CPA 上传」→ 全部计入 `failed`（`panel_push.py:239-244`）→ 界面报「N 个账号推送失败」。
 - 也就是说：**每次点「更新远程」都会稳定产生一批必然失败的条目，而用户没有任何办法把它们筛掉。**
 - 建议：二选一并保持一处为真 —— ① `_PANEL_PLATFORMS["cpa"] = ("chatgpt",)`（与 2026-10-27 的下线决定一致，最简单）；② 若确实要保留 Grok 的**只读**对比（看远端还有哪些 xai 残留），则 registry 的 `platforms` 补上 `"grok"` 让选择器出现，并给 `PushOutcome` 加 `unsupported` 原因（不计入 `failed`，单独一档「该面板不支持此平台」）。`tests/test_panel_management_actions.py:84-99` 只断言了 `panel["platform"] in _PANEL_PLATFORMS[key]`（子集方向），所以这条不一致测不出来 —— 建议改成双向相等。
@@ -338,7 +347,7 @@ for acc_model in accounts:
     sync_result = sync_results.get(int(acc_model.id or 0), {})
 ```
 
-`AccountModel.id` 是 UUID 字符串（`core/db/models_account.py:45-51`，`default_factory=lambda: str(uuid.uuid4())`），而 `sync_chatgpt_cliproxyapi_status_batch` 用 `getattr(account, "id")` 原样做键（`services/cliproxyapi_sync.py:667`、`:577`，注解还写着 `dict[int, ...]` —— 同一个历史遗留假设）。
+`AccountModel.id` 是 UUID 字符串（`core/db/models_account.py:50-56`（基线 4680c8d 为 45-51，该文件因 `c2c502b` 下移 5 行），`default_factory=lambda: str(uuid.uuid4())`），而 `sync_chatgpt_cliproxyapi_status_batch` 用 `getattr(account, "id")` 原样做键（`services/cliproxyapi_sync.py:667`、`:577`，注解还写着 `dict[int, ...]` —— 同一个历史遗留假设）。
 
 - 复现（纯内存，桩掉网络与落库，未开任何 DB 会话）：
 
@@ -347,14 +356,15 @@ $ .venv/bin/python /root/.hermes/cache/scratch/probe_int_id.py
 RAISED: ValueError invalid literal for int() with base 10: '14de3423-34b4-4e60-9f07-718098cd1a30'
 ```
 
+- 状态（并发修复，2026-10-30）：提交 `9630980` 已把这一行改成 `str(acc_model.id or "")` —— 本条对**基线 `4680c8d`** 成立。同一提交**没有**改另外两处：`services/cliproxyapi_sync.py:570/577/665/667` 的 `dict[int, ...]` 注解、以及 `_execute_batch_cliproxy_sync` 循环体仍然没有 try（F-15）—— 这两项现在依然成立。
 - 影响：`POST /api/actions/chatgpt/sync_cliproxyapi_status/batch`（对比页「同步远端状态」的 CPA 分支，`PanelComparisonPanel.tsx:549`）对任何账号都 500，且异常在 `_execute_batch_cliproxy_sync` 内**没有 try**（对比 `api/actions.py:398-415` 的通用循环是有 try 的），冒泡到 FastAPI。
 - 与 `docs/audit/2026-10-30/actions-tasks.md` 的 F-00 是同一处（该报告从动作分发角度记录）。本节补充两点它没写的：① `services/cliproxyapi_sync.py:570/577/665/667` 的 `dict[int, ...]` 注解是同一个错误的另一半，只改 `actions.py` 会把错误留在类型契约里；② 这条路径**没有任何测试**覆盖（`grep -rn "sync_cliproxyapi_status/batch" tests/` 无命中）。
 - 建议：`sync_results.get(str(acc_model.id or ""), {})`；两处注解改 `dict[str, dict[str, Any]]`；`_execute_batch_cliproxy_sync` 循环体包 try（与通用循环同形）；补一条用 UUID 账号跑批量同步的用例。
 
-### F-15（P2）批量状态同步没有逐账号隔离：一个坏行回滚整批（另外两个批量端点也一样）
+### F-15（P2）两个面板专用批量分支没有逐账号隔离：一个坏行回滚整批
 
-- 位置：`api/actions.py:196-232`（`_execute_batch_panel_status` 的循环，无 try）、`:234-284`（`_execute_batch_cliproxy_sync`，无 try）、提交点在 `:371` / `:363`（整批一次 `session.commit()`）
-- 证据：通用批量循环每个账号都包了 try（`:398-415`），并逐条把异常转成 `ok=False` 的 item；而这两个面板专用分支没有 —— 循环里唯一的失败点 `account_repository.save(acc_model, session=session)`（`:213`）抛异常时：整个请求 500，且**已经处理完的账号的 patch 全部随会话回滚**（commit 在循环外）。
+- 位置：`api/actions.py:196-232`（`_execute_batch_panel_status` 的循环，无 try）、`:234-284`（`_execute_batch_cliproxy_sync`，无 try）、提交点在 `:383` / `:365`（整批一次 `session.commit()`）
+- 证据：通用批量循环每个账号都包了 try（`:398-415`），并逐条把异常转成 `ok=False` 的 item；而这两个面板专用分支没有 —— 循环里唯一的失败点 `account_repository.save(acc_model, session=session)`（`:214`）抛异常时：整个请求 500，且**已经处理完的账号的 patch 全部随会话回滚**（commit 在循环外）。
 - 影响：一条脏数据（超长字段、并发写冲突、磁盘满）能让整批 1000 个账号的状态同步白做，并且用户拿到的是 500 而不是「哪几个失败」。面板状态同步是**可重入且幂等**的，但用户不知道重试是否安全。
 - 建议：两个分支的循环体各包一层 try（与 `:398-415` 同形），失败条目 `ok=False, message=type(exc).__name__`；commit 改成逐账号或「先收集 patch，再统一写」，避免半批回滚。
 
@@ -390,7 +400,7 @@ RAISED: ValueError invalid literal for int() with base 10: '14de3423-34b4-4e60-9
 ### F-18（P2）面板返回的错误文本被原样落库并经 `GET /api/accounts` 下发 —— 远端若回显凭据，就是明文入库
 
 - 位置（产生端）：`platforms/chatgpt/sub2api_upload.py:177-189`、`platforms/chatgpt/cpa_upload.py:275-281`、`platforms/chatgpt/chatgpt2api_upload.py:293-303`
-- 位置（落库端）：`services/panel_push.py:518-527`（`message` 原样进 `enroll` 与 `sync_statuses`）、`services/chatgpt_sync.py:104-110`（`last_message`）
+- 位置（落库端）：`services/panel_push.py:489`（`message` 原样取出）→ `:506-511`（写进 `enroll` 与 `sync_statuses`）、`services/chatgpt_sync.py:104-110`（`last_message`）
 - 位置（下发端）：`api/accounts.py:201-232`（`sync_statuses` 明确**不**在瘦身白名单里，注释写着「列表页都要读」）
 - 证据：
 
@@ -429,7 +439,7 @@ return False, f"上传失败: {detail}"
 
 | 顺序 | 编号 | 理由 |
 |---|---|---|
-| 1 | F-14 | 必现 500，改动一行，先修 |
+| 1 | F-14 | 必现 500，改动一行；`9630980` 已修，确认回归用例后关闭 |
 | 2 | F-06 | 生产库 CPA/grok2api 的「更新本地」整体不可用，用户感知最强 |
 | 3 | F-07 | 会删掉远端唯一记录（数据面），且自动维护每轮都跑 |
 | 4 | F-08 | 前端已按契约传参、后端不认，改动小、影响所有批量操作的范围 |

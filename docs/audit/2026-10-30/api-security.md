@@ -18,6 +18,8 @@
 
 文中的响应体均来自该沙箱实例，数据与真实库同源（1057 个账号 / 5 个代理 / 837 个任务 / 1661 条日志）。长凭据在报告中只给**长度 + 结构**，不落明文。
 
+> **行号基准**：审计期间仓库又前进了两个提交（`9630980` 修 `api/actions.py` 的 `int(uuid)`、`c2c502b` 补 `core/db` 索引声明），均不触及鉴权/敏感数据路径。本报告所有 `path:line` 以 **`4680c8d`** 为准；在 `9630980` 上 `core/db/models_account.py` 因新增 5 行索引声明而整体 +5（`token` 列在 `:86`），其余文件行号不变。
+
 ---
 
 ## 1. 结论摘要
@@ -170,7 +172,7 @@ if forwarded:
   - `WEBUI_ALLOW_LOGIN ∈ {1,true,yes}` → 走 OTP 登录拿凭证（access_token / session），继续当前流程；
   - 未设或其它值 → `mail_provider.mark_dead("OpenAI 识别为已有账号…")` 并把该邮箱标记死亡，抛错让外层 `register()` 自动 claim 下一个号。
 - **写入点**（全部是代码里**硬编码**的流程级覆盖，不是用户配置）：`platforms/chatgpt/rt_backfill.py:70,79`（补 RT 的 `_LOGIN_OVERRIDES` / 密码登录路线）、`platforms/chatgpt/registration_engine.py:482`、`platforms/chatgpt/login_refresh.py:176`、`services/chatgpt_two_factor.py:160`。
-- **作用域**：`auth_flow.py:111` 注释写明这是「本次流程专属的配置覆盖」；它不写回 `configs` 表，也不在 `GET /api/config` 的 143 个键里（实测该键不存在于配置响应）。
+- **作用域**：`auth_flow.py:111` 注释写明这是「本次流程专属的配置覆盖」；它不写回 `configs` 表（该表 143 行里没有这个键），也不在 `GET /api/config` 的响应里（实测响应中无此键）。
 - **安全含义**：
   1. **不构成鉴权旁路** —— 面板是否需要密码、token 是否有效，完全由 `main.py:225-266` 决定，与该变量无关；
   2. 它是**数据破坏性**开关：`=1` 时「已被注册」的邮箱会被继续复用/消耗，未设时会被 `mark_dead` 淘汰。对同一号池反复以 `=1` 跑补 RT，会让已被 OpenAI 标记的邮箱继续留在池里；
@@ -424,7 +426,8 @@ $ curl -s -o /dev/null -w '%{http_code}\n' 'http://127.0.0.1:18000/api/accounts?
 ### 5.2 未捕获异常
 
 - `main.py` 未注册全局异常处理器，FastAPI 默认对未捕获异常返回 `500 {"detail":"Internal Server Error"}`（无 traceback）—— 这一点是好的。
-- 但若响应已经开始流式输出（`api/accounts.py:439` 的 `StreamingResponse`、`api/tasks.py:738` 的 SSE），中途异常只会截断连接，客户端看到的是**不完整 CSV/事件流**而不是错误码。建议导出前先物化到临时文件再流式发送。
+- **但 500 确实会从正常业务路径冒出来**。审计期间就抓到一个现成例子：`api/actions.py:263`（4680c8d）在批量同步 CLI 代理状态时写的是 `sync_results.get(int(acc_model.id or 0), {})`，而 `accounts.id` 早已 UUID 化（`core/db/models_account.py:44`），于是**任何账号**点「批量同步」都 `ValueError` → 500。该问题已由提交 `9630980` 修为 `str(...)`。它说明：批量端点里的 `int(id)` 假设、以及「一个坏行拖垮整批」的写法，是这个仓库 500 的主要来源；建议给批量动作逐账号 `try/except` 并回 `{id, ok:false, reason}`（`api/actions.py:416-425` 的外层循环已经这么做了，`_execute_batch_cliproxy_sync` 这条内层路径没做）。
+- 若响应已经开始流式输出（`api/accounts.py:439` 的 `StreamingResponse`、`api/tasks.py:738` 的 SSE），中途异常只会截断连接，客户端看到的是**不完整 CSV/事件流**而不是错误码。建议导出前先物化到临时文件再流式发送。
 
 ---
 

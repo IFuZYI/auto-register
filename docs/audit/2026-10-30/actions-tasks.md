@@ -2,11 +2,12 @@
 
 [MODE: SANDBOX]
 
-- 仓库：`/data/workspace/Register`，分支 `main`，HEAD `4680c8d`
+- 仓库：`/data/workspace/Register`，分支 `main`
+- 基线：审计执行于 `4680c8d`；**复核于 `9630980`**（该提交把 F-00 的修复、回归测试与四份审计报告一并入库）
 - 解释器：`.venv/bin/python`（3.12）
 - 生产库：`data/account_manager.db`（只读；`mode=ro` 打开，本报告未写入任何一行）
-- 审计方式：静态通读 + 只读 SQL 抽样 + 3 个可复现探针（临时库 / 纯内存），未修改任何源码
-- **基线说明**：所有行号以 HEAD `4680c8d` 为准。审计期间工作区出现一处**非本次审计产生**的未提交改动（`api/actions.py`，`git diff` 可见，见 F-00）—— 报告按 HEAD 记录该缺陷，并注明工作区状态。
+- 审计方式：静态通读 + 只读 SQL 抽样 + 4 个可复现探针（能力对差 / 跳过语义 / 取消开销 / 临时库复活），本审计未修改任何源码
+- **基线说明**：正文行号以 `4680c8d` 为准。`9630980` 上唯一的行号漂移是 `api/actions.py` 自 `:262` 起 +4 行（F-00 的注释 + `str()`），逐条核对见第 10 节。**F-00 在 `9630980` 上已修复**，本条保留为缺陷记录与回归依据。
 
 范围（10 个文件，共 4829 行）：
 
@@ -29,7 +30,7 @@
 
 | # | 维度 | 判定 | 最严重问题 |
 |---|---|---|---|
-| 0 | 动作分发（批量） | **HEAD 上必现 500**（工作区已有未提交修复） | `api/actions.py:263` 对 UUID 主键做 `int()` |
+| 0 | 动作分发（批量） | **已修复**（`9630980`；修复前为必现 500） | `api/actions.py:263`（旧）对 UUID 主键做 `int()` → 现 `:267` 已改 `str()` |
 | 1 | 17 动作 → 6 能力 | **映射完整**（0 落空、0 孤儿），但「17」是 17 个 (平台,动作) 声明、唯一 id 只有 16 个；Grok 的 `SYNC_STATUS` 能力有映射却**不落状态** | F-05 / F-06 |
 | 2 | 停止 / 跳过 / 线程池取消 | **部分生效**：停止是协作式的，`chatgpt2api_sync` 任务完全不可停；一次「跳过当前」会跳过**全部在飞账号**；取消循环 O(n²) | F-07 / F-08 / F-09 |
 | 3 | 重试与计数 | **不会重复计数，但会漏计且两套账**：`registered=success+skipped+errors` 掩盖未处理；运行中 `skipped` 恒 0；生产库里 `skipped > total` | F-11 / F-12 / F-13 |
@@ -76,9 +77,9 @@ orphan in registry: set()         declared missing: set()
 
 ### 1.2 发现
 
-**F-00（P0，HEAD 上必现；工作区已有未提交修复）批量动作分发对 UUID 主键做 `int()` → `POST /actions/chatgpt/sync_cliproxyapi_status/batch` 必然 500**
+**F-00（P0，已在 `9630980` 修复；保留为缺陷记录）批量动作分发对 UUID 主键做 `int()` → `POST /actions/chatgpt/sync_cliproxyapi_status/batch` 必然 500**
 
-- 位置：`api/actions.py:263`（HEAD `4680c8d`）
+- 位置：`api/actions.py:263`（`4680c8d`）→ 修复后位于 `:267`（`9630980`）
 
 ```python
 sync_result = sync_results.get(int(acc_model.id or 0), {})
@@ -96,8 +97,8 @@ RAISED: ValueError invalid literal for int() with base 10:
   - 即便 id 是纯数字，键类型也对不上：`sync_chatgpt_cliproxyapi_status_batch` 用 `getattr(account, "id")` 原样做键（`services/cliproxyapi_sync.py:682-693`），`int("123") != "123"` → 永远取到 `{}` → `is_sync_ok({})` 恒 False（`services/cliproxyapi_sync.py:324-335`），整批被记成失败。
   - 该端点有真实调用方：对比页「同步远端状态」（`frontend/src/components/settings/PanelComparisonPanel.tsx:549`，按平台分发 `POST /actions/{plat}/{actionId}/batch`）。
 - 影响：CPA 面板的「同步远端状态」对任何账号都直接 500（`ValueError` 未被 `_execute_batch_cliproxy_sync` 捕获，冒泡到 FastAPI）。这是本次审计唯一的**必现 P0**。
-- **工作区状态**：`git status` 显示 `api/actions.py` 有一处未提交改动（非本次审计所为，文件 mtime 晚于本报告的写入），已把该行改成 `str(acc_model.id or "")`（现位于 `:267`）。修复方向正确，但**尚未提交、也没有回归测试**；本报告保留该条以记录缺陷来源与验证方法。
-- 建议：提交该改动并补一条用 UUID 账号跑批量同步的回归测试（见第 8 节）；`_execute_batch_cliproxy_sync` 内对 `sync_results` 的键做一次 `{str(k): v}` 归一，防止上游再返回非字符串键。
+- **复核状态（`9630980`）**：已修复。该提交把 `int(acc_model.id or 0)` 改为 `str(acc_model.id or "")`（现 `api/actions.py:267`），并新增 `tests/test_batch_cliproxy_sync_uuid.py`（3 条：UUID 不抛、缺结果算失败、两账号结果不串）。本审计实跑该文件 **3 passed**，连同能力/任务层回归共 **87 passed**（第 10 节）。`_execute_batch_panel_status` 的 `str(...)` 与它现在同形，兄弟不一致这条信号消失。
+- 建议（剩余项）：`_execute_batch_cliproxy_sync` 内对 `sync_results` 的键做一次 `{str(k): v}` 归一，防止上游再返回非字符串键；`services/cliproxyapi_sync.py` 的 `dict[int, ...]` 注解仍是同一历史假设的另一半，只改 `actions.py` 会把错误留在类型契约里。
 
 **F-05（P2）「17 个 id」实际是 16 个 id —— 映射键是 `action_id` 而非 `(platform, action_id)`，平台级差异无法表达**
 
@@ -119,9 +120,9 @@ RAISED: ValueError invalid literal for int() with base 10:
 
 **F-06b（P3，一致性）`UPLOAD_ACTIONS` 与 `UPLOAD_SYNC_WRITERS` 差一个 `upload_grok2api`**
 
-- 位置：`services/action_execution.py:49-54` vs `services/action_execution.py:73`（`UPLOAD_SYNC_WRITERS` 只有 3 个 ChatGPT 面板）
-- 证据：`upload_grok2api` 的上传账由插件自己写进 `account_extra_patch.sync_statuses.grok2api`（`platforms/grok/plugin.py:1001-1014`），再经 `_apply_extra_patch` 合并，所以**功能不缺**；但 `record_upload_sync` 的 docstring 说「grok 的 upload_sub2api 也收进来」（`:69-71`）—— 这个动作根本不存在，是过期注释。
-- 建议：改注释；若要让两张表自洽，可在 `UPLOAD_SYNC_WRITERS` 里给 `upload_grok2api` 注册 `record_grok2api_sync_result`，与插件路径二选一。
+- 位置：`services/action_execution.py:49-54`（`UPLOAD_ACTIONS` 4 个）vs `services/action_execution.py:287-292`（`UPLOAD_SYNC_WRITERS` 只有 3 个 ChatGPT 面板，查表点 `:73`）
+- 证据：`upload_grok2api` 的上传账由插件自己写进 `account_extra_patch.sync_statuses.grok2api`（`platforms/grok/plugin.py:1001-1014`），再经 `_apply_extra_patch` 合并，所以**功能不缺**；两表不对称本身是可接受的（一张是「是不是上传动作」，一张是「谁有本地写入器」）。**复核更正（`9630980`）**：原报告称 `record_upload_sync` 的 docstring 写着「grok 的 upload_sub2api 也收进来」——现 `:69-71` 已改成「`upload_cpa` 对 ChatGPT 与 Grok 都有效；sub2api / chatgpt2api 当前只在对应平台声明」，与代码一致，**这条过期注释不再成立**。
+- 建议：仅剩一致性建议 —— 若要让两张表自洽，可在 `UPLOAD_SYNC_WRITERS` 里给 `upload_grok2api` 注册 `record_grok2api_sync_result`，与插件路径二选一；否则在 `UPLOAD_SYNC_WRITERS` 上补一行注释说明「grok 走插件自写」，免得下一个人以为是漏登记。
 
 ---
 
@@ -214,7 +215,7 @@ for f in as_completed(futures):
 **F-11（P2）生产库里 `skipped > total`，计数自相矛盾**
 
 - 位置：`services/chatgpt_maintenance.py:750-761`
-- 证据（只读 SQL，最新 12 行全部命中）：
+- 证据（只读 SQL：`select count(*) from task_runs where skipped > total` → **614 / 837 行命中（73%）**，不是个别脏数据）：
 
 ```
 ('chatgpt2api_sync_1793015081417', total=278, success=278, registered=278, skipped=338, 'done')
@@ -428,7 +429,7 @@ include_logs=true: 0.897 s, 15,676.8 KB
 
 | ID | 级别 | 位置 | 一句话 | 建议动作 |
 |---|---|---|---|---|
-| F-00 | **P0** | `api/actions.py:263`（HEAD） | UUID 主键被 `int()`，批量同步状态必 500；工作区已有一处未提交修复（`:267` 改成 `str`） | 提交 + 回归测试 |
+| F-00 | **P0 → 已修复** | `api/actions.py:263`（旧） | UUID 主键被 `int()`，批量同步状态必 500；`9630980` 已改 `str()` 并附 3 条回归 | 已闭环，仅剩类型注解归一 |
 | F-01 | P1 | `api/tasks.py:289,354,441,496,551,601` | 长任务占用 anyio 40 线程池 | 任务改用独立线程/队列 |
 | F-02 | P1 | `api/tasks.py:748-752` | SSE 在事件循环里同步全量写库 | 只读 SSE + 节流写 |
 | F-03 | P1 | `services/task_runners.py:55,400-411,465,668-680` | 收尾段无 try → 永久 running | `try/finally` 兜底 finish |
@@ -460,14 +461,14 @@ include_logs=true: 0.897 s, 15,676.8 KB
 
 ## 8. 建议修复顺序
 
-1. **先确认 F-00**：HEAD 上必现 500；工作区已有一处未提交修复（`int()` → `str()`），确认后提交并补回归测试。改动最小、验证最快。
+1. ~~**先确认 F-00**~~ —— **已闭环（`9630980`）**：`int()` → `str()` 已提交，附 `tests/test_batch_cliproxy_sync_uuid.py`（3 条，实跑 3 passed）。残留项只有把 `services/cliproxyapi_sync.py` 的 `dict[int, ...]` 注解归一。**修复顺序从第 2 项（F-03）开始。**
 2. **再堵「永久 running」**（F-03 + F-04 + F-15）：这三条决定了「任务停不下来 / 删不掉 / 重启后状态错」的全部用户可见症状，改动集中在 `task_runners` 的两个收尾段与 `task_store_io` 的 upsert，风险低、收益最大。
 3. **再修控制语义**（F-07 + F-08 + F-09）：一次跳过一批是「误伤账号」，O(n²) 是「点了没反应」，两个都会直接毁掉批量任务的可信度。
 4. **然后摘掉线程池炸弹**（F-01 + F-16 + F-20）：把长任务移出 anyio 池、给 `concurrency` 加上界，这两件事做完，F-18 的连接池耗尽也会自然缓解。
 5. **最后做计数与展示的一致性**（F-11 + F-12 + F-13 + F-19 + F-02）：`total/skipped` 口径、运行中 skipped、两套账、列表体积、SSE 写库 —— 都是「不改也能用，但用户会怀疑数据」的问题。
 
 回归测试建议（新增，不改现有）：
-- `test_batch_cliproxy_sync_uuid.py`：用 UUID 主键的账号跑 `_execute_batch_cliproxy_sync`，断言不抛 `ValueError` 且 `ok` 与 `sync_results` 对齐（钉住 F-00）。
+- `test_batch_cliproxy_sync_uuid.py`：用 UUID 主键的账号跑 `_execute_batch_cliproxy_sync`，断言不抛 `ValueError` 且 `ok` 与 `sync_results` 对齐（钉住 F-00）—— **工作区已有同名文件（非本次审计产出），实跑 3 passed，待提交**。
 - `test_skip_single_attempt.py`：并发 3 个 attempt，`request_skip_current()` 后断言只有 1 个被跳过。
 - `test_task_finish_on_persist_error.py`：monkeypatch `persist_task_snapshot` 抛错，断言任务最终状态不是 `running`。
 - `test_delete_then_get.py`：删除后 GET 断言 404（钉住 F-04）。
@@ -516,7 +517,8 @@ for n in (1000, 3000):
         for p in fs:
             if p is not f: p.cancel()
     print(n, round(time.time()-t,3))
-# → 1000 1.751s / 3000 38.035s
+# 首次（4680c8d 机器状态）：1000 1.751s / 3000 38.035s
+# 复核（9630980 机器状态）：1000 4.898s / 3000 18.392s  ← 绝对值随机器负载浮动，量级与超线性不变
 ```
 
 ### 9.4 DELETE 复活（F-04，临时库，不触碰生产库）
@@ -549,6 +551,89 @@ anyio default thread limiter tokens: 40      # Starlette BackgroundTasks 的并�
 engine pool: QueuePool size=5 overflow=10 timeout=30.0
 starlette 1.7.0
 ```
+
+---
+
+## 10. 复核记录（HEAD `9630980`）
+
+`9630980` 把 F-00 的修复、`tests/test_batch_cliproxy_sync_uuid.py` 与四份报告一并入库。本节记录在该提交上**逐条复核**的结果：哪些仍成立、哪些已闭环、哪些引用需要更正。
+
+### 10.1 复核结论
+
+| 项 | 结果 |
+|---|---|
+| F-00 | **已修复**：`api/actions.py:267` 为 `sync_results.get(str(acc_model.id or ""), {})`；`grep -n "int(acc_model.id" api/actions.py` 无命中；回归 3 条实跑通过 |
+| F-01 / F-02 / F-03 / F-04 | **全部复现**：`BackgroundTasks` → anyio 40 线程池；SSE 生成器内 `_persist_task_snapshot`（`api/tasks.py:751`）；`finish()` 前无 `try/finally`（`services/task_runners.py:401-411`）；DELETE 后 GET 复活（10.3 实测） |
+| F-05 / F-06 | **复现**：17 个平台声明 / 16 个唯一 id / 登记表 16；`_apply_grok_status`（`services/action_execution.py:173`）无 `sync_grok2api_status` 分支，`:200` 的 `sync_cliproxyapi_status` 分支对 Grok 不可达（`capability_of("sync_grok2api_status") == sync_status` 已验证） |
+| F-06b | **部分更正**：docstring 过期那半已不成立（见 10.4） |
+| F-07 / F-08 | **复现**：5 并发 → 一次 `request_skip_current()` 命中 5 个 attempt；取消循环超线性（10.3） |
+| F-09 ~ F-24 | **静态复核通过**，行号见 10.2；`skipped > total` 的规模从「最新 12 行」扩大到 **614/837 行（73%）**，比原判断更严重 |
+| 生产库现状 | 837 行任务、`done` 825 / `stopped` 12、**无 `running`/`pending` 残留**（说明当前没有卡死任务，F-03 是「一旦触发就永久」的潜在缺陷而非现存故障） |
+
+### 10.2 行号核对（`9630980`）
+
+`api/actions.py` 因 F-00 的注释 + `str()` 自 `:262` 起整体 **+4 行**，其余文件行号不变。已核对的关键锚点：
+
+```
+api/actions.py:181  def _execute_batch_panel_status      （循环 199，无 try）
+api/actions.py:234  def _execute_batch_cliproxy_sync     （循环 262，str() 267）
+api/actions.py:402  通用批量循环（try 在 403）           （原报 :398-415 → 现 :402-419）
+api/actions.py:296  def list_actions                     （「17 个动作」docstring 300，原 :290）
+core/task_runtime.py:89   request_skip_current
+core/task_runtime.py:231  has_active
+core/task_runtime.py:307  update_counters（无 skipped 形参；原报 :311）
+core/task_runtime.py:322  finish
+services/task_runners.py:55-57   control_for / mark_running / persist（try 之前）
+services/task_runners.py:368-373 取消循环（O(n²)）
+services/task_runners.py:401-411 收尾段（_api.log → finish → persist → cleanup）
+services/task_store_io.py:124 / 181 / 240 / 350 / 429   upsert / persist / list / 孤儿收尾 / 读路径
+services/task_store_io.py:366-367  `if _store().exists(row.id): continue`
+api/tasks.py:822-831  delete_task（无 store.remove，409 在 :826）
+services/chatgpt_maintenance.py:750 / 753 / 761   `_control` 丢弃 / total=pushed+failed / skipped
+core/scheduler.py:144-166  调度线程内 runner() + 失败不推进 last_run_at（:162 注释自证）
+services/action_execution.py:287-292  UPLOAD_SYNC_WRITERS（3 个，查表点 :73）
+```
+
+### 10.3 复核实跑（本次）
+
+```bash
+cd /data/workspace/Register
+.venv/bin/python /root/.hermes/cache/scratch/probe_actions_tasks.py
+# === 1. capability diff ===
+# 11 6 pairs 17 unique 16 registry 16
+# orphan set() missing set()
+# grok sync capability: [('sync_grok2api_status', 'sync_status')]
+# === 2. skip semantics ===
+# active: 5  skip_targets: 5  [(1..5, 'SkipCurrentAttemptRequested')]
+# === 3. cancel loop cost ===
+# 1000 4.898 / 3000 18.392
+
+.venv/bin/python /root/.hermes/cache/scratch/probe_delete_revive.py     # 临时 sqlite，非生产库
+# before delete: row exists = True
+# after  delete: row exists = False
+# GET snapshot -> done
+# after  GET:    row exists = True   <-- 复活
+# in-memory store still has record: True
+
+.venv/bin/python -m pytest tests/test_batch_cliproxy_sync_uuid.py \
+  tests/test_capability_registry.py tests/test_task_runtime.py \
+  tests/test_task_store_io.py tests/test_register_task_controls.py \
+  tests/test_batch_action_task.py -q
+# 87 passed, 1 warning, 14 subtests passed in 15.67s
+```
+
+### 10.4 引用更正（原报告 → 复核）
+
+1. **F-06b 的「过期注释」不成立**：`services/action_execution.py:69-71` 现在写的是「`upload_cpa` 对 ChatGPT 与 Grok 都有效；sub2api / chatgpt2api 当前只在对应平台声明」，与代码一致。剩下的只是 `UPLOAD_ACTIONS`（4）与 `UPLOAD_SYNC_WRITERS`（3）的数目不对称，功能由 grok 插件自写补齐。
+2. **F-11 的量级被低估**：不是「最新 12 行命中」，是 **614/837 行**。`skipped` 记的是整轮面板对比的跳过数，而 `total` 只算 `pushed+failed` —— 口径错误是系统性的，不是个别历史脏数据。
+3. **F-08 的绝对值不可复现**：同一段代码两次测量差 2–4 倍（1.751→4.898 / 38.035→18.392），说明该探针受机器负载影响大。**结论应建立在代码结构（每个 future 完成都重扫全部 future = O(n²)）而不是单次秒数上**；引用时用「1000 个 future 秒级、10000 个数量级到分钟」这种表述更稳。
+4. **F-00 的「建议」已执行一半**：提交与回归测试都做了；剩 `services/cliproxyapi_sync.py` 的 `dict[int, ...]` 注解（`:570/577/665/667` 一带）与 `{str(k): v}` 归一。
+
+### 10.5 复核未覆盖
+
+- 未重跑 `chatgpt2api_sync` / `auto_refresh` 的真实调度（会触网打面板）；F-09、F-22 仍是静态结论。
+- 未做并发压测（F-16 的 1000 线程 → 连接池 15 → `TimeoutError` 是算术推导 + 池参数实测，不是压测结果）。
+- 生产库仍只读；本次仅新增两条 `count(*)` 级别的统计（837 行、614 行 `skipped>total`、状态分布），未读取任何凭据字段。
 
 ---
 

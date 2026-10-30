@@ -202,24 +202,9 @@ app = FastAPI(
 )
 
 
-def _is_loopback_client(request: Request) -> bool:
-    """请求是否来自本机回环。
-
-    **不看 `X-Forwarded-For`**：那是请求方可伪造的头，用来决定「是否放行」
-    等于把开关交给攻击者。反向代理场景下本机代理连进来就是回环地址，
-    判定仍然正确。
-    """
-    client = request.client
-    if client is None:
-        return False
-    host = str(client.host or "")
-    if host in {"127.0.0.1", "::1", "localhost"} or host.startswith("127."):
-        return True
-    # 测试客户端的主机名是 `testclient`（不是回环地址）。只在显式设置了
-    # `APP_TRUST_TEST_CLIENT` 的测试环境里放行 —— 生产环境没有这个变量。
-    if host == "testclient" and os.getenv("APP_TRUST_TEST_CLIENT", "") == "1":
-        return True
-    return False
+#: 回环判定的实现搬到了 `core/net_utils.py`（`api/auth.py` 也要用，而它不能
+#: import main）。这里保留同名别名，避免历史调用点与测试失效。
+from core.net_utils import is_loopback_client as _is_loopback_client  # noqa: E402
 
 
 @app.middleware("http")
@@ -266,11 +251,16 @@ async def auth_middleware(request: Request, call_next):
     return await call_next(request)
 
 
+#: 面板由 FastAPI 自己托管（同源），根本不需要 CORS。原来 `allow_origins=["*"]`
+#: + 全方法 + 全头，等于允许**任意站点**在用户浏览器里读本机 8000 的响应 ——
+#: 内网/回环部署下这是「随便一个网页就能把全量账号读走」的通道（安全审查 F12）。
+#: 只保留本机开发用的几个来源（vite 5173 / 本机 8000）。
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$",
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "X-Requested-With"],
 )
 
 app.include_router(accounts_router, prefix="/api")

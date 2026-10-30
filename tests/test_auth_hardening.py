@@ -258,3 +258,225 @@ class TotpAttemptLimitTests(unittest.TestCase):
         self.assertEqual(after.status_code, 401, "令牌作废后仍可继续试码")
 
 
+# ── 2026-10-30 全量检测新增：setup / logout / 改密的接管面 ────────────────────
+
+
+class _DictCfg:
+    """最小配置存储替身：只要 get/set 两件事。"""
+
+    def __init__(self) -> None:
+        self.data: dict[str, str] = {}
+
+    def get(self, key, default=None):
+        return self.data.get(key, "" if default is None else default)
+
+    def set(self, key, value):
+        self.data[key] = value
+
+
+def _auth_app():
+    """只挂 auth 路由的小应用（不动 main.py 的全局中间件）。"""
+    from fastapi import FastAPI
+
+    from api import auth
+
+    app = FastAPI()
+    app.include_router(auth.router, prefix="/api")
+    return app
+
+
+class SetupRouteTakeoverTests(unittest.TestCase):
+    """`/api/auth/setup` 在鉴权中间件之外，必须自己把关（安全审查 F1 / F10）。
+
+    原来的写法：没设密码 → 谁先到谁设，返回 token 直接接管；已设密码 →
+    有 token 就能改密，不要旧密码。
+    """
+
+    def setUp(self):
+        import os
+
+        from api import auth
+
+        self._auth = auth
+        self._cfg = _DictCfg()
+        self._patches = [
+            mock.patch.object(auth, "_cfg", lambda: self._cfg),
+            mock.patch.dict(os.environ, {}, clear=False),
+        ]
+        for patch in self._patches:
+            patch.start()
+        os.environ.pop("APP_JWT_SECRET", None)
+        os.environ.pop("APP_ALLOW_REMOTE_SETUP", None)
+        os.environ.pop("APP_TRUST_TEST_CLIENT", None)
+        auth._reset_login_failures()
+
+    def tearDown(self):
+        for patch in reversed(self._patches):
+            patch.stop()
+
+    def _client(self):
+        from fastapi.testclient import TestClient
+
+        return TestClient(_auth_app())
+
+    def test_first_setup_from_remote_is_refused(self):
+        """没设密码时，非本机来源不能抢先设密码。"""
+        r = self._client().post("/api/auth/setup", json={"password": "hunter2"})
+        self.assertEqual(r.status_code, 403, f"远程可以抢注密码: {r.text}")
+        self.assertEqual(self._cfg.get("auth_password_hash", ""), "")
+
+    def test_first_setup_from_loopback_is_allowed(self):
+        """本机（测试客户端 + 显式信任）可以设 —— 正常安装流程不能被挡。"""
+        import os
+
+        os.environ["APP_TRUST_TEST_CLIENT"] = "1"
+        try:
+            r = self._client().post("/api/auth/setup", json={"password": "hunter2"})
+            self.assertEqual(r.status_code, 200, r.text)
+            self.assertTrue(r.json().get("access_token"))
+            self.assertTrue(self._cfg.get("auth_password_hash", ""))
+        finally:
+            os.environ.pop("APP_TRUST_TEST_CLIENT", None)
+
+    def test_changing_password_requires_the_old_one(self):
+        """已设密码时，只有 token 不够 —— 必须给当前密码。"""
+        import os
+
+        os.environ["APP_TRUST_TEST_CLIENT"] = "1"
+        try:
+            client = self._client()
+            first = client.post("/api/auth/setup", json={"password": "hunter2"})
+            token = first.json()["access_token"]
+            r = client.post(
+                "/api/auth/setup",
+                json={"password": "newpass1"},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            self.assertEqual(r.status_code, 400, f"无旧密码即可改密: {r.text}")
+            self.assertIn("当前密码", r.text)
+        finally:
+            os.environ.pop("APP_TRUST_TEST_CLIENT", None)
+
+    def test_wrong_old_password_is_refused(self):
+        import os
+
+        os.environ["APP_TRUST_TEST_CLIENT"] = "1"
+        try:
+            client = self._client()
+            token = client.post("/api/auth/setup", json={"password": "hunter2"}).json()["access_token"]
+            r = client.post(
+                "/api/auth/setup",
+                json={"password": "newpass1", "old_password": "nope"},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            self.assertEqual(r.status_code, 400)
+            self.assertIn("当前密码错误", r.text)
+        finally:
+            os.environ.pop("APP_TRUST_TEST_CLIENT", None)
+
+    def test_password_change_revokes_existing_tokens(self):
+        """改密要真的吊销旧令牌（换密钥），否则旧 token 还能用 7 天。"""
+        import os
+
+        os.environ["APP_TRUST_TEST_CLIENT"] = "1"
+        try:
+            client = self._client()
+            old_token = client.post("/api/auth/setup", json={"password": "hunter2"}).json()["access_token"]
+            r = client.post(
+                "/api/auth/setup",
+                json={"password": "newpass1", "old_password": "hunter2"},
+                headers={"Authorization": f"Bearer {old_token}"},
+            )
+            self.assertEqual(r.status_code, 200, r.text)
+            with self.assertRaises(Exception):
+                self._auth.verify_token(old_token)
+            self._auth.verify_token(r.json()["access_token"])  # 新令牌可用
+        finally:
+            os.environ.pop("APP_TRUST_TEST_CLIENT", None)
+
+
+class LogoutRevocationTests(unittest.TestCase):
+    def setUp(self):
+        import os
+
+        from api import auth
+
+        self._auth = auth
+        self._cfg = _DictCfg()
+        self._patches = [
+            mock.patch.object(auth, "_cfg", lambda: self._cfg),
+            mock.patch.dict(os.environ, {}, clear=False),
+        ]
+        for patch in self._patches:
+            patch.start()
+        os.environ.pop("APP_JWT_SECRET", None)
+
+    def tearDown(self):
+        for patch in reversed(self._patches):
+            patch.stop()
+
+    def test_logout_invalidates_the_token(self):
+        from fastapi.testclient import TestClient
+
+        token = self._auth.create_token()
+        client = TestClient(_auth_app())
+        r = client.post("/api/auth/logout", headers={"Authorization": f"Bearer {token}"})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertTrue(r.json().get("revoked"), "logout 没有真正吊销")
+        with self.assertRaises(Exception):
+            self._auth.verify_token(token)
+
+    def test_env_secret_reports_cannot_revoke(self):
+        """密钥由环境变量管时，如实返回 revoked=False，不假装成功。"""
+        import os
+
+        from fastapi.testclient import TestClient
+
+        os.environ["APP_JWT_SECRET"] = "fixed-by-deployer"
+        try:
+            client = TestClient(_auth_app())
+            r = client.post("/api/auth/logout")
+            self.assertEqual(r.status_code, 200)
+            self.assertFalse(r.json().get("revoked"))
+        finally:
+            os.environ.pop("APP_JWT_SECRET", None)
+
+
+class ForwardedForSpoofingTests(unittest.TestCase):
+    """`X-Forwarded-For` 默认不可信（安全审查 F7）。"""
+
+    def _request(self, forwarded: str):
+        from starlette.requests import Request
+
+        scope = {
+            "type": "http",
+            "method": "POST",
+            "path": "/api/auth/login",
+            "headers": [(b"x-forwarded-for", forwarded.encode())],
+            "client": ("10.0.0.9", 12345),
+            "server": ("127.0.0.1", 8000),
+            "scheme": "http",
+            "query_string": b"",
+        }
+        return Request(scope)
+
+    def test_forwarded_for_is_ignored_by_default(self):
+        import os
+
+        from api.auth import _client_key
+
+        os.environ.pop("APP_TRUST_PROXY", None)
+        self.assertEqual(_client_key(self._request("1.2.3.4")), "10.0.0.9")
+        # 伪造不同的头，key 不变 → 退避计数不会被绕过
+        self.assertEqual(_client_key(self._request("9.9.9.9")), "10.0.0.9")
+
+    def test_forwarded_for_is_used_when_proxy_is_trusted(self):
+        import os
+
+        from api.auth import _client_key
+
+        os.environ["APP_TRUST_PROXY"] = "1"
+        try:
+            self.assertEqual(_client_key(self._request("1.2.3.4, 10.0.0.1")), "1.2.3.4")
+        finally:
+            os.environ.pop("APP_TRUST_PROXY", None)

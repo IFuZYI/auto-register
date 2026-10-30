@@ -44,6 +44,19 @@ def _jwt_secret() -> str:
     return stored
 
 
+def _rotate_jwt_secret() -> bool:
+    """换掉 JWT 签名密钥 —— 等价于「把已签发的令牌全部作废」。
+
+    无状态 JWT 没有服务端会话表，logout / 改密 / 关鉴权要真的生效，只能换密钥。
+    返回 False 表示密钥来自环境变量 `APP_JWT_SECRET`（部署方自己管的），
+    进程内改不了 —— 调用方要把这件事如实告诉前端，而不是假装吊销成功。
+    """
+    if os.getenv("APP_JWT_SECRET", ""):
+        return False
+    _cfg().set("auth_jwt_secret", secrets.token_hex(32))
+    return True
+
+
 def _b64url_encode(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
 
@@ -256,17 +269,14 @@ _TOTP_MAX_ATTEMPTS = 5
 def _client_key(request: Request) -> str:
     """退避计数用的客户端标识。
 
-    优先取反向代理传来的真实 IP —— 面板通常挂在 nginx/caddy 后面，直接读
-    `request.client.host` 会让所有请求都算到代理那一个 IP 上，退避会误伤
-    全部用户。
+    原来无条件采信 `X-Forwarded-For` 首段 —— 那是请求方随手能写的头，
+    伪造它就能让每次尝试都落在一个新 key 上，**退避完全失效**（安全审查 F7）。
+    现在只有部署方显式声明 `APP_TRUST_PROXY=1`（真挂了反代）才采信，
+    否则一律用 TCP 源地址；判定逻辑在 `core/net_utils.client_ip`。
     """
-    forwarded = request.headers.get("x-forwarded-for", "")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
-    real = request.headers.get("x-real-ip", "").strip()
-    if real:
-        return real
-    return request.client.host if request.client else "unknown"
+    from core.net_utils import client_ip
+
+    return client_ip(request)
 
 
 # ── Schemas ────────────────────────────────────────────────────────────────────
@@ -282,6 +292,9 @@ class TotpVerifyRequest(BaseModel):
 
 class SetupPasswordRequest(BaseModel):
     password: str
+    #: 已有密码时**必须**提供当前密码 —— 只凭一个 Bearer 令牌就能改密，
+    #: 等于「令牌泄露一次 = 永久接管」（安全审查 F10）。
+    old_password: str = ""
 
 
 class ChangePasswordRequest(BaseModel):
@@ -307,18 +320,48 @@ def auth_status():
 
 @router.post("/setup")
 def setup_password(
+    request: Request,
     body: SetupPasswordRequest,
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(_bearer),
 ):
-    """Set initial password, or update it only when the caller is already authenticated."""
+    """首次设置密码（仅本机），或已认证后改密（需当前密码）。
+
+    这条路由在 `main.py` 的鉴权中间件**之外**（`/api/auth/*` 整段跳过），
+    所以它必须自己把关 —— 原来的写法是「没设密码就直接设」，于是：
+
+    - 任何能连到端口的人都能**抢先设一个密码**，然后拿返回的 token 接管面板
+      （安全审查 F1，严重）；
+    - 已经设了密码时，只要持有一个有效 token 就能改密，不需要旧密码，
+      令牌泄露即永久接管（F10）。
+
+    现在的规则：没设密码 → 只接受本机回环（与中间件「未设密码只放行本机」
+    的口径一致）；已设密码 → 必须同时给出 token **和**当前密码。
+    """
     if not body.password or len(body.password) < 6:
         raise HTTPException(status_code=400, detail="密码至少需要 6 位")
     cfg = _cfg()
-    if cfg.get("auth_password_hash", ""):
+    stored = cfg.get("auth_password_hash", "")
+    if stored:
         if credentials is None:
             raise HTTPException(status_code=401, detail="未认证", headers=PANEL_AUTH_HEADERS)
         verify_token(credentials.credentials)
+        if not body.old_password:
+            raise HTTPException(status_code=400, detail="修改密码需要提供当前密码")
+        if not verify_password(body.old_password, stored):
+            raise HTTPException(status_code=400, detail="当前密码错误")
+    else:
+        from core.net_utils import is_loopback_client
+
+        if not is_loopback_client(request) and os.getenv("APP_ALLOW_REMOTE_SETUP", "") != "1":
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "首次设置密码只允许本机访问。请在服务器上用 127.0.0.1 打开面板，"
+                    "或显式设置 APP_ALLOW_REMOTE_SETUP=1（容器部署用）。"
+                ),
+            )
     cfg.set("auth_password_hash", _hash_pw(body.password))
+    _rotate_jwt_secret()
     token = create_token()
     return {"ok": True, "access_token": token, "token_type": "bearer"}
 
@@ -333,7 +376,8 @@ def disable_auth(credentials: Optional[HTTPAuthorizationCredentials] = Depends(_
         verify_token(credentials.credentials)
     cfg.set("auth_password_hash", "")
     cfg.set("auth_totp_secret", "")
-    return {"ok": True}
+    revoked = _rotate_jwt_secret()
+    return {"ok": True, "revoked": revoked}
 
 
 @router.post("/login")
@@ -400,7 +444,13 @@ def verify_totp_route(body: TotpVerifyRequest):
 
 @router.post("/logout")
 def logout():
-    return {"ok": True}
+    """注销 = 换密钥，把已签发的令牌全部作废。
+
+    原来是空实现：token 有效期 7 天且无法吊销，「退出登录」只是前端删掉了
+    localStorage 里的那串字符（安全审查 F6）。
+    """
+    revoked = _rotate_jwt_secret()
+    return {"ok": True, "revoked": revoked}
 
 
 @router.post("/change-password", dependencies=[Depends(require_auth)])
@@ -413,7 +463,10 @@ def change_password(body: ChangePasswordRequest):
     if not body.new_password or len(body.new_password) < 6:
         raise HTTPException(status_code=400, detail="新密码至少需要 6 位")
     cfg.set("auth_password_hash", hash_password(body.new_password))
-    return {"ok": True}
+    revoked = _rotate_jwt_secret()
+    # 密钥换过之后**当前这个 token 也失效了**，得给前端一个新令牌，
+    # 否则用户改完密码立刻被踢回登录页（体验上像「改密失败」）。
+    return {"ok": True, "revoked": revoked, "access_token": create_token(), "token_type": "bearer"}
 
 
 @router.get("/2fa/setup", dependencies=[Depends(require_auth)])
