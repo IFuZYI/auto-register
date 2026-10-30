@@ -88,8 +88,8 @@ def apply_sqlite_pragmas(target_engine: Engine) -> Engine:
             ):
                 try:
                     cursor.execute(statement)
-                except Exception:  # noqa: BLE001 - 单个 PRAGMA 不支持不该阻断连接
-                    pass
+                except Exception as exc:  # noqa: BLE001 - 单个 PRAGMA 不支持不该阻断连接
+                    logger.debug("PRAGMA 设置跳过 %s: %s", statement, exc)
         finally:
             cursor.close()
 
