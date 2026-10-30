@@ -10,9 +10,28 @@ from typing import Optional
 from sqlmodel import Field, SQLModel, Session, select
 from .db import current_engine
 from .mail_import_sources import normalize_mail_provider
+from core.config_schema import SECRET_CONFIG_KEYS
+from core.credential_crypto import decrypt_text, encrypt_text
 
 
 _ENV_FILE = Path(__file__).resolve().parent.parent / ".env"
+
+
+def _seal(key: str, value):
+    """配置口令落盘前加密（Q3：`configs` 表里不留明文口令）。
+
+    非口令键、空值、已经是密文 → 原样返回（`encrypt_text` 自带幂等）。
+    """
+    if key not in SECRET_CONFIG_KEYS:
+        return value
+    return encrypt_text(value)
+
+
+def _unseal(key: str, value):
+    """读出来还原成明文。老数据是明文 → `decrypt_text` 原样放行。"""
+    if key not in SECRET_CONFIG_KEYS:
+        return value
+    return decrypt_text(value)
 
 
 def _normalize_config_value(value) -> str:
@@ -270,17 +289,18 @@ class ConfigStore:
         if self._backend_name() == "json":
             value = self._json_store().get(key, "").strip()
             if value:
-                return value
+                return _unseal(key, value)
         else:
             with Session(current_engine()) as s:
                 item = s.get(ConfigItem, key)
                 value = str(item.value if item else "" or "").strip()
                 if value:
-                    return value
+                    return _unseal(key, value)
         fallback = _get_env_fallback_value(key, env_values=env_values)
         return fallback or default
 
     def set(self, key: str, value: str) -> None:
+        value = _seal(key, value)
         if self._backend_name() == "json":
             self._json_store().set(key, value)
             return
@@ -307,11 +327,13 @@ class ConfigStore:
 
     def get_all(self) -> dict:
         if self._backend_name() == "json":
-            values = self._json_store().get_all()
+            values = {
+                k: _unseal(k, v) for k, v in self._json_store().get_all().items()
+            }
         else:
             with Session(current_engine()) as s:
                 items = s.exec(select(ConfigItem)).all()
-                values = {i.key: i.value for i in items}
+                values = {i.key: _unseal(i.key, i.value) for i in items}
         merged = _merge_env_fallback(values)
         # 已删除的 provider 名在这里收敛（applemail → 空串，见
         # `core.mail_import_sources`）。放在 get_all 而不是各个调用点：这是
@@ -331,10 +353,11 @@ class ConfigStore:
         if self._backend_name() == "json":
             store = self._json_store()
             for key, value in data.items():
-                store.set(key, value)
+                store.set(key, _seal(key, value))
             return
         with Session(current_engine()) as s:
             for key, value in data.items():
+                value = _seal(key, value)
                 item = s.get(ConfigItem, key)
                 if item:
                     item.value = value
