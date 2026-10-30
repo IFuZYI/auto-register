@@ -412,3 +412,30 @@ def test_list_snapshot_has_same_keys_as_detail(client):
         assert not missing, f"列表比详情少了这些键: {sorted(missing)}"
     finally:
         client.delete(f"/api/tasks/{tid}")
+
+def test_list_supports_etag_and_304(client):
+    """内容没变时轮询要能拿到 304（无响应体）。
+
+    前端每 2.5 秒（有任务在跑）/ 15 秒（全空闲）轮询这个端点，而一次响应是
+    800+ 个任务、373 KB。走 SSH 隧道或公网时，这 373 KB 就是「切个页面卡
+    一下」的来源 —— 轮询里绝大多数时候内容没变，不该重传。
+
+    ETag 不改变语义：任务状态一变，ETag 就变（所以不能用 TTL 缓存）。
+    """
+    first = client.get("/api/tasks")
+    assert first.status_code == 200
+    etag = first.headers.get("etag")
+    assert etag, "响应必须带 ETag"
+
+    again = client.get("/api/tasks", headers={"If-None-Match": etag})
+    assert again.status_code == 304, "带相同 ETag 应该 304"
+    assert not again.content, "304 不该带响应体"
+
+    # 数据一变，ETag 必须变（否则前端会一直看到旧列表）
+    tid = _make_finished_task(client, 11)
+    try:
+        changed = client.get("/api/tasks")
+        assert changed.headers.get("etag") != etag, "新增任务后 ETag 必须变化"
+        assert changed.status_code == 200
+    finally:
+        client.delete(f"/api/tasks/{tid}")

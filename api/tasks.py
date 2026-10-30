@@ -1,5 +1,5 @@
-from fastapi import APIRouter, BackgroundTasks, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Request, Response
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from sqlmodel import Session, select
 from typing import Callable, Optional
@@ -787,16 +787,35 @@ def get_task(task_id: str):
 
 
 @router.get("")
-def list_tasks(include_logs: bool = False):
+def list_tasks(include_logs: bool = False, request: Request = None):
     """任务列表。
 
     **默认不返回已结束任务的日志**（`?include_logs=1` 可要全量）：列表被前端
     每 2.5 秒轮询一次，历史日志占了一半以上负载，且会让页面卡顿。历史任务的
     日志走 `GET /tasks/{id}`。
+
+    响应带 `ETag`：内容没变时浏览器带回 `If-None-Match`，这里直接 304，
+    **不传响应体**。这个端点一次要序列化 800+ 个任务（实测 373 KB），走
+    SSH 隧道 / 公网时那 373 KB 就是「切个页面卡一下」的来源 —— 轮询里
+    99% 的时候内容没变，没必要重传。
+
+    不做 TTL 缓存：任务状态随时会变，缓存一秒都可能让刚结束的任务还显示
+    「运行中」（`tests/test_tasks_list_perf.py` 就是这么挂的）。ETag 不改变
+    语义 —— 内容一变，ETag 就变。
     """
+    import hashlib
+    import json as _json
+
     _finalize_orphan_tasks()
     # 以 DB 为主返回，避免进程重启导致列表丢失
-    return _list_persisted_tasks(include_logs=include_logs)
+    body = _list_persisted_tasks(include_logs=include_logs)
+    etag = '"' + hashlib.md5(
+        _json.dumps(body, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest() + '"'
+
+    if request is not None and request.headers.get("if-none-match") == etag:
+        return Response(status_code=304, headers={"ETag": etag, "Cache-Control": "no-cache"})
+    return JSONResponse(content=body, headers={"ETag": etag, "Cache-Control": "no-cache"})
 
 
 @router.delete("/{task_id}")

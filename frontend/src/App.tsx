@@ -20,17 +20,33 @@ import zhCN from 'antd/es/locale/zh_CN'
 // 首屏只用到 Dashboard（以及登录页），其余七八个页面（含 1663 行的 Accounts）
 // 却在首屏就下载、解析、执行。改成 `lazy` 后 Vite 按页拆 chunk，
 // 首屏只付它自己那一份（实测 1.57 MB → 首屏 ~600 KB，gzip 后更小）。
-const Dashboard = lazy(() => import('@/pages/Dashboard'))
-const Accounts = lazy(() => import('@/pages/Accounts'))
-const RegisterTaskPage = lazy(() => import('@/pages/RegisterTaskPage'))
-const Proxies = lazy(() => import('@/pages/Proxies'))
-const Settings = lazy(() => import('@/pages/Settings'))
-const MailICloudLocalPage = lazy(() => import('@/pages/mail/MailICloudLocalPage'))
-const MailOutlookPage = lazy(() => import('@/pages/mail/MailOutlookPage'))
-const PanelManagement = lazy(() => import('@/pages/PanelManagement'))
-const TaskHistory = lazy(() => import('@/pages/TaskHistory'))
-const RunningTasks = lazy(() => import('@/pages/RunningTasks'))
-const Login = lazy(() => import('@/pages/Login'))
+//: 每个页面的 chunk 加载器。`lazy()` 与「空闲预取」共用同一批函数 ——
+//: `import()` 有模块缓存，预取过的页面再切过去是 **0 请求**。
+const PAGE_LOADERS = {
+  Dashboard: () => import('@/pages/Dashboard'),
+  Accounts: () => import('@/pages/Accounts'),
+  RegisterTaskPage: () => import('@/pages/RegisterTaskPage'),
+  Proxies: () => import('@/pages/Proxies'),
+  Settings: () => import('@/pages/Settings'),
+  MailICloudLocalPage: () => import('@/pages/mail/MailICloudLocalPage'),
+  MailOutlookPage: () => import('@/pages/mail/MailOutlookPage'),
+  PanelManagement: () => import('@/pages/PanelManagement'),
+  TaskHistory: () => import('@/pages/TaskHistory'),
+  RunningTasks: () => import('@/pages/RunningTasks'),
+  Login: () => import('@/pages/Login'),
+} as const
+
+const Dashboard = lazy(PAGE_LOADERS.Dashboard)
+const Accounts = lazy(PAGE_LOADERS.Accounts)
+const RegisterTaskPage = lazy(PAGE_LOADERS.RegisterTaskPage)
+const Proxies = lazy(PAGE_LOADERS.Proxies)
+const Settings = lazy(PAGE_LOADERS.Settings)
+const MailICloudLocalPage = lazy(PAGE_LOADERS.MailICloudLocalPage)
+const MailOutlookPage = lazy(PAGE_LOADERS.MailOutlookPage)
+const PanelManagement = lazy(PAGE_LOADERS.PanelManagement)
+const TaskHistory = lazy(PAGE_LOADERS.TaskHistory)
+const RunningTasks = lazy(PAGE_LOADERS.RunningTasks)
+const Login = lazy(PAGE_LOADERS.Login)
 import { applyThemeVars, darkTheme, lightTheme } from './theme'
 import { apiFetch, clearToken, getToken } from '@/lib/utils'
 import { MobileNavContext } from '@/hooks/useMobileNav'
@@ -175,6 +191,30 @@ function AppContent() {
   // 面板卡片网格只剩一列（472px），既稀疏又浪费。
   // 992 以上侧栏才真正有地方待。
   const isMobile = screens.lg === false
+
+  // 空闲时把其余页面的 chunk 预取下来。
+  //
+  // 懒加载本身是对的（首屏不下载八个页面），但「点一下才去下」在远程访问时
+  // 每次切换都要等一个往返：改之前一次切页要**串行**拉 10~15 个 chunk
+  // （实测 478ms，走 SSH 隧道时每个请求再叠一次 RTT，就是「加载半天」）。
+  // 打包侧已收敛到 1~2 个 chunk（见 vite.config.ts 的 advancedChunks），
+  // 这里再把「等待」挪到用户不感知的空闲时间 —— 切页时 JS 已经在了。
+  useEffect(() => {
+    const prefetch = () => {
+      for (const load of Object.values(PAGE_LOADERS)) void load().catch(() => {})
+    }
+    const ric = (window as unknown as {
+      requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => number
+    }).requestIdleCallback
+    if (ric) {
+      const id = ric(prefetch, { timeout: 3000 })
+      return () => {
+        ;(window as unknown as { cancelIdleCallback?: (id: number) => void }).cancelIdleCallback?.(id)
+      }
+    }
+    const timer = setTimeout(prefetch, 1500)
+    return () => clearTimeout(timer)
+  }, [])
 
   useEffect(() => {
     applyThemeVars(themeMode)
