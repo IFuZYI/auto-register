@@ -115,10 +115,13 @@ password/token 改成落盘密文（D-01/D-02）。
    `SENSITIVE_EXTRA_KEYS`，存量 607 行已加密（verify 全 0，读回 377 字符）。
 2. ~~`c3f8a1d64b27` downgrade 会把 `accounts` 变空表~~ —— **已修（`8d3c1eb`）**：
    降级前预检主键映射，撞主键直接拒绝（`ALLOW_DESTRUCTIVE_DOWNGRADE=1` 才放行）。
-3. **JSON 后端主路径仍不等价**（D-05）：混合后端（`STORAGE_BACKEND=json` +
-   `STORAGE_BACKEND_ACCOUNTS=sqlite`）启动后一张表都没有。
-   ~~D-04 改账号 500~~ **已修（`7d620d9`）**：更新分支的 `sess.refresh()` 打在没有
-   持久化的模型上，已按新建分支的判据修掉；真机 JSON 实例复现 500 → 200。
+3. ~~JSON 后端主路径（D-04 / D-05）~~ —— **已修**：
+   - D-03 Outlook 池写错仓储（`55edd14`）；
+   - D-04 「邮箱已存在时新增」500（`7d620d9`）：真机 JSON 实例复现 500 → 200；
+   - D-05 2FA 写前日志恢复在 JSON 下撞 `no such table: accounts`（`18fe0f6`）：
+     改走仓储后，真机 lifespan 从「恢复失败」变成「账号尚未落库」（正确语义）。
+   注：`STORAGE_BACKEND_ACCOUNTS=sqlite` 这道**历史门槛已撤**（账号跟随总开关，
+   见 `core/storage/__init__.py` 的说明），混合配置不再是一个受支持的形态。
    ~~D-03 Outlook 池写错表~~ **已修（`55edd14`）**：改走 `OutlookRepository.add`，
    不再借 `account_repository.save`（JSON 下会把邮箱池记录写进 `accounts.json`）。
    凭据明文那半条已修（`c539dda` 落盘封口）。
