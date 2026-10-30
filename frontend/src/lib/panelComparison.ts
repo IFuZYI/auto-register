@@ -111,7 +111,7 @@ export interface DirectionFilterableRow extends PlatformFilterableRow {
   state?: string
   /** local_newer / remote_newer / time_synced / '' */
   time_relation?: string
-  local_id?: number | null
+  local_id?: string | null
   /** 本地账号状态（registered / expired / invalid / banned）。 */
   local_status?: string
 }
@@ -130,7 +130,7 @@ export interface DirectionFilterableRow extends PlatformFilterableRow {
  * 为了让按钮上的计数与真实动作一致（「看到的」与「被改的」对不上是
  * 这个页面反复踩过的坑）。
  */
-export function selectPushIds(rows: DirectionFilterableRow[]): number[] {
+export function selectPushIds(rows: DirectionFilterableRow[]): string[] {
   return (Array.isArray(rows) ? rows : [])
     .filter(
       (row) =>
@@ -139,7 +139,7 @@ export function selectPushIds(rows: DirectionFilterableRow[]): number[] {
         (row?.state === 'local_only' ||
           (row?.state === 'credential_diff' && row?.time_relation === 'local_newer')),
     )
-    .map((row) => row.local_id as number)
+    .map((row) => row.local_id as string)
 }
 
 /**
@@ -149,7 +149,7 @@ export function selectPushIds(rows: DirectionFilterableRow[]): number[] {
  * 同时在两个方向的目标里（`local_newer` 与 `remote_newer` 不可能同时成立）。
  * 禁用（`banned`）的账号不参与同步（用户要求 2026-10-07）。
  */
-export function selectPullIds(rows: DirectionFilterableRow[]): number[] {
+export function selectPullIds(rows: DirectionFilterableRow[]): string[] {
   return (Array.isArray(rows) ? rows : [])
     .filter(
       (row) =>
@@ -158,7 +158,7 @@ export function selectPullIds(rows: DirectionFilterableRow[]): number[] {
         row?.local_id &&
         String(row?.local_status || '').trim().toLowerCase() !== 'banned',
     )
-    .map((row) => row.local_id as number)
+    .map((row) => row.local_id as string)
 }
 
 /**
@@ -202,7 +202,7 @@ export function actionsForState(state: string): PanelActionKey[] {
  * 已登记的不必重传（对端 `skipped` 也会合并字段，但重传是白花时间）；
  * 禁用账号不参与上传（与后端 `_UPLOAD_ACTIONS` 的既有口径一致）。
  */
-export function selectUploadIds(rows: DirectionFilterableRow[]): number[] {
+export function selectUploadIds(rows: DirectionFilterableRow[]): string[] {
   return (Array.isArray(rows) ? rows : [])
     .filter(
       (row) =>
@@ -210,5 +210,5 @@ export function selectUploadIds(rows: DirectionFilterableRow[]): number[] {
         String(row?.local_status || '').trim().toLowerCase() !== 'banned' &&
         row?.state === 'local_only',
     )
-    .map((row) => row.local_id as number)
+    .map((row) => row.local_id as string)
 }

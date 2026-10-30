@@ -30,13 +30,20 @@ REPO = Path(__file__).resolve().parent.parent
 _ALLOWED_UNDECLARED = set(INTERNAL_KEYS)
 
 
+#: 不扫的目录：第三方参考实现、嵌套 worktree、虚拟环境、前端依赖。
+#: `reference/` 里是别人的实现（`any-auto-register*`），它们读自己的配置键；
+#: `.worktrees/` 是本仓库的其它 checkout —— 扫进来等于把同一份代码数两遍，
+#: 还会因为 checkout 里多出来的实验文件误报。只查**本仓库第一方代码**。
+_SKIP_DIRS = frozenset({"reference", ".worktrees", ".venv", "node_modules", "__pycache__", "tests"})
+
+
 def _literal_config_reads() -> set[str]:
     """扫出代码里所有 `config_store.get("字面量")` 的键名。"""
     pattern = re.compile(r'config_store\.get\(\s*["\']([A-Za-z0-9_]+)["\']')
     found: set[str] = set()
     for path in REPO.rglob("*.py"):
-        text = str(path)
-        if "__pycache__" in text or "/tests/" in text or text.startswith(str(REPO / "tests")):
+        rel = path.relative_to(REPO)
+        if set(rel.parts) & _SKIP_DIRS:
             continue
         found.update(pattern.findall(path.read_text(encoding="utf-8", errors="ignore")))
     return found

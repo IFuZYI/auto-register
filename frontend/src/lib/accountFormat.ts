@@ -8,7 +8,7 @@
  * 由 `parseExtraJson` 解析。
  */
 export interface AccountLike {
-  id?: number
+  id?: string
   email?: string
   extra_json?: string
   [key: string]: unknown
