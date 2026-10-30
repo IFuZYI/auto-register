@@ -4,6 +4,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 
+from sqlalchemy import Index
 from sqlmodel import Field, SQLModel
 
 from .base import _utcnow
@@ -12,10 +13,16 @@ from .base import _utcnow
 class TaskLog(SQLModel, table=True):
     __tablename__ = "task_logs"
 
+    #: 日志列表按 platform 过滤 + id 倒序翻页，两个条件都要走**同一个**索引，
+    #: 否则日志积累到几万条后每次翻页都是全表扫描 + 排序。
+    #:
+    #: 复合索引的前缀就是 `platform`，所以不再单独给 platform 建单列索引
+    #: （原来 `index=True` 会多出一个 `ix_task_logs_platform`，生产库里没有，
+    #: `alembic check` 一直想把它加回来 —— 加了也是白占空间）。
+    __table_args__ = (Index("ix_task_logs_platform_id", "platform", "id"),)
+
     id: Optional[int] = Field(default=None, primary_key=True)
-    # 日志列表按 platform 过滤 + id 倒序翻页，两个条件都要走索引，
-    # 否则日志积累到几万条后每次翻页都是全表扫描。
-    platform: str = Field(index=True)
+    platform: str = ""
     email: str = Field(index=True)
     status: str = Field(default="success", index=True)  # success | failed
     error: str = ""

@@ -40,6 +40,11 @@ class AccountModel(SQLModel, table=True):
             text("lower(email)"),
             unique=True,
         ),
+        # 列表页的承重索引：`WHERE platform=? ORDER BY created_at DESC`。
+        # 生产库由 `core/db/migrations.py` 的 legacy runner 建好了，但**模型里
+        # 没声明** —— 于是 `alembic check` 认为它是多余的，autogenerate 会生成
+        # `drop_index`。谁照着跑一次，列表页就从走索引变成全表扫 + 排序。
+        Index("ix_accounts_platform_created_at", "platform", "created_at"),
     )
 
     id: str = Field(

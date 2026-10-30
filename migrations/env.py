@@ -40,6 +40,22 @@ if config.config_file_name is not None:
 
 target_metadata = SQLModel.metadata
 
+#: 这三张表**不在主库**：它们由 `data/platforms/<平台>.db` 各自持有
+#: （见 `core/db/base.py` 的 `platform_session`）。基线迁移里仍然会创建它们
+#: （单库部署/测试用得上），但对**主库**做 autogenerate / `alembic check` 时
+#: 必须跳过 —— 否则每次都会报「缺这三张表」，照着补一遍就等于在错误的库里
+#: 建了一份永远不会被读到的副本。
+_PER_PLATFORM_TABLES = frozenset({"icloud_accounts", "icloud_aliases", "outlook_accounts"})
+
+
+def include_object(obj, name, type_, reflected, compare_to):
+    """让 `alembic check` 只在「主库该有的东西」上报警。"""
+    if type_ == "table" and name in _PER_PLATFORM_TABLES:
+        return False
+    if type_ == "index" and getattr(getattr(obj, "table", None), "name", "") in _PER_PLATFORM_TABLES:
+        return False
+    return True
+
 
 def render_item(type_, obj, autogen_context):
     """把 SQLModel 的自定义类型渲染成原生 SQLAlchemy 类型。
@@ -73,6 +89,7 @@ def run_migrations_offline() -> None:
         # 开着它每张表的时间列都会被误报成类型漂移，`alembic check` 永远不干净。
         compare_type=False,
         render_item=render_item,
+        include_object=include_object,
     )
     with context.begin_transaction():
         context.run_migrations()
@@ -89,6 +106,7 @@ def run_migrations_online() -> None:
             render_as_batch=True,
             compare_type=False,
             render_item=render_item,
+            include_object=include_object,
         )
         with context.begin_transaction():
             context.run_migrations()
