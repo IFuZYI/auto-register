@@ -249,7 +249,8 @@ def _config_text(key: str) -> str:
         from core.config_store import config_store
 
         return str(config_store.get(key, "") or "").strip()
-    except Exception:  # noqa: BLE001 - 配置读不到时按「关闭」处理
+    except Exception as exc:  # noqa: BLE001 - 配置读不到时按「关闭」处理
+        logger.debug("读取配置 %s 失败，按空值处理: %s", key, exc)
         return ""
 
 
@@ -385,7 +386,8 @@ def _run_actions(
         if control is not None:
             try:
                 control.checkpoint()
-            except Exception:  # noqa: BLE001 - 用户点了停止
+            except Exception as exc:  # noqa: BLE001 - 用户点了停止（checkpoint 就是这么通知的）
+                logger.debug("任务被停止: %s", exc)
                 stopped = True
                 log(f"已停止（处理 {summary['ok'] + summary['failed']}/{len(picks)}）")
                 break

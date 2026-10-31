@@ -36,6 +36,7 @@ register_job(
 from __future__ import annotations
 
 import threading
+import logging
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -52,6 +53,8 @@ JobRunner = Callable[[], object]
 JobDailyAt = Callable[[], str]
 
 _SECONDS_PER_DAY = 86400
+
+logger = logging.getLogger(__name__)
 
 
 def _parse_hhmm(value: str) -> tuple[int, int] | None:
@@ -95,7 +98,8 @@ class _Job:
             return 0.0
         try:
             interval = float(self.interval() or 0)
-        except Exception:
+        except Exception as exc:  # noqa: BLE001 - 配置读不到按「不跑」处理
+            logger.debug("任务 %s 的间隔函数抛异常，本次跳过: %s", self.name, exc)
             return 0.0
         if interval <= 0:
             return 0.0
@@ -111,7 +115,8 @@ class _Job:
         """
         try:
             spec = self.daily_at() if self.daily_at else ""
-        except Exception:
+        except Exception as exc:  # noqa: BLE001 - 配置读不到按「不跑」处理
+            logger.debug("任务 %s 的定时函数抛异常，本次跳过: %s", self.name, exc)
             return False
         parsed = _parse_hhmm(spec)
         if not parsed:
@@ -284,7 +289,8 @@ class Scheduler:
                     results["valid"] += 1
                 else:
                     results["invalid"] += 1
-            except Exception:
+            except Exception as exc:  # noqa: BLE001 - 单个账号失败不毁整轮
+                logger.debug("检测账号失败: %s", exc)
                 results["error"] += 1
         return results
 

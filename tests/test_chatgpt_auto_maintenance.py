@@ -1108,9 +1108,23 @@ class FrontendWiringTests(unittest.TestCase):
         return (ROOT / "frontend" / "src" / rel).read_text(encoding="utf-8")
 
     def test_panel_config_has_both_switches(self):
+        """本地维护的开关与面板同步的开关都必须在界面上。
+
+        2026-10-31 起本地维护**按平台展开**（ChatGPT / Grok 各一节），
+        开关不再逐个手写，而是由 `LOCAL_PLATFORMS` × 规则模板生成。所以
+        这里断言的是「模板存在 + 两个平台都在清单里」，而不是一个字面量键名
+        —— 后者在搬一次结构之后就会假红（这次就是）。语义没变：
+        两个开关都必须在界面上可切换。
+        """
         src = self._src(self.MAINTENANCE_SRC)
-        for key in ("chatgpt_auto_refresh_enabled", "chatgpt2api_auto_sync_enabled"):
-            self.assertIn(f"switchKey: '{key}'", src, f"缺 {key} 的开关声明")
+        self.assertIn(
+            "switchKey={`${prefix}_auto_refresh_enabled`}",
+            src,
+            "本地维护的「自动刷新 Token」开关声明不见了",
+        )
+        self.assertIn("switchKey: 'chatgpt2api_auto_sync_enabled'", src, "缺面板同步开关声明")
+        for prefix in ("'chatgpt'", "'grok'"):
+            self.assertIn(f"prefix: {prefix}", src, f"平台清单里少了 {prefix} —— 那一节不会渲染")
 
     def test_switches_are_boolean_typed(self):
         """开关必须是 `Form.Item valuePropName="checked"` + `<Switch>`。
