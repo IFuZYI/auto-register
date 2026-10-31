@@ -32,9 +32,38 @@ __all__ = [
     "is_banned_status",
     "merge_extra_patch",
     "record_upload_sync",
+    "resolve_action_proxy",
     "result_message",
     "to_platform_account",
 ]
+
+
+def resolve_action_proxy(acc_model: AccountModel) -> str:
+    """给「复用账号」的动作挑代理：优先它注册时那个，不可用才换。
+
+    返回空串表示不用代理。**无绑定或绑定不可用时都会写回** `register_proxy`：
+    用户要求「不再是仅有注册才绑定，若无绑定、绑定代理不可用，后续也能更新」。
+
+    这里和批量任务（补 RT / 绑 2FA）走**同一套**决策（`proxy_pool.
+    resolve_for_account`），否则同一个账号在「测活」按钮和「补 RT」任务里
+    会走不同出口，行为对不上。
+
+    从 `api/actions.py` 搬下来：定时自动维护也要用它，而服务层不能反向
+    import HTTP 层（见模块 docstring 的 M1）。`api/actions.py` 保留同名
+    别名，调用点与测试不动。
+    """
+    from core.proxy_pool import proxy_pool
+
+    extra = acc_model.get_extra()
+    saved = str(extra.get("register_proxy") or "")
+    chosen, should_bind = proxy_pool.resolve_for_account(
+        saved, fallback_provider=proxy_pool.get_next
+    )
+    if should_bind and chosen:
+        # 就地更新一个键，不碰其它字段
+        extra["register_proxy"] = chosen
+        acc_model.set_extra(extra)
+    return chosen or ""
 
 
 def merge_extra_patch(base: dict, patch: dict) -> dict:

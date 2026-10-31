@@ -50,6 +50,7 @@ def _get_platform_cls_or_404(platform: str):
 from services.action_execution import (
     UPLOAD_ACTIONS as _UPLOAD_ACTIONS,
     apply_action_result as _apply_action_result,
+    resolve_action_proxy as _resolve_action_proxy_service,
     is_banned_status as _is_banned_status,
     merge_extra_patch as _merge_extra_patch,
     result_message as _result_message,
@@ -82,28 +83,9 @@ from services.action_execution import (
 
 
 
-def _resolve_action_proxy(acc_model: AccountModel) -> str:
-    """给「复用账号」的动作挑代理：优先它注册时那个，不可用才换。
-
-    返回空串表示不用代理。**无绑定或绑定不可用时都会写回** `register_proxy`：
-    用户要求「不再是仅有注册才绑定，若无绑定、绑定代理不可用，后续也能更新」。
-
-    这里和批量任务（补 RT / 绑 2FA）走**同一套**决策（`proxy_pool.
-    resolve_for_account`），否则同一个账号在「测活」按钮和「补 RT」任务里
-    会走不同出口，行为对不上。
-    """
-    from core.proxy_pool import proxy_pool
-
-    extra = acc_model.get_extra()
-    saved = str(extra.get("register_proxy") or "")
-    chosen, should_bind = proxy_pool.resolve_for_account(
-        saved, fallback_provider=proxy_pool.get_next
-    )
-    if should_bind and chosen:
-        # 就地更新一个键，不碰其它字段
-        extra["register_proxy"] = chosen
-        acc_model.set_extra(extra)
-    return chosen or ""
+# 迁到服务层（`services.action_execution.resolve_action_proxy`）：定时自动维护
+# 也要用它，而服务层不能反向 import HTTP 层。这里保留 `_` 前缀别名。
+_resolve_action_proxy = _resolve_action_proxy_service
 
 
 def _execute_platform_action(

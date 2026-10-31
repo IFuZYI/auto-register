@@ -61,7 +61,7 @@ class SchemaShapeTests(unittest.TestCase):
         #   cpa_auto_sync_enabled         面板与本地同步
         #   sub2api_auto_sync_enabled     面板与本地同步
         #   grok2api_auto_sync_enabled    面板与本地同步
-        self.assertEqual(len(CONFIG_KEYS), 77, "键数变了要同步改文档")
+        self.assertEqual(len(CONFIG_KEYS), 101, "键数变了要同步改文档")
 
     def test_every_key_has_a_group(self):
         for item in CONFIG_SCHEMA:
@@ -112,7 +112,7 @@ class ReadsAreRegisteredTests(unittest.TestCase):
 class SchemaPayloadTests(unittest.TestCase):
     def test_payload_has_no_values(self):
         payload = schema_payload()
-        self.assertEqual(len(payload["keys"]), 77)
+        self.assertEqual(len(payload["keys"]), 101)
         self.assertEqual(sorted(payload["secrets"]), sorted(SECRET_CONFIG_KEYS))
         # 只允许这三个键：多一个就说明有人把值塞进来了
         self.assertEqual(set(payload), {"keys", "secrets", "groups"})

@@ -176,6 +176,7 @@ async def lifespan(app: FastAPI):
         print(_line)
     # 业务周期任务自注册（core.scheduler 不认识具体业务，见其模块 docstring）
     from services import chatgpt_maintenance  # noqa: F401  注册自动维护任务
+    from services import local_maintenance  # noqa: F401  注册自动检测/刷新/日志清理
     from core.scheduler import registered_jobs, scheduler
     print(f"[OK] 周期任务: {registered_jobs()}")
     scheduler.start()

@@ -1713,3 +1713,56 @@ body {
 .detail-group__chevron.is-open {
   transform: rotate(90deg);
 }
+
+/* ═══════════════════════════════════════════════════════════════
+   自动维护 · 本地维护（按平台分节）
+
+   一个平台 = 一节，节里是它的几条规则。规则**关着的时候只占一行**
+   （名字 + 开关），打开后才露出它要问的参数 —— 24 个键一次性平铺
+   出来是一面墙，而其中大半属于用户根本没启用的规则。
+
+   不套卡片：本地维护不是「有身份、有连接状态、能打开的外部服务」，
+   它就是一个定时任务。面板同步仍然用卡片，因为那里卡片确实在表达
+   「这是哪个面板、配没配好」。
+   ═══════════════════════════════════════════════════════════════ */
+.maint-platform {
+  margin-top: 20px;
+}
+
+.maint-platform + .maint-platform {
+  margin-top: 26px;
+  padding-top: 18px;
+  border-top: 1px solid color-mix(in srgb, var(--border) 45%, transparent);
+}
+
+.maint-platform__name {
+  margin: 0 0 4px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.maint-rule__title {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+/* 参数区往右缩一格：行首的对齐差让「这些属于上面那条规则」一眼可见，
+   不必再加一条边框（加边框就又变成盒子了）。 */
+.maint-rule__body {
+  padding-left: 16px;
+  border-left: 2px solid color-mix(in srgb, var(--border) 45%, transparent);
+}
+
+.maint-rule__suffix {
+  margin-left: 8px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+@media (max-width: 767px) {
+  .maint-rule__body {
+    padding-left: 10px;
+  }
+}

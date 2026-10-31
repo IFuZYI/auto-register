@@ -19,6 +19,15 @@ register_job(
 
 间隔函数返回 0 表示「当前不启用」，scheduler 会跳过该任务（不需要注销）。
 
+两种触发方式，按任务的语义选：
+
+- `interval_seconds`：**每隔 N 秒跑一次**（N 由函数现算，可随配置变化）。
+  适合「持续收敛」的任务（面板同步）。
+- `daily_at`：**每天某个时刻跑一次**（函数返回 `"HH:MM"`，空串 = 关闭）。
+  适合「一天对账一次」的任务（自动检测、自动刷新、日志清理）——
+  给它们用 interval 是在表达错误的语义：用户要的是「凌晨三点跑」，
+  不是「每 86400 秒跑一次」（后者会随进程重启不断漂移）。
+
 当前状态：扩展点保留，但**尚无服务注册任务** —— 原 `cpa_maintenance`
 （CPA 自动维护）已按需求删除；`check_trial_expiry`（trial 到期检查）
 随「试用中/已订阅」状态一起删除。
@@ -39,22 +48,51 @@ from .registry import get, load_all
 # 周期任务：interval 返回秒数（0 = 本次不跑），runner 执行任务
 JobInterval = Callable[[], int]
 JobRunner = Callable[[], object]
+#: 每天定点任务：返回 `"HH:MM"`（本地时间）；空串 = 关闭。
+JobDailyAt = Callable[[], str]
+
+_SECONDS_PER_DAY = 86400
+
+
+def _parse_hhmm(value: str) -> tuple[int, int] | None:
+    """解析 `"HH:MM"`；非法值返回 None（按「关闭」处理，不抛）。
+
+    「配置写错就把整个调度循环搞崩」是不可接受的：`_run_due_jobs` 里虽然
+    有 try/except，但那是给 runner 的 —— due() 抛异常只会让这个任务永远
+    不跑，而且**日志里什么都不留**（`due()` 里的 except 静默返回 0）。
+    """
+    text = str(value or "").strip()
+    if not text or ":" not in text:
+        return None
+    hh, _, mm = text.partition(":")
+    try:
+        hour, minute = int(hh), int(mm)
+    except (TypeError, ValueError):
+        return None
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        return None
+    return hour, minute
 
 
 @dataclass
 class _Job:
     name: str
-    interval: JobInterval
     runner: JobRunner
+    interval: JobInterval | None = None
+    daily_at: JobDailyAt | None = None
     last_run_at: float = field(default=0.0)
 
     def due(self, now: float) -> float:
-        """到期则返回间隔秒数（>0），否则返回 0。
+        """到期则返回一个 >0 的数，否则返回 0。
 
         用 `float` 而非 `int` 截断：`int(0.9)` 会变成 0，于是「亚秒间隔」被
         静默当成「本次不跑」（0 的语义是主动跳过），排查时完全看不出原因。
-        interval 抛异常同样按 0 处理 —— 一个任务的配置错误不该拖垮整个调度循环。
+        配置读取抛异常同样按 0 处理 —— 一个任务的配置错误不该拖垮整个调度循环。
         """
+        if self.daily_at is not None:
+            return 1.0 if self._daily_due(now) else 0.0
+        if self.interval is None:
+            return 0.0
         try:
             interval = float(self.interval() or 0)
         except Exception:
@@ -63,18 +101,62 @@ class _Job:
             return 0.0
         return interval if now - self.last_run_at >= interval else 0.0
 
+    def _daily_due(self, now: float) -> bool:
+        """「今天这个时刻到了，而且今天还没跑过」为真。
+
+        判据是 `last_run_at < 最近一次应跑时刻`，而不是「距上次跑满 24 小时」：
+        后者在每次进程重启时都会漂移（`start()` 把 `last_run_at` 顶到当前时间），
+        用户设的「凌晨三点」会慢慢挪到下午。用「最近一次应跑时刻」则每次唤醒
+        都重新对准钟面。
+        """
+        try:
+            spec = self.daily_at() if self.daily_at else ""
+        except Exception:
+            return False
+        parsed = _parse_hhmm(spec)
+        if not parsed:
+            return False
+        hour, minute = parsed
+        # 日期必须从传进来的 `now` 推，不能用 `datetime.now()` —— 后者让这个
+        # 方法**不可测**（测试没法把时钟挪到明天），生产里也只是碰巧等价。
+        today = datetime.fromtimestamp(now).replace(
+            hour=hour, minute=minute, second=0, microsecond=0
+        )
+        due_at = today.timestamp()
+        # 今天这个点还没到 → 最近一次应跑是昨天那个点
+        if due_at > now:
+            due_at -= _SECONDS_PER_DAY
+        return self.last_run_at < due_at
+
 
 _jobs: dict[str, _Job] = {}
 _jobs_lock = threading.Lock()
 
 
-def register_job(name: str, *, interval_seconds: JobInterval, runner: JobRunner) -> None:
+def register_job(
+    name: str,
+    *,
+    runner: JobRunner,
+    interval_seconds: JobInterval | None = None,
+    daily_at: JobDailyAt | None = None,
+) -> None:
     """注册一个周期任务（业务侧自注册，core 不认识具体业务）。
+
+    二选一：`interval_seconds`（每隔 N 秒）或 `daily_at`（每天 HH:MM）。
+    两个都不给等于注册了一个永不触发的任务 —— 显式拒绝，免得写出
+    「注册了、但永远不会跑」的哑任务（那种问题在界面上完全看不出来）。
 
     同名重复注册直接覆盖，便于测试与热重载。
     """
+    if interval_seconds is None and daily_at is None:
+        raise ValueError(f"任务 {name} 既没有 interval_seconds 也没有 daily_at，永远不会触发")
     with _jobs_lock:
-        _jobs[str(name)] = _Job(name=str(name), interval=interval_seconds, runner=runner)
+        _jobs[str(name)] = _Job(
+            name=str(name),
+            runner=runner,
+            interval=interval_seconds,
+            daily_at=daily_at,
+        )
 
 
 def registered_jobs() -> list[str]:

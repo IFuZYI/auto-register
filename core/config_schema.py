@@ -86,7 +86,6 @@ CONFIG_SCHEMA: tuple[ConfigKey, ...] = (
     #: 但有人只想给号池喂可用凭证、不交出密码 —— 所以做成显式选择，默认 `full`
     #: （与加这个开关之前的行为一致，升级不改变既有部署）。
     ConfigKey("chatgpt2api_import_mode", "chatgpt2api"),
-    ConfigKey("chatgpt_auto_refresh_enabled", "chatgpt2api"),
     ConfigKey("chatgpt2api_auto_sync_enabled", "chatgpt2api"),
     # ---- CLIProxyAPI ----
     ConfigKey("cliproxyapi_base_url", "cliproxyapi"),
@@ -129,6 +128,43 @@ CONFIG_SCHEMA: tuple[ConfigKey, ...] = (
     ConfigKey("sms_per_phone_timeout", "sms"),
     ConfigKey("sms_max_phone_attempts", "sms"),
     ConfigKey("sms_code_retries_per_phone", "sms"),
+    # ---- 自动维护（本地定时任务；与「面板同步」是两件事）----
+    #
+    # 命名约定：`<作用域>_<动作>_<参数>`，作用域是 `log` / `chatgpt` / `grok`。
+    #
+    # 时间一律 `HH:MM`（本地时间），由 `core/scheduler.py` 的 `daily_at`
+    # 支持 —— 这些任务要的是「每天凌晨三点跑」，不是「每 86400 秒跑一次」
+    # （后者会随进程重启漂移）。
+    #
+    # 日志自动清理：只按**保留天数**删，不提供「全清」——一个每天定点执行的
+    # 删除动作不该有「抹掉全部」这种档位。
+    ConfigKey("log_cleanup_enabled", "maintenance"),
+    ConfigKey("log_cleanup_time", "maintenance"),
+    ConfigKey("log_cleanup_keep_days", "maintenance"),
+    # ChatGPT 本地维护
+    ConfigKey("chatgpt_auto_refresh_enabled", "maintenance"),
+    ConfigKey("chatgpt_refresh_scope", "maintenance"),
+    ConfigKey("chatgpt_refresh_random_count", "maintenance"),
+    ConfigKey("chatgpt_refresh_time", "maintenance"),
+    ConfigKey("chatgpt_refresh_disable_banned", "maintenance"),
+    ConfigKey("chatgpt_auto_probe_enabled", "maintenance"),
+    ConfigKey("chatgpt_probe_mode", "maintenance"),
+    ConfigKey("chatgpt_probe_sample_percent", "maintenance"),
+    ConfigKey("chatgpt_probe_strategy", "maintenance"),
+    ConfigKey("chatgpt_probe_time", "maintenance"),
+    ConfigKey("chatgpt_sync_strategy", "maintenance"),
+    # Grok 本地维护（同构）
+    ConfigKey("grok_auto_refresh_enabled", "maintenance"),
+    ConfigKey("grok_refresh_scope", "maintenance"),
+    ConfigKey("grok_refresh_random_count", "maintenance"),
+    ConfigKey("grok_refresh_time", "maintenance"),
+    ConfigKey("grok_refresh_disable_banned", "maintenance"),
+    ConfigKey("grok_auto_probe_enabled", "maintenance"),
+    ConfigKey("grok_probe_mode", "maintenance"),
+    ConfigKey("grok_probe_sample_percent", "maintenance"),
+    ConfigKey("grok_probe_strategy", "maintenance"),
+    ConfigKey("grok_probe_time", "maintenance"),
+    ConfigKey("grok_sync_strategy", "maintenance"),
     # ---- 贡献模式 ----
     ConfigKey("contribution_enabled", "contribution"),
     ConfigKey("contribution_server_url", "contribution"),

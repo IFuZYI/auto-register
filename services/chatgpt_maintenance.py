@@ -930,11 +930,15 @@ def _default_chatgpt2api_push() -> dict[str, Any]:
 from core.db import account_repository
 from core.scheduler import register_job as _register_job  # noqa: E402
 
-_register_job(
-    "chatgpt_auto_refresh",
-    interval_seconds=get_auto_refresh_interval_seconds,
-    runner=run_auto_refresh_pass,
-)
+# ⚠️ 这里**曾经**注册过一个 interval 版的自动刷新（`chatgpt_auto_refresh`）。
+# 2026-10-31 撤掉了：自动刷新现在由 `services/local_maintenance.py` 的
+# `chatgpt_auto_refresh_daily` 承担 —— 用户明确要「设置刷新时间 + 范围
+# （只刷失效 / 全部 / 随机 N 个）」，那是**每天定点一次**的语义，而
+# interval 是「距上次跑满 24 小时」，每次重启都会把时刻往后推。
+# 两个都注册 = 同一个账号被两条链各刷一遍，且其中一条在界面上看不见。
+#
+# `run_auto_refresh_pass` 与 `get_auto_refresh_interval_seconds` 暂时保留
+# （它们的计划/退避逻辑仍被测试钉住），但**生产路径已经不调用**。
 _register_job(
     "chatgpt2api_auto_sync",
     interval_seconds=get_chatgpt2api_auto_sync_interval_seconds,
@@ -970,7 +974,6 @@ __all__ = [
     "RETRY_STATUSES",
     "AutoRefreshPlan",
     "compute_next_attempt_at",
-    "get_auto_refresh_interval_seconds",
     "get_chatgpt2api_auto_sync_interval_seconds",
     "get_panel_auto_sync_interval_seconds",
     "plan_auto_refresh",
