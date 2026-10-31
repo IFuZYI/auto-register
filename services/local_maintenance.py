@@ -5,9 +5,10 @@
 - 面板同步：**持续收敛**。每 10 分钟对账一次，问「面板和本地谁的新」。
 - 本地维护：**每天对账一次**。到点跑一轮明确的动作（抽检 / 刷失效号）。
 
-所以这里用 `core.scheduler` 的 `daily_at`（每天 HH:MM）而不是 `interval_seconds`
-—— 用户要的是「凌晨三点跑」，而 interval 的语义是「距上次跑满 24 小时」，
-每次进程重启都会把那个时刻往后推一点，慢慢就漂到下午去了。
+所以这里用 `interval_seconds`（每 N 秒一轮），间隔由界面配置。
+（2026-10-31 一度做成「每天 HH:MM」，同日改回间隔 —— 用户要的是「执行间隔」：
+「每天三点」只是间隔 24 小时的特例，而「每 6 小时」「每 30 分钟」用固定时刻
+根本表达不了。）
 
 跑法上刻意**复用手动动作那条链**（`api.actions` 里的
 `_execute_platform_action` + `_apply_action_result`），不另写一套：
@@ -15,7 +16,7 @@
 凭据写回规则也会分叉。这里只负责**选谁**（范围 / 抽检策略 / 随机数）。
 
 本模块的纯函数（`select_probe_targets` / `select_refresh_targets` /
-`parse_hhmm`）不碰网络与数据库，测试直接喂数据即可。
+`parse_interval`）不碰网络与数据库，测试直接喂数据即可。
 """
 
 from __future__ import annotations
@@ -74,32 +75,65 @@ NON_REFRESHABLE_STATUSES = frozenset({"banned"})
 DEFAULT_PROBE_PERCENT = 20
 DEFAULT_REFRESH_RANDOM_COUNT = 50
 DEFAULT_LOG_KEEP_DAYS = 7
-DEFAULT_PROBE_TIME = "03:00"
-DEFAULT_REFRESH_TIME = "04:00"
-DEFAULT_CLEANUP_TIME = "05:00"
 
 
-# ── 时间 ──────────────────────────────────────────────────────────────
+# ── 间隔 ──────────────────────────────────────────────────────────────
+
+#: 单位 → 秒。用户 2026-10-31 要的是「执行间隔」而不是「执行时间」：
+#: 「每天凌晨三点」只是**间隔 24 小时**的一个特例，而「每 6 小时」「每 30 分钟」
+#: 这种粒度用固定时刻根本表达不了。所以配置形态从 `HH:MM` 换成 `<数字><单位>`。
+INTERVAL_UNITS: dict[str, int] = {"m": 60, "h": 3600, "d": 86400}
+
+#: 最短 5 分钟。再短就不是「定时维护」而是贴着上游打 —— 自动刷新本身就是
+#: 一次登录动作，几分钟一轮足以让出口 IP 进风控名单。
+MIN_INTERVAL_SECONDS = 5 * 60
+#: 最长 30 天。再长等于关掉，不如把开关关掉（意图更清楚）。
+MAX_INTERVAL_SECONDS = 30 * 86400
+
+DEFAULT_PROBE_INTERVAL = "6h"
+DEFAULT_REFRESH_INTERVAL = "6h"
+DEFAULT_CLEANUP_INTERVAL = "24h"
 
 
-def parse_hhmm(value: Any) -> str:
-    """把配置里的时间规整成 `"HH:MM"`；非法值返回空串（= 这个任务不跑）。
+def parse_interval(value: Any) -> int:
+    """把配置里的间隔解析成秒；非法值返回 0（= 这个任务不跑）。
 
-    兼容用户手打的 `9:5` / `09：05`（全角冒号）/ 前后空格 —— 这些都不该让
-    定时任务静默失效。非法值返回空串而不是抛异常：一个写错的配置不该让
-    scheduler 的整个唤醒循环出问题。
+    接受三种写法：
+    - `30m` / `6h` / `1d` —— 界面写出来的就是这个
+    - 裸数字 `90` —— 按**分钟**算（用户手打时最自然的单位）
+    - 全角/空格混杂（` 6h `）—— 顺手 trim
+
+    返回 0 而不是抛异常：一个写错的配置不该让调度循环出问题。超范围则**钳制**
+    而不是判非法 —— 用户填 `1m` 的本意是「尽量勤」，给他 5 分钟比让他什么都不跑
+    更接近意图，而且界面上那个值会立刻显示成钳制后的结果。
     """
-    text = str(value or "").strip().replace("：", ":")
-    if not text or ":" not in text:
-        return ""
-    hh, _, mm = text.partition(":")
+    text = str(value or "").strip().lower()
+    if not text:
+        return 0
+    unit = INTERVAL_UNITS.get(text[-1])
+    if unit is None:
+        number, unit = text, 60
+    else:
+        number = text[:-1].strip()
     try:
-        hour, minute = int(hh), int(mm)
+        amount = float(number)
     except (TypeError, ValueError):
+        return 0
+    if amount <= 0:
+        return 0
+    seconds = int(amount * unit)
+    return max(MIN_INTERVAL_SECONDS, min(MAX_INTERVAL_SECONDS, seconds))
+
+
+def format_interval(seconds: int) -> str:
+    """秒 → `<数字><单位>`（界面回显）。取**能整除的最大单位**。"""
+    value = int(seconds or 0)
+    if value <= 0:
         return ""
-    if not (0 <= hour <= 23 and 0 <= minute <= 59):
-        return ""
-    return f"{hour:02d}:{minute:02d}"
+    for suffix, unit in (("d", 86400), ("h", 3600), ("m", 60)):
+        if value % unit == 0:
+            return f"{value // unit}{suffix}"
+    return f"{value // 60}m"
 
 
 def clamp_percent(value: Any, default: int = DEFAULT_PROBE_PERCENT) -> int:
@@ -281,29 +315,27 @@ def _sync_strategy(platform: str) -> str:
     return value if value in SYNC_STRATEGIES else "local_only"
 
 
-def get_log_cleanup_daily_at() -> str:
+def get_log_cleanup_interval_seconds() -> int:
     if not _config_bool("log_cleanup_enabled"):
-        return ""
-    return parse_hhmm(_config_text("log_cleanup_time")) or DEFAULT_CLEANUP_TIME
+        return 0
+    return parse_interval(_config_text("log_cleanup_interval") or DEFAULT_CLEANUP_INTERVAL)
 
 
-def get_auto_probe_daily_at(platform: str) -> str:
-    key = f"{platform}_auto_probe_enabled"
-    if not _config_bool(key):
-        return ""
-    mode = _config_text(f"{platform}_probe_mode").lower()
-    if mode not in PROBE_MODES:
-        return ""
-    return parse_hhmm(_config_text(f"{platform}_probe_time")) or DEFAULT_PROBE_TIME
+def get_auto_probe_interval_seconds(platform: str) -> int:
+    if not _config_bool(f"{platform}_auto_probe_enabled"):
+        return 0
+    # 范围不在白名单时整条规则不跑，**不**退化成「全部」：静默放大执行量最危险。
+    if _config_text(f"{platform}_probe_mode").lower() not in PROBE_MODES:
+        return 0
+    return parse_interval(_config_text(f"{platform}_probe_interval") or DEFAULT_PROBE_INTERVAL)
 
 
-def get_auto_refresh_daily_at(platform: str) -> str:
+def get_auto_refresh_interval_seconds(platform: str) -> int:
     if not _config_bool(f"{platform}_auto_refresh_enabled"):
-        return ""
-    scope = _config_text(f"{platform}_refresh_scope").lower()
-    if scope not in REFRESH_SCOPES:
-        return ""
-    return parse_hhmm(_config_text(f"{platform}_refresh_time")) or DEFAULT_REFRESH_TIME
+        return 0
+    if _config_text(f"{platform}_refresh_scope").lower() not in REFRESH_SCOPES:
+        return 0
+    return parse_interval(_config_text(f"{platform}_refresh_interval") or DEFAULT_REFRESH_INTERVAL)
 
 
 #: 每处理一个账号之间的间隔。定时任务在无人值守时跑，没有理由贴着上游打 ——
@@ -605,15 +637,15 @@ def run_log_cleanup(*, now: Optional[datetime] = None) -> dict[str, Any]:
 
 # ── 周期任务自注册 ────────────────────────────────────────────────────
 #
-# 用 `daily_at`（每天 HH:MM）而不是 `interval_seconds`：这些任务要的是
-# 「凌晨三点跑」。读配置失败 / 开关关着 / 时间非法 → 返回空串 = 本次不跑，
-# scheduler 会跳过（不需要注销）。
+# 用 `interval_seconds`：用户要的是「执行间隔」。开关关着 / 间隔非法 → 返回 0
+# = 本次不跑，scheduler 会跳过（不需要注销）。每 N 秒是**距上次跑满 N 秒**，
+# 重启时 `start()` 会把 last_run_at 顶到当前时间，不会一启动就瞬间触发。
 
 from core.scheduler import register_job as _register_job  # noqa: E402
 
 _register_job(
     "log_auto_cleanup",
-    daily_at=get_log_cleanup_daily_at,
+    interval_seconds=get_log_cleanup_interval_seconds,
     runner=run_log_cleanup,
 )
 
@@ -635,12 +667,12 @@ def _bind_refresh(_platform: str):
 for _p in ("chatgpt", "grok"):
     _register_job(
         f"{_p}_auto_probe",
-        daily_at=(lambda _k=_p: get_auto_probe_daily_at(_k)),
+        interval_seconds=(lambda _k=_p: get_auto_probe_interval_seconds(_k)),
         runner=_bind_probe(_p),
     )
     _register_job(
-        f"{_p}_auto_refresh_daily",
-        daily_at=(lambda _k=_p: get_auto_refresh_daily_at(_k)),
+        f"{_p}_auto_refresh",
+        interval_seconds=(lambda _k=_p: get_auto_refresh_interval_seconds(_k)),
         runner=_bind_refresh(_p),
     )
 
@@ -655,11 +687,12 @@ __all__ = [
     "clamp_count",
     "clamp_days",
     "clamp_percent",
-    "get_auto_probe_daily_at",
-    "get_auto_refresh_daily_at",
-    "get_log_cleanup_daily_at",
+    "get_auto_probe_interval_seconds",
+    "get_auto_refresh_interval_seconds",
+    "get_log_cleanup_interval_seconds",
     "last_probe_at",
-    "parse_hhmm",
+    "format_interval",
+    "parse_interval",
     "run_auto_probe",
     "run_auto_refresh",
     "run_log_cleanup",

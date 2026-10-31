@@ -191,47 +191,46 @@ class MaintenanceIntervalTests(unittest.TestCase):
         for key in (
             "chatgpt_auto_refresh_enabled",
             "chatgpt_refresh_scope",
-            "chatgpt_refresh_time",
+            "chatgpt_refresh_interval",
             "chatgpt2api_auto_sync_enabled",
             "chatgpt2api_api_url",
             "chatgpt2api_api_key",
         ):
             config_store.set(key, "")
 
-    def test_auto_refresh_daily_off_when_disabled(self):
-        """2026-10-31 起自动刷新是**每天定点**任务，不再是 interval。
+    def test_auto_refresh_off_when_disabled(self):
+        """自动刷新由 `services/local_maintenance` 的间隔任务承担。
 
-        老实现用 `interval_seconds`（每 86400 秒一次），每次进程重启都会把
-        执行时刻往后推 —— 用户设的「凌晨三点」会慢慢挪到下午。现在由
-        `services/local_maintenance.get_auto_refresh_daily_at` 返回 `HH:MM`。
+        2026-10-31 定型：用户要的是**执行间隔**（「每 6 小时」这种粒度用固定
+        时刻表达不了），所以走 `interval_seconds` 而不是每天几点。
         """
-        from services.local_maintenance import get_auto_refresh_daily_at
+        from services.local_maintenance import get_auto_refresh_interval_seconds
 
-        self.assertEqual(get_auto_refresh_daily_at("chatgpt"), "")
+        self.assertEqual(get_auto_refresh_interval_seconds("chatgpt"), 0)
 
-    def test_auto_refresh_daily_at_when_enabled(self):
-        from services.local_maintenance import get_auto_refresh_daily_at
-
-        self.config_store.set("chatgpt_auto_refresh_enabled", "1")
-        self.config_store.set("chatgpt_refresh_scope", "failed")
-        self.config_store.set("chatgpt_refresh_time", "04:30")
-        self.assertEqual(get_auto_refresh_daily_at("chatgpt"), "04:30")
-
-    def test_auto_refresh_daily_at_falls_back_to_default_time(self):
-        from services.local_maintenance import get_auto_refresh_daily_at
+    def test_auto_refresh_interval_when_enabled(self):
+        from services.local_maintenance import get_auto_refresh_interval_seconds
 
         self.config_store.set("chatgpt_auto_refresh_enabled", "1")
         self.config_store.set("chatgpt_refresh_scope", "failed")
-        self.config_store.set("chatgpt_refresh_time", "")
-        self.assertEqual(get_auto_refresh_daily_at("chatgpt"), "04:00")
+        self.config_store.set("chatgpt_refresh_interval", "90m")
+        self.assertEqual(get_auto_refresh_interval_seconds("chatgpt"), 5400)
 
-    def test_auto_refresh_daily_off_when_scope_invalid(self):
+    def test_auto_refresh_interval_falls_back_to_default(self):
+        from services.local_maintenance import get_auto_refresh_interval_seconds
+
+        self.config_store.set("chatgpt_auto_refresh_enabled", "1")
+        self.config_store.set("chatgpt_refresh_scope", "failed")
+        self.config_store.set("chatgpt_refresh_interval", "")
+        self.assertEqual(get_auto_refresh_interval_seconds("chatgpt"), 6 * 3600)
+
+    def test_auto_refresh_off_when_scope_invalid(self):
         """范围配错（不在白名单里）时整个任务不跑，而不是退化成「全部」。"""
-        from services.local_maintenance import get_auto_refresh_daily_at
+        from services.local_maintenance import get_auto_refresh_interval_seconds
 
         self.config_store.set("chatgpt_auto_refresh_enabled", "1")
         self.config_store.set("chatgpt_refresh_scope", "whatever")
-        self.assertEqual(get_auto_refresh_daily_at("chatgpt"), "")
+        self.assertEqual(get_auto_refresh_interval_seconds("chatgpt"), 0)
 
     def test_chatgpt2api_interval_zero_when_disabled(self):
         from services.chatgpt_maintenance import get_chatgpt2api_auto_sync_interval_seconds
@@ -275,19 +274,24 @@ class SchedulerRegistrationTests(unittest.TestCase):
         self.assertIn("chatgpt2api_auto_sync", jobs)
         self.assertIn("sub2api_auto_sync", jobs)
 
-    def test_interval_based_auto_refresh_is_retired(self):
-        """旧的 interval 版刷新任务**不能再注册**。
+    def test_auto_refresh_is_registered_exactly_once(self):
+        """自动刷新只能有一个调度入口。
 
-        两个都注册的后果是同一个账号每天被刷两遍，而且其中一条链在界面上
-        看不见 —— 正是这次改版要消灭的那类问题。
+        历史上有过两个（旧 interval 循环 + 新的定时任务），后果是同一个账号
+        被刷两遍、而且其中一条链在界面上看不见。现在由
+        `services/local_maintenance` 独家承担。
         """
         import services.chatgpt_maintenance  # noqa: F401
+        import services.local_maintenance  # noqa: F401
         from core.scheduler import registered_jobs
 
+        jobs = registered_jobs()
+        self.assertIn("chatgpt_auto_refresh", jobs, "自动刷新的调度入口不见了")
+        # chatgpt_maintenance 只管面板同步，不许再注册刷新相关任务
         self.assertNotIn(
-            "chatgpt_auto_refresh",
-            registered_jobs(),
-            "interval 版自动刷新又注册回来了 —— 会与定时任务双重刷新",
+            "chatgpt_auto_refresh_legacy",
+            jobs,
+            "又出现了第二个刷新入口 —— 会双重刷新",
         )
 
     def test_panel_sync_job_interval_reads_the_switch(self):

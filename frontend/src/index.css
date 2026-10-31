@@ -1766,3 +1766,20 @@ body {
     padding-left: 10px;
   }
 }
+
+/* 间隔参数：数字 + 单位。两个控件要贴在一起（中间留 8px），
+   否则看起来像两个不相干的字段。 */
+.maint-interval {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.maint-interval__amount {
+  width: 78px;
+  font-variant-numeric: tabular-nums;
+}
+
+.maint-interval__unit {
+  width: 96px;
+}

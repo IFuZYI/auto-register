@@ -504,7 +504,7 @@ git diff --stat
 | 启动报 `no such column` | 新列的迁移排在 ORM 读之后 | 调整迁移顺序（§1.3） |
 | 前端「保存了但没生效」 | 表单字段名与配置键不一致 | 两处对照（§2.3） |
 | Outlook 导入全失败，报 `AADSTS7000012: The grant was obtained for a different tenant` | `client_id` 与 `refresh_token` 两段顺序反了（多数令牌导出工具是 `邮箱----密码----token----client_id`） | 已按 GUID 形状自动纠正（§5.2）；仍报这个错说明两段都不像 GUID，原样交给微软给真实错误 |
-| 定时任务设了时间却不跑 | `daily_at` 回调返回空串（开关关着 / 时间非法 / 范围不在白名单） | 看 `services/local_maintenance.get_*_daily_at` 的返回值；空串 = 本次不跑，不是「时间没到」 |
+| 定时任务设了间隔却不跑 | 间隔回调返回 0（开关关着 / 间隔非法 / 范围不在白名单） | 看 `services/local_maintenance.get_*_interval_seconds` 的返回值；0 = 主动不跑，不是「还没到」 |
 | 窄屏表格「内容被裁、也没有滚动条」 | 只把 `tr` 设成 `block`，`table` 还是 `display: table` —— 浏览器把 block 级 tbody 包进匿名 table-cell，宽度仍按列算 | `table` / `tbody` 都设 `display: block`，并 `col { width: auto }`（见 §5.1） |
 
 ### 5.1 窄屏（< 768px）的表格折叠

@@ -137,16 +137,16 @@ const LOCAL_KEYS: string[] = LOCAL_PLATFORMS.flatMap(({ prefix }) => [
   `${prefix}_probe_mode`,
   `${prefix}_probe_sample_percent`,
   `${prefix}_probe_strategy`,
-  `${prefix}_probe_time`,
+  `${prefix}_probe_interval`,
   `${prefix}_auto_refresh_enabled`,
   `${prefix}_refresh_scope`,
   `${prefix}_refresh_random_count`,
-  `${prefix}_refresh_time`,
+  `${prefix}_refresh_interval`,
   `${prefix}_refresh_disable_banned`,
   `${prefix}_sync_strategy`,
 ])
 
-const LOG_KEYS = ['log_cleanup_enabled', 'log_cleanup_keep_days', 'log_cleanup_time']
+const LOG_KEYS = ['log_cleanup_enabled', 'log_cleanup_keep_days', 'log_cleanup_interval']
 const ALL_KEYS = [...LOCAL_KEYS, ...LOG_KEYS, ...PANEL_CARDS.map((c) => c.switchKey)]
 
 /** 布尔键：提交时要归一成 "0"/"1"，不能把 antd 的 true/false 直接塞进文本列。 */
@@ -174,17 +174,17 @@ const BOOLEAN_DEFAULTS: Record<string, boolean> = Object.fromEntries(
 /** 字符串键的默认值。`load()` 时把库里是空的键补成默认，界面才不会开出空框。 */
 const TEXT_DEFAULTS: Record<string, string> = {
   log_cleanup_keep_days: '7',
-  log_cleanup_time: '05:00',
+  log_cleanup_interval: '24h',
 }
 for (const { prefix } of LOCAL_PLATFORMS) {
   Object.assign(TEXT_DEFAULTS, {
     [`${prefix}_probe_mode`]: 'sample',
     [`${prefix}_probe_sample_percent`]: '20',
     [`${prefix}_probe_strategy`]: 'oldest',
-    [`${prefix}_probe_time`]: '03:00',
+    [`${prefix}_probe_interval`]: '6h',
     [`${prefix}_refresh_scope`]: 'failed',
     [`${prefix}_refresh_random_count`]: '50',
-    [`${prefix}_refresh_time`]: '04:00',
+    [`${prefix}_refresh_interval`]: '6h',
     [`${prefix}_sync_strategy`]: 'local_only',
   })
 }
@@ -239,6 +239,86 @@ function TextRow({
         <Input style={{ width }} placeholder={placeholder} />
       </Form.Item>
       {suffix ? <span className="maint-rule__suffix">{suffix}</span> : null}
+    </SettingRow>
+  )
+}
+
+/**
+ * 一行间隔参数：数字 + 单位。
+ *
+ * 用户 2026-10-31 明确要的是「执行间隔」而不是「执行时间」——「每天凌晨三点」
+ * 只是**间隔 24 小时**的一个特例，而「每 6 小时」「每 30 分钟」这种粒度用固定
+ * 时刻根本表达不了。
+ *
+ * 存的是**一个字符串**（`6h` / `30m` / `1d`）：解析归后端
+ * （`services/local_maintenance.parse_interval`），前端只负责拆成两个控件再拼
+ * 回去。不在前端算秒数 —— 那样两边的钳制范围会各写一份、迟早不一致。
+ */
+const INTERVAL_UNITS = [
+  { value: 'm', label: '分钟' },
+  { value: 'h', label: '小时' },
+  { value: 'd', label: '天' },
+]
+
+function splitInterval(value: unknown, fallbackUnit: string): { amount: string; unit: string } {
+  const text = String(value ?? '').trim().toLowerCase()
+  const m = /^(\d+)\s*([mhd])$/.exec(text)
+  if (m) return { amount: m[1], unit: m[2] }
+  if (/^\d+$/.test(text)) return { amount: text, unit: fallbackUnit }
+  return { amount: '', unit: fallbackUnit }
+}
+
+function IntervalRow({
+  name,
+  label,
+  hint,
+  defaultUnit = 'h',
+}: {
+  name: string
+  label: string
+  hint?: string
+  defaultUnit?: string
+}) {
+  const form = Form.useFormInstance()
+  const raw = Form.useWatch(name)
+  const { amount, unit } = splitInterval(raw, defaultUnit)
+
+  const commit = (nextAmount: string, nextUnit: string) => {
+    // 数字位允许清空（用户从「6」删到空再打新数字），但不写回 `h` 这种空壳 ——
+    // 后端解析空值 = 任务不跑，会让「正在编辑」变成「悄悄停掉这条规则」。
+    if (!nextAmount) return
+    form.setFieldValue(name, `${nextAmount}${nextUnit}`)
+  }
+
+  return (
+    <SettingRow label={label} hint={hint}>
+      {/*
+        必须先把这个字段**注册**进 Form，`Form.useWatch(name)` 才看得到它。
+        下面那两个控件是普通受控组件（值是拼出来的 `6h` 这种字符串，
+        没有哪个 antd 控件直接对应），而 `useWatch` 对**未注册**字段一律返回
+        undefined —— 实测后果是数字框永远空着，误以为没配过
+        （同样的坑 `ConfigPanels.tsx` 里注释过：`_set` 键 watch 不到）。
+        `hidden` 只用于注册，不显示。
+      */}
+      <Form.Item name={name} hidden>
+        <Input />
+      </Form.Item>
+      <span className="maint-interval">
+        <Input
+          className="maint-interval__amount"
+          value={amount}
+          inputMode="numeric"
+          aria-label={`${label}的数值`}
+          onChange={(e) => commit(e.target.value.replace(/[^0-9]/g, ''), unit)}
+        />
+        <Select
+          className="maint-interval__unit"
+          value={unit}
+          options={INTERVAL_UNITS}
+          aria-label={`${label}的单位`}
+          onChange={(next) => commit(amount || '1', String(next))}
+        />
+      </span>
     </SettingRow>
   )
 }
@@ -315,11 +395,10 @@ function LocalPlatformSection({
             />
           </>
         ) : null}
-        <TextRow
-          name={`${prefix}_probe_time`}
-          label="执行时间"
-          placeholder="03:00"
-          hint="每天这个时刻跑一次（本地时间，24 小时制）。"
+        <IntervalRow
+          name={`${prefix}_probe_interval`}
+          label="执行间隔"
+          hint="每隔这么久跑一轮。以「距上次跑完」算，不是对齐整点 —— 所以重启进程不会改变节奏。最短 5 分钟，最长 30 天。"
         />
       </RuleBlock>
 
@@ -348,11 +427,10 @@ function LocalPlatformSection({
             hint="一次刷太多，出口 IP 的表现就像攻击。随机摊开、每天一小批，才不容易触发限流。"
           />
         ) : null}
-        <TextRow
-          name={`${prefix}_refresh_time`}
-          label="执行时间"
-          placeholder="04:00"
-          hint="每天这个时刻跑一次（本地时间，24 小时制）。"
+        <IntervalRow
+          name={`${prefix}_refresh_interval`}
+          label="执行间隔"
+          hint="每隔这么久跑一轮。以「距上次跑完」算，不是对齐整点。最短 5 分钟，最长 30 天。"
         />
         <SettingRow
           label="封禁账号标记为禁用"
@@ -497,11 +575,10 @@ export function MaintenancePanel() {
             placeholder="7"
             hint="超过这个天数的记录会被删掉。最少 1 天。"
           />
-          <TextRow
-            name="log_cleanup_time"
-            label="执行时间"
-            placeholder="05:00"
-            hint="每天这个时刻跑一次（本地时间，24 小时制）。"
+          <IntervalRow
+            name="log_cleanup_interval"
+            label="执行间隔"
+            hint="每隔这么久清一次。以「距上次跑完」算，不是对齐整点。最短 5 分钟，最长 30 天。"
           />
         </RuleBlock>
       </section>

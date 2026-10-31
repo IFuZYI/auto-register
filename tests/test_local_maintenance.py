@@ -7,20 +7,24 @@
 
 from __future__ import annotations
 
+import pathlib
 import unittest
 from datetime import datetime
 
 from services.local_maintenance import (
     DEFAULT_REFRESH_RANDOM_COUNT,
+    MAX_INTERVAL_SECONDS,
+    MIN_INTERVAL_SECONDS,
     Pick,
     clamp_count,
     clamp_days,
     clamp_percent,
-    get_auto_probe_daily_at,
-    get_auto_refresh_daily_at,
-    get_log_cleanup_daily_at,
+    format_interval,
+    get_auto_probe_interval_seconds,
+    get_auto_refresh_interval_seconds,
+    get_log_cleanup_interval_seconds,
     last_probe_at,
-    parse_hhmm,
+    parse_interval,
     select_probe_targets,
     select_refresh_targets,
 )
@@ -30,26 +34,41 @@ def _pick(idx: int, status: str = "registered", probed: float = 0.0) -> Pick:
     return Pick(id=idx, email=f"u{idx}@example.com", status=status, last_probe_at=probed)
 
 
-class ParseHhmmTests(unittest.TestCase):
-    """"用户手打的时间不该让定时任务静默失效。"""
+class ParseIntervalTests(unittest.TestCase):
+    """间隔解析。用户 2026-10-31 把「执行时间」改成「执行间隔」。"""
 
-    def test_accepts_and_pads(self):
-        self.assertEqual(parse_hhmm("3:5"), "03:05")
-        self.assertEqual(parse_hhmm(" 09:30 "), "09:30")
-        self.assertEqual(parse_hhmm("23:59"), "23:59")
-        self.assertEqual(parse_hhmm("00:00"), "00:00")
+    def test_accepts_number_plus_unit(self):
+        self.assertEqual(parse_interval("30m"), 1800)
+        self.assertEqual(parse_interval("6h"), 21600)
+        self.assertEqual(parse_interval("1d"), 86400)
+        self.assertEqual(parse_interval(" 6H "), 21600)
 
-    def test_accepts_fullwidth_colon(self):
-        """中文输入法下打出来的是全角冒号 —— 直接拒绝等于「我明明设了却不跑」。"""
-        self.assertEqual(parse_hhmm("09：05"), "09:05")
+    def test_bare_number_means_minutes(self):
+        """手打 `90` 时最自然的单位是分钟（界面上会带单位，这里是兜底）。"""
+        self.assertEqual(parse_interval("90"), 5400)
 
-    def test_rejects_out_of_range(self):
-        for bad in ("24:00", "09:60", "-1:00", "abc", "", "  ", "0900", "09:", ":30"):
-            self.assertEqual(parse_hhmm(bad), "", f"{bad!r} 应该被判为非法")
+    def test_clamps_instead_of_rejecting(self):
+        """`1m` 的本意是「尽量勤」—— 给他下限比让他什么都不跑更接近意图。"""
+        self.assertEqual(parse_interval("1m"), MIN_INTERVAL_SECONDS)
+        self.assertEqual(parse_interval("90d"), MAX_INTERVAL_SECONDS)
 
-    def test_rejects_none_and_numbers(self):
-        self.assertEqual(parse_hhmm(None), "")
-        self.assertEqual(parse_hhmm(930), "")
+    def test_rejects_garbage(self):
+        for bad in ("abc", "", "  ", "h", "6x", "-3h", "0h", None):
+            self.assertEqual(parse_interval(bad), 0, f"{bad!r} 应该判为非法")
+
+    def test_format_round_trips_to_the_biggest_unit(self):
+        self.assertEqual(format_interval(21600), "6h")
+        self.assertEqual(format_interval(1800), "30m")
+        self.assertEqual(format_interval(86400), "1d")
+        self.assertEqual(format_interval(300), "5m")
+        self.assertEqual(format_interval(0), "")
+
+    def test_format_output_is_parseable(self):
+        for seconds in (300, 1800, 21600, 86400, 7 * 86400):
+            self.assertEqual(
+                parse_interval(format_interval(seconds)), seconds,
+                f"{seconds}s 的展示形式不能被自己解析回来",
+            )
 
 
 class ClampTests(unittest.TestCase):
@@ -157,149 +176,118 @@ class RefreshSelectionTests(unittest.TestCase):
         self.assertEqual(select_refresh_targets([_pick(1, "expired")], scope="whatever"), [])
 
 
-class DailyScheduleGateTests(unittest.TestCase):
-    """三个开关各自的「今天跑不跑」，以及时间默认值。"""
+class IntervalGateTests(unittest.TestCase):
+    """三个开关各自的「多久跑一轮」，以及默认值。"""
 
     def setUp(self):
         from core.config_store import config_store
 
         self.config_store = config_store
         for key in (
-            "log_cleanup_enabled",
-            "log_cleanup_time",
-            "chatgpt_auto_probe_enabled",
-            "chatgpt_probe_mode",
-            "chatgpt_probe_time",
-            "chatgpt_auto_refresh_enabled",
-            "chatgpt_refresh_scope",
-            "chatgpt_refresh_time",
+            "log_cleanup_enabled", "log_cleanup_interval",
+            "chatgpt_auto_probe_enabled", "chatgpt_probe_mode", "chatgpt_probe_interval",
+            "chatgpt_auto_refresh_enabled", "chatgpt_refresh_scope", "chatgpt_refresh_interval",
         ):
             config_store.set(key, "")
 
     def test_everything_off_by_default(self):
-        self.assertEqual(get_log_cleanup_daily_at(), "")
-        self.assertEqual(get_auto_probe_daily_at("chatgpt"), "")
-        self.assertEqual(get_auto_refresh_daily_at("chatgpt"), "")
+        self.assertEqual(get_log_cleanup_interval_seconds(), 0)
+        self.assertEqual(get_auto_probe_interval_seconds("chatgpt"), 0)
+        self.assertEqual(get_auto_refresh_interval_seconds("chatgpt"), 0)
 
-    def test_defaults_when_time_blank(self):
+    def test_defaults_when_blank(self):
         self.config_store.set("log_cleanup_enabled", "1")
         self.config_store.set("chatgpt_auto_probe_enabled", "1")
         self.config_store.set("chatgpt_probe_mode", "sample")
         self.config_store.set("chatgpt_auto_refresh_enabled", "1")
         self.config_store.set("chatgpt_refresh_scope", "failed")
-        self.assertEqual(get_log_cleanup_daily_at(), "05:00")
-        self.assertEqual(get_auto_probe_daily_at("chatgpt"), "03:00")
-        self.assertEqual(get_auto_refresh_daily_at("chatgpt"), "04:00")
+        self.assertEqual(get_log_cleanup_interval_seconds(), 86400)
+        self.assertEqual(get_auto_probe_interval_seconds("chatgpt"), 21600)
+        self.assertEqual(get_auto_refresh_interval_seconds("chatgpt"), 21600)
+
+    def test_configured_interval_wins(self):
+        self.config_store.set("chatgpt_auto_probe_enabled", "1")
+        self.config_store.set("chatgpt_probe_mode", "sample")
+        self.config_store.set("chatgpt_probe_interval", "30m")
+        self.assertEqual(get_auto_probe_interval_seconds("chatgpt"), 1800)
 
     def test_invalid_scope_kills_the_job(self):
         """范围配错 → 整条规则不跑。退化成「全部」会静默放大执行量。"""
         self.config_store.set("chatgpt_auto_probe_enabled", "1")
         self.config_store.set("chatgpt_probe_mode", "nonsense")
-        self.assertEqual(get_auto_probe_daily_at("chatgpt"), "")
+        self.assertEqual(get_auto_probe_interval_seconds("chatgpt"), 0)
 
     def test_grok_is_independent_from_chatgpt(self):
         from core.config_store import config_store
 
         config_store.set("chatgpt_auto_probe_enabled", "1")
         config_store.set("chatgpt_probe_mode", "sample")
-        self.assertNotEqual(get_auto_probe_daily_at("chatgpt"), "")
-        self.assertEqual(get_auto_probe_daily_at("grok"), "", "开 ChatGPT 不该把 Grok 一起开起来")
+        self.assertNotEqual(get_auto_probe_interval_seconds("chatgpt"), 0)
+        self.assertEqual(get_auto_probe_interval_seconds("grok"), 0, "开 ChatGPT 不该把 Grok 一起开起来")
 
 
-class SchedulerDailyAtTests(unittest.TestCase):
-    """`_Job` 的每天定点触发。
+class SchedulerIntervalTests(unittest.TestCase):
+    """`_Job` 的间隔触发。
 
-    判据是「`last_run_at` < 最近一次应跑时刻」，而不是「距上次跑满 24 小时」：
-    后者在每次进程重启时都会漂移（`start()` 把 `last_run_at` 顶到当前时间），
-    用户设的「凌晨三点」会慢慢挪到下午。
+    语义是「距上次跑满 N 秒」—— 用户要的「执行间隔」就是这个。`start()` 会把
+    `last_run_at` 顶到当前时间，所以重启进程不会一启动就瞬间触发，也不会
+    改变节奏（它本来就不对齐整点）。
     """
 
-    def _job(self, hhmm: str, last_run_at: float):
+    def _job(self, seconds, last_run_at):
         from core.scheduler import _Job
 
-        return _Job(
-            name="probe",
-            runner=lambda: None,
-            daily_at=lambda: hhmm,
-            last_run_at=last_run_at,
-        )
+        return _Job(name="probe", runner=lambda: None, interval=lambda: seconds, last_run_at=last_run_at)
 
-    def _at(self, hour: int, minute: int) -> float:
-        return datetime.now().replace(hour=hour, minute=minute, second=0, microsecond=0).timestamp()
+    def test_not_due_before_the_interval(self):
+        self.assertEqual(self._job(3600, last_run_at=1_000_000).due(1_003_000), 0.0)
 
-    def test_not_due_before_the_hour(self):
-        """`start()` 会把 `last_run_at` 顶到当前时间，所以启动那一刻不该补跑。"""
-        job = self._job("03:00", last_run_at=self._at(2, 59))
-        self.assertEqual(job.due(self._at(2, 59)), 0.0)
+    def test_due_after_the_interval(self):
+        job = self._job(3600, last_run_at=1_000_000)
+        self.assertGreater(job.due(1_003_601), 0.0)
 
-    def test_due_after_the_hour(self):
-        job = self._job("03:00", last_run_at=self._at(2, 59))
-        self.assertGreater(job.due(self._at(3, 1)), 0.0)
+    def test_zero_interval_skips(self):
+        """0 = 主动不跑（开关关着 / 配置非法），不是「立刻跑」。"""
+        self.assertEqual(self._job(0, last_run_at=0).due(1_000_000), 0.0)
 
-    def test_never_ran_catches_up(self):
-        """从没跑过（last_run_at=0）时会补跑一次。
-
-        生产里不会出现这个状态（`start()` 会顶上当前时间），保留它是为了
-        明确语义：这个判据问的是「最近一次应跑时刻之后跑过没有」，
-        而不是「距上次跑满 24 小时没有」。
-        """
-        job = self._job("03:00", last_run_at=0.0)
-        self.assertGreater(job.due(self._at(12, 0)), 0.0)
-
-    def test_not_due_again_same_day(self):
-        job = self._job("03:00", last_run_at=self._at(3, 0))
-        self.assertEqual(job.due(self._at(9, 0)), 0.0)
-
-    def test_due_again_next_day(self):
-        yesterday = self._at(3, 0) - 86400
-        job = self._job("03:00", last_run_at=yesterday)
-        self.assertGreater(job.due(self._at(3, 5)), 0.0)
-
-    def test_restart_does_not_drift_the_hour(self):
-        """重启把 `last_run_at` 顶到当前时间后，**同一个钟面时刻**仍会触发。
-
-        用 interval 的话这里会变成「上次跑的那一刻 + 24h」，也就是今天
-        10:00 重启、明天 10:00 才跑 —— 用户设的 03:00 永远轮不到。
-        """
-        restarted_at = self._at(10, 0)
-        job = self._job("03:00", last_run_at=restarted_at)
-        self.assertEqual(job.due(self._at(23, 0)), 0.0, "当天已经过去了，不该补跑")
-        tomorrow = self._at(3, 0) + 86400
-        self.assertGreater(job.due(tomorrow), 0.0, "第二天 03:00 必须触发")
-
-    def test_blank_or_invalid_time_never_runs(self):
-        for spec in ("", "  ", "banana", "25:00"):
-            self.assertEqual(self._job(spec, last_run_at=0.0).due(self._at(12, 0)), 0.0)
-
-    def test_interval_jobs_are_unaffected(self):
+    def test_raising_interval_callback_skips_instead_of_crashing(self):
         from core.scheduler import _Job
 
-        job = _Job(name="panel_sync", runner=lambda: None, interval=lambda: 60, last_run_at=0.0)
-        self.assertGreater(job.due(self._at(12, 0)), 0.0)
+        def boom() -> int:
+            raise RuntimeError("配置读不到")
 
-    def test_register_requires_a_trigger(self):
-        """两个触发方式都不给 = 一个永远不会跑的任务，直接拒绝注册。"""
+        job = _Job(name="probe", runner=lambda: None, interval=boom, last_run_at=0.0)
+        self.assertEqual(job.due(1_000_000), 0.0)
+
+    def test_sub_second_interval_is_not_truncated_to_zero(self):
+        """`int(0.9)` 会变成 0，而 0 的语义是「主动跳过」—— 那会静默吞掉这个任务。"""
+        from core.scheduler import _Job
+
+        job = _Job(name="probe", runner=lambda: None, interval=lambda: 0.9, last_run_at=0.0)
+        self.assertGreater(job.due(1_000_000), 0.0)
+
+    def test_register_requires_an_interval(self):
         from core.scheduler import register_job
 
-        with self.assertRaises(ValueError):
+        with self.assertRaises(TypeError):
             register_job("dangling", runner=lambda: None)
 
 
 class JobRegistrationTests(unittest.TestCase):
-    def test_local_maintenance_registers_five_daily_jobs(self):
+    def test_local_maintenance_registers_five_interval_jobs(self):
         import services.local_maintenance  # noqa: F401
         from core.scheduler import _jobs
 
         expected = {
             "log_auto_cleanup",
             "chatgpt_auto_probe",
-            "chatgpt_auto_refresh_daily",
+            "chatgpt_auto_refresh",
             "grok_auto_probe",
-            "grok_auto_refresh_daily",
+            "grok_auto_refresh",
         }
         for name in expected:
             self.assertIn(name, _jobs, f"{name} 没有注册")
-            self.assertIsNotNone(_jobs[name].daily_at, f"{name} 不是每天定点任务")
+            self.assertIsNotNone(_jobs[name].interval, f"{name} 不是间隔任务")
 
 class BannedSwitchDefaultTests(unittest.TestCase):
     """「封禁账号标记为禁用」默认开 —— 不能靠改默认值改掉既有行为。"""
@@ -565,3 +553,48 @@ class RefreshSyncStrategyTests(unittest.TestCase):
         self.assertIn("refresh", order, "拉取失败把刷新也带崩了")
         config_store.set("chatgpt_sync_strategy", "")
         config_store.set("chatgpt_refresh_scope", "")
+
+
+class MaintenancePanelFrontendTests(unittest.TestCase):
+    """自动维护面板的接线（源码级契约）。
+
+    前端没有单测基础设施，能钉住的是「这段结构必须存在」—— 都是踩过坑的点。
+    """
+
+    SRC = pathlib.Path("/data/workspace/Register/frontend/src/components/settings/MaintenancePanel.tsx")
+
+    def _src(self) -> str:
+        return self.SRC.read_text(encoding="utf-8")
+
+    def test_interval_row_registers_the_field(self):
+        """间隔控件必须先 `Form.Item name=...` 注册，`useWatch` 才看得到值。
+
+        踩过：`IntervalRow` 里只放了两个普通受控组件，字段没注册 ——
+        `Form.useWatch(name)` 对未注册字段返回 undefined，于是数字框**永远是空的**，
+        即使库里配了 `6h`。布局看着完全正常，只有读那个 input 的 value 才发现。
+
+        （同一个坑 `ConfigPanels.tsx` 里注释过：`_set` 键 watch 不到。）
+        """
+        src = self._src()
+        block = src[src.index("function IntervalRow("):src.index("/** 一行下拉参数。 */")]
+        self.assertIn("Form.useWatch(name)", block, "间隔控件没读表单值")
+        self.assertIn("<Form.Item name={name}", block, "字段没注册进 Form —— 读到的永远是 undefined")
+        self.assertIn("splitInterval(", block, "没把 `6h` 拆成数字 + 单位")
+
+    def test_no_leftover_execution_time_keys(self):
+        """「执行时间」的键名必须清干净（改成间隔后它们不再被读写）。
+
+        断言的是**键名**和**界面标签**，不是「文件里出现过这四个字」——
+        注释里正当地解释「为什么从执行时间改成执行间隔」时会出现这个词，
+        按字面禁掉会让文档和测试互相打架。
+        """
+        src = self._src()
+        for stale in ("_probe_time", "_refresh_time", "log_cleanup_time"):
+            self.assertNotIn(stale, src, f"面板里还残留旧的配置键 {stale}")
+        self.assertNotIn('label="执行时间"', src, "界面上还留着「执行时间」标签")
+
+    def test_default_intervals_are_present(self):
+        """空值时的默认间隔 —— 不给默认的话开关一开就是空框，看着像配错了。"""
+        src = self._src()
+        for default in ("'6h'", "'24h'"):
+            self.assertIn(default, src, f"缺少默认间隔 {default}")
