@@ -503,6 +503,33 @@ git diff --stat
 | 分库后账号「消失」 | 裸 `select(AccountModel)` 漏了平台库 | 走 `account_repository` |
 | 启动报 `no such column` | 新列的迁移排在 ORM 读之后 | 调整迁移顺序（§1.3） |
 | 前端「保存了但没生效」 | 表单字段名与配置键不一致 | 两处对照（§2.3） |
+| 窄屏表格「内容被裁、也没有滚动条」 | 只把 `tr` 设成 `block`，`table` 还是 `display: table` —— 浏览器把 block 级 tbody 包进匿名 table-cell，宽度仍按列算 | `table` / `tbody` 都设 `display: block`，并 `col { width: auto }`（见 §5.1） |
+
+### 5.1 窄屏（< 768px）的表格折叠
+
+宽表在 390px 上没法看：账号表实测容器 358px、表格 1042px，sticky 的操作列
+**盖在**右侧列上面 —— 那一列永远看不见。
+
+做法：隐藏表头，每个单元格用 `::before` 渲染自己的列名（`content: attr(data-label)`），
+一行变成一张小卡片。
+
+```tsx
+const columns = withDataLabels(columns)   // lib/tableCards.ts，标签从列的 title 生成
+<Table className="table-cards" scroll={narrow ? undefined : { x: 1050 }} ... />
+```
+
+四条**必须一起**成立，少一条就退回到「内容被裁、也没有滚动条」：
+
+1. `.table-cards table { display: block !important }` —— 退出表格格式化上下文
+2. `.table-cards .ant-table-tbody { display: block; width: 100% }`
+3. `.table-cards col { width: auto !important }` —— antd 按列的 `width` 生成 `<colgroup>`，光设 `table-layout: auto` 不够
+4. 窄屏去掉 `scroll.x` 与 `fixed: 'right'`（折叠后横向滚动没意义，sticky 会把操作列浮在卡片上）
+
+其余规则：
+- **每个单元格都必须有 `data-label`**。漏一个就渲染成没有标签的裸值 —— 这个失败**只在折叠态可见**，宽屏下完全看不出来。所以标签由列自己的 `title` 生成，不要每页手写。
+- **选择列没有 `title`**，折叠后会渲染出裸复选框 —— 窄屏直接隐藏。
+- **长文本用 `.cell-ellipsis` 包一层 span**。直接给 `td` 设 `text-overflow` 无效：折叠时 td 是 flex 容器，文本节点没有自己的盒子。
+- **低价值列在窄屏隐藏**（`responsive: ['md']`），只留「是什么 / 谁的 / 能不能用 / 操作」。别名表 10 列全摊开是 421px/条。
 
 ---
 
