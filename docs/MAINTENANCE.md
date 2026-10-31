@@ -503,6 +503,7 @@ git diff --stat
 | 分库后账号「消失」 | 裸 `select(AccountModel)` 漏了平台库 | 走 `account_repository` |
 | 启动报 `no such column` | 新列的迁移排在 ORM 读之后 | 调整迁移顺序（§1.3） |
 | 前端「保存了但没生效」 | 表单字段名与配置键不一致 | 两处对照（§2.3） |
+| Outlook 导入全失败，报 `AADSTS7000012: The grant was obtained for a different tenant` | `client_id` 与 `refresh_token` 两段顺序反了（多数令牌导出工具是 `邮箱----密码----token----client_id`） | 已按 GUID 形状自动纠正（§5.2）；仍报这个错说明两段都不像 GUID，原样交给微软给真实错误 |
 | 窄屏表格「内容被裁、也没有滚动条」 | 只把 `tr` 设成 `block`，`table` 还是 `display: table` —— 浏览器把 block 级 tbody 包进匿名 table-cell，宽度仍按列算 | `table` / `tbody` 都设 `display: block`，并 `col { width: auto }`（见 §5.1） |
 
 ### 5.1 窄屏（< 768px）的表格折叠
@@ -531,6 +532,22 @@ const columns = withDataLabels(columns)   // lib/tableCards.ts，标签从列的
 - **长文本用 `.cell-ellipsis` 包一层 span**。直接给 `td` 设 `text-overflow` 无效：折叠时 td 是 flex 容器，文本节点没有自己的盒子。
 - **低价值列在窄屏隐藏**（`responsive: ['md']`），只留「是什么 / 谁的 / 能不能用 / 操作」。别名表 10 列全摊开是 421px/条。
 - **不要写死 `rgba(255,255,255,0.045)` 这种「暗色下的发丝线」**。亮色主题下它等于白底画白线 —— 分隔线彻底消失，而且不报错。用 `color-mix(in srgb, var(--border) 45%, transparent)`：`--border` 由 `applyThemeVars()` 按主题注入，两个主题下是同一条线的两个版本。
+
+### 5.2 Outlook 导入的字段顺序
+
+```
+邮箱----密码----client_id----refresh_token     ← 文档顺序
+邮箱----密码----refresh_token----client_id     ← 多数「Outlook 令牌导出」工具的顺序
+```
+
+两种都收。判断依据是形状：微软的 `client_id` 一律是 GUID（8-4-4-4-12 共 36 位），
+`refresh_token` 不是（MSA 的是 `M.C5xx_…` 一长串）。第 3 段不像 GUID、第 4 段像
+GUID 就交换；**两段都像或都不像时不动** —— 猜错比不猜更糟，原样交给可用性探测，
+让微软给出真实错误。
+
+顺序反了的症状很有欺骗性：解析阶段不报错，到探测可用性才被微软拒，
+返回 `400 invalid_grant` / `AADSTS7000012`，**提示语里一个字都没提字段顺序** ——
+看起来像 token 过期或号被封。实测 10 条真实账号：原顺序 0/10 可用，换序 10/10。
 
 ---
 
