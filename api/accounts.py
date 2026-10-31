@@ -786,9 +786,16 @@ def get_account(account_id: str, platform: str = ""):
     # 前端拿到的就是 `v1:0hh8AWoF...` 这种密文 —— 页面上「Access Token」
     # 那一行显示的是密文，复制出来也是密文，粘到别处当然用不了。
     # 列表端点裁正文（`_slim_account_row`）、详情端点给明文，这里补上解密。
-    payload = acc.model_dump()
-    payload["extra_json"] = json.dumps(acc.get_extra(), ensure_ascii=False)
-    return payload
+    #
+    # ⚠️ 用 `model_copy` 而**不是** `model_dump()`：`model_dump()` 走的是
+    # Python 模式，`created_at` 会退化成 `datetime` 对象，再由 FastAPI 输出成
+    # `2026-10-31T12:09:55.618609+00:00` —— 而列表端点给的是 `...Z`。同一时刻
+    # 两种字符串是对外契约的静默变化（`test_list_keeps_iso_datetime_format`
+    # 就是为这个 bug 写的，这次在详情端点上又踩了一遍）。
+    # `model_copy` 保留模型类型，FastAPI 仍走模型自己的序列化器。
+    return acc.model_copy(
+        update={"extra_json": json.dumps(acc.get_extra(), ensure_ascii=False)}
+    )
 
 
 @router.patch("/{account_id}")
