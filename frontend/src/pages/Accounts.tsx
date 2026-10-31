@@ -1,8 +1,10 @@
 import { useEffect, useState, useCallback } from 'react'
 import { useParams } from 'react-router-dom'
 import {
-  DetailSection,
+  DetailGroup,
+  DetailRow,
   LocalProbeSummary,
+  SecretLine,
   TotpSecretAlert,
 } from '@/components/account/AccountDetailParts'
 import {
@@ -252,6 +254,8 @@ export default function Accounts() {
   const [panelUploadRunning, setPanelUploadRunning] = useState(false)
   const [exportModalOpen, setExportModalOpen] = useState(false)
   const [detailModalOpen, setDetailModalOpen] = useState(false)
+  // AT 默认按「只读 + 复制」展示，点「替换」才展开成可编辑的文本框。
+  const [editingToken, setEditingToken] = useState(false)
   const [currentAccount, setCurrentAccount] = useState<any>(null)
 
   const [registerForm] = Form.useForm()
@@ -321,6 +325,9 @@ export default function Accounts() {
       status: currentAccount.status,
       token: currentAccount.token,
     })
+    // 换一个账号就退回只读：否则上一号点开的「替换」会带到下一个号上，
+    // 一保存就把旧号的 AT 写进新号。
+    setEditingToken(false)
   }, [detailModalOpen, currentAccount, detailForm])
 
   const load = useCallback(async () => {
@@ -587,9 +594,13 @@ export default function Accounts() {
 
   const handleDetailSave = async () => {
     const values = await detailForm.validateFields()
+    // `token` 只在点了「替换」之后才挂载。没挂载就不提交 —— 否则会用
+    // `initialValues` 里的旧值覆盖掉别处刚写进去的新 AT。
+    const payload: Record<string, unknown> = { status: values.status }
+    if (values.token !== undefined) payload.token = values.token
     await apiFetch(`/accounts/${currentAccount.id}?platform=${encodeURIComponent(currentPlatform)}`, {
       method: 'PATCH',
-      body: JSON.stringify(values),
+      body: JSON.stringify(payload),
     })
     message.success('保存成功')
     setDetailModalOpen(false)
@@ -1761,146 +1772,138 @@ export default function Accounts() {
       >
         {currentAccount && (
           <>
+            {/*
+              详情弹窗的信息架构（2026-10-31 重做）：
+                身份 → 凭据 → 有效期 → 代理 → 本地探测
+
+              改造前是「状态 / 密码 / AT」三个竖排 Form 项，加四个带边框
+              带底色的盒子，加一段手写的 AT 有效期 —— 三套画法混在一起。
+              现在全部走 `DetailRow`（一行一个字段）与 `DetailGroup`（分组
+              只用小标题 + 发丝线，不套盒子）。
+            */}
             <Form form={detailForm} layout="vertical" initialValues={currentAccount}>
-              <Form.Item name="status" label="状态">
-                <Select
-                  options={[
-                    { value: 'registered', label: '正常' },
-                    { value: 'expired', label: '过期' },
-                    { value: 'invalid', label: '失效' },
-                    { value: 'limited', label: '限流' },
-                    { value: 'banned', label: '禁用' },
-                  ]}
-                />
-              </Form.Item>
-              {/* 密码：**只读展示 + 一键复制**。详情端点返回明文（列表响应
-                  里已裁成 `has_password` 布尔，安全加固），要看/复制原文只能
-                  在这里。用户要求「账号详细信息查看要完整，账号密码2FA等」。 */}
-              <Form.Item label="密码">
-                {currentAccount.password ? (
-                  <Text
-                    style={{ fontFamily: 'monospace', fontSize: 12, wordBreak: 'break-all' }}
-                    copyable={{ text: String(currentAccount.password), tooltips: ['复制密码', '已复制'] }}
+              <DetailGroup title="身份">
+                <DetailRow label="邮箱">
+                  <Text copyable={{ text: currentAccount.email, tooltips: ['复制邮箱', '已复制'] }}>
+                    {currentAccount.email}
+                  </Text>
+                </DetailRow>
+                <DetailRow label="注册时间">
+                  {(() => {
+                    const created = formatCreatedAt(currentAccount.created_at)
+                    return (
+                      <Text type="secondary">
+                        {[created.date, created.time].filter(Boolean).join(' ') || '—'}
+                      </Text>
+                    )
+                  })()}
+                </DetailRow>
+                <DetailRow
+                  label="状态"
+                  hint="这里改的是**本地标记**，不会去上游重新探测。真正的状态以「探测本地状态」的结果为准。"
+                >
+                  <Form.Item name="status" noStyle>
+                    <Select
+                      style={{ width: 180 }}
+                      options={[
+                        { value: 'registered', label: '正常' },
+                        { value: 'expired', label: '过期' },
+                        { value: 'invalid', label: '失效' },
+                        { value: 'limited', label: '限流' },
+                        { value: 'banned', label: '禁用' },
+                      ]}
+                    />
+                  </Form.Item>
+                </DetailRow>
+              </DetailGroup>
+
+              <DetailGroup
+                title="凭据"
+                hint="列表接口不下发凭据正文（只给「有 / 无」），完整值只在这个弹窗里能看到。点右侧图标复制。"
+              >
+                <DetailRow label="密码">
+                  {currentAccount.password ? (
+                    <SecretLine value={String(currentAccount.password)} />
+                  ) : (
+                    <Text type="secondary">无密码（手机号注册的号没有邮箱密码，或该号未设过密码）</Text>
+                  )}
+                </DetailRow>
+
+                <DetailRow label={currentPlatform === 'grok' ? 'SSO' : 'Access Token'}>
+                  {editingToken ? (
+                    <Form.Item name="token" noStyle>
+                      <Input.TextArea
+                        rows={4}
+                        autoFocus
+                        style={{ fontFamily: 'monospace', fontSize: 12 }}
+                      />
+                    </Form.Item>
+                  ) : (
+                    <SecretLine
+                      value={getAccessToken(currentAccount) || ''}
+                      empty="无"
+                      onEdit={() => setEditingToken(true)}
+                      editLabel="替换"
+                    />
+                  )}
+                </DetailRow>
+
+                <DetailRow label="Refresh Token">
+                  <SecretLine value={getRefreshToken(currentAccount) || ''} empty="无（补过 RT 才会有）" />
+                </DetailRow>
+
+                {currentAccount.totpSecret ? (
+                  <DetailRow
+                    label="TOTP 2FA"
+                    hint={`在验证器 App 里选「手动输入密钥」，账户名填 ${currentAccount.email}。`}
                   >
-                    {String(currentAccount.password)}
-                  </Text>
-                ) : (
-                  <Text type="secondary">
-                    无密码（手机号注册的号没有邮箱密码，或该号未设过密码）
-                  </Text>
-                )}
-              </Form.Item>
-              <Form.Item name="token" label={currentPlatform === 'grok' ? 'SSO（token 列）' : 'Access Token'}>
-                <Input.TextArea rows={2} style={{ fontFamily: 'monospace' }} />
-              </Form.Item>
+                    <SecretLine value={currentAccount.totpSecret} />
+                  </DetailRow>
+                ) : null}
+              </DetailGroup>
+
+              {(() => {
+                // AT 生成时间 / 到期时间（从 JWT 的 iat / exp 解出，纯前端计算）。
+                // 取 AT 走 getAccessToken：token 列与 extra.access_token 都看。
+                const at = atLifecycleMeta(getAccessToken(currentAccount))
+                if (at.status === 'invalid' && !at.issuedText && !at.expiresText) return null
+                return (
+                  <DetailGroup title="Access Token 有效期">
+                    <DetailRow label="状态">
+                      <Tag color={at.color} style={{ marginInlineEnd: 8 }}>{at.label}</Tag>
+                      <Text type="secondary" style={{ fontSize: 12 }}>
+                        {at.issuedText ? `生成于 ${at.issuedText}` : '生成时间未知'}
+                        {at.expiresText ? ` · 到期 ${at.expiresText}` : ''}
+                        {at.remainingText ? ` · ${at.remainingText}` : ''}
+                      </Text>
+                    </DetailRow>
+                  </DetailGroup>
+                )
+              })()}
+
+              {currentAccount.registerProxy ? (
+                <DetailGroup
+                  title="注册代理"
+                  hint="注册这个账号时用的出口。复用时（测活、补 RT、绑 2FA）优先回到它 —— 同一账号反复换 IP 容易被上游当成异常登录。原代理不可用时会自动换成新的并更新这里。"
+                >
+                  <DetailRow label="出口">
+                    <SecretLine value={currentAccount.registerProxy} />
+                  </DetailRow>
+                </DetailGroup>
+              ) : null}
+
+              {currentPlatform === 'chatgpt' ? (
+                <DetailGroup title="本地真实状态" collapsible defaultOpen={false}>
+                  {currentAccount.chatgptLocal && Object.keys(currentAccount.chatgptLocal).length > 0 ? (
+                    <LocalProbeSummary probe={currentAccount.chatgptLocal} />
+                  ) : (
+                    <DetailRow label="—">
+                      <Text type="secondary">尚未探测。可在操作菜单里点「探测本地状态」。</Text>
+                    </DetailRow>
+                  )}
+                </DetailGroup>
+              ) : null}
             </Form>
-            {(() => {
-              // AT 生成时间 / 到期时间（从 JWT 的 iat / exp 解出，纯前端计算）。
-              // 取 AT 走 getAccessToken：token 列与 extra.access_token 都看。
-              const at = atLifecycleMeta(getAccessToken(currentAccount))
-              if (at.status === 'invalid' && !at.issuedText && !at.expiresText) return null
-              return (
-                <div style={{ marginTop: 8 }}>
-                  <div style={{ marginBottom: 4, fontWeight: 500, fontSize: 13 }}>
-                    AT 有效期 <Tag color={at.color} style={{ marginInlineStart: 4 }}>{at.label}</Tag>
-                  </div>
-                  <Text type="secondary" style={{ fontSize: 12 }}>
-                    {at.issuedText ? `生成于 ${at.issuedText}` : '生成时间未知'}
-                    {at.expiresText ? ` · 到期 ${at.expiresText}` : ''}
-                    {at.remainingText ? ` · ${at.remainingText}` : ''}
-                  </Text>
-                </div>
-              )
-            })()}
-            {(() => {
-              const rt = getRefreshToken(currentAccount)
-              if (!rt) return null
-              return (
-                <div style={{ marginTop: 8 }}>
-                  <div style={{ marginBottom: 4, fontWeight: 500, fontSize: 13 }}>Refresh Token</div>
-                  <div
-                    style={{
-                      display: 'flex',
-                      alignItems: 'flex-start',
-                      gap: 8,
-                      background: token.colorFillAlter,
-                      border: `1px solid ${token.colorBorder}`,
-                      borderRadius: token.borderRadius,
-                      padding: '8px 10px',
-                    }}
-                  >
-                    <Text
-                      style={{ fontFamily: 'monospace', fontSize: 11, wordBreak: 'break-all', flex: 1, userSelect: 'text' }}
-                      copyable={{ text: rt, tooltips: ['复制 RT', '已复制'] }}
-                    >
-                      {rt}
-                    </Text>
-                  </div>
-                </div>
-              )
-            })()}
-            {currentAccount.totpSecret ? (
-              <div style={{ marginTop: 8 }}>
-                <div style={{ marginBottom: 4, fontWeight: 500, fontSize: 13 }}>TOTP 2FA 密钥</div>
-                <div
-                  style={{
-                    display: 'flex',
-                    alignItems: 'flex-start',
-                    gap: 8,
-                    background: token.colorFillAlter,
-                    border: `1px solid ${token.colorBorder}`,
-                    borderRadius: token.borderRadius,
-                    padding: '8px 10px',
-                  }}
-                >
-                  <Text
-                    style={{ fontFamily: 'monospace', fontSize: 12, wordBreak: 'break-all', flex: 1, userSelect: 'text' }}
-                    copyable={{ text: currentAccount.totpSecret, tooltips: ['复制密钥', '已复制'] }}
-                  >
-                    {currentAccount.totpSecret}
-                  </Text>
-                </div>
-                <Text type="secondary" style={{ fontSize: 12 }}>
-                  在验证器 App 里选「手动输入密钥」，账户名填 {currentAccount.email}。
-                </Text>
-              </div>
-            ) : null}
-            {currentAccount.registerProxy ? (
-              <DetailSection title="注册代理">
-                <div
-                  style={{
-                    display: 'flex',
-                    alignItems: 'flex-start',
-                    gap: 8,
-                    background: token.colorFillAlter,
-                    border: `1px solid ${token.colorBorder}`,
-                    borderRadius: token.borderRadius,
-                    padding: '8px 10px',
-                  }}
-                >
-                  <Text
-                    style={{ fontFamily: 'monospace', fontSize: 12, wordBreak: 'break-all', flex: 1, userSelect: 'text' }}
-                    copyable={{ text: currentAccount.registerProxy, tooltips: ['复制代理', '已复制'] }}
-                  >
-                    {currentAccount.registerProxy}
-                  </Text>
-                </div>
-                <Text type="secondary" style={{ fontSize: 12 }}>
-                  注册这个账号时用的出口。复用时（测活、补 RT、绑 2FA）优先回到它 ——
-                  同一账号反复换 IP 容易被上游当成异常登录。原代理不可用时会自动换成
-                  新的并更新这里。
-                </Text>
-              </DetailSection>
-            ) : null}
-            {currentPlatform === 'chatgpt' ? (
-              <DetailSection title="本地真实状态">
-                {currentAccount.chatgptLocal && Object.keys(currentAccount.chatgptLocal).length > 0 ? (
-                  <LocalProbeSummary probe={currentAccount.chatgptLocal} />
-                ) : (
-                  <Text type="secondary">尚未探测。可在操作菜单中点击“探测本地状态”。</Text>
-                )}
-              </DetailSection>
-            ) : null}
           </>
         )}
       </Modal>

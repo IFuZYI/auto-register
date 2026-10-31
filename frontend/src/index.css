@@ -1600,3 +1600,116 @@ body {
 .table-cards .ant-table-tbody > tr.ant-table-row > td > .cell-ellipsis {
   min-width: 0;
 }
+
+/* ═══════════════════════════════════════════════════════════════
+   账号详情弹窗
+
+   改造前这里三套表现形式并存（Form 竖排 / 手写圆角盒子 / DetailSection
+   盒子），装的却是同一类东西：一个标签 + 一个值。同一件事三种画法，
+   用户每换一段就要重新认一遍。
+
+   现在统一成「一行一个字段」：标签左固定 104px、值右，行间一条发丝线。
+   不套盒子 —— 盒子是**分组**的信号，一段字段不是一张卡。
+   ═══════════════════════════════════════════════════════════════ */
+.detail-group {
+  margin-top: 18px;
+}
+
+.detail-group:first-child {
+  margin-top: 0;
+}
+
+.detail-group__title {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin: 0 0 2px;
+  padding-bottom: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 45%, transparent);
+}
+
+.detail-row {
+  display: grid;
+  grid-template-columns: 104px minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+  padding: 7px 0;
+}
+
+/* 行间线比分组线更淡：分组是结构，行只是相邻。 */
+.detail-row + .detail-row {
+  border-top: 1px solid color-mix(in srgb, var(--border) 28%, transparent);
+}
+
+.detail-row__label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 22px;
+}
+
+.detail-row__value {
+  min-width: 0;
+  font-size: 13px;
+  line-height: 22px;
+}
+
+.detail-secret {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+/* `min-width: 0` 是省略号能出现的前提：flex 子项默认 min-width:auto，
+   会按内容撑开，`text-overflow` 就永远不触发。 */
+.detail-secret__text {
+  flex: 1;
+  min-width: 0;
+  display: block;
+}
+
+@media (max-width: 575px) {
+  .detail-row {
+    grid-template-columns: 84px minmax(0, 1fr);
+    gap: 10px;
+  }
+}
+
+/* 可折叠的分组标题。标题本身是 button（键盘可 Tab、aria-expanded 说明开合），
+   所以要把按钮的默认外观全部抹掉，只留文字与箭头。 */
+.detail-group__toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.detail-group__toggle:hover {
+  color: var(--text);
+}
+
+.detail-group__toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+.detail-group__chevron {
+  font-size: 10px;
+  transition: transform 0.16s var(--ease-standard);
+}
+
+.detail-group__chevron.is-open {
+  transform: rotate(90deg);
+}

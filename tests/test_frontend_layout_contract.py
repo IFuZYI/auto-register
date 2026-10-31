@@ -327,6 +327,62 @@ class TableCardsContractTests(unittest.TestCase):
         self.assertIn(".table-cards col {", block, "colgroup 的列宽没有清掉（会把表撑到 646px）")
 
 
+class AccountDetailLayoutTests(unittest.TestCase):
+    """账号详情弹窗的信息架构（2026-10-31 重做）。
+
+    改造前同一个弹窗里三套表现形式并存：`Form layout="vertical"` 的竖排项、
+    手写的圆角盒子（RT / TOTP / 代理）、以及 `DetailSection` 又一个盒子。
+    装的却是同一类东西 —— 一个标签 + 一个值。
+
+    这类问题在截图上看不出来（都挺整齐），只有数「同一件事有几种画法」才看得出来。
+    """
+
+    def _accounts(self):
+        return (FRONTEND / "src" / "pages" / "Accounts.tsx").read_text(encoding="utf-8")
+
+    def _parts(self):
+        return (
+            FRONTEND / "src" / "components" / "account" / "AccountDetailParts.tsx"
+        ).read_text(encoding="utf-8")
+
+    def test_modal_uses_the_row_grammar(self):
+        src = self._accounts()
+        modal = src[src.index("open={detailModalOpen}") : src.index("</Modal>", src.index("open={detailModalOpen}"))]
+        self.assertIn("<DetailRow", modal, "详情弹窗没有用统一的「一行一个字段」")
+        self.assertIn("<DetailGroup", modal, "详情弹窗没有分组")
+        # 手写盒子与 DetailSection 都不该再出现在弹窗里
+        self.assertNotIn("<DetailSection", modal, "弹窗里仍有 DetailSection 盒子（三套画法之一）")
+        self.assertNotIn("colorFillAlter", modal, "弹窗里仍有手写的带底色盒子")
+
+    def test_secret_values_are_one_line_with_copy(self):
+        src = self._parts()
+        block = src[src.index("export function SecretLine") :]
+        self.assertIn("ellipsis={{ tooltip: value }}", block, "长凭据没有省略号，会把弹窗撑高")
+        self.assertIn("copyable={{ text: value", block, "密钥没有复制按钮")
+        # 折叠成一行必须靠 min-width:0，否则 flex 子项按内容撑开、省略号不触发
+        css = (FRONTEND / "src" / "index.css").read_text(encoding="utf-8")
+        self.assertIn(".detail-secret__text", css)
+        self.assertIn("min-width: 0", css[css.index(".detail-secret__text") : css.index(".detail-secret__text") + 200])
+
+    def test_probe_section_is_collapsed_by_default(self):
+        src = self._accounts()
+        self.assertIn(
+            'title="本地真实状态" collapsible defaultOpen={false}',
+            src,
+            "本地探测结果默认展开 —— 打开详情的人九成是来复制凭据的，探测结果是排查时才看的",
+        )
+
+    def test_save_only_sends_mounted_fields(self):
+        src = self._accounts()
+        self.assertIn("if (values.token !== undefined) payload.token = values.token", src,
+                      "token 没挂载时仍会提交 —— 会用旧值覆盖别处刚写的新 AT")
+
+    def test_editing_state_resets_when_switching_accounts(self):
+        src = self._accounts()
+        self.assertIn("setEditingToken(false)", src,
+                      "换账号没重置「替换」状态，一保存就把上一个号的 AT 写进新号")
+
+
 class TaskRowDensityTests(unittest.TestCase):
     """已完成任务用紧凑行，不用一张卡。
 

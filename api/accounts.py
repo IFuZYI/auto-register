@@ -1,3 +1,5 @@
+import json
+
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from fastapi.responses import StreamingResponse
 from sqlmodel import Session, select, func
@@ -778,7 +780,15 @@ def get_account(account_id: str, platform: str = ""):
     acc = account_repository.get(account_id, platform=platform)
     if not acc:
         raise HTTPException(404, "账号不存在")
-    return acc
+
+    # `extra_json` 这一列**落盘就是密文**（AT/RT/IDT/ST/SSO/totp_secret 六把
+    # 凭证，见 core/credential_crypto.py）。直接把模型丢给 FastAPI 序列化，
+    # 前端拿到的就是 `v1:0hh8AWoF...` 这种密文 —— 页面上「Access Token」
+    # 那一行显示的是密文，复制出来也是密文，粘到别处当然用不了。
+    # 列表端点裁正文（`_slim_account_row`）、详情端点给明文，这里补上解密。
+    payload = acc.model_dump()
+    payload["extra_json"] = json.dumps(acc.get_extra(), ensure_ascii=False)
+    return payload
 
 
 @router.patch("/{account_id}")
