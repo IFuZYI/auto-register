@@ -661,9 +661,12 @@ export default function ICloudPage() {
                   loading={loading}
                   columns={accountColumns}
                   dataSource={accounts}
-                  // 8 列合计 1390px，容器装不下时 antd 会等比压缩所有列 ——
+                  // 定住宽度、宁可横向滚动：容器装不下时 antd 会等比压缩所有列，
                   // 实测「主号」列被压到 143px（设定 260），邮箱地址换行、行高 78px。
-                  // 定住宽度宁可横向滚动，与别名表同款处理。
+                  //
+                  // ⚠️ `x` 必须 ≥ 各列宽度之和（这里是 1390）。写小了内容会被裁掉，
+                  // 滚到底也够不着 —— `tests/test_frontend_layout_contract.py` 的
+                  // `ICloudTableLayoutTests` 会从源码算列宽和来钉这一条。
                   scroll={{ x: 1390 }}
                   pagination={false}
                   locale={{

@@ -12,6 +12,7 @@ import { accountStatusMeta } from '@/lib/accountFormat'
 import { apiFetch } from '@/lib/utils'
 import { PageHeader } from '@/components/PageHeader'
 import { GRID_GAP } from '@/theme'
+import { HelpTip } from '@/components/settings/SettingsPrimitives'
 
 /** 平台分布条的配色：按平台名取稳定色相，没有映射时回落主题色。 */
 const PLATFORM_BAR_COLORS: Record<string, string> = {
@@ -25,9 +26,12 @@ interface StatCardProps {
   icon: React.ReactNode
   color: string
   index: number
+  /** 这个数字由什么构成（进标题旁的 ⓘ）。合计型的卡片必须写清楚， */
+  /*  否则会和下方明细里的同名项对不上（实测「失效 77 vs 69」）。 */
+  hint?: string
 }
 
-function StatCard({ title, value, icon, color, index }: StatCardProps) {
+function StatCard({ title, value, icon, color, index, hint }: StatCardProps) {
   return (
     <div
       className="stat-card stagger-item"
@@ -50,9 +54,13 @@ function StatCard({ title, value, icon, color, index }: StatCardProps) {
                 fontWeight: 500,
                 letterSpacing: 0,
                 marginBottom: 10,
+                display: 'flex',
+                alignItems: 'center',
+                gap: 5,
               }}
             >
               {title}
+              <HelpTip text={hint} />
             </div>
             <div
               style={{
@@ -121,10 +129,12 @@ export default function Dashboard() {
       color: 'var(--success)',
     },
     {
-      title: '失效',
-      // 过期 / 失效归这一档：它们同样是「这号还能救」——过期刷新可能救回、
-      // 失效重登可能救回。禁用是「号没了」，单独一张卡（用户要求 2026-10-07：
-      // 在失效右侧补位，同时四张卡 lg=6 恰好填满整行）。
+      // 标题**不能叫「失效」**：这一档是「过期 + 失效」的合计，而下面的
+      // 状态分布里「失效」是单独一项。实测 77（卡片）对 69（分布），
+      // 同一个屏幕上两个不同的数都叫「失效」—— 用户只会认为数据坏了。
+      // 改叫「待恢复」（这两类都能靠刷新/重登救回来），构成写进 ⓘ。
+      title: '待恢复',
+      hint: `过期 ${stats?.by_status?.expired ?? 0} + 失效 ${stats?.by_status?.invalid ?? 0}。这两类都能靠刷新 Token 或重登救回来，所以合成一档看量；下方的状态分布里仍分开列。`,
       value: (stats?.by_status?.expired ?? 0)
         + (stats?.by_status?.invalid ?? 0),
       icon: <CloseCircleOutlined />,
@@ -157,9 +167,9 @@ export default function Dashboard() {
       />
 
       <Row gutter={[GRID_GAP, GRID_GAP]}>
-        {statCards.map(({ title, value, icon, color }, i) => (
+        {statCards.map(({ title, value, icon, color, hint }, i) => (
           <Col xs={24} sm={12} lg={6} key={title}>
-            <StatCard title={title} value={value} icon={icon} color={color} index={i} />
+            <StatCard title={title} value={value} icon={icon} color={color} index={i} hint={hint} />
           </Col>
         ))}
       </Row>

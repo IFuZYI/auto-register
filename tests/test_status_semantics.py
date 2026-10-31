@@ -324,8 +324,13 @@ class FrontendStatusLabelContractTests(unittest.TestCase):
         self.assertIn("by_status?.banned", src, "「禁用」卡片必须读 by_status.banned")
         # 四张卡各占 lg=6 → 24 列满行（不补位就留 6 列空档）
         self.assertIn("lg={6}", src, "统计卡栅格应保持 lg=6（四张满行）")
-        # 失效卡不再把 banned 并进去（已由独立卡片承担）
-        invalid_block = src.split("title: '失效'", 1)[1].split("},", 1)[0]
+        # 「待恢复」卡不再把 banned 并进去（已由独立卡片承担）。
+        #
+        # 标题在 2026-10-31 从「失效」改成「待恢复」：那张卡是
+        # 「过期 + 失效」的**合计**，而下方状态分布里「失效」是单独一项 ——
+        # 同一个屏幕上 77 和 69 都叫「失效」，用户只会认为数据坏了。
+        # 断言本身（不能把 banned 并进来）不变，只换锚点。
+        invalid_block = src.split("title: '待恢复'", 1)[1].split("},", 1)[0]
         self.assertNotIn(
             "banned", invalid_block,
             "「失效」卡仍把 banned 并进合计 —— 会和「禁用」卡双记",

@@ -73,20 +73,25 @@ class AtLifecycleDisplayContractTests(unittest.TestCase):
         """列表要有「AT 有效期」列（用 atListSummary 渲染，两平台通用）。"""
         src = self._src()
         self.assertIn("atListSummary", src, "列表没有用 atListSummary —— AT 日期在列表不可见")
-        self.assertIn("title: 'AT 有效期'", src, "列表没有「AT 有效期」列标题")
+        self.assertIn("title: 'AT 到期'", src, "列表没有「AT 到期」列标题")
         # 列必须在**公共区**（两平台都显示）——ChatGPT 与 Grok 的 AT 都是
         # JWT，详情弹窗本来就是共享的，列表不该只给一个平台。
         # 锚点：列定义出现在 `if (isChatgptPlatform)` 之前。
-        at_idx = src.find("title: 'AT 有效期'")
+        at_idx = src.find("title: 'AT 到期'")
         branch_idx = src.find("if (isChatgptPlatform) {")
         self.assertLess(
             at_idx,
             branch_idx,
-            "「AT 有效期」列只在 ChatGPT 分支里 —— Grok 列表看不到（同类 UI 不一致）",
+            "「AT 到期」列只在 ChatGPT 分支里 —— Grok 列表看不到（同类 UI 不一致）",
         )
 
     def test_scroll_x_covers_the_new_column(self):
-        """scroll.x 要盖住加了 AT 列之后的列宽和（否则 antd 等比压缩）。"""
+        """scroll.x 要盖住列宽之和（否则 antd 等比压缩，或内容滚不到）。
+
+        这里**从源码算**列宽和，不写死数字：改造前写死 1422 / 1242，改一次
+        列结构就要手改一次测试，而漏改的表现是「测试绿着、表格却挤成一团」。
+        算出来的和与 `scroll.x` 直接比，改列宽忘了同步 x 立刻变红。
+        """
         import re
 
         src = self._src()
@@ -94,10 +99,38 @@ class AtLifecycleDisplayContractTests(unittest.TestCase):
         if m is None:
             self.fail("找不到 scroll.x 配置")
         chatgpt_x, grok_x = int(m.group(1)), int(m.group(2))
-        # ChatGPT: 260+120+120+110+130+260+140+132+150 = 1422
-        # Grok:    260+120+120+110+130+100+120+132+150 = 1242
-        self.assertGreaterEqual(chatgpt_x, 1422, f"ChatGPT scroll.x={chatgpt_x} 小于列宽和 1422")
-        self.assertGreaterEqual(grok_x, 1242, f"Grok scroll.x={grok_x} 小于列宽和 1242")
+
+        # 用**下标切片**而不是 split：文件里 `} else {` 出现很多次，split 会切到
+        # 前面无关的分支上（实测把 Grok 的列宽和算成 1260，真值是 812）。
+        def widths(text: str) -> int:
+            # 只认**列对象自己的** width（整行就是 `      width: 250,`）。
+            # 宽松正则会连内联样式一起算进去 —— 实测把复制按钮的
+            # `style={{ width: 20 }}` 也加了进去，和算成 1248 而不是 1034。
+            return sum(int(n) for n in re.findall(r"^      width: (\d+),$", text, re.M))
+
+        i_cols = src.index("const columns: any[] = [")
+        i_branch = src.index("if (isChatgptPlatform) {", i_cols)
+        i_else = src.index("} else {", i_branch)
+        i_push = src.index("columns.push(", i_else)
+        i_after = src.index("// 只留账号自身的动作", i_push)
+
+        common_w = widths(src[i_cols:i_branch])
+        chatgpt_w = widths(src[i_branch:i_else])
+        grok_w = widths(src[i_else:i_push])
+        tail_w = widths(src[i_push:i_after])  # 注册时间 + 操作，两平台共用
+        # 选择列（checkbox）40px —— antd 的 rowSelection 列不在 columns 里
+        selection_w = 40
+
+        need_chatgpt = common_w + chatgpt_w + tail_w + selection_w
+        need_grok = common_w + grok_w + tail_w + selection_w
+        self.assertGreaterEqual(
+            chatgpt_x, need_chatgpt,
+            f"ChatGPT scroll.x={chatgpt_x} 小于列宽和 {need_chatgpt}",
+        )
+        self.assertGreaterEqual(
+            grok_x, need_grok,
+            f"Grok scroll.x={grok_x} 小于列宽和 {need_grok}",
+        )
 
     def test_detail_and_list_read_at_from_both_sources(self):
         """取 AT 要兼容 token 列与 extra.access_token 两个来源。"""
@@ -143,25 +176,28 @@ class AtLifecycleDisplayContractTests(unittest.TestCase):
             "getAccessToken 没有按平台镜像规则短路 —— grok 的 SSO 会被当 AT 显示",
         )
 
-    def test_at_column_splits_date_and_remaining_into_separate_lines(self):
-        """AT 列的「到期日期」与「剩余时间」要分行渲染。
+    def test_at_column_never_truncates_the_date(self):
+        """AT 列不能把日期截断（dogfood 2026-10-05 的原始诉求）。
 
-        dogfood 实测（2026-10-05，90% 缩放 + 100% 均复现）：两者拼成一行
-        需要 146px，而该列可用内容宽只有 ~92px（130px 列宽 - cell padding -
-        panel padding）—— 日期被截断成「到期 2026-10-…」。拆行后
-        「到期 2026-10-12」78px、「6 天 20 小时」59px，都放得下。
+        历史：日期与剩余时间拼一行需要 146px、可用只有 ~92px，被截成
+        「到期 2026-10-…」。当时靠**拆成两行**解决。
+
+        2026-10-31 改版换了做法：整行只留 `MM-DD`（年份在这张表里没有信息量），
+        完整日期与剩余时长进 tooltip —— 一行放得下，而且行高从 104px 降到 66px。
+        两种做法的**共同约束**是不许截断，所以断言改成钉住这两点：
+        日期被裁成短格式、且剩余时间仍然可达（在 tooltip 里）。
         """
         src = self._src()
-        block = src.split("title: 'AT 有效期'", 1)[1].split("if (isChatgptPlatform)", 1)[0]
-        self.assertNotIn(
-            "at.expiresShort ? ' · ' : ''",
+        block = src.split("title: 'AT 到期'", 1)[1].split("if (isChatgptPlatform)", 1)[0]
+        self.assertIn(
+            "slice(5)",
             block,
-            "AT 列又把「到期日期 · 剩余」拼回一行 —— 列宽放不下会截断（实测 146px > 92px）",
+            "AT 列没有把日期裁成 MM-DD —— 完整 `到期 YYYY-MM-DD` 需要 95px、该列只有 ~92px，会截断",
         )
         self.assertIn(
             "at.remainingText",
             block,
-            "AT 列丢了剩余时间渲染",
+            "AT 列丢了剩余时间（应放进 tooltip，否则用户看不到还剩多久）",
         )
 
     def test_plus_trial_time_uses_two_line_date_format(self):
@@ -173,16 +209,18 @@ class AtLifecycleDisplayContractTests(unittest.TestCase):
         的两行格式（日期一行、时间一行），两列显示的是同类信息，格式应当一致。
         """
         src = self._src()
-        block = src.split("title: 'Plus 试用'", 1)[1].split("} else {", 1)[0]
+        block = src.split("title: '探测结果'", 1)[1].split("} else {", 1)[0]
         self.assertNotIn(
             "formatSyncTime(check.checked_at)",
             block,
             "Plus 列又用单行 formatSyncTime —— 时间戳会被截断（实测 118px > 102px）",
         )
+        # 2026-10-31 改版：Plus 试用并入「探测结果」列，日期不再单独占一行
+        # （那会让行高回到 100px+），改成进 tooltip —— 完整时间仍可达。
         self.assertIn(
             "formatCreatedAt(check.checked_at)",
             block,
-            "Plus 列没有用两行日期格式（与「注册时间」列不一致）",
+            "Plus 探测时间没有用 formatCreatedAt（与「注册时间」列同一套格式）",
         )
 
 

@@ -54,6 +54,7 @@ import {
   KeyOutlined,
   FileAddOutlined,
   SearchOutlined,
+  ClearOutlined,
 } from '@ant-design/icons'
 import { AccountExportModal } from '@/components/AccountExportModal'
 import { ChatGPTBind2faSwitch } from '@/components/ChatGPTBind2faSwitch'
@@ -84,8 +85,6 @@ const PLUS_TRIAL_FILTERS = [
   { value: 'token_invalid', label: '凭证失效' },
   { value: 'unchecked', label: '未检测' },
 ]
-
-type PlusCheck = { status?: string; message?: string; checked_at?: string }
 
 // 纯前端动作，不发请求，所以不和后端的 action id 抢命名空间
 const COPY_TOTP_ACTION_ID = '__copy_totp_secret'
@@ -233,6 +232,8 @@ export default function Accounts() {
   const [filterPlusStatus, setFilterPlusStatus] = useState('')
   const [createdAtStart, setCreatedAtStart] = useState('')
   const [createdAtEnd, setCreatedAtEnd] = useState('')
+  // 重置筛选用：日期控件是不受控的（antd 要 Dayjs 对象），换 key 重挂载即可清空。
+  const [filterEpoch, setFilterEpoch] = useState(0)
   const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([])
   const [recoverLoading, setRecoverLoading] = useState(false)
 
@@ -876,82 +877,124 @@ export default function Accounts() {
 
   const getStatusSyncScope = (): 'selected' | 'all' => (selectedRowKeys.length > 0 ? 'selected' : 'all')
 
+  // 当前生效的筛选条件数（给「重置 N 项筛选」用）。空串 = 没筛。
+  const activeFilterCount =
+    (search ? 1 : 0) +
+    (filterStatus ? 1 : 0) +
+    (filterPlusStatus ? 1 : 0) +
+    (createdAtStart ? 1 : 0) +
+    (createdAtEnd ? 1 : 0)
+
   const isChatgptPlatform = currentPlatform === 'chatgpt'
   const monospaceStyle: React.CSSProperties = {
     fontFamily: 'SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace',
     fontSize: 12,
   }
-  const secondaryTextStyle: React.CSSProperties = {
-    fontSize: 12,
-    color: token.colorTextSecondary,
-  }
+  /**
+   * 表格密度：一行两行字，不套框。
+   *
+   * 改造前每个单元格都是「带边框 + 底色的小面板」（`compactPanelStyle`），
+   * 一行里叠三个，实测行高 **104~110px** —— 667 个账号的表格一屏只看得到
+   * 7 行。用户要的是「扫一遍哪些号有问题」，不是逐张读卡片。
+   *
+   * 现在：一格最多两行、行距 2px、无边框，行高 ~56px（一屏 ~13 行）。
+   * 分组靠**列**（一个列一个语义），不靠框。
+   */
   const cellStackStyle: React.CSSProperties = {
     display: 'flex',
     flexDirection: 'column',
-    gap: 6,
+    gap: 2,
     minWidth: 0,
   }
-  const compactPanelStyle: React.CSSProperties = {
-    padding: '8px 10px',
-    borderRadius: token.borderRadiusLG,
-    border: `1px solid ${token.colorBorder}`,
-    background: token.colorFillAlter,
+  const metaLineStyle: React.CSSProperties = {
+    fontSize: 11,
+    lineHeight: '16px',
+    color: token.colorTextTertiary,
+    whiteSpace: 'nowrap',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
   }
+  /**
+   * 「有 / 无」型事实：有的亮、无的淡。
+   *
+   * 不用 Tag —— 一行挂七个彩色块（实测）就是这一页最大的噪音源：
+   * 七个颜色互相抢注意力，真正要紧的「账号状态」反而看不出来。
+   * 三个词（密码 / RT / 2FA）合成一列，回答的是同一个问题：这个号还能不能救。
+   */
+  const factStyle = (on: boolean): React.CSSProperties => ({
+    fontSize: 11,
+    lineHeight: '16px',
+    // 有 = 中性次要色，无 = 极淡。**不用绿色** —— 一行里「状态」「AT 到期」
+    // 「凭据」三处同时发绿，等于告诉眼睛「三个都一样重要」。
+    // 这一列回答的是「有没有」，不是「好不好」。
+    color: on ? token.colorTextSecondary : token.colorTextQuaternary,
+    // 「没有」再加一道**非颜色**的线索：删除线。只靠明暗差，色弱用户
+    // 分不出「密码」和「没有密码」—— 而这列是判断「这号还能不能救」的
+    // 依据之一，不能只靠颜色编码。
+    textDecoration: on ? 'none' : 'line-through',
+    whiteSpace: 'nowrap',
+  })
 
   const columns: any[] = [
     {
       title: '邮箱',
       dataIndex: 'email',
       key: 'email',
-      width: 260,
+      width: 250,
       render: (text: string, record: any) => (
         <div style={cellStackStyle}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 2, minWidth: 0 }}>
             <Text
               style={{ ...monospaceStyle, flex: 1, minWidth: 0, whiteSpace: 'nowrap' }}
               ellipsis={{ tooltip: text }}
             >
               {text}
             </Text>
-            <Button type="text" size="small" icon={<CopyOutlined />} onClick={() => copyText(text)} />
+            <Button
+              type="text"
+              size="small"
+              aria-label="复制邮箱"
+              style={{ flex: '0 0 auto', width: 20, height: 20, minWidth: 20 }}
+              icon={<CopyOutlined />}
+              onClick={() => copyText(text)}
+            />
           </div>
-          <Text type="secondary" style={secondaryTextStyle} ellipsis={{ tooltip: record.user_id || `账号 #${record.id}` }}>
-            {record.user_id ? `UID: ${record.user_id}` : `账号 #${record.id}`}
+          <Text style={metaLineStyle} ellipsis={{ tooltip: record.user_id || `账号 #${record.id}` }}>
+            {record.user_id ? `UID ${record.user_id}` : `#${record.id}`}
           </Text>
         </div>
       ),
     },
     {
-      title: '密码',
-      dataIndex: 'has_password',
-      key: 'password',
-      width: 120,
-      // **列表响应不含密码正文**（安全加固：换成 `has_password` 布尔）。
-      // 原来绑 `dataIndex: 'password'` → 该键不存在 → 整列恒空（用户报
-      // 「账号信息有问题」）。正文的复制入口在详情抽屉里。
-      render: (_: unknown, record: { has_password?: boolean }) =>
-        record?.has_password ? (
-          <Text type="success" style={{ fontSize: 11 }}>
-            有（详情可复制）
-          </Text>
-        ) : (
-          <span style={{ color: 'var(--text-muted)' }}>-</span>
-        ),
-    },
-    {
-      title: 'RT',
-      key: 'refresh_token',
+      // 密码 / RT / 2FA 合成一列：三件事回答同一个问题 ——「这个号还能不能救」。
+      // 原来占三列（密码、RT、本地状态里的 2FA 徽章），每列一个彩色块。
+      // 列表响应本来就不带凭据正文（安全加固），所以这里只表达「有没有」，
+      // 正文的复制入口在详情抽屉里（tooltip 里写明）。
+      title: '凭据',
+      key: 'credentials',
       width: 120,
       render: (_: any, record: any) => {
-        // 列表**只显示有没有**，不渲染 token 正文：正文已从列表响应里裁掉
-        // （它占 `extra_json` 的 62%，见 api/accounts.py）。要看/复制原文请
-        // 点进详情 —— 详情走 `GET /accounts/{id}`，那里仍是全量。
-        const rt = getRefreshToken(record)
-        if (!rt) return <span style={{ color: 'var(--text-muted)' }}>-</span>
+        const hasPwd = Boolean(record.has_password)
+        const hasRt = Boolean(getRefreshToken(record))
+        const hasTotp = hasTotpSecret(record)
         return (
-          <Text type="success" style={{ fontSize: 11 }}>
-            有（详情可复制）
-          </Text>
+          <Tooltip
+            title={
+              `密码 ${hasPwd ? '有' : '无'}；RT ${hasRt ? '有' : '无'}；2FA ${hasTotp ? '已绑' : '未绑'}。` +
+              '正文在「详情」里复制。'
+            }
+          >
+            <Space
+              size={9}
+              style={{ whiteSpace: 'nowrap' }}
+              // 读屏用户拿不到颜色/删除线 —— 用 aria-label 把三种状态说全。
+              aria-label={`密码${hasPwd ? '有' : '无'}，RT${hasRt ? '有' : '无'}，2FA${hasTotp ? '已绑' : '未绑'}`}
+            >
+              <span style={factStyle(hasPwd)}>密码</span>
+              <span style={factStyle(hasRt)}>RT</span>
+              <span style={factStyle(hasTotp)}>2FA</span>
+            </Space>
+          </Tooltip>
         )
       },
     },
@@ -959,26 +1002,29 @@ export default function Accounts() {
       title: '状态',
       dataIndex: 'status',
       key: 'status',
-      width: 110,
+      width: 88,
       render: (status: string) => {
-        // 显示中文语义标签（正常/过期/失效/禁用）—— 此前直接渲染英文原值
+        // 显示中文语义标签（正常/过期/失效/禁用）—— 此前直接渲染英文原值。
+        // 一行只留这**一个** Tag：它才是「要不要处理这个号」的判据。
         const meta = accountStatusMeta(status)
-        return <Tag color={meta.color}>{meta.label}</Tag>
+        return (
+          <Tag color={meta.color} style={{ marginInlineEnd: 0 }}>
+            {meta.label}
+          </Tag>
+        )
       },
     },
     {
       // AT 有效期：ChatGPT 与 Grok 的 AT 都是 JWT（都带 iat/exp），
       // 两个平台的列表都要显示 —— 详情弹窗本来就是共享的，列表不该分家。
-      title: 'AT 有效期',
+      //
+      // 日期只显示 `MM-DD`：完整年份在这张表里没有信息量（都在今年），
+      // 而 `到期 2026-11-09` 需要 95px、该列内容宽只有 ~92px，实测被截断成
+      // 「到期 2026-11…」。完整时间与剩余时长在 tooltip 里。
+      title: 'AT 到期',
       key: 'at_lifecycle',
-      width: 130,
+      width: 132,
       render: (_: unknown, record: { token?: string; has_token?: boolean; extra_json?: string }) => {
-        // 与详情弹窗同口径（atListSummary 内部复用 atLifecycleMeta）。
-        // 参考实现（chatgpt2api）在列表行内直接显示凭据状态，用户反馈
-        // 「GPT 界面没见到 AT 日期」——此前只在详情弹窗里。
-        // 列表响应不带 AT 正文（占 extra_json 的大头），但后端把 JWT 的
-        // iat/exp 提成两个时间戳放进行里（约 20 字节），所以这里仍能显示
-        // 到期日与剩余时间 —— 那是用户 2026-10-05 明确要求的功能。
         const parsed = (() => {
           try {
             return JSON.parse(record.extra_json || '{}')
@@ -989,125 +1035,121 @@ export default function Accounts() {
         const at = atSummaryFromClaims(parsed) ?? atListSummary(getAccessToken(record))
         const hasDate = Boolean(at.expiresShort || at.remainingText)
         if (at.label === '无 AT' && !hasDate) {
-          return (
-            <Text type="secondary" style={secondaryTextStyle}>
-              无 AT
-            </Text>
-          )
+          return <Text style={metaLineStyle}>无 AT</Text>
         }
+        const shortDate = at.expiresShort ? String(at.expiresShort).slice(5) : ''
         return (
-          <div style={{ ...cellStackStyle, ...compactPanelStyle }}>
-            <Tooltip title={at.tooltip || at.label}>
+          <Tooltip
+            title={[at.tooltip || at.label, at.expiresShort ? `到期 ${at.expiresShort}` : '', at.remainingText]
+              .filter(Boolean)
+              .join(' · ')}
+          >
+            <Space size={6} style={{ whiteSpace: 'nowrap' }}>
               <Tag color={at.color} style={{ marginInlineEnd: 0 }}>
                 {at.label}
               </Tag>
-            </Tooltip>
-            {hasDate ? (
-              // 日期与剩余时间**分行**：两者拼一行需要 146px，而该列可用
-              // 内容宽只有 ~92px（130px 列宽 - 两重 padding）—— 实测日期
-              // 被截断成「到期 2026-10-…」。拆行后都放得下。
-              <Text type="secondary" style={secondaryTextStyle} ellipsis={{ tooltip: at.tooltip }}>
-                {at.expiresShort ? `到期 ${at.expiresShort}` : ''}
-              </Text>
-            ) : null}
-            {at.remainingText ? (
-              <Text type="secondary" style={secondaryTextStyle} ellipsis={{ tooltip: at.tooltip }}>
-                {at.remainingText}
-              </Text>
-            ) : null}
-          </div>
+              {shortDate ? <span style={metaLineStyle}>{shortDate}</span> : null}
+            </Space>
+          </Tooltip>
         )
       },
     },
   ]
 
   if (isChatgptPlatform) {
-    columns.push(
-      {
-        title: '本地状态',
-        key: 'chatgpt_local_state',
-        width: 260,
-        render: (_: any, record: any) => {
-          const auth = record.chatgptLocal?.auth || {}
-          const subscription = record.chatgptLocal?.subscription || {}
-          const codex = record.chatgptLocal?.codex || {}
-          const authMeta = authStateMeta(auth.state)
-          const planTag = planMeta(subscription.plan)
-          const codexMeta = codexStateMeta(codex.state)
+    columns.push({
+      // 账号状态：授权状态 + Codex 可用性 + 套餐 + Plus 试用。
+      // 原来是两列（本地状态 260px + Plus 试用 140px）、一行四个 Tag。
+      // 现在两行小字：第一行「授权状态 + Codex」，第二行「套餐 + Plus」。
+      // 名字不叫「账号状态」—— 旁边那列已经叫「状态」了，两个「状态」并排
+      // 谁也说不清哪个是账号本身、哪个是探测结论。这列放的是**本地探测**的
+      // 结果（认证 / Codex / 套餐 / Plus 试用）。
+      title: '探测结果',
+      key: 'chatgpt_local_state',
+      width: 176,
+      render: (_: any, record: any) => {
+        const auth = record.chatgptLocal?.auth || {}
+        const subscription = record.chatgptLocal?.subscription || {}
+        const codex = record.chatgptLocal?.codex || {}
+        const authMeta = authStateMeta(auth.state)
+        const planTag = planMeta(subscription.plan)
+        const codexMeta = codexStateMeta(codex.state)
+        const check = record.plusCheck || {}
+        const plusMeta = plusTrialMeta(check.status)
+        const checkedAt = formatCreatedAt(check.checked_at)
 
-          return (
-            <div style={{ ...cellStackStyle, ...compactPanelStyle }}>
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-                <Tag color={authMeta.color}>{authMeta.label}</Tag>
-                <Tag color={planTag.color}>{planTag.label}</Tag>
-                <Tag color={codexMeta.color}>Codex {codexMeta.label}</Tag>
-              </div>
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-                {hasTotpSecret(record) ? (
-                  // 列表行只有 `has_totp_secret` 布尔（密钥正文被安全加固
-                  // 裁掉了）。复制入口在详情抽屉，那里拿的是全量。
-                  <Tag color="purple" style={{ marginInlineEnd: 0 }}>
-                    2FA 已绑
-                  </Tag>
-                ) : null}
-              </div>
-            </div>
-          )
-        },
-      },
-      {
-        title: 'Plus 试用',
-        key: 'plus_check',
-        width: 140,
-        render: (_: unknown, record: { plusCheck?: PlusCheck }) => {
-          const check = record.plusCheck || {}
-          const meta = plusTrialMeta(check.status)
-          // 两行日期格式（与「注册时间」列同款）：单行 toLocaleString
-          // （`10/1/2026, 6:43:48 PM`）实测需要 118px，该列可用内容宽只有
-          // ~102px，时间戳会被截断成「10/1/2026, 6:43…」（dogfood 2026-10-05）。
-          const checkedAt = formatCreatedAt(check.checked_at)
-          return (
-            <div style={{ ...cellStackStyle, ...compactPanelStyle }}>
-              <Tag color={meta.color} title={check.message || ''}>
-                {meta.label}
-              </Tag>
-              {checkedAt.date !== '-' && (
-                <Text type="secondary" style={secondaryTextStyle} ellipsis={{ tooltip: `${checkedAt.date} ${checkedAt.time}`.trim() }}>
-                  {checkedAt.date}
-                </Text>
-              )}
-              {checkedAt.time ? (
-                <Text type="secondary" style={secondaryTextStyle}>
-                  {checkedAt.time}
-                </Text>
+        // 认证正常时**不挂 Tag**：它是预期状态，左边的「AT 到期」已经说了
+        // 「有效」。每行都挂一个绿块只会把真正异常的号埋掉 ——
+        // 只有不正常时才用颜色说话。
+        const authAbnormal = Boolean(auth.state) && auth.state !== 'access_token_valid'
+        // Plus 试用只在有结论时显示：「未检测」和「Free」都不带来信息，
+        // 而「可领首月免费」「封号」才是要动手的。
+        const plusWorthShowing = !['', 'unchecked', 'free'].includes(String(check.status || '').toLowerCase())
+
+        return (
+          <div style={cellStackStyle}>
+            <Space size={6} style={{ whiteSpace: 'nowrap' }}>
+              {authAbnormal ? (
+                <Tag color={authMeta.color} style={{ marginInlineEnd: 0 }}>
+                  {authMeta.label}
+                </Tag>
               ) : null}
-            </div>
-          )
-        },
+              <span style={metaLineStyle}>Codex {codexMeta.label}</span>
+            </Space>
+            <Tooltip
+              title={
+                `认证 ${authMeta.label}；套餐 ${planTag.label}；Plus 试用 ${plusMeta.label}` +
+                (checkedAt.date !== '-' ? `（检测于 ${checkedAt.date} ${checkedAt.time}）` : '') +
+                (check.message ? `：${check.message}` : '')
+              }
+            >
+              <Space size={8} style={{ whiteSpace: 'nowrap' }}>
+                {planTag.label && planTag.label !== '未知' ? (
+                  <span style={metaLineStyle}>套餐 {planTag.label}</span>
+                ) : null}
+                {plusWorthShowing ? (
+                  <span
+                    style={{
+                      ...metaLineStyle,
+                      color:
+                        plusMeta.color === 'success'
+                          ? token.colorSuccess
+                          : plusMeta.color === 'error' || plusMeta.color === 'warning'
+                            ? token.colorWarning
+                            : token.colorTextTertiary,
+                    }}
+                  >
+                    {plusMeta.label}
+                  </span>
+                ) : null}
+              </Space>
+            </Tooltip>
+          </div>
+        )
       },
-    )
+    })
   } else {
     columns.push(
       {
         title: '地区',
         dataIndex: 'region',
         key: 'region',
-        width: 100,
-        render: (text: string) => text || '-',
+        width: 90,
+        render: (text: string) => <span style={metaLineStyle}>{text || '-'}</span>,
       },
       {
         title: '试用链接',
         dataIndex: 'cashier_url',
         key: 'cashier_url',
-        width: 120,
+        width: 92,
         render: (url: string) =>
           url ? (
             <Space size={0}>
-              <Button type="text" size="small" icon={<CopyOutlined />} onClick={() => copyText(url)} />
-              <Button type="text" size="small" icon={<LinkOutlined />} onClick={() => window.open(url, '_blank')} />
+              <Button type="text" size="small" aria-label="复制试用链接" icon={<CopyOutlined />} onClick={() => copyText(url)} />
+              <Button type="text" size="small" aria-label="打开试用链接" icon={<LinkOutlined />} onClick={() => window.open(url, '_blank')} />
             </Space>
           ) : (
-            '-'
+            <span style={metaLineStyle}>-</span>
           ),
       },
     )
@@ -1118,27 +1160,35 @@ export default function Accounts() {
       title: '注册时间',
       dataIndex: 'created_at',
       key: 'created_at',
-      width: 132,
+      width: 108,
       render: (text: string) => {
+        // 单行 `MM-DD HH:mm`：两行写法（日期一行、时间一行）与 AT 列的
+        // `11-09` 不是同一种格式，同一张表里出现两种日期写法会让人多读一遍。
         const formatted = formatCreatedAt(text)
+        const short = String(formatted.date || '').replace(/^(\d{2})\/(\d{2})\/(\d{4})$/, '$1-$2')
+        // 时间保留 AM/PM：去掉之后 `03:49` 是凌晨还是下午说不清。
+        const stamp = [short, formatted.time].filter(Boolean).join(' ')
         return (
-          <div style={cellStackStyle}>
-            <Text style={{ fontSize: 13 }}>{formatted.date}</Text>
-            {formatted.time ? <Text type="secondary" style={secondaryTextStyle}>{formatted.time}</Text> : null}
-          </div>
+          <Tooltip title={`${formatted.date} ${formatted.time}`.trim()}>
+            <span style={{ ...metaLineStyle, fontSize: 12 }}>{stamp || '-'}</span>
+          </Tooltip>
         )
       },
     },
     {
       title: '操作',
       key: 'action',
-      width: 150,
-      // 所有平台都固定到右侧：列宽合计远大于容器（实测 1448px vs 984px），
-      // 不固定的话「操作」列默认落在视口外，用户得横向滚动才能点到按钮。
+      width: 132,
+      // 所有平台都固定到右侧：窄屏下不固定的话「操作」列会落在视口外，
+      // 用户得横向滚动才能点到按钮。
+      //
+      // ⚠️ `scroll.x` 必须 ≥ 各列宽度之和。改造前写的是 1430，而实际列宽合计
+      // 1458 —— 表格内容比声明的宽，sticky 的「操作」列就**压在「注册时间」
+      // 上面**（实测重叠 30px，日期被盖住）。改版后合计 1030，这里取 1040。
       fixed: 'right',
       render: (_: any, record: any) => (
-        <Space size={4} wrap>
-          <Button type="link" size="small" onClick={() => { void openDetail(record) }}>
+        <Space size={2} style={{ whiteSpace: 'nowrap' }}>
+          <Button type="link" size="small" style={{ paddingInline: 4 }} onClick={() => { void openDetail(record) }}>
             详情
           </Button>
           <Popconfirm
@@ -1148,7 +1198,7 @@ export default function Accounts() {
             cancelText="取消"
             okButtonProps={{ danger: true }}
           >
-            <Button type="link" size="small" danger>
+            <Button type="link" size="small" danger style={{ paddingInline: 4 }}>
               删除
             </Button>
           </Popconfirm>
@@ -1288,6 +1338,10 @@ export default function Accounts() {
         <Input.Search
           placeholder="搜索邮箱..."
           allowClear
+          // 受控 + onChange 必须成对：只给 `value` 不给 `onChange`，输入会被
+          // 立刻重置回 state 里的空串 —— 打字没反应（实测踩过，还以为是浏览器问题）。
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
           aria-label="搜索邮箱"
           // antd 的 Input.Search 会渲染一个纯图标搜索按钮，没有可访问名时
           // 读屏只能念 "button"。给图标一个 aria-label，它就成为了按钮的名字。
@@ -1298,6 +1352,7 @@ export default function Accounts() {
         <Select
           placeholder="状态筛选"
           allowClear
+          value={filterStatus || undefined}
           style={{ width: 130 }}
           onChange={(v) => { setPage(1); setFilterStatus(v) }}
           options={[
@@ -1312,6 +1367,7 @@ export default function Accounts() {
           <Select
             placeholder="Plus 试用"
             allowClear
+            value={filterPlusStatus || undefined}
             style={{ width: 150 }}
             onChange={(v) => { setPage(1); setFilterPlusStatus(v || '') }}
             options={PLUS_TRIAL_FILTERS}
@@ -1320,6 +1376,7 @@ export default function Accounts() {
         <DatePicker
           showTime
           allowClear
+          key={`start-${filterEpoch}`}
           placeholder="开始时间"
           style={{ width: 168 }}
           onChange={(value) => { setPage(1); setCreatedAtStart(value ? value.toISOString() : '') }}
@@ -1327,10 +1384,27 @@ export default function Accounts() {
         <DatePicker
           showTime
           allowClear
+          key={`end-${filterEpoch}`}
           placeholder="结束时间"
           style={{ width: 168 }}
           onChange={(value) => { setPage(1); setCreatedAtEnd(value ? value.toISOString() : '') }}
         />
+        {/* 重置只在**确实有筛选**时出现：平时不占版面，有筛选时给一条出路。
+            以前五个控件各带 allowClear，但要一个一个点掉 —— 而用户判断
+            「我现在看的是不是全部账号」靠的正是「有没有筛选」。 */}
+        {activeFilterCount > 0 ? (
+          <Button
+            type="text"
+            icon={<ClearOutlined />}
+            onClick={() => {
+              setSearch(''); setFilterStatus(''); setFilterPlusStatus('')
+              setCreatedAtStart(''); setCreatedAtEnd(''); setPage(1)
+              setFilterEpoch((n) => n + 1)
+            }}
+          >
+            重置 {activeFilterCount} 项筛选
+          </Button>
+        ) : null}
       </div>
 
       <Table
@@ -1344,7 +1418,11 @@ export default function Accounts() {
           onChange: setSelectedRowKeys,
         }}
         pagination={{ total, current: page, pageSize, showSizeChanger: true, pageSizeOptions: ['20', '50', '100'], onChange: (p, ps) => { setPage(p); setPageSize(ps) } }}
-        scroll={{ x: isChatgptPlatform ? 1430 : 1250 }}
+        // 列宽合计：ChatGPT 1046 / Grok 1052（选择列 40 + 各列）。
+        // 取 ≥ 合计的值 —— 写小了内容会被裁、滚到底也够不着；改造前写 1430
+        // 而实际 1458，sticky 的操作列就压在「注册时间」上面（实测重叠 30px）。
+        // `tests/test_frontend_layout_contract.py` 会从源码算列宽和来钉这一条。
+        scroll={{ x: isChatgptPlatform ? 1050 : 1060 }}
         onRow={(record) => ({
           onDoubleClick: () => {
             void openDetail(record)
