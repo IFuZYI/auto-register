@@ -470,7 +470,13 @@ def run_auto_refresh(platform: str, *, rng: Optional[random.Random] = None) -> d
     panels = _enabled_panels(platform)
 
     if strategy == "remote_first" and panels:
-        _pull_from_panels(platform, panels)
+        # 拉取失败**不能**拖住刷新：面板连不上是面板的事，本地该刷的号还是
+        # 该刷。`_pull_from_panels` 内部已按面板逐个兜底，这里再兜一层是因为
+        # 它自己也可能在进入循环前就抛（平台不支持 / 读账号列表失败）。
+        try:
+            _pull_from_panels(platform, panels)
+        except Exception as exc:  # noqa: BLE001 - 拉取是优化，不是前提
+            logger.warning("自动维护：同步面板状态失败（继续刷新）: %s", exc)
 
     picks = _iter_picks(platform)
     targets = select_refresh_targets(
@@ -489,7 +495,10 @@ def run_auto_refresh(platform: str, *, rng: Optional[random.Random] = None) -> d
     )
 
     if strategy in {"remote_first", "local_then_push"} and panels:
-        summary["pushed"] = _push_to_panels(platform, panels)
+        try:
+            summary["pushed"] = _push_to_panels(platform, panels)
+        except Exception as exc:  # noqa: BLE001 - 推送失败不改刷新结果
+            logger.warning("自动维护：推送刷新结果到面板失败: %s", exc)
     return summary
 
 

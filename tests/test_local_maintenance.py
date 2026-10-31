@@ -484,3 +484,84 @@ class RunActionsTaskRecordTests(unittest.TestCase):
 
 
 from unittest import mock  # noqa: E402  —— 上面的测试类要用
+
+
+class RefreshSyncStrategyTests(unittest.TestCase):
+    """「刷新策略」三个档的**接线**（用户要求的三选一）。
+
+    这三条分支在本部署里没法真机验证 —— 4 个面板都没配连接参数，拉取/推送
+    那两条路跑不起来。所以在这里把编排钉死：**先拉、再刷、后推**的顺序，
+    以及 `local_only` 绝不碰远端。
+
+    顺序不是可选的细节：「先同步远程」的意义是面板侧可能已经用别的路径换过
+    凭证，本地拿旧的去刷等于白刷一次（上游会把旧凭证判失效）。推在刷之前，
+    推上去的就是马上要过期的那个。
+    """
+
+    def _run(self, strategy: str, panels=("chatgpt2api",)):
+        from unittest import mock
+
+        from services import local_maintenance as lm
+        from core.config_store import config_store
+
+        config_store.set("chatgpt_sync_strategy", strategy)
+        config_store.set("chatgpt_refresh_scope", "failed")
+        order: list[str] = []
+
+        with mock.patch.object(lm, "_enabled_panels", return_value=list(panels)), \
+             mock.patch.object(lm, "_iter_picks", return_value=[lm.Pick(1, "a@x.com", "invalid", 0.0)]), \
+             mock.patch.object(lm, "_pull_from_panels", side_effect=lambda *a: order.append("pull")), \
+             mock.patch.object(lm, "_push_to_panels", side_effect=lambda *a: order.append("push") or []), \
+             mock.patch.object(lm, "_run_actions", side_effect=lambda *a, **k: order.append("refresh") or {
+                 "total": 1, "ok": 1, "failed": 0, "skipped": 0, "errors": []
+             }):
+            lm.run_auto_refresh("chatgpt")
+        return order
+
+    def tearDown(self):
+        from core.config_store import config_store
+
+        config_store.set("chatgpt_sync_strategy", "")
+        config_store.set("chatgpt_refresh_scope", "")
+
+    def test_local_only_touches_nothing_remote(self):
+        """默认档：不碰面板。这是加这个开关之前的行为，升级不该改变它。"""
+        self.assertEqual(self._run("local_only"), ["refresh"])
+
+    def test_remote_first_pulls_then_refreshes_then_pushes(self):
+        self.assertEqual(self._run("remote_first"), ["pull", "refresh", "push"])
+
+    def test_local_then_push_only_pushes_after(self):
+        self.assertEqual(self._run("local_then_push"), ["refresh", "push"])
+
+    def test_no_enabled_panel_means_no_remote_calls(self):
+        """一个面板都没开自动同步时，两个远程分支都不该发生。"""
+        self.assertEqual(self._run("remote_first", panels=()), ["refresh"])
+        self.assertEqual(self._run("local_then_push", panels=()), ["refresh"])
+
+    def test_unknown_strategy_falls_back_to_local_only(self):
+        """策略配错（不在白名单）→ 按最保守的 `local_only`，不去动远端。"""
+        self.assertEqual(self._run("nonsense"), ["refresh"])
+
+    def test_pull_failure_does_not_block_the_refresh(self):
+        """拉取失败只记日志 —— 刷新本身不该被一个连不上的面板拖住。"""
+        from unittest import mock
+
+        from services import local_maintenance as lm
+        from core.config_store import config_store
+
+        config_store.set("chatgpt_sync_strategy", "remote_first")
+        config_store.set("chatgpt_refresh_scope", "failed")
+        order: list[str] = []
+
+        with mock.patch.object(lm, "_enabled_panels", return_value=["chatgpt2api"]), \
+             mock.patch.object(lm, "_iter_picks", return_value=[lm.Pick(1, "a@x.com", "invalid", 0.0)]), \
+             mock.patch.object(lm, "_pull_from_panels", side_effect=RuntimeError("面板连不上")), \
+             mock.patch.object(lm, "_push_to_panels", side_effect=lambda *a: order.append("push") or []), \
+             mock.patch.object(lm, "_run_actions", side_effect=lambda *a, **k: order.append("refresh") or {
+                 "total": 1, "ok": 1, "failed": 0, "skipped": 0, "errors": []
+             }):
+            lm.run_auto_refresh("chatgpt")
+        self.assertIn("refresh", order, "拉取失败把刷新也带崩了")
+        config_store.set("chatgpt_sync_strategy", "")
+        config_store.set("chatgpt_refresh_scope", "")
