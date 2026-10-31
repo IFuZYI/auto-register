@@ -19,6 +19,7 @@ import {
   Typography,
   Grid,
 } from 'antd'
+import type { TableColumnsType } from 'antd'
 import {
   DeleteOutlined,
   CloudServerOutlined,
@@ -296,7 +297,7 @@ export default function ICloudPage() {
   const screens = Grid.useBreakpoint()
   const narrow = screens.md === false
 
-  const accountColumns = [
+  const accountColumns: TableColumnsType<ICloudAccount> = [
     {
       title: '主号',
       dataIndex: 'email',
@@ -457,7 +458,7 @@ export default function ICloudPage() {
     },
   ]
 
-  const aliasColumns = [
+  const aliasColumns: TableColumnsType<ICloudAlias> = [
     {
       title: '隐私邮箱',
       dataIndex: 'address',
@@ -469,12 +470,16 @@ export default function ICloudPage() {
       title: '来源',
       dataIndex: 'source',
       width: 100,
+      // 窄屏折叠成卡片时隐藏：本地/远程是运营背景信息，不是判断一条别名
+      // 能不能用的依据。10 个字段全摊在卡片上实测 421px/条（1941 条 = 8400px）。
+      responsive: ['md'],
       render: (value: ICloudAlias['source']) =>
         value === 'remote' ? <Tag color="purple">远程</Tag> : <Tag color="blue">本地</Tag>,
     },
     {
       title: '邮件 URL',
       width: 280,
+      responsive: ['md'],
       render: (_: unknown, alias: ICloudAlias) => {
         const url = aliasMailUrl(alias.share_token)
         if (!url) return <Text type="secondary">-</Text>
@@ -520,6 +525,7 @@ export default function ICloudPage() {
       // 使用看「已注册平台」列）；选了平台筛选时改显示该平台口径。
       title: filterPlatform ? `号池（${getPlatformLabel(filterPlatform)}）` : '号池',
       dataIndex: 'pool_status',
+      responsive: ['md'],
       width: filterPlatform ? 170 : 130,
       render: (value: ICloudAlias['pool_status'], alias: ICloudAlias) => {
         if (filterPlatform) {
@@ -536,6 +542,7 @@ export default function ICloudPage() {
       title: '已注册平台',
       dataIndex: 'used_platforms',
       width: 200,
+      responsive: ['md'],
       render: (_: unknown, alias: ICloudAlias) => {
         const names = aliasRegisteredPlatforms(alias)
         if (names.length === 0) return <Text type="secondary">-</Text>
@@ -554,6 +561,7 @@ export default function ICloudPage() {
       title: '创建时间',
       dataIndex: 'created_at',
       width: 180,
+      responsive: ['md'],
       render: (value: string | null) => formatDateTime(value),
     },
     {

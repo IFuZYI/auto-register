@@ -261,6 +261,38 @@ class TableCardsContractTests(unittest.TestCase):
         self.assertIn("scroll={narrow ? undefined :", src, "窄屏仍在横向滚动")
         self.assertIn("fixed: narrow ? undefined : 'right'", src, "窄屏操作列仍然 sticky")
 
+    def test_icloud_alias_card_keeps_only_five_fields(self):
+        """别名表在窄屏只留 5 个字段。
+
+        10 个字段全摊在卡片上实测 **421px/条**（1941 条 = 8400px 的滚动），
+        而「来源 / 邮件 URL / 号池 / 已注册平台 / 创建时间」都不是判断一条
+        别名能不能用的依据 —— 它们是运营背景信息，详情里有。
+        留下的是：隐私邮箱（是什么）、标签、所属主号（谁的）、状态、操作。
+        """
+        src = (FRONTEND / "src" / "pages" / "ICloud.tsx").read_text(encoding="utf-8")
+        alias_block = src.split("const aliasColumns")[1].split("\n  ]\n")[0]
+        # 按列切块：窗口式 `idx+400` 会串到下一列（「隐私邮箱」后面紧跟
+        # 「来源」，而来源带 responsive —— 断言会误报）。
+        columns = [c for c in alias_block.split("\n    {") if c.strip()]
+
+        def column_with(marker: str) -> str:
+            for c in columns:
+                if marker in c:
+                    return c
+            self.fail(f"找不到列：{marker}")
+
+        for field in ("来源", "邮件 URL", "已注册平台", "创建时间"):
+            self.assertIn("responsive: ['md']", column_with(f"title: '{field}'"),
+                          f"「{field}」列没有在窄屏隐藏 —— 别名卡片会涨到 421px/条")
+        # 号池的标题是动态的（`号池（ChatGPT）`），按 dataIndex 找
+        self.assertIn("responsive: ['md']", column_with("dataIndex: 'pool_status'"),
+                      "「号池」列没有在窄屏隐藏")
+
+        # 这五个必须留下
+        for field in ("隐私邮箱", "标签", "所属主号", "状态"):
+            self.assertNotIn("responsive:", column_with(f"title: '{field}'"),
+                             f"「{field}」列被隐藏了 —— 它是判断别名能不能用的依据")
+
     def test_css_collapses_rows_into_labelled_cards(self):
         css = (FRONTEND / "src" / "index.css").read_text(encoding="utf-8")
         idx = css.find(".table-cards")

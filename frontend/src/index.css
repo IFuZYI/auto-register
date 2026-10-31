@@ -1411,21 +1411,26 @@ body {
   white-space: nowrap;
 }
 
-/* 窄屏：六列挤不下，收成两行（第一行身份 + 状态，第二行计数 + 操作）。 */
+/* 窄屏：六列挤不下。
+   原先写成两列 grid，六个子元素被摊成 4 行 —— 实测 390px 下每行 **125px**，
+   比改造前的卡片还高（34 条 = 4250px）。改成 flex-wrap 两行，
+   并隐藏任务 id：`action_1793398035853` 对人没有意义，点「查看日志」
+   本来就是按 id 打开，不需要先读一遍。 */
 @media (max-width: 900px) {
   .task-row {
-    grid-template-columns: minmax(0, 1fr) auto;
-    row-gap: 4px;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px 10px;
+    padding: 8px 12px;
   }
 
-  .task-row__tags,
-  .task-row__meta {
-    grid-column: span 1;
+  .task-row__id {
+    display: none;
   }
 
   .task-row__actions {
-    grid-column: 1 / -1;
-    justify-content: flex-end;
+    margin-left: auto;
   }
 }
 
