@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { App, Button, Empty, Popconfirm, Segmented, Space, Spin, Table, Tag, Tooltip, Typography } from 'antd'
+import { App, Button, Empty, Grid, Popconfirm, Segmented, Space, Spin, Table, Tag, Tooltip, Typography } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
 import {
   CloudDownloadOutlined,
@@ -19,6 +19,7 @@ import {
   shouldShowPlatformFilter,
   summarizeRows,
 } from '@/lib/panelComparison'
+import { withDataLabels } from '@/lib/tableCards'
 
 /**
  * 选中面板后的本地管理面板：本地账号 ↔ 远端账号的对比 + 面板操作。
@@ -405,6 +406,10 @@ export function PanelComparisonPanel({
   /** 拉远端状态的动作 id（如 `sync_cliproxyapi_status`）；空串表示没有 */
   syncAction?: string
 }) {
+  // 窄屏把 9 列表格折叠成卡片（同 lib/tableCards 的约定）。
+  const screens = Grid.useBreakpoint()
+  const narrow = screens.md === false
+
   const { message } = App.useApp()
   const [payload, setPayload] = useState<ComparisonPayload | null>(null)
   const [loading, setLoading] = useState(false)
@@ -860,7 +865,8 @@ export function PanelComparisonPanel({
             // （邮箱池按平台消耗），选「全部」时两行的 email 相同 —— 只用
             // email 当 key 会被 React 认成同一个节点（渲染错行 + key 冲突警告）。
             rowKey={(row) => `${row.platform || ''}|${row.email}`}
-            columns={COLUMNS}
+            className="table-cards"
+            columns={withDataLabels(COLUMNS)}
             dataSource={rows}
             size="small"
             pagination={{ pageSize: 20, showSizeChanger: true, pageSizeOptions: ['20', '50', '100'] }}
@@ -870,7 +876,7 @@ export function PanelComparisonPanel({
             // 各列：平台 90 + 邮箱 240 + 对比 130 + 本地 150 + 远端 150 +
             // 远端信息 220 + 凭证 120 + 时间 110 + 差异 130 = 1340。
             // 改任一列宽时把这个数一起改。
-            scroll={{ x: 1340 }}
+            scroll={narrow ? undefined : { x: 1340 }}
           />
         ) : (
           <Empty

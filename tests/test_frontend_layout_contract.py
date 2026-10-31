@@ -293,6 +293,20 @@ class TableCardsContractTests(unittest.TestCase):
             self.assertNotIn("responsive:", column_with(f"title: '{field}'"),
                              f"「{field}」列被隐藏了 —— 它是判断别名能不能用的依据")
 
+    def test_settings_tables_opt_in_too(self):
+        """设置里的两张表也走同一套折叠。
+
+        它们不是主页面，但 9 列 / 8 列在 390px 上同样是「表格 1340px、
+        容器 358px」—— 没有 sticky 列，数据不会不可达，可横向滑动的体验
+        仍然很差。走同一条 `withDataLabels` + `.table-cards` 路径，
+        不另写一套。
+        """
+        for name in ("PanelComparisonPanel.tsx", "MailImportPanel.tsx"):
+            src = (FRONTEND / "src" / "components" / "settings" / name).read_text(encoding="utf-8")
+            self.assertIn("withDataLabels(", src, f"{name} 没有给列挂 data-label")
+            self.assertIn('className="table-cards"', src, f"{name} 没启用折叠样式")
+            self.assertIn("narrow ? undefined :", src, f"{name} 窄屏仍在横向滚动")
+
     def test_css_collapses_rows_into_labelled_cards(self):
         css = (FRONTEND / "src" / "index.css").read_text(encoding="utf-8")
         idx = css.find(".table-cards")
@@ -468,8 +482,9 @@ class PanelComparisonTableLayoutTests(unittest.TestCase):
         widths = [int(m) for m in re.findall(r"width:\s*(\d+)", columns_block)]
         self.assertGreaterEqual(len(widths), 8, f"只解出 {len(widths)} 个列宽，解析可能失效")
 
-        # scroll.x
-        m = re.search(r"scroll=\{\{\s*x:\s*(\d+)\s*\}\}", src)
+        # scroll.x —— 2026-10-31 起是条件式的（窄屏折叠成卡片后不设 x）：
+        #   scroll={narrow ? undefined : { x: 1340 }}
+        m = re.search(r"scroll=\{narrow \? undefined : \{ x: (\d+) \}\}", src)
         self.assertIsNotNone(m, "找不到 scroll={{ x: ... }} —— 表格结构变了")
         scroll_x = int(m.group(1))
 

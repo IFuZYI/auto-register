@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { App, Alert, Button, Card, Form, Input, InputNumber, Popconfirm, Select, Space, Switch, Table, Tag, Tooltip, Typography } from 'antd'
+import { App, Alert, Button, Card, Form, Grid, Input, InputNumber, Popconfirm, Select, Space, Switch, Table, Tag, Tooltip, Typography } from 'antd'
 import type { FormInstance } from 'antd'
 
 import { aliasRegisteredOn, aliasRegisteredPlatforms } from '@/lib/icloud'
@@ -7,6 +7,7 @@ import { normalizeMailImportSource, useStoredMailImportSource, type MailImportSo
 import { PLATFORM_FILTER_OPTIONS, getPlatformLabel, getPlatformTagColor } from '@/lib/platforms'
 import { poolStatusMeta } from '@/lib/poolStatus'
 import { apiFetch } from '@/lib/utils'
+import { withDataLabels } from '@/lib/tableCards'
 
 type MailImportProviderType = 'microsoft'
 type MailImportSelectionType = MailImportSource
@@ -180,6 +181,9 @@ function buildResultMessage(result: MailImportResult) {
 }
 
 export default function MailImportPanel({ form, lockToProvider }: MailImportPanelProps) {
+  const screens = Grid.useBreakpoint()
+  const narrow = screens.md === false
+
   const { message } = App.useApp()
   const currentMailProvider = String(Form.useWatch('mail_provider', form) || '')
   const storedMailImportSource = useStoredMailImportSource(form)
@@ -795,11 +799,12 @@ export default function MailImportPanel({ form, lockToProvider }: MailImportPane
               selectedRowKeys,
               onChange: setSelectedRowKeys,
             }}
-            columns={columns}
+            className="table-cards"
+            columns={withDataLabels(columns)}
             dataSource={tableData}
             size="small"
             pagination={false}
-            scroll={{ y: 320 }}
+            scroll={narrow ? undefined : { y: 320 }}
           />
         ) : (
           <div
