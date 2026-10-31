@@ -42,7 +42,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Callable
 
-from .base_platform import Account, AccountStatus, RegisterConfig
+from .base_platform import AccountStatus, RegisterConfig
 from .db import account_repository
 from .registry import get, load_all
 

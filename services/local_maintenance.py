@@ -366,7 +366,6 @@ def _run_actions(
         result_message,
         to_platform_account,
     )
-    from services import task_service as _api
 
     summary = {"total": len(picks), "ok": 0, "failed": 0, "skipped": 0, "errors": []}
     if not picks:

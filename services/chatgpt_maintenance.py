@@ -1,45 +1,44 @@
-"""ChatGPT 账号自动维护（用户要求 2026-10-06）。
+"""维护任务的**共享底座**：面板自动同步 + 刷新退避记账。
 
-两条功能，都由「全局配置 → 面板配置」里的开关控制：
+## 这个模块现在管什么
 
-1. **自动刷新临期/过期 Token**（`chatgpt_auto_refresh_enabled`）：
-   后台定期扫描 ChatGPT 账号，对 AT 临期（剩余 ≤ 24h）或已过期的账号，
-   在临期窗口内**随机**一个时刻刷新 —— 不设固定更新时刻（用户要求：
-   「不要设定固定值来更新，应该在临期时间段内随机一个时间更新」），
-   且至少提前 1 小时（「尽量不要拖到过期，比如至少在过期前 1 小时」）。
-   **失效（`invalid`）/ 过期（`expired`）状态的账号也进重试队列**
-   （用户要求 2026-10-10：「定期尝试自动刷新 gpt 失效的账号」）——
-   这类账号不管 AT 是否临期、能否解出 exp，都尽快 + 抖动排一次刷新
-   （刷新链会先试 session/OAuth，再走登录兜底，可能把它们救回来）。
-   封禁的、连续失败达上限的不重复尝试（「封禁/无法更新 token 的不要
-   重复尝试」）。刷新走 `refresh_token` 动作的完整链（session → OAuth →
-   登录兜底），与手动批量刷新同一条路径。
+1. **面板与本地同步**（`chatgpt2api_auto_sync_enabled` /
+   `sub2api_auto_sync_enabled` / `cpa_auto_sync_enabled` /
+   `grok2api_auto_sync_enabled`）：定期比对本地与面板的凭证，本地较新就推过去。
+   `PANEL_AUTO_SYNC` 是这张登记表，四个面板各注册一个 interval 任务。
+   这类任务要的是**持续收敛**（每 10 分钟对账一次），所以用
+   `interval_seconds`。
 
-   **检出封禁 → 标注 + 移出队列**（用户要求 2026-10-10：「若检测出账号
-   被封禁，就标注为封禁账号」）：刷新链认出「号没了」措辞时，执行器把
-   状态落成 `banned`（共享状态策略），维护侧清掉该账号的自动刷新计划
-   —— 封禁是终局结论，不再占用重试名额。封禁账号不参与后续的自动刷新、
-   凭据同步与对比。
+2. **刷新退避记账**（`record_auto_refresh_result` / `AUTO_REFRESH_STATE_KEY`）：
+   状态存 extra 的 `chatgpt_auto_refresh`
+   （`{at, for_exp, attempts, disabled}`），进程重启不丢；失败按 1h → 6h
+   退避，连续 `MAX_ATTEMPTS` 次置 `disabled`。AT 换发后（exp 变了）旧计划
+   自动作废重排。
 
-2. **chatgpt2api 凭证自动维护**（`chatgpt2api_auto_sync_enabled`）：
-   定期对比本地与 chatgpt2api 远端凭证，本地较新时自动推送更新
-   （复用 `panel_push` 的方向判定），使远端始终持有最新凭证。
+   消费方是**手动恢复链**（`/api/tasks/recover` → `services/task_runners.py`）：
+   它按这套计数决定「还能不能再试」以及「用尽后落禁用」。
+
+3. **任务可见性**（`_open_auto_task` / `_close_auto_task` / `_make_logger`）：
+   维护任务要在「任务运行」页看得到、日志可回看、支持停止。定时任务与
+   本地维护（`services/local_maintenance.py`）共用这三个helper。
+
+## 已经搬走的东西（别在这里找）
+
+- **自动刷新 Token**：2026-10-31 搬到 `services/local_maintenance.py`，
+  改成**每天定点**触发（用户要的是「设置刷新时间 + 范围：只刷失效 / 全部 /
+  随机 N 个」）。原来那套 interval 版（`run_auto_refresh_pass`：按 AT 临期
+  窗口随机挑时刻、每轮限量扫描）已删除 —— 两个入口同时存在会让同一个账号
+  每天被刷两遍，而其中一条链在界面上看不见。
+  它依赖的 `plan_auto_refresh` / `compute_next_attempt_at` / `_default_execute`
+  一并删除。
+- **自动检测**：同样住在 `services/local_maintenance.py`。
 
 设计约束：
 
-- **避免高并发**：每轮扫描限量（`_SCAN_BATCH_SIZE`），逐个串行执行，
-  每个之间留间隔（`_PER_ACCOUNT_DELAY_SECONDS`）；随机时刻本身就是
-  错峰机制（各账号的窗口不同、采样独立）。
-- **随机时刻持久化**：计划存 extra 的 `chatgpt_auto_refresh`
-  （`{at, for_exp, attempts, disabled}`），进程重启不丢；AT 换发后
-  （exp 变了）旧计划自动作废重排。
-- **退避**：失败后 1h → 6h 退避重试；连续 3 次失败置 `disabled`，
-  同一 AT 周期内不再尝试。手动刷新成功（AT 换发）后 exp 变化会自然
-  复位重排。
-- **任务可见性**（用户要求 2026-10-07）：「任务运行」页要能看到这些维护
-  任务、方便查看日志。两趟维护在**有实际动作**时创建任务记录
-  （source = `auto_refresh` / `chatgpt2api_sync`），日志逐行进记录、
-  支持停止/跳过；空轮不建记录（每 5/10 分钟一条空任务会把列表淹掉）。
+- **避免高并发**：逐个串行执行、之间留间隔，不用并发池 —— 这些任务打的是
+  上游真实接口，贴着打就是一次小型爬取。
+- **可见性**：有实际动作时才建任务记录，空轮不建（每 10 分钟一条空任务会把
+  「任务运行」列表淹掉）。
 """
 
 from __future__ import annotations
@@ -53,12 +52,6 @@ from services.task_store_io import persist_task_snapshot
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Optional
 
-#: 临期判定：剩余 ≤ 24h 视为「临期」（与 `chatgpt_token_lifecycle` 的
-#: `ACCESS_TOKEN_EXPIRING_SKEW_SECONDS` 同口径）。
-EXPIRING_SKEW_SECONDS = 24 * 60 * 60
-
-#: 随机窗口的「最晚刷新时刻」= 到期前 1 小时（用户要求：至少提前 1 小时）。
-MIN_LEAD_SECONDS = 60 * 60
 
 #: 已过期 / 剩余不足 1 小时时的紧急抖动上限（秒）：尽快刷，但错开同秒并发。
 URGENT_JITTER_SECONDS = 5 * 60
@@ -80,42 +73,6 @@ RETRY_STATUSES = frozenset({"expired", "invalid", "limited"})
 
 #: extra 里的状态键。
 AUTO_REFRESH_STATE_KEY = "chatgpt_auto_refresh"
-
-
-def _rand_default() -> float:
-    import random
-
-    return random.random()
-
-
-def compute_next_attempt_at(
-    expires_at: Optional[int],
-    now: int,
-    *,
-    rand: Callable[[], float] = _rand_default,
-) -> Optional[int]:
-    """算出这个账号下次自动刷新的时刻（epoch 秒）；不临期返回 None。
-
-    窗口规则（用户要求「临期时间段内随机一个时间，至少提前 1 小时」）：
-
-    - 剩余 > 24h：None（还不到排计划的时候）；
-    - 1h < 剩余 ≤ 24h：`[now, expires_at - 1h]` 内均匀随机 —— 上限保证
-      至少提前 1 小时刷新；
-    - 剩余 ≤ 1h 或已过期：`[now, now + 5min]` 内小抖动，尽快刷、错峰。
-    """
-    if expires_at is None:
-        return None
-    remaining = int(expires_at) - int(now)
-    if remaining > EXPIRING_SKEW_SECONDS:
-        return None
-
-    r = min(max(float(rand()), 0.0), 1.0)
-    latest = int(expires_at) - MIN_LEAD_SECONDS
-    if latest > now:
-        span = latest - now
-        return int(now + span * r)
-    # 剩余不足 1 小时（或已过期）：尽快 + 小抖动
-    return int(now + URGENT_JITTER_SECONDS * r)
 
 
 @dataclass
@@ -144,79 +101,6 @@ def _safe_int(value: Any, default: int = 0) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
-
-
-def plan_auto_refresh(
-    extra: dict[str, Any],
-    *,
-    expires_at: Optional[int],
-    status: str,
-    now: int,
-    rand: Callable[[], float] = _rand_default,
-) -> AutoRefreshPlan:
-    """决定这个账号现在该不该（以及何时）自动刷新。
-
-    规则（纯函数，不落库）：
-    - `banned` → skip；
-    - 失效/过期状态（`RETRY_STATUSES`）→ **不看临期窗口**，尽快 + 抖动排
-      一次刷新（用户要求 2026-10-10「定期尝试自动刷新失效账号」）；
-    - 其余（正常等）：无 exp / 未临期 → skip；
-    - 有计划且 `for_exp == 当前 exp`：`disabled` → skip；
-      未到点 → wait；到点 → due；
-    - 无计划或 `for_exp` 变了（AT 已换发）→ 重排（清 attempts/disabled）。
-    """
-    status_text = str(status or "").strip().lower()
-    if status_text == "banned":
-        return AutoRefreshPlan(action="skip", reason="banned")
-
-    state = _state_from_extra(extra)
-    same_cycle = _safe_int(state.get("for_exp")) == _safe_int(expires_at)
-
-    if status_text in RETRY_STATUSES:
-        # 失效/过期账号：不受临期窗口限制 —— 能解出 exp 也不等（凭证被吊销
-        # 的账号拖着只会更难救）；解不出 exp 同样排（刷新链的登录兜底可能
-        # 把它救回来）。排计划与到点执行复用同一套状态机（退避/上限）。
-        if state and same_cycle:
-            if state.get("disabled"):
-                return AutoRefreshPlan(action="skip", reason="disabled")
-            at = _safe_int(state.get("at"))
-            if at > now:
-                return AutoRefreshPlan(action="wait", at=at)
-            return AutoRefreshPlan(action="due", at=at)
-
-        r = min(max(float(rand()), 0.0), 1.0)
-        at = int(now + URGENT_JITTER_SECONDS * r)
-        new_state = {
-            "at": at,
-            "for_exp": _safe_int(expires_at),
-            "attempts": 0,
-            "disabled": False,
-        }
-        return AutoRefreshPlan(action="schedule", at=at, state=new_state)
-
-    if expires_at is None:
-        return AutoRefreshPlan(action="skip", reason="no_expiry")
-
-    next_at = compute_next_attempt_at(expires_at, now, rand=rand)
-    if next_at is None:
-        return AutoRefreshPlan(action="skip", reason="not_expiring")
-
-    if state and same_cycle:
-        if state.get("disabled"):
-            return AutoRefreshPlan(action="skip", reason="disabled")
-        at = _safe_int(state.get("at"))
-        if at > now:
-            return AutoRefreshPlan(action="wait", at=at)
-        return AutoRefreshPlan(action="due", at=at)
-
-    # 无计划，或 AT 已换发（for_exp 不再是当前 exp）→ 重排
-    new_state = {
-        "at": next_at,
-        "for_exp": int(expires_at),
-        "attempts": 0,
-        "disabled": False,
-    }
-    return AutoRefreshPlan(action="schedule", at=next_at, state=new_state)
 
 
 def _access_token_of(extra: Mapping[str, Any], row: Any = None) -> str:
@@ -303,22 +187,10 @@ def _refresh_kind_of(extra: dict[str, Any]) -> str:
     return str(stamp.get("refresh_kind") or "").strip().lower()
 
 
-# ── 扫描执行（集成层）─────────────────────────────────────────────
-
-#: 每轮扫描最多执行的账号数 —— 避免高并发（用户要求）。
-#: 60 秒调度 tick 下每轮最多 5 个，一分钟内的实际刷新请求不会超过 5 个。
-_SCAN_BATCH_SIZE = 5
-
-#: 相邻两个账号执行之间的间隔（秒）—— 串行 + 间隔，进一步错峰。
-_PER_ACCOUNT_DELAY_SECONDS = 3.0
-
 #: 自动维护任务记录的 source 值（任务运行页据此显示彩色标签）。
 AUTO_REFRESH_SOURCE = "auto_refresh"
 CHATGPT2API_SYNC_SOURCE = "chatgpt2api_sync"
 
-#: 自动刷新的扫描间隔（秒）。5 分钟一跳：随机窗口的粒度是分钟级，
-#: 更密只是空转。
-AUTO_REFRESH_INTERVAL_SECONDS = 5 * 60
 
 #: chatgpt2api 自动同步的间隔（秒）。10 分钟：远端凭证变更不频繁，
 #: 且推送有外网成本。
@@ -388,22 +260,6 @@ def _config_text(key: str) -> str:
         return ""
 
 
-def get_auto_refresh_interval_seconds() -> int:
-    """**后台自动**刷新 / 恢复的调度间隔；关闭时返回 0（scheduler 跳过）。
-
-    默认**关**：这一趟会对真实账号打上游请求（1057 个号 × 每 5 分钟），
-    默认打开等于替用户决定「开始消耗出口 IP 和上游配额」。
-
-    但「异常账号尝试恢复」这个能力**不依赖它** —— 用户要恢复时走
-    `POST /api/tasks/recover`（见 `api/tasks.py`），那条路自己会跑、自己会
-    按退避计数、自己会在用尽后落禁用。这个开关只决定「要不要无人值守地
-    定期跑同一件事」。
-    """
-    if not _config_bool("chatgpt_auto_refresh_enabled"):
-        return 0
-    return AUTO_REFRESH_INTERVAL_SECONDS
-
-
 def get_chatgpt2api_auto_sync_interval_seconds() -> int:
     """chatgpt2api 自动同步的调度间隔；关闭或未配置时返回 0。"""
     if not _config_bool("chatgpt2api_auto_sync_enabled"):
@@ -411,303 +267,6 @@ def get_chatgpt2api_auto_sync_interval_seconds() -> int:
     if not _config_text("chatgpt2api_api_url") or not _config_text("chatgpt2api_api_key"):
         return 0
     return CHATGPT2API_AUTO_SYNC_INTERVAL_SECONDS
-
-
-def _default_execute(account_id: str) -> dict[str, Any]:
-    """生产执行器：走 `refresh_token` 动作的完整链（与手动批量刷新同路径）。
-
-    代理规则与批量刷新一致（`_run_account_batch_task` 的
-    `_resolve_proxy_for_account`）：优先账号注册时那个；不可用/未绑定时
-    从池里取备用（惰性来源 —— 避免白推轮转游标）并**写回** `register_proxy`
-    （用户要求「不再是仅有注册才绑定」）。
-    """
-    from services.action_execution import (
-        apply_action_result as _apply_action_result,
-        to_platform_account as _to_platform_account,
-    )
-    from core.base_platform import RegisterConfig
-    from core.config_store import config_store
-    from core.db import AccountModel, platform_session
-    from core.registry import get
-
-    with platform_session("chatgpt") as s:
-        row = s.get(AccountModel, account_id)
-        if row is None:
-            return {"ok": False, "error": "账号不存在"}
-        account = _to_platform_account(row)
-
-    base_config = config_store.get_all() or {}
-    PlatformCls = get("chatgpt")
-    instance = PlatformCls(config=RegisterConfig(extra=base_config))
-
-    from core.proxy_pool import proxy_pool
-
-    saved = str((account.extra or {}).get("register_proxy") or "")
-    chosen, should_bind = proxy_pool.resolve_for_account(
-        saved, fallback_provider=lambda: proxy_pool.get_next()
-    )
-    if chosen:
-        instance.config.proxy = chosen
-    if should_bind and chosen:
-        # 写回绑定（与原代理不可用/未绑定的场景对齐，见 resolve_for_account 的 docstring）。
-        # 写回失败只忽略 —— 不该让整轮任务失败。
-        try:
-            with platform_session("chatgpt") as s:
-                row = s.get(AccountModel, account_id)
-                if row is not None:
-                    extra = row.get_extra()
-                    extra["register_proxy"] = chosen
-                    row.set_extra(extra)
-                    account_repository.save(row, session=s)
-                    s.commit()
-        except Exception:  # noqa: BLE001
-            logger.debug("忽略异常（保留原行为）", exc_info=True)
-
-    result = instance.execute_action("refresh_token", account, {})
-    with platform_session("chatgpt") as s:
-        row = s.get(AccountModel, account_id)
-        if row is not None:
-            _apply_action_result("chatgpt", "refresh_token", row, result, s)
-            account_repository.save(row, session=s)
-            s.commit()
-    return result
-
-
-def run_auto_refresh_pass(
-    *,
-    now: Optional[int] = None,
-    execute: Optional[Callable[[int], dict[str, Any]]] = None,
-    max_accounts: int = _SCAN_BATCH_SIZE,
-    delay_seconds: float = _PER_ACCOUNT_DELAY_SECONDS,
-    log: Optional[Callable[[str], None]] = None,
-) -> dict[str, Any]:
-    """跑一轮扫描：排计划 / 执行到点的刷新。
-
-    每轮最多执行 `max_accounts` 个（避免高并发），串行 + `delay_seconds`
-    间隔；结果按账号落库（`record_auto_refresh_result` 的语义）。
-
-    **有实际执行**时创建任务记录（source=`auto_refresh`）——「任务运行」页
-    可见、日志可回看、支持停止/跳过（用户要求 2026-10-07）；空轮不建记录。
-
-    返回 `{scanned, scheduled, due, executed, ok, failed, skipped}`。
-    """
-    import time as _time
-
-    from core.db import AccountModel, account_repository, platform_session
-    from services.chatgpt_token_lifecycle import project_access_token_lifecycle
-
-    now_s = int(now if now is not None else _time.time())
-    execute_fn = execute or _default_execute
-
-    summary = {
-        "scanned": 0,
-        "scheduled": 0,
-        "due": 0,
-        "executed": 0,
-        "ok": 0,
-        "failed": 0,
-        "skipped": 0,
-    }
-
-    rows = account_repository.list_accounts("chatgpt")
-    due_ids: list[int] = []
-    for row in rows:
-        summary["scanned"] += 1
-        extra = row.get_extra()
-
-        lifecycle = project_access_token_lifecycle(_access_token_of(extra, row))
-        expires_at = lifecycle.get("expires_at")
-
-        plan = plan_auto_refresh(
-            extra,
-            expires_at=expires_at,
-            status=str(row.status or ""),
-            now=now_s,
-        )
-        if plan.action == "schedule":
-            extra[AUTO_REFRESH_STATE_KEY] = plan.state
-            _write_extra(str(row.id), extra)
-            summary["scheduled"] += 1
-        elif plan.action == "due":
-            summary["due"] += 1
-            due_ids.append(str(row.id))
-        else:
-            summary["skipped"] += 1
-            if plan.reason == "banned":
-                # 封禁账号移出队列：清掉遗留计划（手动置封禁、或上一次执行
-                # 刚标上的场景都适用）。封禁是终局结论 —— 不留任何待办状态，
-                # 避免日后人工解封时被旧的 disabled/attempts 卡住重试。
-                state = _state_from_extra(extra)
-                if state:
-                    extra.pop(AUTO_REFRESH_STATE_KEY, None)
-                    _write_extra(str(row.id), extra)
-            # 清掉「针对旧 AT」的死计划：AT 被手动刷新后 exp 变了，旧计划
-            # 已无意义 —— 保持「extra 里只有当前 AT 周期的计划」这一不变量。
-            elif plan.reason == "not_expiring":
-                state = _state_from_extra(extra)
-                if state and _safe_int(state.get("for_exp")) != _safe_int(expires_at):
-                    extra.pop(AUTO_REFRESH_STATE_KEY, None)
-                    _write_extra(str(row.id), extra)
-
-    to_run = due_ids[: max(0, int(max_accounts))]
-    # 有实际执行才建任务记录（空轮不建 —— 每 5 分钟一条空任务会淹列表）。
-    task_id: Optional[str] = None
-    control = None
-    if to_run:
-        task_id, control = _open_auto_task(
-            source=AUTO_REFRESH_SOURCE,
-            platform="chatgpt",
-            total=len(to_run),
-            meta={"due": len(due_ids), "batch": len(to_run)},
-        )
-    log_fn = _make_logger(task_id, log, "[ChatGPT 维护]")
-
-    if task_id is not None:
-        log_fn(
-            f"本轮待刷新 {len(to_run)} 个账号（共 {len(due_ids)} 个到点，"
-            "每轮限量避免高并发）"
-        )
-
-    exec_errors: list[str] = []
-    exec_skipped = 0
-    stopped = False
-    for index, account_id in enumerate(to_run):
-        if index > 0 and delay_seconds > 0:
-            _time.sleep(float(delay_seconds))
-        # 停止/跳过在账号间隙生效（与批量刷新任务同款协作式控制）。
-        if control is not None:
-            try:
-                control.checkpoint()
-            except Exception as exc:  # StopTaskRequested / SkipCurrentAttemptRequested
-                from core.task_runtime import SkipCurrentAttemptRequested, StopTaskRequested
-
-                if isinstance(exc, StopTaskRequested):
-                    stopped = True
-                    log_fn("收到停止请求，本轮剩余账号不再执行")
-                    break
-                if isinstance(exc, SkipCurrentAttemptRequested):
-                    summary["skipped"] += 1
-                    exec_skipped += 1
-                    log_fn(f"跳过账号 #{account_id}（手动跳过）")
-                    continue
-                raise
-        summary["executed"] += 1
-        # 执行前复查：扫描与执行之间 AT 可能被手动刷新（exp 变了）或账号
-        # 状态变了 —— 按**当下**的状态重新判定，避免对已换发的 AT 白跑一次
-        # 并把一次本可避免的失败记到新周期上（复审建议 S3）。
-        try:
-            with platform_session("chatgpt") as s:
-                fresh = s.get(AccountModel, account_id)
-                if fresh is None:
-                    summary["skipped"] += 1
-                    exec_skipped += 1
-                    summary["executed"] -= 1
-                    continue
-                fresh_extra = fresh.get_extra()
-                fresh_status = str(fresh.status or "")
-
-            fresh_lc = project_access_token_lifecycle(_access_token_of(fresh_extra, fresh))
-            fresh_plan = plan_auto_refresh(
-                fresh_extra,
-                expires_at=fresh_lc.get("expires_at"),
-                status=fresh_status,
-                now=now_s,
-            )
-            if fresh_plan.action != "due":
-                summary["skipped"] += 1
-                exec_skipped += 1
-                summary["executed"] -= 1
-                continue
-        except Exception as exc:  # noqa: BLE001 - 复查失败按跳过处理，不毁整轮
-            log_fn(f"账号 #{account_id} 执行前复查失败（跳过）: {type(exc).__name__}: {exc}")
-            summary["skipped"] += 1
-            exec_skipped += 1
-            summary["executed"] -= 1
-            continue
-
-        result: dict[str, Any]
-        try:
-            result = execute_fn(account_id) or {}
-        except Exception as exc:  # noqa: BLE001 - 单账号失败不该毁整轮
-            log_fn(f"账号 #{account_id} 自动刷新异常: {type(exc).__name__}: {exc}")
-            result = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
-
-        data = result.get("data") if isinstance(result.get("data"), dict) else {}
-        # 成功 = ok 且 AT 真换发（未换发视为「无法更新」的一次失败，
-        # 与批量刷新任务的如实报告同一口径）。
-        ok = bool(result.get("ok")) and bool(data.get("refreshed"))
-        # 封禁是终局结论（用户要求 2026-10-10「检测出封禁就标注」）：
-        # 执行器已把状态落成 banned（`_default_execute` → 共享状态策略），
-        # 这里把该账号移出自动刷新队列 —— 清计划而不是记一次退避失败，
-        # 封禁账号不该保留任何待办状态。
-        banned_detected = bool(data.get("banned"))
-        # `state` 先给默认值：账号可能在执行期间被删（写回落空）——
-        # 失败路径引用它时不能是未绑定变量（复审 E1，已复现 UnboundLocalError）。
-        state: dict[str, Any] = {}
-        try:
-            with platform_session("chatgpt") as s:
-                row = s.get(AccountModel, account_id)
-                if row is not None:
-                    extra = row.get_extra()
-                    if banned_detected:
-                        extra.pop(AUTO_REFRESH_STATE_KEY, None)
-                    else:
-                        state = record_auto_refresh_result(extra, ok=ok, now=now_s, row=row)
-                    row.set_extra(extra)
-                    account_repository.save(row, session=s)
-                    s.commit()
-        except Exception as exc:  # noqa: BLE001 - 写回失败只记账，不毁整轮
-            log_fn(f"账号 #{account_id} 结果写回失败（忽略）: {type(exc).__name__}: {exc}")
-        if banned_detected:
-            summary["failed"] += 1
-            reason = str(result.get("error") or "").strip() or "账号已封禁"
-            exec_errors.append(f"账号 #{account_id}: 账号已封禁（已标注）")
-            log_fn(f"账号 #{account_id} 检测出封禁，已标注为封禁账号并移出自动刷新队列: {reason}")
-        elif ok:
-            summary["ok"] += 1
-            log_fn(f"账号 #{account_id} Token 已自动刷新（AT 已换发）")
-        else:
-            summary["failed"] += 1
-            reason = str(result.get("error") or "") or "未换发"
-            suffix = ""
-            if state.get("disabled_reason") == "recovery_exhausted":
-                # 恢复用尽 → 已落禁用。日志必须说清楚「这是终局结论」，
-                # 否则用户看到「失败」会以为还能再点一次刷新。
-                suffix = "；连续恢复失败已达上限，已标注为禁用账号并移出恢复队列"
-            elif state.get("disabled"):
-                suffix = "；本 AT 周期内不再自动尝试"
-            exec_errors.append(f"账号 #{account_id}: {reason}")
-            log_fn(f"账号 #{account_id} 自动刷新失败: {reason}{suffix}")
-
-    if due_ids[max(0, int(max_accounts)):]:
-        log_fn(
-            f"本轮执行 {min(len(due_ids), max_accounts)}/{len(due_ids)} 个，"
-            "其余下轮继续（避免高并发）"
-        )
-    # 收尾任务记录：停止优先；否则 done（部分失败也如实带 errors）。
-    # skipped 只统计**执行阶段**的跳过（手动跳过/账号消失/计划过期）——
-    # 扫描阶段的「未临期」是 170+ 量级的正常跳过，进记录会误导。
-    _close_auto_task(
-        task_id,
-        status="stopped" if stopped else "done",
-        success=summary["ok"],
-        registered=summary["ok"] + summary["failed"],
-        skipped=exec_skipped,
-        errors=exec_errors,
-    )
-    return summary
-
-
-def _write_extra(account_id: str, extra: dict[str, Any]) -> None:
-    """把 extra 写回账号行（短会话，不占网络链的连接）。"""
-    from core.db import AccountModel, platform_session
-
-    with platform_session("chatgpt") as s:
-        row = s.get(AccountModel, account_id)
-        if row is not None:
-            row.set_extra(extra)
-            account_repository.save(row, session=s)
-            s.commit()
 
 
 def _open_auto_task(
@@ -920,14 +479,8 @@ def _default_panel_push(panel_key: str, platform: str, delete_old: bool) -> dict
     return push_local_rows(panel_key, platform=platform, delete_old=delete_old)
 
 
-def _default_chatgpt2api_push() -> dict[str, Any]:
-    """chatgpt2api 的生产推送（保留具名入口，测试直接引用它）。"""
-    return _default_panel_push("chatgpt2api", "chatgpt", True)
-
-
 # ── 周期任务自注册（core.scheduler 不认识具体业务，见其模块 docstring）──
 
-from core.db import account_repository
 from core.scheduler import register_job as _register_job  # noqa: E402
 
 # ⚠️ 这里**曾经**注册过一个 interval 版的自动刷新（`chatgpt_auto_refresh`）。
@@ -937,8 +490,9 @@ from core.scheduler import register_job as _register_job  # noqa: E402
 # interval 是「距上次跑满 24 小时」，每次重启都会把时刻往后推。
 # 两个都注册 = 同一个账号被两条链各刷一遍，且其中一条在界面上看不见。
 #
-# `run_auto_refresh_pass` 与 `get_auto_refresh_interval_seconds` 暂时保留
-# （它们的计划/退避逻辑仍被测试钉住），但**生产路径已经不调用**。
+# `run_auto_refresh_pass` / `plan_auto_refresh` / `compute_next_attempt_at` /
+# `_default_execute` / `get_auto_refresh_interval_seconds` 于同日**删除** ——
+# 留着会被下一个人当成活的。
 _register_job(
     "chatgpt2api_auto_sync",
     interval_seconds=get_chatgpt2api_auto_sync_interval_seconds,
@@ -964,21 +518,15 @@ for _panel_key in ("sub2api", "cpa", "grok2api"):
 
 
 __all__ = [
-    "AUTO_REFRESH_INTERVAL_SECONDS",
     "AUTO_REFRESH_STATE_KEY",
     "CHATGPT2API_AUTO_SYNC_INTERVAL_SECONDS",
     "PANEL_AUTO_SYNC",
-    "EXPIRING_SKEW_SECONDS",
     "MAX_ATTEMPTS",
-    "MIN_LEAD_SECONDS",
     "RETRY_STATUSES",
     "AutoRefreshPlan",
-    "compute_next_attempt_at",
     "get_chatgpt2api_auto_sync_interval_seconds",
     "get_panel_auto_sync_interval_seconds",
-    "plan_auto_refresh",
     "run_panel_auto_sync",
     "record_auto_refresh_result",
-    "run_auto_refresh_pass",
     "run_chatgpt2api_auto_sync",
 ]

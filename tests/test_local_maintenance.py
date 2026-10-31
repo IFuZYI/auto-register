@@ -329,3 +329,158 @@ class BannedSwitchDefaultTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RunActionsTaskRecordTests(unittest.TestCase):
+    """`_run_actions` 的任务可见性（用户要求 2026-10-07）。
+
+    这套断言原来长在 `test_task_kinds_and_visibility.py`，驱动的是**已删除**的
+    `run_auto_refresh_pass`。行为本身还在（`_open_auto_task` / `_close_auto_task`
+    三个 helper 一字未改，只是换了个调用方），所以把它重挂到现在的执行器上
+    —— 否则「空轮不建记录」「停止要如实标 stopped」就没人管了。
+    """
+
+    SOURCE = "test_local_maintenance_probe"
+
+    def setUp(self):
+        from core.config_store import config_store
+
+        config_store.set("chatgpt_probe_sample_percent", "20")
+        self._purge()
+
+    def tearDown(self):
+        self._purge()
+
+    def _purge(self):
+        from sqlmodel import Session, delete
+
+        from api.tasks import _task_store
+        from core.db import TaskRunModel, current_engine
+
+        with _task_store._lock:
+            for tid in [k for k, r in _task_store._records.items() if r.source == self.SOURCE]:
+                _task_store._records.pop(tid, None)
+        with Session(current_engine()) as s:
+            s.exec(delete(TaskRunModel).where(TaskRunModel.source == self.SOURCE))
+            s.commit()
+
+    def _records(self):
+        from api.tasks import _task_store
+
+        return [s for s in _task_store.list_snapshots() if s.get("source") == self.SOURCE]
+
+    def _fake(self, *, ok: bool = True, boom: bool = False, delay: float = 0.0):
+        """把动作链整体替换掉：只留 `_run_actions` 自己的编排逻辑可测。"""
+        import contextlib
+
+        from unittest import mock
+
+        from services import local_maintenance as lm
+
+        account = mock.MagicMock()
+        account.status = "registered"
+        account.get_extra.return_value = {}
+
+        class _Instance:
+            def __init__(self, **kwargs):
+                self.config = mock.MagicMock()
+
+            def execute_action(self, action_id, acct, params):
+                if boom:
+                    raise RuntimeError("上游炸了")
+                return {"ok": ok, "error": "" if ok else "没换发"}
+
+        platform_session = mock.MagicMock()
+        platform_session.return_value.__enter__ = mock.MagicMock(return_value=mock.MagicMock())
+        platform_session.return_value.__exit__ = mock.MagicMock(return_value=False)
+
+        return [
+            mock.patch.object(lm, "PER_ACCOUNT_DELAY_SECONDS", delay),
+            mock.patch("core.registry.get", return_value=_Instance),
+            mock.patch("core.db.platform_session", platform_session),
+            mock.patch("core.db.account_repository.get", return_value=account),
+            mock.patch("services.action_execution.resolve_action_proxy", return_value=""),
+            mock.patch("services.action_execution.to_platform_account", return_value=mock.MagicMock()),
+            mock.patch("services.action_execution.apply_action_result"),
+            mock.patch("services.action_execution.result_message", return_value="没换发"),
+            mock.patch.object(lm, "_open_task", side_effect=self._open),
+            mock.patch.object(lm, "_close_auto_task"),
+            mock.patch.object(lm, "_make_logger", return_value=lambda m: None),
+        ]
+
+    def _open(self, *, source, platform, total, meta=None):
+        from services import task_service as _api
+
+        task_id = f"{source}_t"
+        _api.task_store.create(task_id, platform=platform, total=total, source=source, meta=dict(meta or {}))
+        _api.task_store.mark_running(task_id)
+        return task_id, None
+
+    def test_empty_round_creates_no_record(self):
+        """空轮不建记录 —— 每天一条空任务会把「任务运行」淹掉。
+
+        整条动作链都 patch 上（而不是只断言 `total == 0`）：这样去掉早返回时
+        失败原因是「多了一条记录」这个**真正的**断言，而不是一个无关的
+        `KeyError` —— 后者看着红、其实没测到东西。
+        """
+        from services import local_maintenance as lm
+
+        patches = self._fake()
+        with patches[0]:
+            for pt in patches[1:]:
+                pt.start()
+            try:
+                summary = lm._run_actions("chatgpt", "probe_local_status", [], source=self.SOURCE, label="检测")
+            finally:
+                for pt in reversed(patches[1:]):
+                    pt.stop()
+
+        self.assertEqual(summary["total"], 0)
+        self.assertEqual(summary["ok"], 0)
+        self.assertEqual(self._records(), [], "空轮建了任务记录")
+
+    def test_successful_round_creates_one_record(self):
+        from services import local_maintenance as lm
+
+        patches = self._fake()
+        with mock.patch("core.db.platform_session"):
+            with patches[0]:
+                for pt in patches[1:]:
+                    pt.start()
+                try:
+                    summary = lm._run_actions(
+                        "chatgpt", "probe_local_status",
+                        [lm.Pick(1, "a@x.com", "registered", 0.0)], source=self.SOURCE, label="检测",
+                    )
+                finally:
+                    for pt in reversed(patches[1:]):
+                        pt.stop()
+
+        self.assertEqual(summary["ok"], 1)
+        records = self._records()
+        self.assertEqual(len(records), 1, "跑了一轮却没有任务记录 —— 页面上看不见")
+        self.assertEqual(records[0]["source"], self.SOURCE)
+
+    def test_per_account_exception_is_counted_not_fatal(self):
+        """单个号炸了要记进 errors，而不是毁掉整轮。"""
+        from services import local_maintenance as lm
+
+        patches = self._fake(boom=True)
+        with patches[0]:
+            for pt in patches[1:]:
+                pt.start()
+            try:
+                summary = lm._run_actions(
+                    "chatgpt", "probe_local_status",
+                    [lm.Pick(1, "a@x.com", "registered", 0.0)], source=self.SOURCE, label="检测",
+                )
+            finally:
+                for pt in reversed(patches[1:]):
+                    pt.stop()
+
+        self.assertEqual(summary["failed"], 1)
+        self.assertEqual(summary["ok"], 0)
+        self.assertTrue(summary["errors"], "异常没有被记进 errors")
+
+
+from unittest import mock  # noqa: E402  —— 上面的测试类要用
