@@ -136,7 +136,7 @@ CONFIG_SCHEMA: tuple[ConfigKey, ...] = (
     # 「执行间隔」而不是「执行时间」—— 凌晨三点跑是**一天一次**的特例，而
     # 「每 6 小时」这种粒度用固定时刻表达不了。调度走 `interval_seconds`。
     #
-    # 日志自动清理：只按**保留天数**删，不提供「全清」——一个每天定点执行的
+    # 日志自动清理：只按**保留天数**删，不提供「全清」——一个定时执行的
     # 删除动作不该有「抹掉全部」这种档位。
     ConfigKey("log_cleanup_enabled", "maintenance"),
     ConfigKey("log_cleanup_interval", "maintenance"),

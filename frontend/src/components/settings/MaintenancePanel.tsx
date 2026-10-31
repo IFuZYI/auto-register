@@ -217,7 +217,7 @@ function RuleBlock({
   )
 }
 
-/** 一行文本参数（时间 / 比例 / 条数）。 */
+/** 一行文本参数（比例 / 条数）。时间类参数走 IntervalRow —— 见下。 */
 function TextRow({
   name,
   label,
@@ -556,7 +556,7 @@ export function MaintenancePanel() {
       <section className="set-section">
         <SectionHead
           title="日志自动清理"
-          hint="按保留天数删任务历史。只按天数删，没有「全清」档位 —— 每天定点执行的动作不该带「抹掉全部」这种选项。"
+          hint="按保留天数删任务历史。只按天数删，没有「全清」档位 —— 定时执行的动作不该带「抹掉全部」这种选项。"
         />
         <RuleBlock
           label="自动清理"

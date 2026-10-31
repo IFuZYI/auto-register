@@ -601,7 +601,7 @@ def _make_logger(task_id: Optional[str], sink: Optional[Callable[[str], None]], 
 def run_log_cleanup(*, now: Optional[datetime] = None) -> dict[str, Any]:
     """删掉超过保留天数的任务历史。
 
-    只按**保留天数**删，没有「全清」档位：一个每天定点执行的动作不该带
+    只按**保留天数**删，没有「全清」档位：一个定时执行的动作不该带
     「抹掉全部历史」这种选项 —— 误配一次就再也查不到「上周那个号为什么掉」。
 
     两个存储后端各走各的：JSON 用仓储自带的 `cleanup_json`（它已经处理了
