@@ -37,8 +37,10 @@ import {
   Switch,
   Tooltip,
   theme,
+  Grid,
 } from 'antd'
 import type { MenuProps } from 'antd'
+import { withDataLabels } from '@/lib/tableCards'
 import {
   MedicineBoxOutlined,
   ReloadOutlined,
@@ -885,6 +887,11 @@ export default function Accounts() {
     (createdAtStart ? 1 : 0) +
     (createdAtEnd ? 1 : 0)
 
+  // 窄屏（< md）把表格折叠成卡片：8 列在 390px 上只能横向滚，而 sticky 的
+  // 操作列会盖住右侧内容（实测容器 358px、表格 1042px，凭据列整个被盖住）。
+  const screens = Grid.useBreakpoint()
+  const narrow = screens.md === false
+
   const isChatgptPlatform = currentPlatform === 'chatgpt'
   const monospaceStyle: React.CSSProperties = {
     fontFamily: 'SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace',
@@ -973,6 +980,9 @@ export default function Accounts() {
       title: '凭据',
       key: 'credentials',
       width: 120,
+      // 窄屏折叠成卡片时隐藏：凭据是「这号能不能救」的细节，详情里有；
+      // 卡片上优先放「是谁、什么状态、什么时候到期」。
+      responsive: ['md'],
       render: (_: any, record: any) => {
         const hasPwd = Boolean(record.has_password)
         const hasRt = Boolean(getRefreshToken(record))
@@ -1067,6 +1077,7 @@ export default function Accounts() {
       title: '探测结果',
       key: 'chatgpt_local_state',
       width: 176,
+      responsive: ['md'],
       render: (_: any, record: any) => {
         const auth = record.chatgptLocal?.auth || {}
         const subscription = record.chatgptLocal?.subscription || {}
@@ -1161,6 +1172,7 @@ export default function Accounts() {
       dataIndex: 'created_at',
       key: 'created_at',
       width: 108,
+      responsive: ['md'],
       render: (text: string) => {
         // 单行 `MM-DD HH:mm`：两行写法（日期一行、时间一行）与 AT 列的
         // `11-09` 不是同一种格式，同一张表里出现两种日期写法会让人多读一遍。
@@ -1185,7 +1197,7 @@ export default function Accounts() {
       // ⚠️ `scroll.x` 必须 ≥ 各列宽度之和。改造前写的是 1430，而实际列宽合计
       // 1458 —— 表格内容比声明的宽，sticky 的「操作」列就**压在「注册时间」
       // 上面**（实测重叠 30px，日期被盖住）。改版后合计 1030，这里取 1040。
-      fixed: 'right',
+      fixed: narrow ? undefined : 'right',
       render: (_: any, record: any) => (
         <Space size={2} style={{ whiteSpace: 'nowrap' }}>
           <Button type="link" size="small" style={{ paddingInline: 4 }} onClick={() => { void openDetail(record) }}>
@@ -1207,6 +1219,10 @@ export default function Accounts() {
       ),
     },
   )
+
+  // 所有列定义完之后统一挂 `data-label`（窄屏折叠成卡片时当行标签用）。
+  // 只在这里包一次：在创建时包、push 后再包，会把 onCell 套三层。
+  const tableColumns = withDataLabels(columns)
 
   // 只留账号自身的动作：本地状态探测、Plus 试用检测。
   // 「同步 CLIProxyAPI 状态」已移到「面板管理」页（用户要求平台管理只管账号）——
@@ -1409,7 +1425,8 @@ export default function Accounts() {
 
       <Table
         rowKey="id"
-        columns={columns}
+        className="table-cards"
+        columns={tableColumns}
         dataSource={accounts}
         loading={loading}
         size="middle"
@@ -1422,7 +1439,7 @@ export default function Accounts() {
         // 取 ≥ 合计的值 —— 写小了内容会被裁、滚到底也够不着；改造前写 1430
         // 而实际 1458，sticky 的操作列就压在「注册时间」上面（实测重叠 30px）。
         // `tests/test_frontend_layout_contract.py` 会从源码算列宽和来钉这一条。
-        scroll={{ x: isChatgptPlatform ? 1050 : 1060 }}
+        scroll={narrow ? undefined : { x: isChatgptPlatform ? 1050 : 1060 }}
         onRow={(record) => ({
           onDoubleClick: () => {
             void openDetail(record)

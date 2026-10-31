@@ -95,7 +95,12 @@ class AtLifecycleDisplayContractTests(unittest.TestCase):
         import re
 
         src = self._src()
-        m = re.search(r"scroll=\{\{ x: isChatgptPlatform \? (\d+) : (\d+) \}\}", src)
+        # 窄屏折叠成卡片后不设 scroll.x（`narrow ? undefined : {...}`），
+        # 所以正则要吃掉那个前缀。
+        m = re.search(
+            r"scroll=\{narrow \? undefined : \{ x: isChatgptPlatform \? (\d+) : (\d+) \}\}",
+            src,
+        )
         if m is None:
             self.fail("找不到 scroll.x 配置")
         chatgpt_x, grok_x = int(m.group(1)), int(m.group(2))
@@ -224,6 +229,72 @@ class AtLifecycleDisplayContractTests(unittest.TestCase):
         )
 
 
+class TableCardsContractTests(unittest.TestCase):
+    """窄屏把宽表折叠成卡片（`data-label` + `::before`）。
+
+    390px 下账号表容器 358px、表格 1042px：邮箱被压成
+    「skyway-finale-6c@icloud.co…」，而 sticky 的操作列盖在凭据列上面
+    —— 右侧那列永远看不见。折叠成卡片后不再横向滚动。
+
+    这个模式有一个**只在折叠态才暴露**的静默失败：某个单元格没拿到
+    `data-label`，就渲染成一个没有标签的裸值（宽度 > 断点时完全看不出来）。
+    所以标签必须由列自己的 `title` 生成（`lib/tableCards.ts` 一处定义），
+    而不是每页手写一遍。
+    """
+
+    def test_helper_derives_label_from_column_title(self):
+        src = (FRONTEND / "src" / "lib" / "tableCards.ts").read_text(encoding="utf-8")
+        self.assertIn("'data-label': title", src, "没有给单元格挂 data-label")
+        self.assertIn("typeof column.title === 'string'", src,
+                      "非字符串标题（自定义节点）必须跳过 —— 否则 attr() 拿到 [object Object]")
+        self.assertIn("previousOnCell", src, "覆盖了列原有的 onCell")
+
+    def test_accounts_table_opts_in(self):
+        src = (FRONTEND / "src" / "pages" / "Accounts.tsx").read_text(encoding="utf-8")
+        self.assertIn("withDataLabels(columns)", src, "账号表没有给列挂 data-label")
+        self.assertIn('className="table-cards"', src, "账号表没启用折叠样式")
+        # 窄屏必须去掉 scroll.x 与 fixed：折叠后横向滚动没有意义，
+        # sticky 还会把操作列浮在卡片上。
+        self.assertIn("scroll={narrow ? undefined :", src, "窄屏仍在横向滚动")
+        self.assertIn("fixed: narrow ? undefined : 'right'", src, "窄屏操作列仍然 sticky")
+
+    def test_css_collapses_rows_into_labelled_cards(self):
+        css = (FRONTEND / "src" / "index.css").read_text(encoding="utf-8")
+        idx = css.find(".table-cards")
+        self.assertGreater(idx, -1, "index.css 里没有 .table-cards 规则")
+        block = css[idx : idx + 2200]
+        self.assertIn("content: attr(data-label)", block, "卡片上没有渲染列名")
+        self.assertIn(".ant-table-thead", block, "没有隐藏表头")
+        self.assertIn("display: none", block)
+        # 选择列没有 title，折叠后会渲染出裸复选框 —— 必须隐藏
+        self.assertIn(".ant-table-selection-column", block, "选择列没处理，会渲染出无标签的复选框")
+
+
+class TaskRowDensityTests(unittest.TestCase):
+    """已完成任务用紧凑行，不用一张卡。
+
+    实测（2026-10-31）：464 条已完成任务原来一条一张卡、90~100px/张，
+    一屏 5~6 条。改成紧凑行后 41px/条 —— 密度翻 2.2 倍。
+    进行中的任务仍用完整卡片：那里进度条与实时时长是有用的。
+    """
+
+    def test_finished_tasks_use_compact_rows(self):
+        src = (FRONTEND / "src" / "pages" / "RunningTasks.tsx").read_text(encoding="utf-8")
+        self.assertIn("renderCompactTask", src, "没有紧凑行渲染器")
+        self.assertIn("visibleFinished.map(renderCompactTask)", src,
+                      "已完成任务仍在用完整卡片（应为紧凑行）")
+        # 进行中必须还是卡片 —— 进度条/实时时长在那里有用
+        self.assertIn("activeTasks.map(renderTask)", src, "进行中任务被改成了紧凑行")
+
+    def test_compact_row_css_is_a_grid(self):
+        css = (FRONTEND / "src" / "index.css").read_text(encoding="utf-8")
+        idx = css.find(".task-row {")
+        self.assertGreater(idx, -1, "index.css 里没有 .task-row 规则")
+        block = css[idx : idx + 400]
+        self.assertIn("display: grid", block,
+                      "用 flex 的话每行内容宽度不同，列不成一条竖线，扫读会跳")
+
+
 class TableMeasureRowTests(unittest.TestCase):
     """表格的 measure row 必须 `visibility: hidden`。
 
@@ -282,7 +353,13 @@ class ICloudTableLayoutTests(unittest.TestCase):
         self.assertGreaterEqual(len(widths), 7, f"只解出 {len(widths)} 个列宽，解析可能失效")
 
         # 两个 scroll={{ x: N }}（主号表 + 别名表），取最小的那个 = 主号表
-        scrolls = [int(m) for m in re.findall(r"scroll=\{\{\s*x:\s*(\d+)\s*\}\}", src)]
+        # 2026-10-31 起 scroll.x 是条件式的（窄屏折叠成卡片后不设 x）：
+        #   scroll={narrow ? undefined : { x: 1390 }}
+        # 正则要吃掉这个前缀，否则匹配不到、测试变成假失败。
+        scrolls = [
+            int(m)
+            for m in re.findall(r"scroll=\{narrow \? undefined : \{ x: (\d+) \}\}", src)
+        ]
         self.assertGreaterEqual(len(scrolls), 2, "找不到两个表格的 scroll 配置")
 
         self.assertGreaterEqual(
@@ -309,7 +386,13 @@ class ICloudTableLayoutTests(unittest.TestCase):
             widths.append(max(int(a), int(b)))
         self.assertGreaterEqual(len(widths), 9, f"只解出 {len(widths)} 个列宽")
 
-        scrolls = [int(m) for m in re.findall(r"scroll=\{\{\s*x:\s*(\d+)\s*\}\}", src)]
+        # 2026-10-31 起 scroll.x 是条件式的（窄屏折叠成卡片后不设 x）：
+        #   scroll={narrow ? undefined : { x: 1390 }}
+        # 正则要吃掉这个前缀，否则匹配不到、测试变成假失败。
+        scrolls = [
+            int(m)
+            for m in re.findall(r"scroll=\{narrow \? undefined : \{ x: (\d+) \}\}", src)
+        ]
         self.assertGreaterEqual(
             max(scrolls),
             sum(widths),
@@ -426,10 +509,12 @@ class ICloudActionColumnStickyTests(unittest.TestCase):
         block = src.split("const accountColumns", 1)[1].split("\n  ]", 1)[0]
         action_idx = block.index("title: '操作'")
         action_block = block[action_idx : action_idx + 200]
+        # 桌面态必须固定；窄屏折叠成卡片后不固定（sticky 在卡片布局里
+        # 会把操作列浮在内容上）。所以断言的是这个**条件式**。
         self.assertIn(
-            "fixed: 'right'",
+            "fixed: (narrow ? undefined : 'right')",
             action_block,
-            "主号表「操作」列没有 fixed: 'right' —— 列宽超出容器时按钮落在视口外",
+            "主号表「操作」列没有在桌面态 fixed: 'right' —— 列宽超出容器时按钮落在视口外",
         )
 
     def test_alias_table_action_column_is_fixed_right(self):
@@ -438,9 +523,9 @@ class ICloudActionColumnStickyTests(unittest.TestCase):
         action_idx = block.index("title: '操作'")
         action_block = block[action_idx : action_idx + 200]
         self.assertIn(
-            "fixed: 'right'",
+            "fixed: (narrow ? undefined : 'right')",
             action_block,
-            "别名表「操作」列没有 fixed: 'right' —— 列宽超出容器时按钮落在视口外",
+            "别名表「操作」列没有在桌面态 fixed: 'right' —— 列宽超出容器时按钮落在视口外",
         )
 
 

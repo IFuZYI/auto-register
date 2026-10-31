@@ -1357,3 +1357,167 @@ body {
 .ant-table-measure-row {
   visibility: hidden;
 }
+
+/* ═══════════════════════════════════════════════════════════════
+   任务运行 · 已完成任务的紧凑行
+
+   464 条已完成任务原来是一条一张卡（实测 90~100px/张）——一屏 5~6 条，
+   翻到底要 80 多屏。而「已完成」这段是用来**查**的（跑过没有、结果怎样），
+   不是盯进度；进度条和两行元信息在这里全是浪费。
+
+   进行中的任务仍用完整卡片：那里进度条与实时时长是有用的。
+
+   六列对齐（id / 标签 / 状态 / 时长 / 计数 / 操作）：用 grid 而不是
+   flex —— flex 下每行内容宽度不同，列就不成一条竖线，扫读时会跳。
+   ═══════════════════════════════════════════════════════════════ */
+.task-row {
+  display: grid;
+  grid-template-columns: minmax(150px, 1.6fr) minmax(140px, 1.4fr) 84px 74px minmax(120px, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 14px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.045);
+  font-size: 12px;
+}
+
+.task-row:hover {
+  background: var(--bg-subtle);
+}
+
+.task-row__id {
+  font-family: SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace;
+  font-size: 11px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.task-row__tags {
+  display: flex;
+  gap: 4px;
+  min-width: 0;
+}
+
+.task-row__meta {
+  color: var(--text-muted);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.task-row__actions {
+  display: flex;
+  gap: 2px;
+  white-space: nowrap;
+}
+
+/* 窄屏：六列挤不下，收成两行（第一行身份 + 状态，第二行计数 + 操作）。 */
+@media (max-width: 900px) {
+  .task-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+    row-gap: 4px;
+  }
+
+  .task-row__tags,
+  .task-row__meta {
+    grid-column: span 1;
+  }
+
+  .task-row__actions {
+    grid-column: 1 / -1;
+    justify-content: flex-end;
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   表格 → 窄屏卡片（`.table-cards`）
+
+   8~10 列的宽表在 390px 上只能横向滚：实测账号表容器 358px、表格 1042px，
+   邮箱被压成「skyway-finale-6c@icloud.co…」，而 sticky 的操作列盖在
+   凭据列上面 —— 右侧那一列永远看不见。
+
+   做法（dogfood 的标准套路）：隐藏表头，每个单元格用 `::before` 渲染
+   自己的列名（`content: attr(data-label)`），一行变成一张小卡片，
+   标签与值成对出现，不再需要横向滚动。
+
+   `data-label` 由 `lib/tableCards.ts` 从列自己的 `title` 生成 ——
+   一处定义，标题改了卡片标签跟着改。
+   ═══════════════════════════════════════════════════════════════ */
+@media (max-width: 767px) {
+  .table-cards .ant-table-thead {
+    display: none;
+  }
+
+  .table-cards .ant-table-tbody > tr.ant-table-row {
+    display: block;
+    margin-bottom: 10px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+    background: var(--bg-container);
+  }
+
+  .table-cards .ant-table-tbody > tr.ant-table-row > td {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 14px;
+    /* 列宽是给横向表格用的，折叠后必须让位 —— 不写 !important 会被
+       antd 的 `table-layout: fixed` + 内联 width 压回固定宽度。 */
+    width: auto !important;
+    max-width: none !important;
+    padding: 9px 12px !important;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.045);
+    text-align: right;
+  }
+
+  .table-cards .ant-table-tbody > tr.ant-table-row > td:last-child {
+    border-bottom: 0;
+  }
+
+  .table-cards .ant-table-tbody > tr.ant-table-row > td::before {
+    content: attr(data-label);
+    /* 固定标签列宽：不固定的话每个单元格的标签宽度跟着自己的字走，
+       一列卡片里的「邮箱 / 状态 / AT 到期」就不成一条竖线。 */
+    flex: 0 0 76px;
+    color: var(--text-muted);
+    font-size: 12px;
+    text-align: left;
+  }
+
+  /* 值那一侧必须**占满剩余宽度**（flex: 1 + min-width: 0）。
+     只给 `justify-content: space-between` 时，值是「按内容收缩」的 flex 项，
+     长邮箱会在一个很窄的盒子里折行 —— 实测 iCloud 的主号被折成
+     「fuzzy202610@icloud」+「.com」两行，后半截还贴到最右边。 */
+  .table-cards .ant-table-tbody > tr.ant-table-row > td > * {
+    flex: 1 1 auto;
+    min-width: 0;
+    text-align: right;
+    overflow-wrap: anywhere;
+    /* 窄屏把值降一号字：主号邮箱 21 字符在 13px 下差几像素就要折行，
+       12px 刚好一行放得下（实测 iCloud 主号从 2 行回到 1 行）。 */
+    font-size: 12px;
+  }
+
+  /* 选择列没有 title，折叠后会渲染出一个**没有标签的裸复选框** ——
+     宁可窄屏不做批量选择（手机上本来也不适合选 50 个号再点删除）。 */
+  .table-cards .ant-table-selection-column {
+    display: none !important;
+  }
+
+  /* 折叠后不再有横向滚动，sticky 也没有意义；留着会让操作列浮在卡片上。 */
+  .table-cards .ant-table-cell-fix-right,
+  .table-cards .ant-table-cell-fix-left {
+    position: static !important;
+    box-shadow: none !important;
+  }
+
+  .table-cards .ant-table-content,
+  .table-cards .ant-table-body {
+    overflow-x: visible !important;
+  }
+
+  .table-cards table {
+    table-layout: auto !important;
+  }
+}

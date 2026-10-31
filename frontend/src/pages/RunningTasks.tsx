@@ -51,7 +51,10 @@ interface TaskSnapshot {
   control: { stop_requested: boolean }
 }
 
-const STATUS_CONFIG: Record<string, { color: string; label: string; icon?: React.ReactNode }> = {
+// `color` 用 antd Badge 的联合类型而不是 `string`：写成 string 时调用处
+// 得 `as any`，eslint 的 no-explicit-any 会报错（实测两处）。
+type BadgeStatus = 'default' | 'processing' | 'success' | 'error' | 'warning'
+const STATUS_CONFIG: Record<string, { color: BadgeStatus; label: string; icon?: React.ReactNode }> = {
   pending: { color: 'default', label: '等待中', icon: <LoadingOutlined /> },
   running: { color: 'processing', label: '运行中', icon: <LoadingOutlined /> },
   done: { color: 'success', label: '已完成' },
@@ -247,7 +250,7 @@ export default function RunningTasks() {
 
           {/* Status */}
           <Col flex="90px">
-            <Badge status={cfg.color as any} text={cfg.label} />
+            <Badge status={cfg.color} text={cfg.label} />
           </Col>
 
           {/* Duration */}
@@ -322,6 +325,64 @@ export default function RunningTasks() {
     )
   }
 
+  /**
+   * 已完成任务的**紧凑行**。
+   *
+   * 改造前 464 条已完成任务也是一条一张卡（实测 90~100px/张）：一屏 5~6 条，
+   * 翻到底要 80 多屏。而「已完成」这一段的用途是**查**（哪个任务跑过、结果
+   * 怎样），不是盯进度 —— 一张卡的信息量（进度条、两行元信息）在这里全是浪费。
+   *
+   * 进行中的任务仍然用完整卡片：那里进度条和实时时长是有用的。
+   */
+  const renderCompactTask = (task: TaskSnapshot) => {
+    const cfg = STATUS_CONFIG[task.status] || { color: 'default', label: task.status }
+    const failed = task.errors?.length ?? 0
+    const totalRaw = Number(task.total)
+    const doneRaw = Number(task.registered)
+    const success = Number.isFinite(Number(task.success)) ? Number(task.success) : 0
+    const skipped = Number.isFinite(Number(task.skipped)) ? Number(task.skipped) : 0
+    const total = Number.isFinite(totalRaw) && totalRaw > 0 ? Math.floor(totalRaw) : 0
+    const done = Number.isFinite(doneRaw) && doneRaw > 0 ? Math.floor(doneRaw) : 0
+    const duration = formatDuration(task.created_at, task.updated_at)
+    const kind = taskKindMeta(task.source)
+
+    return (
+      <div key={task.id} className="task-row">
+        <span className="task-row__id" title={task.id}>{task.id}</span>
+        <span className="task-row__tags">
+          <Tag color={getPlatformTagColor(task.platform)} style={{ margin: 0 }}>
+            {getPlatformLabel(task.platform)}
+          </Tag>
+          <Tag color={kind.color} style={{ margin: 0 }}>{kind.label}</Tag>
+        </span>
+        <span className="task-row__status">
+          <Badge status={cfg.color} text={cfg.label} />
+        </span>
+        <span className="task-row__meta">⏱ {duration}</span>
+        <span className="task-row__meta">
+          {done}/{total}
+          <span style={{ color: 'var(--success)', marginLeft: 8 }}>✓ {success}</span>
+          {failed > 0 ? <span style={{ color: 'var(--danger)', marginLeft: 6 }}>✗ {failed}</span> : null}
+          {skipped > 0 ? <span style={{ color: 'var(--warning)', marginLeft: 6 }}>→ {skipped}</span> : null}
+        </span>
+        <span className="task-row__actions">
+          <Button type="link" size="small" style={{ paddingInline: 4 }} onClick={() => setLogTaskId(task.id)}>
+            查看日志
+          </Button>
+          <Popconfirm
+            title="确认删除该任务记录？"
+            okText="删除"
+            cancelText="取消"
+            okButtonProps={{ danger: true }}
+            onConfirm={() => handleDelete(task.id)}
+          >
+            <Button type="link" size="small" danger style={{ paddingInline: 4 }}>删除</Button>
+          </Popconfirm>
+        </span>
+      </div>
+    )
+  }
+
   return (
     <div>
       <PageHeader
@@ -379,7 +440,7 @@ export default function RunningTasks() {
           >
             已完成 ({finishedTasks.length})
           </Text>
-          {visibleFinished.map(renderTask)}
+          {visibleFinished.map(renderCompactTask)}
           {finishedTasks.length > visibleFinished.length && (
             <Button
               block

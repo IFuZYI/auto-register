@@ -17,6 +17,7 @@ import {
   Tag,
   Tooltip,
   Typography,
+  Grid,
 } from 'antd'
 import {
   DeleteOutlined,
@@ -59,6 +60,7 @@ import { CookieImportModal } from '@/components/icloud/CookieImportModal'
 import { AddRemoteServiceModal } from '@/components/icloud/AddRemoteServiceModal'
 import { GenerateAliasModal } from '@/components/icloud/GenerateAliasModal'
 import { PageHeader } from '@/components/PageHeader'
+import { withDataLabels } from '@/lib/tableCards'
 import {
   ICLOUD_HOURLY_ALIAS_LIMIT,
   ALIAS_EXPORT_FILENAME,
@@ -289,6 +291,11 @@ export default function ICloudPage() {
     message.success(`已导出 ${exportable} 条`)
   }
 
+  // 窄屏（< md）把两张宽表都折叠成卡片：8 列在 390px 上只能横向滚，
+  // 而 sticky 的操作列会盖住右侧内容（与账号表同一个问题，实测 123px 重叠）。
+  const screens = Grid.useBreakpoint()
+  const narrow = screens.md === false
+
   const accountColumns = [
     {
       title: '主号',
@@ -414,7 +421,7 @@ export default function ICloudPage() {
       // 固定到右侧：列宽合计超出容器时（实测 1240px vs 984px），操作列
       // 默认落在视口外，用户得横向滚动才能点到「同步 / 删除」——
       // 与账号页（Accounts.tsx）同款处理。
-      fixed: 'right' as const,
+      fixed: (narrow ? undefined : 'right') as 'right' | undefined,
       render: (_: unknown, account: ICloudAccount) => (
         <Space>
           <Button
@@ -553,7 +560,7 @@ export default function ICloudPage() {
       title: '操作',
       width: 260,
       // 同主号表：列宽合计 1830px 远超容器，不固定操作列就落在视口外。
-      fixed: 'right' as const,
+      fixed: (narrow ? undefined : 'right') as 'right' | undefined,
       render: (_: unknown, alias: ICloudAlias) => (
         <Space>
           <Button size="small" icon={<InboxOutlined />} onClick={() => setInboxAlias(alias)}>
@@ -659,7 +666,7 @@ export default function ICloudPage() {
                 <Table
                   rowKey="id"
                   loading={loading}
-                  columns={accountColumns}
+                  columns={withDataLabels(accountColumns)}
                   dataSource={accounts}
                   // 定住宽度、宁可横向滚动：容器装不下时 antd 会等比压缩所有列，
                   // 实测「主号」列被压到 143px（设定 260），邮箱地址换行、行高 78px。
@@ -667,7 +674,8 @@ export default function ICloudPage() {
                   // ⚠️ `x` 必须 ≥ 各列宽度之和（这里是 1390）。写小了内容会被裁掉，
                   // 滚到底也够不着 —— `tests/test_frontend_layout_contract.py` 的
                   // `ICloudTableLayoutTests` 会从源码算列宽和来钉这一条。
-                  scroll={{ x: 1390 }}
+                  className="table-cards"
+                  scroll={narrow ? undefined : { x: 1390 }}
                   pagination={false}
                   locale={{
                     emptyText: (
@@ -860,7 +868,7 @@ export default function ICloudPage() {
                 <Table
                   rowKey="id"
                   loading={loading}
-                  columns={aliasColumns}
+                  columns={withDataLabels(aliasColumns)}
                   dataSource={visibleAliases}
                   rowSelection={{
                     selectedRowKeys: selectedAliasIds,
@@ -870,7 +878,8 @@ export default function ICloudPage() {
                   // 宽度要盖住所有列（含后加的「号池」「已注册平台」「来源」列，
                   // 且平台筛选时「号池」列从 130 变 170 —— 按最大值 1930 算），
                   // 否则最后一列被裁掉 / 被 antd 等比压缩。
-                  scroll={{ x: 1930 }}
+                  className="table-cards"
+                  scroll={narrow ? undefined : { x: 1930 }}
                   pagination={{ pageSize: 20, showSizeChanger: false }}
                   locale={{
                     emptyText: (
