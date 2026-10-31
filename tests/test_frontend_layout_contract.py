@@ -224,6 +224,36 @@ class AtLifecycleDisplayContractTests(unittest.TestCase):
         )
 
 
+class TableMeasureRowTests(unittest.TestCase):
+    """表格的 measure row 必须 `visibility: hidden`。
+
+    rc-table 把表头整行克隆进 `aria-hidden` 的 `.ant-table-measure-row` 量列宽。
+    开 `rowSelection` 时「全选」复选框也被克隆进去 —— antd 只设了
+    `pointer-events: none`（鼠标点不到），但 `input` 仍 `tabIndex=0`。
+
+    实测（2026-10-31，账号表）：点那一下，50 行全被选中（页头变「已选 50 个」），
+    再点「删除」就是对着 50 个账号动手。Tab 也能停在那个看不见的复选框上。
+
+    不能用 `display: none`：rc-table 靠 `offsetWidth` 量宽度，`display:none`
+    会让它量到 0、所有列塌成最小宽度。`visibility: hidden` 保留布局盒。
+    """
+
+    def _css(self) -> str:
+        return (FRONTEND / "src" / "index.css").read_text(encoding="utf-8")
+
+    def test_measure_row_is_hidden_from_focus_and_pointer(self):
+        css = self._css()
+        idx = css.find(".ant-table-measure-row")
+        self.assertGreater(idx, -1, "index.css 里没有 .ant-table-measure-row 规则")
+        block = css[idx : idx + 200]
+        self.assertIn("visibility: hidden", block, "measure row 没隐藏 —— 隐藏复选框可被 Tab 聚焦并全选")
+        self.assertNotIn(
+            "display: none",
+            block,
+            "不能用 display:none —— rc-table 靠 offsetWidth 量列宽，会量到 0",
+        )
+
+
 class ICloudTableLayoutTests(unittest.TestCase):
     """iCloud 页两个表格的列宽契约（实测踩过的 bug 的回归网）。
 

@@ -1337,3 +1337,23 @@ body {
     grid-template-columns: minmax(0, 1fr);
   }
 }
+
+/* ═══════════════════════════════════════════════════════════════
+   rc-table 的 measure row：隐藏，但**不能** display:none
+
+   rc-table 为了量列宽，会把表头整行克隆一份到 `aria-hidden="true"` 的
+   `.ant-table-measure-row` 里。开了 `rowSelection` 时，「全选」复选框也被
+   一起克隆进去 —— antd 只给这一行设了 `pointer-events: none`（鼠标点不到），
+   但里面的 `input` 仍然 `tabIndex=0`。
+
+   结果：Tab 会停在一个**看不见的复选框**上，空格一按就是「全选」。
+   实测：点它一下，50 行全被选中（页头变成「已选 50 个」），
+   接着点「上传 / 删除」就是对着 50 个账号动手。
+
+   用 `visibility: hidden` 而不是 `display: none`：前者保留布局盒，
+   rc-table 的 `offsetWidth` 仍能量到宽度；后者会让它量到 0，
+   列宽全部塌成最小宽度（那是另一个更显眼的 bug）。
+   ═══════════════════════════════════════════════════════════════ */
+.ant-table-measure-row {
+  visibility: hidden;
+}
