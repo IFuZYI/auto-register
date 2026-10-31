@@ -94,7 +94,7 @@ PANELS: list[dict[str, Any]] = [
     },
     {
         "key": "grok2api",
-        "label": "grok2api",
+        "label": "Grok2API",
         "desc": "Grok 账号池与 API 网关",
         "url_key": "grok2api_base_url",
         "github": "https://github.com/chenyme/grok2api",
@@ -105,7 +105,7 @@ PANELS: list[dict[str, Any]] = [
     },
     {
         "key": "chatgpt2api",
-        "label": "chatgpt2api",
+        "label": "ChatGPT2API",
         "desc": "ChatGPT 普通网页号池（只认 access_token，与 CPA 的 codex 凭据互不相干）",
         "url_key": "chatgpt2api_api_url",
         # 同名项目有两个不同作者的实现，都兼容本项目（上传器同一份代码两边都能用）。

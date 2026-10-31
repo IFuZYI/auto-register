@@ -634,7 +634,9 @@ class Grok2ApiToggleTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn("grok2api_enabled", src)
         self.assertIn("'grok2api_enabled'", src, "要进 BOOLEAN_KEYS 才会归一成 0/1")
-        self.assertIn("label: '启用自动上传'", src)
+        # 标签从「启用自动上传」简化成「自动上传」（2026-10-30 界面改版：
+        # 卡片里先开关后地址，前面那两个字每个开关都带，纯噪音）。
+        self.assertIn("label: '自动上传'", src)
 
 
     def test_platform_tag_uses_contrast_safe_tokens(self):

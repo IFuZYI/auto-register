@@ -831,9 +831,14 @@ class GrokPlatform(BasePlatform):
 
                 g2a = Grok2ApiClient.from_config(proxy=proxy or "")
                 if g2a.configured:
+                    from services.chatgpt_sync import upload_proxy_for
+
                     ok_ing, msg_ing = g2a.ingest_sso(
                         sso, email,
                         nsfw=_truthy(extra.get("grok2api_auto_nsfw"), default=True),
+                        # 「上传代理」开关：把账号绑定的代理一并交给 grok2api
+                        # （它没有账号级代理字段，走 egress 节点绑定）
+                        proxy=upload_proxy_for("grok2api", account_extra),
                         log=log,
                     )
                     account_extra["grok2api_ingested"] = bool(ok_ing)
@@ -988,9 +993,14 @@ class GrokPlatform(BasePlatform):
             }
 
         nsfw = _truthy(params.get("nsfw"), default=True)
+        from services.chatgpt_sync import upload_proxy_for
+
         try:
             ok, msg = client.ingest_sso(
-                sso, account.email, nsfw=nsfw,
+                sso,
+                account.email,
+                nsfw=nsfw,
+                proxy=upload_proxy_for("grok2api", account.extra or {}),
             )
         except Exception as exc:  # noqa: BLE001 - 动作失败要带原因回前端
             return {

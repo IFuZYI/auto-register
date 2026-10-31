@@ -1,18 +1,18 @@
 import { useEffect, useState } from 'react'
-import { App, Button, Card, Form, Space, Tooltip, Typography } from 'antd'
+import { App, Button, Form, Typography } from 'antd'
 import {
   ApiOutlined,
   ExportOutlined,
   GithubOutlined,
   ReloadOutlined,
   SaveOutlined,
-  SettingOutlined,
 } from '@ant-design/icons'
 import {
-  ConfigSection,
+  ConfigField,
   resolveFeatureEnabledConfig,
-  type SectionConfig,
+  type FieldConfig,
 } from '@/components/settings/ConfigPanels'
+import { HelpTip } from '@/components/settings/SettingsPrimitives'
 import { parseBooleanConfigValue } from '@/lib/configValueParsers'
 import {
   dropEmptySecrets,
@@ -23,14 +23,15 @@ import { PANEL_ICONS } from '@/lib/panelIcons'
 import { apiFetch } from '@/lib/utils'
 
 /**
- * 面板配置（全局配置的一个 tab）。
+ * 平台面板 —— 一个平台一张卡片，卡片里就是这个平台的配置。
  *
- * 原先拆在两个一级菜单里：「平台配置」管各面板的连接配置、「面板管理」管入口
- * 卡片。两页说的都是「面板」这一件事，用户要在两处来回找 —— 合并到一处。
+ * 改造前是「上面一排入口卡片 + 下面一列连接配置表单」，两边靠 `scrollIntoView`
+ * 对应：卡片说「未配置」，按钮叫「去配置」，点了滚到下面某节。问题在于
+ * **同一个平台的连接参数被写了两遍位置**（身份在卡上、旋钮在下面），
+ * 用户要先认卡片、再滚下去找对应的那一节。
  *
- * 上半页是入口卡片（来自 `GET /api/integrations/panels`），下半页是连接配置。
- * 卡片、地址字段、口令字段都由后端注册表下发，前端不硬编码面板清单；
- * 各面板的**额外**旋钮（自动维护阈值、分组 ID、上传类型…）在这里声明。
+ * 现在一张卡片就是全部：卡头给身份与状态，卡体给旋钮，卡脚给去处。
+ * 页面上只有一个保存按钮（四种面板的配置都在同一份 config 里）。
  */
 
 interface PanelItem {
@@ -42,7 +43,7 @@ interface PanelItem {
   github: string
   url: string
   configured: boolean
-  /** 仅需要口令的面板才有（CPA 面板） */
+  /** 仅需要口令的面板才有 */
   secret_key?: string
   secret_label?: string
   secret_placeholder?: string
@@ -50,107 +51,146 @@ interface PanelItem {
   secret_set?: boolean
 }
 
-/**
- * 各面板的连接配置。
- *
- * 地址与口令字段与注册表共用同一批配置键（`url_key` / `secret_key`）——
- * 这里写的是**面板项之外**的旋钮（开关、阈值、分组…），它们不属于
- * 「面板地址」这个抽象，注册表里没有。
- *
- * `anchor` 与卡片上的「去配置」按钮对应：卡片知道自己的 `key`，配置区知道
- * 自己的 `anchor`，两边靠它对上（注册表加面板时这里补一节即可）。
- */
-interface PanelSection {
-  /** 对应哪个面板卡片的「去配置」；不填表示这节没有对应卡片 */
-  anchor?: string
-  section: SectionConfig
+/** 卡头那句定位。注册表的 `desc` 更长，进 ⓘ。 */
+const PANEL_TAGLINE: Record<string, string> = {
+  cpa: 'ChatGPT 账号的 auth-file 出口',
+  sub2api: '账号转 OAuth 后推送到管理后台',
+  chatgpt2api: 'ChatGPT 网页号池',
+  grok2api: 'Grok 账号池与 API 网关',
 }
 
-const PANEL_SECTIONS: PanelSection[] = [
-  {
-    anchor: 'cpa',
-    section: {
-      title: 'CPA 面板（CLIProxyAPI）',
-      desc: '地址与管理口令。注册完自动上传、状态同步也从这里读（同一个 auth-files 端点）。Grok 自 2026-10-27 起不再支持 CPA，只保留 grok2api。',
-      fields: [
-        { key: 'cpa_upload_chatgpt_enabled', label: '自动上传 ChatGPT 账号', type: 'boolean' },
-        { key: 'cpa_upload_proxy_enabled', label: '上传代理（账号绑定的代理）', type: 'boolean' },
-        { key: 'cpa_api_url', label: 'API URL', placeholder: 'http://127.0.0.1:8317' },
-        { key: 'cpa_api_key', label: '管理口令', secret: true, placeholder: '默认 cliproxyapi' },
-      ],
+/**
+ * 各面板的旋钮。
+ *
+ * 顺序即卡片里的行序：**先开关，后连接参数**。用户扫一眼卡片先要知道
+ * 「有没有在自动上传」，地址是配好了才需要改的东西。
+ */
+const PANEL_FIELDS: Record<string, FieldConfig[]> = {
+  cpa: [
+    {
+      key: 'cpa_upload_chatgpt_enabled',
+      label: '自动上传',
+      type: 'boolean',
+      hint: '注册成功后自动把 ChatGPT 账号推到 CPA。Grok 自 2026-10-27 起不再支持 CPA，只保留 Grok2API。',
     },
-  },
-  {
-    anchor: 'sub2api',
-    section: {
-      title: 'Sub2API 面板',
-      desc: '注册完成后自动上传到 Sub2API 管理后台',
-      fields: [
-        { key: 'sub2api_enabled', label: '启用自动上传', type: 'boolean' },
-        { key: 'sub2api_api_url', label: 'API URL', placeholder: 'https://your-sub2api.example.com' },
-        { key: 'sub2api_api_key', label: 'API Key', secret: true },
-        { key: 'sub2api_group_ids', label: '分组 ID', placeholder: '多个分组用英文逗号分隔，例如 2,4,8' },
-      ],
+    {
+      key: 'cpa_upload_proxy_enabled',
+      label: '上传代理',
+      type: 'boolean',
+      hint: '把账号绑定的代理一并写进 auth 文件（顶层 proxy_url），让 CPA 用同一条出口访问上游。账号没有绑定代理时留空、不影响上传。',
     },
-  },
-  {
-    anchor: 'grok2api',
-    section: {
-      title: 'grok2api',
-      desc: 'Grok 账号池与 API 网关。注册出 SSO 后自动上传 Web 账号并开启 NSFW；Console / Build 凭据由你在 grok2api 中手动转换。',
-      fields: [
-        { key: 'grok2api_enabled', label: '启用自动上传', type: 'boolean' },
-        { key: 'grok2api_base_url', label: 'API URL', placeholder: 'http://127.0.0.1:8000' },
-        { key: 'grok2api_username', label: '管理员用户名', placeholder: 'admin' },
-        { key: 'grok2api_password', label: '管理员密码', secret: true },
-      ],
+    { key: 'cpa_api_url', label: '地址', placeholder: 'http://127.0.0.1:8317' },
+    {
+      key: 'cpa_api_key',
+      label: '管理口令',
+      secret: true,
+      placeholder: '默认 cliproxyapi',
+      hint: 'CLIProxyAPI 管理端的 Bearer 口令。上传与状态同步走同一个 auth-files 端点。',
     },
-  },
-  {
-    anchor: 'chatgpt2api',
-    section: {
-      title: 'chatgpt2api',
-      desc: 'ChatGPT 网页号池（只认 access_token，与 CPA 的 codex 凭据互不相干）。',
-      fields: [
-        { key: 'chatgpt2api_enabled', label: '启用自动上传', type: 'boolean' },
-        { key: 'chatgpt2api_auto_sync_enabled', label: '凭证自动维护（本地较新自动推送更新）', type: 'boolean' },
-        { key: 'chatgpt2api_upload_proxy_enabled', label: '上传代理（账号绑定的代理）', type: 'boolean' },
-        { key: 'chatgpt2api_api_url', label: 'API URL', placeholder: 'http://127.0.0.1:8000' },
-        { key: 'chatgpt2api_api_key', label: '管理密钥', secret: true },
-      ],
+  ],
+  sub2api: [
+    {
+      key: 'sub2api_enabled',
+      label: '自动上传',
+      type: 'boolean',
+      hint: '注册成功后自动上传到 Sub2API 管理后台。',
     },
-  },
-  {
-    anchor: 'chatgpt-auto-maintenance',
-    section: {
-      title: 'ChatGPT Token 自动维护',
-      desc:
-        '定时扫描 ChatGPT 账号：AT 临期（剩余 ≤ 24h）、已过期或已失效时自动刷新 Token —— 临期账号在到期前随机一个时刻刷新（至少提前 1 小时，不设固定更新时刻），失效/过期账号尽快尝试；' +
-        '失败自动退避重试，连续失败 3 次或已封禁的账号不再自动尝试。检测出封禁的账号会标注为「禁用」，且不参与凭据同步与对比。手动刷新 Token 与注册任务不受影响。',
-      fields: [
-        { key: 'chatgpt_auto_refresh_enabled', label: '自动刷新临期/过期/失效 Token', type: 'boolean' },
-      ],
+    {
+      key: 'sub2api_upload_proxy_enabled',
+      label: '上传代理',
+      type: 'boolean',
+      hint: 'Sub2API 的账号只认 proxy_id，所以会先在面板里按「协议 + 主机 + 端口 + 用户名」找一条代理记录，找不到就建一条，再把这个账号绑上去。绑定失败不影响账号上传。',
     },
-  },
-]
+    { key: 'sub2api_api_url', label: '地址', placeholder: 'https://your-sub2api.example.com' },
+    { key: 'sub2api_api_key', label: 'API Key', secret: true },
+    {
+      key: 'sub2api_group_ids',
+      label: '分组 ID',
+      placeholder: '2,4,8',
+      hint: '多个分组用英文逗号分隔。留空按面板的默认分组（2）。',
+    },
+  ],
+  chatgpt2api: [
+    {
+      key: 'chatgpt2api_enabled',
+      label: '自动上传',
+      type: 'boolean',
+      hint: '注册成功后自动上传到 ChatGPT2API 号池。',
+    },
+    {
+      key: 'chatgpt2api_import_mode',
+      label: '导入内容',
+      hint:
+        '仅 AT/RT：只给号池喂 access_token + refresh_token，不交出密码。' +
+        '完全账户：再加邮箱、密码与 2FA 密钥 —— 对端（≥ 2.2.0）能在 RT 失效后用密码自动重登，' +
+        '不交密码就只能人工救。默认完全账户，与升级前行为一致。',
+    },
+    {
+      key: 'chatgpt2api_upload_proxy_enabled',
+      label: '上传代理',
+      type: 'boolean',
+      hint: '把这个账号绑定的代理随凭据一起交给 ChatGPT2API（导入对象的 proxy 字段），让号池用同一条出口。',
+    },
+    { key: 'chatgpt2api_api_url', label: '地址', placeholder: 'http://127.0.0.1:8000' },
+    { key: 'chatgpt2api_api_key', label: '管理密钥', secret: true },
+  ],
+  grok2api: [
+    {
+      key: 'grok2api_enabled',
+      label: '自动上传',
+      type: 'boolean',
+      hint: '注册出 SSO 后自动上传 Web 账号并开启 NSFW。Console / Build 凭据由你在 Grok2API 里手动转换。',
+    },
+    {
+      key: 'grok2api_upload_proxy_enabled',
+      label: '上传代理',
+      type: 'boolean',
+      hint: 'Grok2API 的账号没有代理字段，出口由 egress 节点提供。开启后会按「主机 + 端口」建（或复用）一个出口节点，再把账号绑上去。绑定失败不影响账号上传。',
+    },
+    { key: 'grok2api_base_url', label: '地址', placeholder: 'http://127.0.0.1:8000' },
+    { key: 'grok2api_username', label: '用户名', placeholder: 'admin' },
+    { key: 'grok2api_password', label: '密码', secret: true },
+  ],
+}
+
+/** 「导入内容」这类枚举字段的候选值。 */
+const FIELD_OPTIONS: Record<string, { value: string; label: string }[]> = {
+  // 选项文字保持短：卡片里的控件列只有 200px 上下，长标签会把下拉撑成
+  // 「完全账户（账号密码 + AT/RT + 2FA）」这样一长条，与旁边的开关、
+  // 地址框右边缘全错开。内容写进 ⓘ 里。
+  chatgpt2api_import_mode: [
+    { value: 'full', label: '完全账户' },
+    { value: 'atrt', label: '仅 AT/RT' },
+  ],
+}
 
 /** 库里存 "0"/"1" 字符串的开关：读时归一成布尔，写时归一回去。 */
 const BOOLEAN_KEYS = [
   'cpa_upload_chatgpt_enabled',
   'cpa_upload_proxy_enabled',
   'sub2api_enabled',
+  'sub2api_upload_proxy_enabled',
   'grok2api_enabled',
+  'grok2api_upload_proxy_enabled',
   'chatgpt2api_enabled',
   'chatgpt2api_upload_proxy_enabled',
   'chatgpt2api_auto_sync_enabled',
   'chatgpt_auto_refresh_enabled',
+  'cpa_auto_sync_enabled',
+  'sub2api_auto_sync_enabled',
+  'grok2api_auto_sync_enabled',
 ] as const
+
+/** 枚举字段：不是开关也不是自由文本，回填时要有个兜底值。 */
+const ENUM_DEFAULTS: Record<string, string> = {
+  chatgpt2api_import_mode: 'full',
+}
 
 /**
  * 本页出现的所有口令字段名。
  *
  * 两个来源：注册表项声明的（`secret_key`，如 CPA 的管理口令）与本节声明的
- * （`secret: true`，如 grok2api 的管理员密码）。**必须收齐** —— 漏一个，
+ * （`secret: true`，如 Grok2API 的管理员密码）。**必须收齐** —— 漏一个，
  * 那个口令就会被 `GET /api/config` 的明文回填进表单、保存时再原样提交，
  * 等于把明文塞进 DOM 又绕一圈（实测 grok2api_password 就是这样）。
  */
@@ -159,8 +199,8 @@ function secretFieldKeys(panels: PanelItem[]): string[] {
   for (const panel of panels) {
     if (panel.secret_key) keys.add(panel.secret_key)
   }
-  for (const { section } of PANEL_SECTIONS) {
-    for (const field of section.fields) {
+  for (const fields of Object.values(PANEL_FIELDS)) {
+    for (const field of fields) {
       if (field.secret) keys.add(field.key)
     }
   }
@@ -169,86 +209,84 @@ function secretFieldKeys(panels: PanelItem[]): string[] {
 
 function PanelCard({
   panel,
+  secretSetKeys,
   onOpenGithub,
-  onConfigure,
 }: {
   panel: PanelItem
+  secretSetKeys: ReadonlySet<string>
   onOpenGithub: (url: string) => void
-  onConfigure: () => void
 }) {
+  const [expanded, setExpanded] = useState(false)
   const configured = panel.configured
   const hasGithub = Boolean(String(panel.github || '').trim())
+  const fields = PANEL_FIELDS[panel.key] ?? []
+  const tagline = PANEL_TAGLINE[panel.key] ?? ''
 
   return (
-    <Card
-      styles={{ body: { padding: 20, display: 'flex', flexDirection: 'column', gap: 14, height: '100%' } }}
-      style={{ height: '100%' }}
-    >
-      <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-        <div
-          style={{
-            width: 38,
-            height: 38,
-            borderRadius: 11,
-            display: 'grid',
-            placeItems: 'center',
-            fontSize: 18,
-            background: configured ? 'var(--accent-soft)' : 'var(--bg-subtle)',
-            color: configured ? 'var(--accent)' : 'var(--text-muted)',
-            flex: '0 0 auto',
-          }}
-        >
+    <section className={`panel-card${expanded ? ' is-expanded' : ''}`}>
+      <header className="panel-card__head">
+        <div className={`panel-card__icon${configured ? ' is-on' : ''}`}>
           {PANEL_ICONS[panel.key] ?? <ApiOutlined />}
         </div>
-        <div style={{ minWidth: 0, flex: 1 }}>
-          <div style={{ fontWeight: 600 }}>{panel.label}</div>
-          <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>{panel.desc}</div>
+        <div className="panel-card__id">
+          <div className="panel-card__name">
+            {panel.label}
+            <HelpTip text={panel.desc} />
+          </div>
+          <div className="panel-card__desc">{tagline}</div>
         </div>
-        {/* GitHub 主页直达。没有公开仓库的项目（自建系统）不渲染按钮 ——
-            摆一个点了没反应的图标比不摆更糟。 */}
-        {hasGithub ? (
-          <Tooltip title="打开 GitHub 项目主页">
-            <Button
-              type="text"
-              size="small"
-              icon={<GithubOutlined />}
-              aria-label={`打开 ${panel.label} 的 GitHub 主页`}
-              onClick={() => onOpenGithub(panel.github)}
-              style={{ color: 'var(--text-muted)' }}
+        <span className={`panel-card__state${configured ? ' is-on' : ''}`}>
+          {configured ? '已连接' : '未配置'}
+        </span>
+      </header>
+
+      {expanded ? (
+        <div className="panel-card__body">
+          {fields.map((field) => (
+            <ConfigField
+              key={field.key}
+              field={
+                FIELD_OPTIONS[field.key]
+                  ? { ...field, type: 'select', options: FIELD_OPTIONS[field.key] }
+                  : field
+              }
+              secretSet={secretSetKeys.has(field.key)}
             />
-          </Tooltip>
-        ) : null}
-      </div>
-
-      <div style={{ flex: 1, minWidth: 0 }}>
-        {configured ? (
-          <Typography.Text copyable style={{ fontSize: 12 }} ellipsis>
-            {panel.url}
-          </Typography.Text>
-        ) : (
+          ))}
+        </div>
+      ) : (
+        <div className="panel-card__body panel-card__body--idle">
           <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-            未配置
+            {configured && panel.url ? panel.url : '还没有配置连接参数'}
           </Typography.Text>
-        )}
-      </div>
+        </div>
+      )}
 
-      <Space>
+      <footer className="panel-card__foot">
         {configured ? (
           <Button
+            size="small"
             icon={<ExportOutlined />}
             onClick={() => window.open(panel.url, '_blank', 'noopener')}
           >
             打开面板
           </Button>
-        ) : (
-          // 未配置时把视线带到下面的连接配置区，而不是跳去别的页面 ——
-          // 配置就在本页，跳走反而要用户自己找回来。
-          <Button icon={<SettingOutlined />} onClick={onConfigure}>
-            去配置
-          </Button>
-        )}
-      </Space>
-    </Card>
+        ) : null}
+        <Button size="small" type="text" onClick={() => setExpanded((v) => !v)}>
+          {expanded ? '收起' : '配置'}
+        </Button>
+        {hasGithub ? (
+          <Button
+            size="small"
+            type="text"
+            icon={<GithubOutlined />}
+            aria-label={`打开 ${panel.label} 的 GitHub 主页`}
+            onClick={() => onOpenGithub(panel.github)}
+            style={{ marginLeft: 'auto', color: 'var(--text-muted)' }}
+          />
+        ) : null}
+      </footer>
+    </section>
   )
 }
 
@@ -303,12 +341,17 @@ export function PanelConfigPanel() {
         config.chatgpt2api_enabled,
         Boolean(String(config.chatgpt2api_api_url ?? '').trim() && config.chatgpt2api_api_key_set),
       )
-      // 其余布尔开关（上传代理 ×2 + 自动维护 ×2）：库里存 "0"/"1" 字符串，
+      // 其余布尔开关（上传代理 ×4 + 自动同步 ×4）：库里存 "0"/"1" 字符串，
       // 必须归一成布尔再回填 —— antd Switch 把非空字符串一律视为真，
       // 直接回填 "0" 会把关闭的开关渲染成「开启」（实测复现）。
       // 默认值一律 false：它们没有「已配置即开启」的语义。
       for (const key of BOOLEAN_KEYS) {
         config[key] = resolveFeatureEnabledConfig(config[key], false)
+      }
+      // 枚举字段：库里的空串会让 Select 显示空白，回落成默认档
+      for (const [key, fallback] of Object.entries(ENUM_DEFAULTS)) {
+        const value = String(config[key] ?? '').trim()
+        if (!value) config[key] = fallback
       }
       // 口令字段留空 = 「不修改」：接口本就不回明文，这里再清一遍是双保险
       // （服务端也会拦空串，见 api/config.py 的 SECRET_CONFIG_KEYS 处理）。
@@ -353,59 +396,45 @@ export function PanelConfigPanel() {
     }
   }
 
-  const scrollToConfig = (panel: PanelItem) => {
-    document
-      .getElementById(`panel-config-${panel.key}`)
-      ?.scrollIntoView({ behavior: 'smooth', block: 'center' })
-  }
-
   return (
     <Form form={form} layout="vertical">
-      <div
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          gap: 12,
-          flexWrap: 'wrap',
-          marginBottom: 12,
-        }}
-      >
-        <Typography.Text type="secondary" style={{ fontSize: 13 }}>
-          面板是独立的远程服务 —— 这里配置它们的地址，已配置的可以直接打开
-        </Typography.Text>
-        <Button icon={<ReloadOutlined />} loading={loading} onClick={load}>
+      {/* 这里**不再有标题**：页面顶部的「面板配置 ⓘ」已经说明了这一页管什么，
+          再来一个「平台面板」就是同一个意思说两遍（实测两行几乎一样的字
+          挨在一起，看着像层级没对齐）。只留一个右对齐的刷新。 */}
+      <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 12 }}>
+        <Button
+          size="small"
+          type="text"
+          icon={<ReloadOutlined />}
+          loading={loading}
+          onClick={load}
+        >
           刷新
         </Button>
       </div>
 
-      <div
-        style={{
-          display: 'grid',
-          gridTemplateColumns: 'repeat(auto-fill, minmax(248px, 1fr))',
-          gap: 16,
-          marginBottom: 'var(--section-gap)',
-        }}
-      >
+      <div className="panel-grid">
         {panels.map((panel) => (
           <PanelCard
             key={panel.key}
             panel={panel}
+            secretSetKeys={secretSetKeys}
             onOpenGithub={(url) => window.open(url, '_blank', 'noopener')}
-            onConfigure={() => scrollToConfig(panel)}
           />
         ))}
       </div>
 
-      {PANEL_SECTIONS.map(({ anchor, section }) => (
-        <div key={section.title} id={anchor ? `panel-config-${anchor}` : undefined}>
-          <ConfigSection section={section} secretSetKeys={secretSetKeys} />
-        </div>
-      ))}
-
-      <Button type="primary" icon={<SaveOutlined />} onClick={save} loading={saving} block>
+      <Button
+        type="primary"
+        icon={<SaveOutlined />}
+        onClick={save}
+        loading={saving}
+        style={{ marginTop: 20 }}
+      >
         保存面板配置
       </Button>
     </Form>
   )
 }
+
+export type { PanelItem }

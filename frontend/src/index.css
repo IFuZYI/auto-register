@@ -307,6 +307,11 @@ body {
 
 /* 表单里的短值控件不该被拉满。antd 默认 width:100%，这里按语义收窄。
    刻意不用 .ant-form-item 全局收窄 —— 那会连 URL、密钥一起变窄。 */
+/* 行式布局的两档：有框的控件统一一个宽度，开关按内容宽度。
+   （--sm/--md/--lg 仍留给注册设置的 form-grid 用，那里是另一套排版。） */
+.form-field--set { max-width: 420px; }
+.form-field--auto { max-width: max-content; }
+
 .form-field--sm { max-width: var(--w-field); }
 .form-field--md { max-width: var(--w-field-md); }
 .form-field--lg { max-width: var(--w-field-lg); }
@@ -1035,5 +1040,300 @@ body {
   .stat-card:hover,
   .app-card:hover {
     transform: none;
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   全局配置页 —— 「规格表」而不是「卡片堆」
+
+   这一页以前的形状是「每节一张 Card，卡头下面一段两三行的说明，
+   再下面一列字段」。100 多个配置项铺开时，真正在改的那个输入框被
+   淹在解释文字里，扫读成本极高。
+
+   现在的结构：**一行一个配置项**，标签在左（固定列宽，右对齐到同一
+   条轴上），控件在右（有上限，不被拉成 900px）；节与节之间靠一条
+   发丝线断开而不是靠卡片投影。说明文字全部收进标签后的 ⓘ，悬停/
+   聚焦才出现。
+
+   为什么不给每节加边框：页面里唯一的「卡片」应该是有实体的东西
+   （一个平台、一个面板）。给「一组字段」也套卡片，等于把「对象」
+   和「分组」画成同一种东西 —— 那正是这一页原来显得吵的原因。
+   ─────────────────────────────────────────────────────────────── */
+
+.set-section + .set-section {
+  margin-top: 28px;
+}
+
+.set-section__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 2px;
+}
+
+.set-section__title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  letter-spacing: 0;
+}
+
+/* 一行配置项。标签列宽 156px —— 放得下「邮箱验证码等待秒数」这类
+   最长的中文标签（13px 下约 9 个汉字 ≈ 117px + ⓘ）。 */
+.set-row {
+  display: grid;
+  grid-template-columns: 156px minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+  padding: 11px 0;
+}
+
+.set-row + .set-row {
+  border-top: 1px solid rgba(255, 255, 255, 0.045);
+}
+
+.set-row__label {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 32px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  padding-top: 6px;
+}
+
+.set-row__control {
+  min-width: 0;
+}
+
+/* Form.Item 在行里只是一根纵向的容器：标签已经由 .set-row__label 承担，
+   这里要把它自带的 label/extra 间距压掉，否则每个字段会多出一条 8px 空白
+   —— 100 个字段就是 800px 的纯空隙。 */
+.set-row__control .ant-form-item {
+  margin-bottom: 0;
+}
+
+.set-row__control .ant-form-item-explain {
+  font-size: 12px;
+  padding-top: 4px;
+}
+
+/* ⓘ：默认很淡，悬停该行或自身时才提高对比度。键盘可聚焦（Tooltip 也响应
+   focus），所以不能只靠 hover —— 用 :focus-visible 单独给一圈焦点环。 */
+.set-help {
+  font-size: 12px;
+  color: var(--text-muted);
+  opacity: 0.55;
+  cursor: help;
+  transition: opacity 0.15s var(--ease-standard), color 0.15s var(--ease-standard);
+}
+
+.set-row:hover .set-help,
+.set-section__head:hover .set-help,
+.set-help:hover,
+.set-help:focus-visible {
+  opacity: 1;
+  color: var(--accent-text);
+}
+
+.set-help:focus-visible {
+  outline: 2px solid var(--accent-ring);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+
+/* ── 平台/面板卡片 ─────────────────────────────────────────────
+   一个卡片 = 一个真实存在的远程服务。卡头给身份（图标 + 名称 + 一句
+   定位）与状态（一点颜色 + 两个字），卡体给旋钮，卡脚给去处。
+   ─────────────────────────────────────────────────────────────── */
+
+.panel-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+  gap: 16px;
+}
+
+.panel-card {
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-container);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  overflow: hidden;
+  transition: border-color 0.18s var(--ease-standard);
+}
+
+.panel-card:hover {
+  border-color: var(--border-strong);
+}
+
+.panel-card__head {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 16px 16px 14px;
+}
+
+.panel-card__icon {
+  width: 34px;
+  height: 34px;
+  flex: 0 0 auto;
+  border-radius: 10px;
+  display: grid;
+  place-items: center;
+  font-size: 16px;
+  background: var(--bg-subtle);
+  color: var(--text-muted);
+}
+
+.panel-card__icon.is-on {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.panel-card__id {
+  min-width: 0;
+  flex: 1;
+}
+
+.panel-card__name {
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.panel-card__desc {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+
+/* 状态：一个 6px 的点 + 两个字。不用 Tag —— 四张卡各挂一个彩色标签，
+   页面会被四种色块切成碎片，而这里想说的是「连上了没有」一件事。 */
+.panel-card__state {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  font-size: 12px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.panel-card__state::before {
+  content: '';
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  /* 未连接用**空心环**而不是半透明实心点：实心点在小尺寸下与「开启的开关」
+     图形上撞车（截图里被读成 toggle），空心环是「位子空着」的明确信号。 */
+  border: 1.5px solid var(--border-strong);
+  background: transparent;
+}
+
+.panel-card__state.is-on {
+  color: var(--success);
+}
+
+.panel-card__state.is-on::before {
+  border-color: var(--success);
+  background: var(--success);
+  box-shadow: 0 0 0 3px var(--success-soft);
+}
+
+.panel-card__body {
+  padding: 0 16px 4px;
+  flex: 1;
+}
+
+/* 收起态：只显示已配置的地址（或一句「还没配置」），高度与展开态无关 ——
+   四张卡并排时卡脚要对齐，收起态不能塌成一条。 */
+.panel-card__body--idle {
+  display: flex;
+  align-items: center;
+  min-height: 46px;
+  padding-bottom: 12px;
+}
+
+/* 卡片里的行更紧：标签列窄一档，行距减一档 —— 卡内是「同一个服务的
+   几个旋钮」，不需要页面级那种呼吸感。 */
+.panel-card__body .set-row {
+  grid-template-columns: 92px minmax(0, 1fr);
+  gap: 12px;
+  padding: 9px 0;
+}
+
+.panel-card__body .set-row__label {
+  font-size: 12.5px;
+}
+
+.panel-card__foot {
+  display: flex;
+  gap: 8px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.012);
+}
+
+/* ── 自动维护卡片 ─────────────────────────────────────────────
+   与面板卡片同一套骨架，但卡体只有一句「怎么维护的」+ 一个开关。
+   ─────────────────────────────────────────────────────────────── */
+
+.maint-card__mode {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--text-muted);
+  padding: 2px 8px 2px 6px;
+  border-radius: 6px;
+  background: var(--bg-subtle);
+  margin-top: 6px;
+}
+
+.maint-card__mode--local {
+  color: var(--cyan);
+  background: var(--cyan-soft);
+}
+
+.maint-card__body {
+  padding: 14px 16px 16px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.maint-card__hint {
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--text-secondary);
+  min-width: 0;
+}
+
+/* 窄屏：标签列叠到控件上面。156px 固定列在 360px 宽的抽屉里会把控件
+   压到 180px，比输入框的最小可用宽度还窄。 */
+@media (max-width: 767px) {
+  .set-row {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 6px;
+    padding: 12px 0;
+  }
+
+  .set-row__label {
+    min-height: 0;
+    padding-top: 0;
+  }
+
+  .panel-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .panel-card__body .set-row {
+    grid-template-columns: minmax(0, 1fr);
   }
 }

@@ -91,7 +91,11 @@ def _extract_organization_id(id_token_payload: dict[str, Any]) -> str:
     return ""
 
 
-def _build_sub2api_account_payload(account, group_ids: list[int] | None = None) -> dict[str, Any]:
+def _build_sub2api_account_payload(
+    account,
+    group_ids: list[int] | None = None,
+    proxy_id: int | None = None,
+) -> dict[str, Any]:
     token_data = generate_token_json(account)
     access_token = str(token_data.get("access_token") or "").strip()
     refresh_token = str(token_data.get("refresh_token") or "").strip()
@@ -107,7 +111,7 @@ def _build_sub2api_account_payload(account, group_ids: list[int] | None = None) 
     # 关键逻辑：Sub2API 依赖 OpenAI OAuth 结构化字段，这里尽量从现有 token 自动补齐。
     organization_id = _extract_organization_id(_decode_jwt_payload(id_token))
 
-    return {
+    payload: dict[str, Any] = {
         "name": email,
         "notes": "",
         "platform": "openai",
@@ -131,6 +135,12 @@ def _build_sub2api_account_payload(account, group_ids: list[int] | None = None) 
         "priority": 1,
         "auto_pause_on_expired": True,
     }
+    # `proxy_id` 只在**确实拿到 id** 时下发。不传等价于「不指定」；
+    # 显式写 None 会让「上传代理」开关看起来生效了（键存在）实际什么也没绑，
+    # 所以干脆不写 —— 键不存在就没有歧义。
+    if proxy_id is not None:
+        payload["proxy_id"] = int(proxy_id)
+    return payload
 
 
 def upload_to_sub2api(
@@ -138,8 +148,18 @@ def upload_to_sub2api(
     api_url: str | None = None,
     api_key: str | None = None,
     group_ids: list[int] | None = None,
+    proxy: str = "",
 ) -> Tuple[bool, str]:
-    """上传单个账号到 Sub2API 管理后台。"""
+    """上传单个账号到 Sub2API 管理后台。
+
+    `proxy` 非空时先确保面板里有一条对应代理的记录、拿 `proxy_id` 再随账号
+    提交（Sub2API 的账号只认外键，不认 URL）。由「上传代理」开关控制
+    （见 `services.chatgpt_sync.upload_proxy_for`）。
+
+    **绑定代理失败不影响上传**：账号能不能用不取决于它走哪条出口，
+    因为建不出代理记录就把账号丢掉是本末倒置。失败原因并进返回消息，
+    让界面能显示「传上去了、代理没绑上」。
+    """
     api_url = str(api_url or _get_config_value("sub2api_api_url")).strip()
     api_key = str(api_key or _get_config_value("sub2api_api_key")).strip()
     resolved_group_ids = _parse_group_ids(
@@ -151,7 +171,17 @@ def upload_to_sub2api(
     if not api_key:
         return False, "Sub2API API Key 未配置"
 
-    payload = _build_sub2api_account_payload(account, group_ids=resolved_group_ids)
+    proxy_id: int | None = None
+    proxy_note = ""
+    proxy_url = str(proxy or "").strip()
+    if proxy_url:
+        from services.panel_proxy_binding import ensure_sub2api_proxy
+
+        proxy_id, proxy_note = ensure_sub2api_proxy(api_url, api_key, proxy_url)
+
+    payload = _build_sub2api_account_payload(
+        account, group_ids=resolved_group_ids, proxy_id=proxy_id
+    )
     url = f"{api_url.rstrip('/')}/api/v1/admin/accounts"
     headers = {
         "Content-Type": "application/json",
@@ -172,7 +202,7 @@ def upload_to_sub2api(
         )
 
         if response.status_code in (200, 201):
-            return True, "上传成功"
+            return True, ("上传成功；代理：" + proxy_note) if proxy_url else "上传成功"
 
         error_msg = f"上传失败: HTTP {response.status_code}"
         try:

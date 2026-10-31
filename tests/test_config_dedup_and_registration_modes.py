@@ -418,8 +418,12 @@ class FrontendWiringTests(unittest.TestCase):
 
         self.assertIn("function secretFieldKeys", src,
                       "口令键必须由两个来源汇总，不能只扫注册表")
-        self.assertIn("for (const { section } of PANEL_SECTIONS)", src,
+        # 本节声明的 secret 字段（grok2api 密码等）也要收进来。改造后字段表
+        # 从「按节的数组」变成「按面板 key 的字典」，断言随之改成遍历它的值 ——
+        # 校验的是同一件事：**第二来源被扫到了**。
+        self.assertIn("for (const fields of Object.values(PANEL_FIELDS))", src,
                       "本节声明的 secret 字段（grok2api 密码等）也要收进来")
+        self.assertIn("if (field.secret) keys.add(field.key)", src)
         self.assertIn("if (panel.secret_key) keys.add(panel.secret_key)", src)
 
         # 读：清空全部口令键（双保险）

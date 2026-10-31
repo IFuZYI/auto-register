@@ -371,7 +371,11 @@ def _push_account_uploader(panel_key: str, platform: str, row: dict):
         client = Grok2ApiClient.from_config()
         if not client.configured:
             return False, "grok2api 未配置（「全局配置 → 面板配置 → grok2api」）"
-        ok, msg = client.ingest_sso(sso, email)
+        from services.chatgpt_sync import upload_proxy_for
+
+        ok, msg = client.ingest_sso(
+            sso, email, proxy=upload_proxy_for("grok2api", extra)
+        )
         if ok:
             from services.chatgpt_sync import record_grok2api_sync_result
 
@@ -413,7 +417,11 @@ def _push_account_uploader(panel_key: str, platform: str, row: dict):
             token=get_credential(extra, "access_token"),
             status=AccountStatus.REGISTERED, extra=extra,
         )
-        return upload_to_sub2api(account)
+        from services.chatgpt_sync import upload_proxy_for
+
+        return upload_to_sub2api(
+            account, proxy=upload_proxy_for("sub2api", extra)
+        )
 
     if panel_key == "chatgpt2api":
         from core.base_platform import Account, AccountStatus

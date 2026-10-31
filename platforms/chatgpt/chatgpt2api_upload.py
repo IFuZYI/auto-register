@@ -99,6 +99,26 @@ def _account_extra(account) -> dict[str, Any]:
     return extra if isinstance(extra, dict) else {}
 
 
+def _import_mode() -> str:
+    """`chatgpt2api_import_mode`：`atrt`（只推 AT/RT）或 `full`（完全账户）。
+
+    默认 `full` —— 与加这个开关之前的行为一致（那时总是尽量带上
+    `password` / `totp_secret`）。升级到本版本不会改变既有部署的推送内容。
+
+    取不到配置（config_store 异常）时同样回落 `full`：宁可多推一个字段，
+    也不要因为读配置失败而静默降级成「只推 AT/RT」—— 那会让对端的
+    「RT 失效自动重登」失效，而用户完全看不出来。
+    """
+    try:
+        from core.config_store import config_store
+
+        raw = str(config_store.get("chatgpt2api_import_mode", "") or "").strip().lower()
+    except Exception as exc:  # noqa: BLE001 - 读配置失败不该让上传失败
+        logger.debug("读取 chatgpt2api_import_mode 失败，按 full 处理: %s", exc)
+        return "full"
+    return "atrt" if raw == "atrt" else "full"
+
+
 def build_chatgpt2api_account(account, proxy: str = "") -> dict[str, Any]:
     """把本地账号转成 chatgpt2api 的导入对象。
 
@@ -181,11 +201,17 @@ def build_chatgpt2api_account(account, proxy: str = "") -> dict[str, Any]:
         item["refresh_token"] = refresh_token
     if id_token:
         item["id_token"] = id_token
-    if password:
-        item["password"] = password
-    if totp_secret:
-        # 开了 2FA 的号没有它，对端「失效后自动密码重登」必失败（只能人工救）
-        item["totp_secret"] = totp_secret
+    # 「导入内容」= 完全账户时才带密码与 2FA 密钥。
+    #
+    # 只推 AT/RT 模式（`chatgpt2api_import_mode=atrt`）下**连键都不出现** ——
+    # 不是置空：对端 `merged[k] = v` 会让空串覆盖掉已有密码（docstring 那条
+    # 硬要求的同一个理由）。不出现就完全不碰对端已存的东西。
+    if _import_mode() == "full":
+        if password:
+            item["password"] = password
+        if totp_secret:
+            # 开了 2FA 的号没有它，对端「失效后自动密码重登」必失败（只能人工救）
+            item["totp_secret"] = totp_secret
     if plan_type:
         # 对端会把这个值当归一化前的套餐类型（free / Plus / Pro…）。
         #

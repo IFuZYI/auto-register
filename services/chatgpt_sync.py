@@ -463,14 +463,22 @@ def backfill_chatgpt_account_to_cpa(
 
 #: 支持「上传代理」的面板 → 开关配置键。
 #:
-#: 只有导入格式本身带代理字段的面板才支持（读参考实现确认）：
+#: 面板的导入格式是否带代理字段（逐个读参考实现确认）：
 #: - CPA：auth 文件 JSON 顶层 `proxy_url`（`sdk/auth/filestore.go`）
-#: - chatgpt2api：导入对象 `proxy` 字段（`_add_account_payloads`）
-#: sub2api 需要先在面板里建代理记录拿 proxy_id、grok2api 的导入格式不含代理
-#: —— 都不做（避免半吊子实现，见 `docs/` 的面板接线说明）。
+#: - chatgpt2api：导入对象 `proxy` 字段（`_add_account_payloads`），custom 模式直接是 URL
+#: - sub2api：账号对象只认 `proxy_id`（`CreateAccountRequest.ProxyID`），所以要先
+#:   在面板里建一条代理记录拿 id —— `ensure_sub2api_proxy` 负责「查不到就建」
+#: - grok2api：账号没有代理字段，出口走 **egress 节点**（`POST /egress-nodes`
+#:   带 `proxyURL`，再 `POST /egress-nodes/:id/accounts` 绑定账号）——
+#:   `ensure_grok2api_egress` 负责「同名节点查不到就建」
+#:
+#: 四个面板各有各的接线方式，但**开关语义一致**：开 = 把这个账号绑定的
+#: `register_proxy` 一并交给对面，让它的请求从同一条出口出去。
 _UPLOAD_PROXY_SWITCHES: dict[str, str] = {
     "cpa": "cpa_upload_proxy_enabled",
     "chatgpt2api": "chatgpt2api_upload_proxy_enabled",
+    "sub2api": "sub2api_upload_proxy_enabled",
+    "grok2api": "grok2api_upload_proxy_enabled",
 }
 
 

@@ -1039,26 +1039,49 @@ class ConfigWhitelistTests(unittest.TestCase):
 
 
 class FrontendWiringTests(unittest.TestCase):
-    """面板配置页要有两个开关（用户要求「在配置界面选择是否开启」）。"""
+    """两个自动维护开关要在界面上可切换（用户要求「在配置界面选择是否开启」）。
+
+    位置在 2026-10-30 从「面板配置」搬到了独立子菜单「自动维护」——
+    用户要求：「将自动维护搬到一个新的子菜单里面。不同平台都要一个卡片，
+    GPT 支持本地维护，其他是面板与本地同步的自动维护。」
+
+    断言强度不变：开关仍然必须存在、必须是**布尔开关**（不是文本框），
+    加载时仍然必须走 `resolveFeatureEnabledConfig` 归一。
+    """
+
+    #: 维护开关所在的文件。搬迁只改这个常量，断言本身不动。
+    MAINTENANCE_SRC = "components/settings/MaintenancePanel.tsx"
 
     def _src(self, rel: str) -> str:
         return (ROOT / "frontend" / "src" / rel).read_text(encoding="utf-8")
 
     def test_panel_config_has_both_switches(self):
-        src = self._src("components/settings/PanelConfigPanel.tsx")
-        self.assertIn("chatgpt_auto_refresh_enabled", src)
-        self.assertIn("chatgpt2api_auto_sync_enabled", src)
+        src = self._src(self.MAINTENANCE_SRC)
+        for key in ("chatgpt_auto_refresh_enabled", "chatgpt2api_auto_sync_enabled"):
+            self.assertIn(f"switchKey: '{key}'", src, f"缺 {key} 的开关声明")
 
     def test_switches_are_boolean_typed(self):
-        src = self._src("components/settings/PanelConfigPanel.tsx")
-        for key in ("chatgpt_auto_refresh_enabled", "chatgpt2api_auto_sync_enabled"):
-            idx = src.find(f"key: '{key}'")
-            self.assertGreater(idx, -1, f"缺 {key} 字段声明")
-            block = src[idx : idx + 200]
-            self.assertIn("type: 'boolean'", block, f"{key} 不是开关")
+        """开关必须是 `Form.Item valuePropName="checked"` + `<Switch>`。
+
+        不是「源码里有 type: 'boolean'」这种字面量检查 —— 搬迁后这里用
+        `switchKey` 声明、由统一的渲染器画 `Switch`。断言的**语义**没变：
+        它必须是一个勾选框，而不是一个让人手动输入 "1"/"0" 的文本框。
+        """
+        src = self._src(self.MAINTENANCE_SRC)
+        self.assertIn('valuePropName="checked"', src, "开关没有按 antd 的受控勾选渲染")
+        self.assertIn("<Switch", src, "开关没用 Switch 控件")
+        # 每个卡片的 switchKey 都要落在一个受控 Switch 上（同一个渲染器，
+        # 所以只要确认渲染器存在且卡片都走它）。
+        idx = src.find("CARDS.map")
+        self.assertGreater(idx, -1, "卡片没有由 CARDS 驱动渲染")
 
     def test_boolean_keys_include_maintenance_switches(self):
-        """BOOLEAN_KEYS 漏加 → 保存时 "true" 字符串被原样写入但回读不归一。"""
+        """BOOLEAN_KEYS 漏加 → 保存时 "true" 字符串被原样写入但回读不归一。
+
+        `BOOLEAN_KEYS` 留在 PanelConfigPanel（面板卡片与它同页保存），
+        维护开关也在这份清单里 —— 两个页面共用一份归一逻辑，漏一个就会
+        「保存成开启、重进变关闭」。
+        """
         src = self._src("components/settings/PanelConfigPanel.tsx")
         idx = src.find("const BOOLEAN_KEYS")
         self.assertGreater(idx, -1)

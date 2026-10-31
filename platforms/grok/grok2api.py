@@ -368,6 +368,7 @@ class Grok2ApiClient:
         email: str,
         *,
         nsfw: bool = True,
+        proxy: str = "",
         log=None,
     ) -> tuple[bool, str]:
         """一个账号的完整接入：上传 SSO（Web）→ 开 NSFW。
@@ -406,6 +407,30 @@ class Grok2ApiClient:
                     done.append("NSFW")
                 else:
                     warnings.append("NSFW 未完成: " + "；".join(failed_n)[:100])
+
+        # 出口代理：grok2api 的账号本身没有代理字段，出口由 **egress 节点**提供
+        # （节点带 proxyURL，账号绑上去）。所以这里是「建/复用节点 → 绑账号」。
+        #
+        # 由「上传代理」开关控制（`grok2api_upload_proxy_enabled`）。失败只记
+        # 警告、不算上传失败 —— 账号已经在池里了，出口是优化不是前提。
+        proxy_url = str(proxy or "").strip()
+        if proxy_url:
+            from services.panel_proxy_binding import (
+                assign_grok2api_account,
+                ensure_grok2api_egress,
+            )
+
+            node_id, proxy_note = ensure_grok2api_egress(self, proxy_url)
+            if not node_id:
+                warnings.append("代理未绑定: " + proxy_note)
+            else:
+                web = self.find_web_account_by_email(email)
+                account_id = str((web or {}).get("id") or "").strip()
+                if not account_id:
+                    warnings.append("代理未绑定: 查不到账号 id")
+                else:
+                    ok_b, bind_note = assign_grok2api_account(self, node_id, account_id)
+                    (done.append("代理") if ok_b else warnings.append("代理未绑定: " + bind_note))
 
         summary = "已接入（" + " + ".join(done) + "）"
         if warnings:

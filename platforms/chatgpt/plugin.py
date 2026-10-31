@@ -670,11 +670,13 @@ class ChatGPTPlatform(BasePlatform):
 
         if action_id == "upload_sub2api":
             from platforms.chatgpt.sub2api_upload import upload_to_sub2api
+            from services.chatgpt_sync import upload_proxy_for
 
             ok, msg = upload_to_sub2api(
                 a,
                 api_url=params.get("api_url"),
                 api_key=params.get("api_key"),
+                proxy=upload_proxy_for("sub2api", a.extra or {}),
             )
             return {"ok": ok, "data": msg}
 

@@ -76,12 +76,27 @@ class UploadProxyForTests(unittest.TestCase):
         out = self._call("cpa", {}, enabled="1")
         self.assertEqual(out, "")
 
-    def test_unsupported_panel_returns_empty(self):
-        """grok2api / sub2api 的导入格式不支持代理 —— 永远空。"""
-        for panel in ("grok2api", "sub2api"):
+    def test_every_real_panel_is_supported(self):
+        """四个面板**都**支持上传代理（2026-10-30 用户要求）。
+
+        改造前只有 cpa / chatgpt2api 支持，sub2api 与 grok2api 被列在「不支持」
+        里（它们的导入格式确实没有代理字段）。现在改为在面板侧先建/复用一条
+        资源（sub2api 建代理记录拿 proxy_id、grok2api 建 egress 节点），
+        所以「不支持」这一档已经不存在了 —— 断言随之从「必须为空」翻转成
+        「必须把代理交出去」。
+        """
+        from services.chatgpt_sync import _UPLOAD_PROXY_SWITCHES
+
+        for panel in ("cpa", "chatgpt2api", "sub2api", "grok2api"):
             with self.subTest(panel=panel):
                 out = self._call(panel, {"register_proxy": "socks5://p:1"}, enabled="1")
-                self.assertEqual(out, "")
+                self.assertEqual(out, "socks5://p:1", f"{panel} 应该把账号绑定的代理交出去")
+                self.assertIn(panel, _UPLOAD_PROXY_SWITCHES)
+
+    def test_unknown_panel_returns_empty(self):
+        """没登记的面板（拼错 / 已删除）不猜，直接空。"""
+        out = self._call("nope", {"register_proxy": "socks5://p:1"}, enabled="1")
+        self.assertEqual(out, "")
 
 
 class CpaProxyInjectionTests(unittest.TestCase):

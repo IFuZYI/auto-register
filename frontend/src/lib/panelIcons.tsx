@@ -2,6 +2,7 @@ import type { ReactNode } from 'react'
 import {
   CloudUploadOutlined,
   DeploymentUnitOutlined,
+  MessageOutlined,
   ThunderboltOutlined,
 } from '@ant-design/icons'
 
@@ -16,4 +17,5 @@ export const PANEL_ICONS: Record<string, ReactNode> = {
   cpa: <CloudUploadOutlined />,
   sub2api: <DeploymentUnitOutlined />,
   grok2api: <ThunderboltOutlined />,
+  chatgpt2api: <MessageOutlined />,
 }

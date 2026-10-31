@@ -180,10 +180,29 @@ chatgpt2api 时漏了三处、面板页直接 404）：
 
 新增面板时三处都要有对应实现（对比页按钮按 `sync_action` + 端点存在与否渲染）。
 
-**上传代理开关**（可选）：面板导入格式支持代理字段时，在
+**上传代理开关**：四个面板**全部支持**（2026-10-30 用户要求「平台都支持上传
+代理功能（账号对应绑定代理）」）。接线分两类：
+
+| 类型 | 面板 | 做法 |
+|---|---|---|
+| 直接带在 payload 里 | CPA / ChatGPT2API | 记录顶层 `proxy_url` / 导入对象 `proxy` 字段 |
+| 先在面板侧建资源 | Sub2API | `ensure_sub2api_proxy` 按「协议+主机+端口+用户名」找或建代理记录，拿 `proxy_id` 随账号提交 |
+| 先在面板侧建资源 | Grok2API | `ensure_grok2api_egress` 按节点名 `auto-<host>-<port>` 建/复用 egress 节点，再 `assign_grok2api_account` 绑账号 |
+
+新增/改造一个面板时：
 `services/chatgpt_sync.py` 的 `_UPLOAD_PROXY_SWITCHES` 加一项 +
-`api/config.py` 白名单 + `PanelConfigPanel.tsx` 的字段与 `BOOLEAN_KEYS`。
+`core/config_schema.py` 加键（白名单与口令集都从它派生，别另抄一份）+
+`PanelConfigPanel.tsx` 的 `PANEL_FIELDS` 与 `BOOLEAN_KEYS`。
 上传路径要把 `upload_proxy_for(panel, extra)` 传给上传函数。
+
+**代理绑定失败不阻断上传**：代理是优化，不是账号能不能用的前提。失败原因并进
+上传结果的消息里，用户看得到「传上去了、代理没绑上」。
+
+**面板自动同步**（面板 ↔ 本地）：在 `services/chatgpt_maintenance.py` 的
+`PANEL_AUTO_SYNC` 注册一项 `(开关键, 平台, 是否删远端旧记录, 任务 source)`，
+调度器按 `get_panel_auto_sync_interval_seconds(panel)` 决定跑不跑。
+`delete_old` 只对**新建式**面板（sub2api / chatgpt2api）为真 —— 它们每次上传
+新增一条记录，不删会积重复；覆盖式（cpa / grok2api）按邮箱原地更新，没有可删的。
 
 **自动上传**（注册完自动推过去）在 `services/external_sync.py` 的 `sync_account()`
 里加分支，并按需加 `<panel>_enabled` 开关键。

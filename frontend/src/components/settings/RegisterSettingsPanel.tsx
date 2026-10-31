@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
-import { Card, Col, Collapse, Form, InputNumber, Row, Select, Space, Tag, Tooltip, Typography } from 'antd'
-import { QuestionCircleOutlined } from '@ant-design/icons'
+import { Card, Col, Collapse, Form, InputNumber, Row, Select, Space, Tag, Typography } from 'antd'
 import { EXECUTOR_LABELS, type ExecutorType } from '@/lib/platforms'
+import { HelpTip } from '@/components/settings/SettingsPrimitives'
 import { apiFetch } from '@/lib/utils'
 
 /**
@@ -98,13 +98,16 @@ const DEFAULT_PARAM_FIELDS: {
 function DefaultParamsCard() {
   return (
     <Card
-      title="默认注册参数"
+      title={
+        <Space size={6}>
+          默认注册参数
+          <HelpTip text="新建注册任务时预填这些值，任务页里仍可临时修改。" />
+        </Space>
+      }
       style={{ marginBottom: 'var(--section-gap)' }}
-      styles={{ body: { paddingBottom: 8 } }}
+      styles={{ body: { paddingTop: 14, paddingBottom: 8 } }}
     >
-      <Typography.Paragraph type="secondary" style={{ marginTop: 0, fontSize: 13, maxWidth: 'var(--w-prose)' }}>
-        新建注册任务时预填这些值，任务页里仍可临时修改。
-      </Typography.Paragraph>
+      {/* 说明进标题旁的 ⓘ（与配置页其余部分一致）：这页的版面留给输入框。 */}
       <Row gutter={[16, 8]}>
         {DEFAULT_PARAM_FIELDS.map((field) => (
           <Col key={field.key} xs={24} sm={12} lg={6}>
@@ -112,9 +115,7 @@ function DefaultParamsCard() {
               label={
                 <Space size={4}>
                   {field.label}
-                  <Tooltip title={field.hint}>
-                    <QuestionCircleOutlined style={{ color: 'var(--text-muted)', fontSize: 12 }} />
-                  </Tooltip>
+                  <HelpTip text={field.hint} />
                 </Space>
               }
               name={field.key}
@@ -392,8 +393,14 @@ export function RegisterSettingsPanel() {
     <div>
       <DefaultParamsCard />
 
-      <div style={{ marginBottom: 8, fontSize: 13, color: 'var(--text-muted)' }}>
-        各平台设置 —— 执行器与注册方式由各平台插件声明，展开可改
+      <div className="set-section__head" style={{ marginBottom: 10 }}>
+        <span className="set-section__title">各平台设置</span>
+        <HelpTip
+          text={
+            '执行器与注册方式由各平台插件声明（`/api/platforms` 下发），界面不硬编码 —— ' +
+            '插件支持什么，这里就能选什么。展开某个平台即可改。'
+          }
+        />
       </div>
       {failed ? (
         <Card>

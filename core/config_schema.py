@@ -69,15 +69,23 @@ CONFIG_SCHEMA: tuple[ConfigKey, ...] = (
     ConfigKey("cpa_upload_chatgpt_enabled", "cpa"),
     ConfigKey("cpa_upload_proxy_enabled", "cpa"),
     ConfigKey("chatgpt2api_upload_proxy_enabled", "cpa"),
+    ConfigKey("cpa_auto_sync_enabled", "cpa"),
     # ---- Sub2API ----
     ConfigKey("sub2api_enabled", "sub2api"),
     ConfigKey("sub2api_api_url", "sub2api"),
     ConfigKey("sub2api_api_key", "sub2api", secret=True),
     ConfigKey("sub2api_group_ids", "sub2api"),
+    ConfigKey("sub2api_upload_proxy_enabled", "sub2api"),
+    ConfigKey("sub2api_auto_sync_enabled", "sub2api"),
     # ---- chatgpt2api ----
     ConfigKey("chatgpt2api_enabled", "chatgpt2api"),
     ConfigKey("chatgpt2api_api_url", "chatgpt2api"),
     ConfigKey("chatgpt2api_api_key", "chatgpt2api", secret=True),
+    #: 导入内容：`atrt` = 只推 AT/RT；`full` = 完全账户（邮箱 + 密码 + AT/RT + 2FA 密钥）。
+    #: 对端 ≥ 2.2.0 支持 `password` / `totp_secret`，带上才能「RT 失效后自动密码重登」；
+    #: 但有人只想给号池喂可用凭证、不交出密码 —— 所以做成显式选择，默认 `full`
+    #: （与加这个开关之前的行为一致，升级不改变既有部署）。
+    ConfigKey("chatgpt2api_import_mode", "chatgpt2api"),
     ConfigKey("chatgpt_auto_refresh_enabled", "chatgpt2api"),
     ConfigKey("chatgpt2api_auto_sync_enabled", "chatgpt2api"),
     # ---- CLIProxyAPI ----
@@ -95,6 +103,8 @@ CONFIG_SCHEMA: tuple[ConfigKey, ...] = (
     ConfigKey("grok2api_username", "grok2api"),
     ConfigKey("grok2api_password", "grok2api", secret=True),
     ConfigKey("grok2api_enabled", "grok2api"),
+    ConfigKey("grok2api_upload_proxy_enabled", "grok2api"),
+    ConfigKey("grok2api_auto_sync_enabled", "grok2api"),
     # ---- ChatGPT 注册 ----
     ConfigKey("grok_register_mode", "grok"),
     ConfigKey("grok_send_code_min_interval", "grok"),

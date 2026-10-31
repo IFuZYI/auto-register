@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
-import { App, Card, Form, Input, Button, message, Tabs, Space, Tag, Typography, QRCode } from 'antd'
+import { App, Button, Form, Input, message, Tabs, Space, Tag, Typography, QRCode } from 'antd'
 import {
   SaveOutlined,
   SafetyOutlined,
@@ -13,6 +13,7 @@ import {
   LockOutlined,
   MobileOutlined,
   MailOutlined,
+  ToolOutlined,
 } from '@ant-design/icons'
 import { setToken } from '@/lib/utils'
 import { parseBooleanConfigValue } from '@/lib/configValueParsers'
@@ -27,10 +28,35 @@ import {
   type SectionConfig,
 } from '@/components/settings/ConfigPanels'
 import { PanelConfigPanel } from '@/components/settings/PanelConfigPanel'
+import { MaintenancePanel } from '@/components/settings/MaintenancePanel'
 import { RegisterSettingsPanel } from '@/components/settings/RegisterSettingsPanel'
 import { DataBackupPanel } from '@/components/settings/DataBackupPanel'
+import { HelpTip, SectionHead, SettingRow } from '@/components/settings/SettingsPrimitives'
 import { apiFetch } from '@/lib/utils'
 import { PageHeader } from '@/components/PageHeader'
+
+/**
+ * 全局配置。
+ *
+ * 组织原则是**一个子菜单说一件事**，而且每件事的作用域要能从菜单名上看出来：
+ *
+ *   注册设置   一次注册任务怎么跑
+ *   验证码     人机验证怎么解
+ *   手机接码   进 add-phone 时怎么租号收码
+ *   邮箱       验证码邮件从哪来、等多久
+ *   面板配置   四个外部面板连在哪、推什么过去
+ *   自动维护   后台定时跑什么（本地刷新 AT/RT / 与面板同步）
+ *   安全       面板自己的访问口令与 2FA
+ *   数据迁移   备份与恢复
+ *
+ * 「自动维护」是独立子菜单而不是面板配置里的一节：它维护的对象**不止面板**
+ * —— 「自动刷新 Token」动的是本地账号库，根本不经过任何面板。放在一起
+ * 会让人分不清「关掉它，是本地不刷新了，还是远端不同步了」。
+ *
+ * 排版：一行一个配置项，标签在左、控件在右，说明文字全部进 ⓘ 气泡。
+ * 改造前每节是一张 Card + 一段两三行的常驻说明，100 多个配置项铺开时
+ * 解释文字占的版面比控件还多。
+ */
 
 const SMS_BOOLEAN_KEYS = ['sms_enabled', 'sms_auto_country', 'sms_reuse_phone'] as const
 
@@ -47,7 +73,11 @@ const TAB_ITEMS = [
   {
     key: 'register',
     label: '注册设置',
+    summary: '默认参数、执行器与各平台的注册方式',
     icon: <ApiOutlined />,
+    hint:
+      '一次注册任务的默认参数：执行器、数量、并发、重试、间隔，以及各平台的注册方式。' +
+      '任务页可以逐个覆盖 —— 这里的值只是「不指定时用什么」。',
     // 注册设置整块交给 RegisterSettingsPanel（渐进式：默认参数 → 执行器 →
     // 各平台方式折叠）。原来的 sections 平铺三张卡，改个并发数要在一屏
     // 平台下拉里找。发码节流也并入该面板。
@@ -57,14 +87,25 @@ const TAB_ITEMS = [
   {
     key: 'captcha',
     label: '验证码',
+    summary: '人机验证的服务与密钥',
     icon: <SafetyOutlined />,
+    hint: '注册时绕过人机验证的服务。YesCaptcha 与 2Captcha 二选一即可，留空的那个不会发起请求。',
     sections: [
       {
         title: '验证码服务',
-        desc: '用于绕过注册页面的人机验证',
+        desc: 'Key 在服务端加密存储，接口只回「是否已配置」不回明文 —— 输入框留空表示不修改。',
         fields: [
-          { key: 'default_captcha_solver', label: '默认服务', type: 'select' },
-          { key: 'yescaptcha_key', label: 'YesCaptcha Key', secret: true },
+          {
+            key: 'default_captcha_solver',
+            label: '默认服务',
+            hint: '新任务默认用哪一个。任务页可以逐个改。',
+          },
+          {
+            key: 'yescaptcha_key',
+            label: 'YesCaptcha Key',
+            secret: true,
+            hint: '在 YesCaptcha 后台的「API 密钥」页复制。',
+          },
         ],
       },
     ],
@@ -72,45 +113,88 @@ const TAB_ITEMS = [
   {
     key: 'sms',
     label: '手机接码',
+    summary: 'add-phone 时自动租号收码',
     icon: <MobileOutlined />,
+    hint: 'ChatGPT 链路进入 add-phone 时自动租号、收码，全程无人值守。',
     sections: [
       {
         title: '接码平台',
-        desc: 'ChatGPT 链路进入 add-phone 时自动租号、收码，全程无人值守',
+        desc: '遇到 add-phone 页面时，自动向接码平台租一个号收验证码。',
         fields: [
-          { key: 'sms_enabled', label: '启用手机接码', type: 'boolean' },
-          { key: 'sms_provider', label: '接码平台', type: 'select' },
-          { key: 'sms_api_key', label: 'API Key', secret: true },
+          {
+            key: 'sms_enabled',
+            label: '启用接码',
+            type: 'boolean',
+            hint: '关掉后遇到 add-phone 直接判定失败、不会尝试租号 —— 想「跳过这类账号」时可以关它。',
+          },
+          // 标签不叫「接码平台」—— 那与它所在的节同名，页面上会出现两行
+          // 一模一样的「接码平台」，其中一行还是节标题（没有控件），
+          // 看起来像渲染坏了（截图实测被读成「孤立的空行」）。
+          { key: 'sms_provider', label: '服务商', type: 'select' },
+          { key: 'sms_api_key', label: 'API Key', secret: true, placeholder: '在接码平台后台复制' },
           { key: 'sms_service', label: '服务代码', placeholder: 'dr（OpenAI / ChatGPT）' },
         ],
       },
       {
         title: '国家选择',
-        desc: '多数国家已改用 WhatsApp 验证，实测只有泰国（52）走纯短信稳定可用',
+        desc:
+          '多数国家已改用 WhatsApp 验证，实测只有泰国（52）走纯短信稳定可用 —— ' +
+          '所以默认给的是泰国。「自动选国家」会在允许的国家里按库存与价格挑一个。',
         fields: [
           { key: 'sms_country', label: '默认国家', type: 'country', placeholder: '默认泰国 (52)' },
-          { key: 'sms_auto_country', label: '自动选最优国家', type: 'boolean' },
+          {
+            key: 'sms_auto_country',
+            label: '自动选国家',
+            type: 'boolean',
+            hint: '在「允许的国家」里按库存与价格挑一个，而不是固定用默认国家。',
+          },
           {
             key: 'sms_allowed_countries',
-            label: '允许的国家（可选）',
+            label: '允许的国家',
             type: 'country-multi',
-            placeholder: '留空则全平台自由选',
+            placeholder: '留空则不限',
+            hint: '自动选国家时只在这些国家里挑。留空表示不限。',
           },
-          { key: 'sms_auto_min_stock', label: '自动选号最低库存', placeholder: '20' },
-          { key: 'sms_auto_max_price', label: '自动选号价格上限', placeholder: '0 表示不限' },
+          {
+            key: 'sms_auto_min_stock',
+            label: '最低库存',
+            placeholder: '20',
+            hint: '库存低于这个数的国家不会被自动选中。',
+          },
+          {
+            key: 'sms_auto_max_price',
+            label: '价格上限',
+            placeholder: '0 表示不限',
+            hint: '自动选号时的单价上限，0 表示不限。',
+          },
         ],
       },
       {
         title: '租号与重试',
-        desc: '单号窗口内只轮询接码平台收码，窗口用尽则换号',
+        desc: '单号窗口内只轮询接码平台收码，窗口用尽则换号。',
         fields: [
           { key: 'sms_max_price', label: '单号价格上限', placeholder: '留空或 0 表示不限' },
-          { key: 'sms_fixed_price', label: '固定价格', placeholder: '留空表示不锁价' },
-          { key: 'sms_reuse_phone', label: '复用同一号码', type: 'boolean' },
-          { key: 'sms_phone_success_max', label: '单号复用上限', placeholder: '3' },
-          { key: 'sms_per_phone_timeout', label: '单号等待秒数', placeholder: '80' },
-          { key: 'sms_max_phone_attempts', label: '最多换号次数', placeholder: '3' },
-          { key: 'sms_code_retries_per_phone', label: '单号内验证重试次数', placeholder: '2' },
+          {
+            key: 'sms_fixed_price',
+            label: '固定价格',
+            placeholder: '留空表示不锁价',
+            hint: '只租这个价格的号；留空表示不锁价。',
+          },
+          {
+            key: 'sms_reuse_phone',
+            label: '复用号码',
+            type: 'boolean',
+            hint: '同一个号码成功后继续用于下一个注册，直到达到复用上限。',
+          },
+          { key: 'sms_phone_success_max', label: '复用上限', placeholder: '3', hint: '同一个号码最多成功注册几次。' },
+          { key: 'sms_per_phone_timeout', label: '单号等待', placeholder: '80', hint: '一个号等码多少秒，超时就换号。' },
+          { key: 'sms_max_phone_attempts', label: '最多换号', placeholder: '3' },
+          {
+            key: 'sms_code_retries_per_phone',
+            label: '单号重试',
+            placeholder: '2',
+            hint: '同一个号上验证码输错后重试几次。',
+          },
         ],
       },
     ],
@@ -118,20 +202,25 @@ const TAB_ITEMS = [
   {
     key: 'mail',
     label: '邮箱',
+    summary: '默认邮箱服务与验证码等待时长',
     icon: <MailOutlined />,
+    hint:
+      '「默认邮箱服务」是全局默认值：注册任务不指定邮箱时用哪个 provider、等验证码等多久。' +
+      '各 provider 的连接参数在「邮箱服务」一级菜单各自的页面里，这里不重复。',
     sections: [
       {
         // 默认邮箱服务放回全局配置：它是「全局默认值」—— 注册任务不指定邮箱时
         // 用哪个 provider、等验证码等多久。各 provider 的连接参数仍在
         // 「邮箱服务」一级菜单各自的页面里，这里不重复。
         title: '默认邮箱服务',
-        desc: '注册任务不单独指定邮箱时用这一项；下面的等待时长对所有邮箱渠道生效',
+        desc: '注册任务不单独指定邮箱时用这一项；下面的等待时长对所有邮箱渠道生效。',
         fields: [
           { key: 'mail_provider', label: '邮箱服务', type: 'select' },
           {
             key: 'mailbox_otp_timeout_seconds',
-            label: '邮箱验证码等待秒数',
+            label: '等待验证码',
             placeholder: '例如 60 / 90 / 120',
+            hint: '超过这个时间还没收到验证码就判定本次失败。信箱慢（iCloud 转发）时可以调大。',
           },
         ],
       },
@@ -140,23 +229,38 @@ const TAB_ITEMS = [
   {
     key: 'panel',
     label: '面板配置',
+    summary: '四个外部面板连在哪、推什么过去',
     icon: <CloudUploadOutlined />,
-    // 面板配置整块交给 PanelConfigPanel（入口卡片 + 连接配置）。
-    // 原先拆在「平台配置」（连接配置）与「面板管理」（入口卡片）两个一级菜单里，
-    // 说的都是「面板」这一件事，合并到全局配置下的一处。
+    hint: '四个外部面板连在哪、推什么过去。一个平台一张卡片，卡片里就是它的全部配置。',
+    // 面板配置整块交给 PanelConfigPanel（一平台一卡片：卡头给身份与状态，
+    // 卡体给旋钮）。曾经是「上面卡片 + 下面连接配置表单」，同一个平台的
+    // 参数写在两个位置，要滚来滚去才对得上。
     custom: 'panel' as const,
+    sections: [],
+  },
+  {
+    key: 'maintenance',
+    label: '自动维护',
+    summary: '后台定时刷新 AT/RT 或与面板同步',
+    icon: <ToolOutlined />,
+    hint: '后台定时跑什么：本地刷新 AT/RT，或与面板同步凭据。一个平台一张卡片，卡上写明是哪种维护。',
+    custom: 'maintenance' as const,
     sections: [],
   },
   {
     key: 'security',
     label: '安全',
+    summary: '面板自己的访问口令与 2FA',
     icon: <LockOutlined />,
+    hint: '面板自己的访问口令与双因素认证 —— 与注册账号的凭据无关。',
     sections: [],
   },
   {
     key: 'backup',
     label: '数据迁移',
+    summary: '整库导出与导入',
     icon: <DatabaseOutlined />,
+    hint: '整库导出与导入。导出文件包含全部明文凭据（含密码与 RT），等同密码本身。',
     // 数据备份/迁移整块交给 DataBackupPanel（导出下载 + 导入上传 + 概况）。
     // 它不是配置项表单（导出是二进制下载、导入是文件上传），
     // 塞进通用 ConfigSection 渲染器表达不了。
@@ -169,16 +273,20 @@ interface TabConfig {
   key: string
   label: string
   icon: React.ReactNode
+  /** 常驻一行，一句话说这页管什么（不重复左侧导航上的标签）。 */
+  summary?: string
+  /** 更长的背景，只进 ⓘ。 */
+  hint?: string
   sections: SectionConfig[]
   /**
    * 用自定义组件替代 sections 渲染（`sections` 留空）。
    *
-   * 「注册设置」需要渐进式布局（折叠面板 + 分组卡片），「面板配置」是
-   * 卡片网格 + 分组表单，「数据迁移」是下载/上传 —— 通用的 `ConfigSection`
-   * 渲染器表达不了；与其把它们的配置项塞进 SectionConfig 再打补丁，
-   * 不如让这几页整块交给专用组件。
+   * 这四个子菜单需要的不是「一组字段」：注册设置是渐进式折叠面板，面板配置
+   * 与自动维护是一平台一卡，数据迁移是下载/上传 —— 通用的 `ConfigSection`
+   * 渲染器表达不了。与其把它们的配置项塞进 SectionConfig 再打补丁，
+   * 不如整块交给专用组件。
    */
-  custom?: 'register' | 'panel' | 'backup'
+  custom?: 'register' | 'panel' | 'maintenance' | 'backup'
 }
 
 interface SmsCountryRow {
@@ -224,29 +332,37 @@ function SmsProbePanel({ form }: { form: any }) {
   }
 
   return (
-    <Card title="平台自检" size="small" style={{ marginBottom: 16 }}>
-      <Space wrap>
-        <Button onClick={() => probe('balance')} loading={loading === 'balance'}>
-          测试余额
-        </Button>
-        <Button onClick={() => probe('countries')} loading={loading === 'countries'}>
-          查询国家排名
-        </Button>
-        {balance !== null ? <Tag color="green">余额 {balance}</Tag> : null}
-      </Space>
+    <section className="set-section">
+      <SectionHead
+        title="平台自检"
+        hint={
+          '用表单里**当前**的值去问接码平台，不必先保存 —— 刚粘上一把新 Key 时最常用。' +
+          '查询结果里绿色是 OpenAI 走纯短信的国家，其余可能被要求用 WhatsApp 验证从而收不到码。'
+        }
+      />
+      <SettingRow label="自检">
+        <Space wrap>
+          <Button size="small" onClick={() => probe('balance')} loading={loading === 'balance'}>
+            测试余额
+          </Button>
+          <Button size="small" onClick={() => probe('countries')} loading={loading === 'countries'}>
+            查询国家排名
+          </Button>
+          {balance !== null ? <Tag color="green">余额 {balance}</Tag> : null}
+        </Space>
+      </SettingRow>
       {countries.length > 0 ? (
-        <div style={{ marginTop: 12, display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-          {countries.map((row) => (
-            <Tag key={row.country} color={row.openai_sms_whitelisted ? 'green' : 'default'}>
-              {row.country} {row.name} · {row.price} · 库存 {row.count}
-            </Tag>
-          ))}
-        </div>
+        <SettingRow label="国家">
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+            {countries.map((row) => (
+              <Tag key={row.country} color={row.openai_sms_whitelisted ? 'green' : 'default'}>
+                {row.country} {row.name} · {row.price} · 库存 {row.count}
+              </Tag>
+            ))}
+          </div>
+        </SettingRow>
       ) : null}
-      <Typography.Paragraph type="secondary" style={{ fontSize: 12, marginTop: 12, marginBottom: 0 }}>
-        绿色标签是 OpenAI 走纯短信的国家，其余国家可能被要求用 WhatsApp 验证从而收不到码。
-      </Typography.Paragraph>
-    </Card>
+    </section>
   )
 }
 
@@ -275,33 +391,31 @@ function SolverStatus() {
   }, [])
 
   return (
-    <Card title="Turnstile Solver" size="small" style={{ marginBottom: 16 }}>
-      <div
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          gap: 12,
-          flexWrap: 'wrap',
-        }}
-      >
-        <Space size={8}>
-          {running === null ? (
-            <SyncOutlined spin style={{ color: 'var(--text-muted)' }} />
-          ) : running ? (
-            <CheckCircleOutlined style={{ color: 'var(--success)' }} />
-          ) : (
-            <CloseCircleOutlined style={{ color: 'var(--danger)' }} />
-          )}
-          <span style={{ color: running ? 'var(--success)' : 'var(--text-muted)', fontWeight: 500 }}>
-            {running === null ? '检测中' : running ? '运行中' : '未运行'}
-          </span>
+    <section className="set-section">
+      <SectionHead
+        title="Turnstile Solver"
+        hint="本机跑的无头浏览器服务，负责解 Cloudflare Turnstile。注册前它必须处于运行状态。"
+      />
+      <SettingRow label="状态">
+        <Space size={12} wrap>
+          <Space size={8}>
+            {running === null ? (
+              <SyncOutlined spin style={{ color: 'var(--text-muted)' }} />
+            ) : running ? (
+              <CheckCircleOutlined style={{ color: 'var(--success)' }} />
+            ) : (
+              <CloseCircleOutlined style={{ color: 'var(--danger)' }} />
+            )}
+            <span style={{ color: running ? 'var(--success)' : 'var(--text-muted)', fontWeight: 500 }}>
+              {running === null ? '检测中' : running ? '运行中' : '未运行'}
+            </span>
+          </Space>
+          <Button size="small" onClick={restartSolver}>
+            重启 Solver
+          </Button>
         </Space>
-        <Button size="small" onClick={restartSolver}>
-          重启 Solver
-        </Button>
-      </div>
-    </Card>
+      </SettingRow>
+    </section>
   )
 }
 
@@ -454,121 +568,136 @@ function SecurityPanel() {
   }
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--section-gap)' }}>
-      <Card
-        title="访问密码保护"
-        extra={
-          status?.has_password
-            ? <Tag color="green"><CheckCircleOutlined /> 已启用</Tag>
-            : <Tag color="default"><CloseCircleOutlined /> 未启用</Tag>
-        }
-      >
+    <>
+      <section className="set-section">
+        <SectionHead
+          title="访问密码"
+          hint="面板本身的门。默认不开启 —— 任何能访问这个地址的人都能读写全部账号与凭据。只在本机/内网暴露时也应至少设一个密码。"
+        />
+        <SettingRow label="状态">
+          <Space size={12} wrap>
+            {status?.has_password ? (
+              <Tag color="green"><CheckCircleOutlined /> 已启用</Tag>
+            ) : (
+              <Tag color="default"><CloseCircleOutlined /> 未启用</Tag>
+            )}
+            {status?.has_password ? (
+              <Button size="small" danger loading={loading} onClick={handleDisableAuth}>
+                关闭密码保护
+              </Button>
+            ) : null}
+          </Space>
+        </SettingRow>
         {!status?.has_password ? (
-          <Space direction="vertical" style={{ width: '100%' }}>
-            <Typography.Text type="secondary">
-              启用后，访问页面需要输入密码。默认不开启，任何能访问此地址的人均可使用。
-            </Typography.Text>
-            <Form form={enableForm} layout="vertical" onFinish={handleEnable} requiredMark={false} style={{ maxWidth: 360, marginTop: 8 }}>
-              <Form.Item name="password" label="设置访问密码" rules={[{ required: true, message: '请输入密码' }, { min: 6, message: '至少 6 位' }]}>
-                <Input.Password placeholder="至少 6 位" />
+          <SettingRow label="设置密码">
+            <Form
+              form={enableForm}
+              layout="inline"
+              onFinish={handleEnable}
+              requiredMark={false}
+              style={{ rowGap: 8, flexWrap: 'wrap' }}
+            >
+              <Form.Item name="password" rules={[{ required: true, message: '请输入密码' }, { min: 6, message: '至少 6 位' }]}>
+                <Input.Password placeholder="至少 6 位" style={{ width: 190 }} />
               </Form.Item>
-              <Form.Item name="confirm" label="确认密码" rules={[{ required: true, message: '请再次输入' }]}>
-                <Input.Password placeholder="再次输入密码" />
+              <Form.Item name="confirm" rules={[{ required: true, message: '请再次输入' }]}>
+                <Input.Password placeholder="再次输入密码" style={{ width: 190 }} />
               </Form.Item>
-              <Form.Item style={{ marginBottom: 0 }}>
+              <Form.Item style={{ margin: 0 }}>
                 <Button type="primary" htmlType="submit" loading={loading} icon={<LockOutlined />}>
                   启用密码保护
                 </Button>
               </Form.Item>
             </Form>
-          </Space>
-        ) : (
-          <Space direction="vertical" style={{ width: '100%' }}>
-            <Typography.Text type="secondary">当前已启用密码保护，关闭后任何人无需密码即可访问。</Typography.Text>
-            <Button danger loading={loading} onClick={handleDisableAuth}>
-              关闭密码保护
-            </Button>
-          </Space>
-        )}
-      </Card>
+          </SettingRow>
+        ) : null}
+      </section>
 
       {status?.has_password && (
         <>
-          <Card title="修改密码">
-            <Form form={pwForm} layout="vertical" onFinish={handleChangePassword} requiredMark={false} style={{ maxWidth: 360 }}>
-              <Form.Item name="current_password" label="当前密码" rules={[{ required: true, message: '请输入当前密码' }]}>
-                <Input.Password placeholder="当前密码" />
-              </Form.Item>
-              <Form.Item name="new_password" label="新密码" rules={[{ required: true, message: '请输入新密码' }, { min: 6, message: '至少 6 位' }]}>
-                <Input.Password placeholder="新密码（至少 6 位）" />
-              </Form.Item>
-              <Form.Item name="confirm" label="确认新密码" rules={[{ required: true, message: '请再次输入' }]}>
-                <Input.Password placeholder="再次输入新密码" />
-              </Form.Item>
-              <Form.Item style={{ marginBottom: 0 }}>
-                <Button type="primary" htmlType="submit" loading={loading} icon={<SaveOutlined />}>
-                  更新密码
-                </Button>
-              </Form.Item>
-            </Form>
-          </Card>
+          <section className="set-section">
+            <SectionHead
+              title="修改密码"
+              hint="改密会轮换服务端 JWT 密钥 —— 所有已登录的会话（含其它设备）立刻失效，只剩当前这一个。"
+            />
+            <SettingRow label="新密码">
+              <Form form={pwForm} layout="inline" onFinish={handleChangePassword} requiredMark={false} style={{ rowGap: 8, flexWrap: 'wrap' }}>
+                <Form.Item name="current_password" rules={[{ required: true, message: '请输入当前密码' }]}>
+                  <Input.Password placeholder="当前密码" style={{ width: 180 }} />
+                </Form.Item>
+                <Form.Item name="new_password" rules={[{ required: true, message: '请输入新密码' }, { min: 6, message: '至少 6 位' }]}>
+                  <Input.Password placeholder="新密码（至少 6 位）" style={{ width: 180 }} />
+                </Form.Item>
+                <Form.Item name="confirm" rules={[{ required: true, message: '请再次输入' }]}>
+                  <Input.Password placeholder="再次输入" style={{ width: 160 }} />
+                </Form.Item>
+                <Form.Item style={{ margin: 0 }}>
+                  <Button type="primary" htmlType="submit" loading={loading} icon={<SaveOutlined />}>
+                    更新密码
+                  </Button>
+                </Form.Item>
+              </Form>
+            </SettingRow>
+          </section>
 
-          <Card
-            title="双因素认证 (2FA)"
-            extra={
-              status?.has_totp
-                ? <Tag color="green"><CheckCircleOutlined /> 已启用</Tag>
-                : <Tag color="default"><CloseCircleOutlined /> 未启用</Tag>
-            }
-          >
-            {status?.has_totp ? (
-              <Space direction="vertical">
-                <Typography.Text type="secondary">
-                  登录时需输入 Google Authenticator / Authy 等 App 中的 6 位验证码。
-                </Typography.Text>
-                <Button danger loading={loading} onClick={handleDisableTotp}>
-                  关闭双因素认证
-                </Button>
+          <section className="set-section">
+            <SectionHead
+              title="双因素认证"
+              hint="登录时除密码外还要输入验证器 App 里的 6 位验证码。开启后即使密码泄露，别人也进不来。"
+            />
+            <SettingRow label="状态">
+              <Space size={12} wrap>
+                {status?.has_totp ? (
+                  <Tag color="green"><CheckCircleOutlined /> 已启用</Tag>
+                ) : (
+                  <Tag color="default"><CloseCircleOutlined /> 未启用</Tag>
+                )}
+                {status?.has_totp ? (
+                  <Button size="small" danger loading={loading} onClick={handleDisableTotp}>
+                    关闭双因素认证
+                  </Button>
+                ) : totpSetupState === 'idle' ? (
+                  <Button size="small" type="primary" loading={loading} onClick={handleSetupTotp} icon={<SafetyOutlined />}>
+                    开启双因素认证
+                  </Button>
+                ) : null}
               </Space>
-            ) : totpSetupState === 'idle' ? (
-              <Space direction="vertical">
-                <Typography.Text type="secondary">
-                  启用后，登录时除密码外还需输入验证器 App 中的 6 位验证码，大幅提升安全性。
-                </Typography.Text>
-                <Button type="primary" loading={loading} onClick={handleSetupTotp} icon={<SafetyOutlined />}>
-                  开启双因素认证
-                </Button>
-              </Space>
-            ) : (
-              <Space direction="vertical" style={{ width: '100%' }}>
-                <Typography.Text strong>1. 用验证器 App 扫描下方二维码</Typography.Text>
-                <div style={{ display: 'flex', gap: 24, alignItems: 'flex-start', flexWrap: 'wrap' }}>
-                  <QRCode value={totpUri} size={180} />
-                  <div style={{ flex: 1 }}>
-                    <Typography.Text type="secondary" style={{ fontSize: 12 }}>无法扫码？手动输入密钥：</Typography.Text>
-                    <Typography.Paragraph copyable style={{ fontFamily: 'monospace', fontSize: 13, marginTop: 4 }}>
-                      {totpSecret}
-                    </Typography.Paragraph>
+            </SettingRow>
+            {!status?.has_totp && totpSetupState === 'setup' ? (
+              <SettingRow label="绑定验证器">
+                <Space direction="vertical" style={{ width: '100%' }} size={12}>
+                  <Typography.Text type="secondary" style={{ fontSize: 13 }}>
+                    用验证器 App 扫描二维码，再输入 App 中显示的 6 位验证码确认绑定。
+                  </Typography.Text>
+                  <div style={{ display: 'flex', gap: 24, alignItems: 'flex-start', flexWrap: 'wrap' }}>
+                    <QRCode value={totpUri} size={180} />
+                    <div style={{ flex: 1, minWidth: 200 }}>
+                      <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                        无法扫码？手动输入密钥：
+                      </Typography.Text>
+                      <Typography.Paragraph copyable style={{ fontFamily: 'monospace', fontSize: 13, marginTop: 4 }}>
+                        {totpSecret}
+                      </Typography.Paragraph>
+                      <Space wrap>
+                        <Form form={codeForm} layout="inline" onFinish={handleEnableTotp}>
+                          <Form.Item name="code" rules={[{ required: true, message: '请输入验证码' }, { len: 6, message: '6 位数字' }]}>
+                            <Input placeholder="000000" maxLength={6} style={{ width: 130, letterSpacing: 4, textAlign: 'center' }} />
+                          </Form.Item>
+                          <Form.Item style={{ margin: 0 }}>
+                            <Button type="primary" htmlType="submit" loading={loading}>确认启用</Button>
+                          </Form.Item>
+                        </Form>
+                        <Button onClick={() => setTotpSetupState('idle')}>取消</Button>
+                      </Space>
+                    </div>
                   </div>
-                </div>
-                <Typography.Text strong>2. 输入 App 中显示的 6 位验证码以确认绑定</Typography.Text>
-                <Form form={codeForm} layout="inline" onFinish={handleEnableTotp}>
-                  <Form.Item name="code" rules={[{ required: true, message: '请输入验证码' }, { len: 6, message: '6 位数字' }]}>
-                    <Input placeholder="000000" maxLength={6} style={{ width: 140, letterSpacing: 4, textAlign: 'center' }} />
-                  </Form.Item>
-                  <Form.Item>
-                    <Button type="primary" htmlType="submit" loading={loading}>确认启用</Button>
-                  </Form.Item>
-                  <Form.Item>
-                    <Button onClick={() => setTotpSetupState('idle')}>取消</Button>
-                  </Form.Item>
-                </Form>
-              </Space>
-            )}
-          </Card>
+                </Space>
+              </SettingRow>
+            ) : null}
+          </section>
         </>
       )}
-    </div>
+    </>
   )
 }
 
@@ -606,7 +735,6 @@ export default function Settings() {
       form.setFieldsValue(data)
     })
   }, [form])
-
 
   const save = async () => {
     setSaving(true)
@@ -668,7 +796,7 @@ export default function Settings() {
         subtitle="配置将持久化保存，注册任务自动使用"
       />
 
-      <div className="settings-layout" style={{ display: 'flex', gap: 24, alignItems: 'flex-start' }}>
+      <div className="settings-layout" style={{ display: 'flex', gap: 28, alignItems: 'flex-start' }}>
         {/* 这个 Tabs 只当左侧导航用 —— 真正的内容在右边那个 div 里
             （安全 tab 与其余 tab 的内容结构差异太大，套进 Tabs 的 pane 反而更乱）。
             antd 在 tabPosition="left" 时会把 nav 与 pane 并排放在 Tabs 根内，
@@ -691,7 +819,25 @@ export default function Settings() {
           />
         </div>
 
-        <div style={{ flex: 1 }}>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          {/* 每个子菜单顶部一行「这一页管什么」+ ⓘ 展开更长背景。
+              正文里不再铺解释文字 —— 那是这一页以前最大的噪音来源。 */}
+          {currentTab.summary ? (
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 6,
+                marginBottom: 18,
+                fontSize: 13,
+                color: 'var(--text-muted)',
+              }}
+            >
+              <span>{currentTab.summary}</span>
+              <HelpTip text={currentTab.hint} />
+            </div>
+          ) : null}
+
           {activeTab === 'security' ? (
             <SecurityPanel />
           ) : activeTab === 'panel' ? (
@@ -699,6 +845,8 @@ export default function Settings() {
             // 与上面那份全局表单不是一批键）。套进外层 Form 会出现两层
             // Form 实例，保存时互相看不到对方的字段。
             <PanelConfigPanel />
+          ) : activeTab === 'maintenance' ? (
+            <MaintenancePanel />
           ) : activeTab === 'backup' ? (
             // 数据迁移：导出是二进制下载、导入是文件上传，与配置表单无关。
             <DataBackupPanel />
@@ -717,7 +865,13 @@ export default function Settings() {
                   />
                 ))
               )}
-              <Button type="primary" icon={<SaveOutlined />} onClick={save} loading={saving} block>
+              <Button
+                type="primary"
+                icon={<SaveOutlined />}
+                onClick={save}
+                loading={saving}
+                style={{ marginTop: 24 }}
+              >
                 {saved ? '已保存 ✓' : '保存配置'}
               </Button>
             </Form>

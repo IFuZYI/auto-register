@@ -160,7 +160,10 @@ class UploadGrok2ApiActionTests(unittest.TestCase):
         p = _platform()
         seen = {}
 
-        def _fake_ingest(self, sso, email, *, nsfw=True, log=None):
+        # 替身签名必须**逐字**复刻真实方法（含新增的 `proxy=`）——
+        # 少一个关键字参数时，真实调用方传了就 TypeError，
+        # 而 mock 掉的单测会把「参数没被转发」这件事藏起来。
+        def _fake_ingest(self, sso, email, *, nsfw=True, proxy="", log=None):
             seen["nsfw"] = nsfw
             return True, "ok"
 
@@ -182,7 +185,10 @@ class UploadGrok2ApiActionTests(unittest.TestCase):
         seen = {}
         explicit = {}
 
-        def _fake_ingest(self, sso, email, *, nsfw=True, log=None):
+        # 替身签名必须**逐字**复刻真实方法（含新增的 `proxy=`）——
+        # 少一个关键字参数时，真实调用方传了就 TypeError，
+        # 而 mock 掉的单测会把「参数没被转发」这件事藏起来。
+        def _fake_ingest(self, sso, email, *, nsfw=True, proxy="", log=None):
             seen["nsfw"] = nsfw
             # 用哨兵值区分「动作传了 True」与「动作没传、吃了默认值」
             return True, "ok"
@@ -217,7 +223,10 @@ class SsoTokenColumnFallbackTests(unittest.TestCase):
         p = _platform()
         seen = {}
 
-        def _fake_ingest(self, sso, email, *, nsfw=True, log=None):
+        # 替身签名必须**逐字**复刻真实方法（含新增的 `proxy=`）——
+        # 少一个关键字参数时，真实调用方传了就 TypeError，
+        # 而 mock 掉的单测会把「参数没被转发」这件事藏起来。
+        def _fake_ingest(self, sso, email, *, nsfw=True, proxy="", log=None):
             seen["sso"] = sso
             return True, "ok"
 

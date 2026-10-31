@@ -324,6 +324,50 @@ AUTO_REFRESH_INTERVAL_SECONDS = 5 * 60
 #: 且推送有外网成本。
 CHATGPT2API_AUTO_SYNC_INTERVAL_SECONDS = 10 * 60
 
+#: 面板「与本地同步」的自动维护注册表：panel_key → 参数。
+#:
+#: 字段：`(开关配置键, 推哪个平台的行, 是否删远端旧记录, 任务记录 source)`。
+#:
+#: `delete_old` 只对**新建式**面板为真（sub2api / chatgpt2api 每次 upload
+#: 新增一条记录，不删会留重复）；覆盖式（cpa / grok2api）按邮箱原地更新，
+#: 没有可删的重复记录，开它只会多一轮无意义的删除请求。
+#:
+#: 为什么这张表在维护模块而不是注册表里：`services/panel_registry.py` 是
+#: 「面板是什么」的静态描述（前端也读它），而「多久跑一次、跑的时候删不删旧
+#: 记录」是本模块的调度决定。混进注册表会让 API 响应里出现前端用不上的字段。
+PANEL_AUTO_SYNC: dict[str, tuple[str, str, bool, str]] = {
+    "chatgpt2api": (
+        "chatgpt2api_auto_sync_enabled",
+        "chatgpt",
+        True,
+        CHATGPT2API_SYNC_SOURCE,
+    ),
+    "sub2api": ("sub2api_auto_sync_enabled", "chatgpt", True, "sub2api_sync"),
+    "cpa": ("cpa_auto_sync_enabled", "chatgpt", False, "cpa_sync"),
+    "grok2api": ("grok2api_auto_sync_enabled", "grok", False, "grok2api_sync"),
+}
+
+
+def get_panel_auto_sync_interval_seconds(panel_key: str) -> int:
+    """某个面板的自动同步间隔；关闭 / 未配置 / 未知面板都返回 0（不调度）。
+
+    「未配置」也要返回 0：面板地址或密钥空着时每 10 分钟跑一次只会每轮在
+    日志里写一条「未配置」，把任务历史淹掉。
+    """
+    from services.panel_registry import PANELS_BY_KEY
+
+    meta = PANEL_AUTO_SYNC.get(str(panel_key or "").strip().lower())
+    if not meta:
+        return 0
+    switch_key, _platform, _delete_old, _source = meta
+    if not _config_bool(switch_key):
+        return 0
+    panel = PANELS_BY_KEY.get(panel_key) or {}
+    url_key = str(panel.get("url_key") or "").strip()
+    if url_key and not _config_text(url_key):
+        return 0
+    return CHATGPT2API_AUTO_SYNC_INTERVAL_SECONDS
+
 
 def _config_bool(key: str) -> bool:
     try:
@@ -747,23 +791,41 @@ def _make_logger(
     return _emit
 
 
-def run_chatgpt2api_auto_sync(
+def run_panel_auto_sync(
+    panel_key: str,
     *,
     push: Optional[Callable[[], dict[str, Any]]] = None,
     log: Optional[Callable[[str], None]] = None,
 ) -> dict[str, Any]:
-    """跑一轮 chatgpt2api 凭证自动同步（本地较新 → 推送远端）。
+    """跑一轮「面板 ↔ 本地」凭证自动同步（本地较新 → 推送远端）。
 
-    复用 `POST /api/integrations/panels/chatgpt2api/push` 的完整管线
-    （方向判定 + 推送 + 旧记录清理 + 落库），`delete_old=true` ——
-    chatgpt2api 是新建式面板，不删旧记录会留重复。
+    复用 `push_local_rows` 的完整管线（方向判定 + 推送 + 旧记录清理 + 落库），
+    `delete_old` 由 `PANEL_AUTO_SYNC` 按面板决定 —— 新建式面板必须删旧记录
+    （每次 upload 新增一条，不删会留重复），覆盖式面板删了也没意义。
 
-    **有实际推送动作**时创建任务记录（source=`chatgpt2api_sync`）——
+    **有实际推送动作**时创建任务记录（`source` 取自注册表）——
     「任务运行」页可见、日志可回看（用户要求 2026-10-07）；纯空转 /
     远端读取失败（下一轮会重试）不建记录。
+
+    `panel_key` 未知时返回空结果而不是抛异常：调度器每 60 秒扫一遍所有
+    注册的任务，一条配置错误不该把整个调度线程带崩。
     """
-    push_fn = push or _default_chatgpt2api_push
-    base_log = log or (lambda msg: print(f"[chatgpt2api 维护] {msg}"))
+    key = str(panel_key or "").strip().lower()
+    meta = PANEL_AUTO_SYNC.get(key)
+    if not meta:
+        return {
+            "panel": key,
+            "total": 0,
+            "pushed": 0,
+            "failed": 0,
+            "skipped": 0,
+            "items": [],
+            "remote_error": f"未登记自动同步的面板: {key}",
+        }
+    _switch_key, platform, delete_old, source = meta
+
+    push_fn = push or (lambda: _default_panel_push(key, platform, delete_old))
+    base_log = log or (lambda msg: print(f"[{key} 维护] {msg}"))
 
     # push 本身抛异常（外网抖动、认证失败路径意外抛出）不得把调度线程带崩
     # —— 记日志返回空结果，下一周期自然重试（复审建议 S5）。
@@ -771,7 +833,15 @@ def run_chatgpt2api_auto_sync(
         summary = push_fn() or {}
     except Exception as exc:  # noqa: BLE001
         base_log(f"同步异常（本轮跳过）: {type(exc).__name__}: {exc}")
-        return {"panel": "chatgpt2api", "total": 0, "pushed": 0, "failed": 0, "skipped": 0, "items": [], "remote_error": f"{type(exc).__name__}: {exc}"}
+        return {
+            "panel": key,
+            "total": 0,
+            "pushed": 0,
+            "failed": 0,
+            "skipped": 0,
+            "items": [],
+            "remote_error": f"{type(exc).__name__}: {exc}",
+        }
 
     remote_error = str(summary.get("remote_error") or "")
     if remote_error:
@@ -788,12 +858,12 @@ def run_chatgpt2api_auto_sync(
     task_id: Optional[str] = None
     if has_action:
         task_id, _control = _open_auto_task(
-            source=CHATGPT2API_SYNC_SOURCE,
-            platform="chatgpt",
+            source=source,
+            platform=platform,
             total=pushed + failed,
             meta={"pushed": pushed, "failed": failed, "deleted": deleted, "skipped": skipped},
         )
-    log_fn = _make_logger(task_id, log, "[chatgpt2api 维护]")
+    log_fn = _make_logger(task_id, log, f"[{key} 维护]")
 
     log_fn(
         "推送 {pushed}，跳过 {skipped}，失败 {failed}，清理旧记录 {deleted}".format(
@@ -830,11 +900,29 @@ def run_chatgpt2api_auto_sync(
     return summary
 
 
-def _default_chatgpt2api_push() -> dict[str, Any]:
+def run_chatgpt2api_auto_sync(
+    *,
+    push: Optional[Callable[[], dict[str, Any]]] = None,
+    log: Optional[Callable[[str], None]] = None,
+) -> dict[str, Any]:
+    """chatgpt2api 自动同步（`run_panel_auto_sync` 的具名入口）。
+
+    保留这个名字是因为它被调度注册与测试直接引用；实现已按面板泛化，
+    别的面板走 `run_panel_auto_sync(<key>)`。
+    """
+    return run_panel_auto_sync("chatgpt2api", push=push, log=log)
+
+
+def _default_panel_push(panel_key: str, platform: str, delete_old: bool) -> dict[str, Any]:
     """生产推送：直接调用接口层的 push 端点函数（同一份管线）。"""
     from services.panel_push import push_local_rows
 
-    return push_local_rows("chatgpt2api", platform="chatgpt", delete_old=True)
+    return push_local_rows(panel_key, platform=platform, delete_old=delete_old)
+
+
+def _default_chatgpt2api_push() -> dict[str, Any]:
+    """chatgpt2api 的生产推送（保留具名入口，测试直接引用它）。"""
+    return _default_panel_push("chatgpt2api", "chatgpt", True)
 
 
 # ── 周期任务自注册（core.scheduler 不认识具体业务，见其模块 docstring）──
@@ -853,11 +941,29 @@ _register_job(
     runner=run_chatgpt2api_auto_sync,
 )
 
+# 其余面板的自动同步各注册一个任务（用户的「不同平台都要一个卡片」——
+# 每个卡片背后都得有一个真的跑起来的任务，否则开关只是个摆设）。
+# 用默认参数绑定 panel_key，避免闭包捕获循环变量。
+def _bind_panel_sync(_panel_key: str):
+    def _runner() -> dict[str, Any]:
+        return run_panel_auto_sync(_panel_key)
+
+    return _runner
+
+
+for _panel_key in ("sub2api", "cpa", "grok2api"):
+    _register_job(
+        f"{_panel_key}_auto_sync",
+        interval_seconds=(lambda _k=_panel_key: get_panel_auto_sync_interval_seconds(_k)),
+        runner=_bind_panel_sync(_panel_key),
+    )
+
 
 __all__ = [
     "AUTO_REFRESH_INTERVAL_SECONDS",
     "AUTO_REFRESH_STATE_KEY",
     "CHATGPT2API_AUTO_SYNC_INTERVAL_SECONDS",
+    "PANEL_AUTO_SYNC",
     "EXPIRING_SKEW_SECONDS",
     "MAX_ATTEMPTS",
     "MIN_LEAD_SECONDS",
@@ -866,7 +972,9 @@ __all__ = [
     "compute_next_attempt_at",
     "get_auto_refresh_interval_seconds",
     "get_chatgpt2api_auto_sync_interval_seconds",
+    "get_panel_auto_sync_interval_seconds",
     "plan_auto_refresh",
+    "run_panel_auto_sync",
     "record_auto_refresh_result",
     "run_auto_refresh_pass",
     "run_chatgpt2api_auto_sync",

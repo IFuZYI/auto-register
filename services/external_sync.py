@@ -274,11 +274,13 @@ def sync_account(account) -> list[dict[str, Any]]:
         )
         if sub2api_enabled and sub2api_url and sub2api_key:
             from platforms.chatgpt.sub2api_upload import upload_to_sub2api
+            from services.chatgpt_sync import upload_proxy_for
 
             ok, msg = upload_to_sub2api(
                 upload_account,
                 api_url=sub2api_url,
                 api_key=sub2api_key,
+                proxy=upload_proxy_for("sub2api", getattr(upload_account, "extra", {}) or {}),
             )
             persist_sub2api_sync_result(account, ok, msg)
             results.append({"name": "Sub2API", "ok": ok, "msg": msg})
