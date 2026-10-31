@@ -26,6 +26,7 @@ import {
 } from '@ant-design/icons'
 import { apiFetch } from '@/lib/utils'
 import { PageHeader } from '@/components/PageHeader'
+import { withDataLabels } from '@/lib/tableCards'
 
 /** 两个标签的展示口径，与后端 `core/models/proxy.py` 的 TAG_* 一一对应。 */
 const TAG_META: Record<string, { label: string; color: string; hint: string }> = {
@@ -538,8 +539,9 @@ export default function Proxies() {
           </Popconfirm>
         </div>
         <Table
+          className="table-cards"
           rowKey="id"
-          columns={columns}
+          columns={withDataLabels(columns)}
           dataSource={proxies}
           loading={loading}
           rowSelection={{

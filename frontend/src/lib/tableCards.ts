@@ -19,11 +19,9 @@
  * 样式见 `index.css` 的 `.table-cards` 段（`@media (max-width: 767px)`）。
  */
 
-interface ColumnLike {
-  title?: unknown
-  onCell?: (...args: unknown[]) => Record<string, unknown>
-  [key: string]: unknown
-}
+type AnyColumn = Record<string, unknown>
+type CellProps = Record<string, unknown>
+
 
 /**
  * 给每一列挂 `data-label`。
@@ -31,18 +29,24 @@ interface ColumnLike {
  * 列标题不是字符串的（自定义节点，比如带 ⓘ 的标题）会被跳过 —— 那时
  * `attr(data-label)` 拿到的是 "[object Object]"，比没有标签更糟。
  * 这类列要自己写 `onCell`，或者干脆在窄屏隐藏（`responsive: ['md']`）。
+ *
+ * 泛型**不加约束**：antd 的 `ColumnsType<T>` 是 interface，没有 index
+ * signature，写成 `T extends ColumnLike` 会让它赋值不进去（实测
+ * `TaskHistory.tsx` 报 TS2322）。内部用 `AnyColumn` 干活，出口再转回 `T`，
+ * 调用处的类型完全不变。
  */
-export function withDataLabels<T extends ColumnLike>(columns: T[]): T[] {
+export function withDataLabels<T>(columns: T[]): T[] {
   return columns.map((column) => {
-    const title = typeof column.title === 'string' ? column.title.trim() : ''
+    const col = column as unknown as AnyColumn
+    const title = typeof col.title === 'string' ? col.title.trim() : ''
     if (!title) return column
-    const previousOnCell = column.onCell
+    const previousOnCell = col.onCell as ((...args: unknown[]) => CellProps) | undefined
     return {
-      ...column,
-      onCell: (...args: unknown[]) => ({
+      ...col,
+      onCell: (...args: unknown[]): CellProps => ({
         'data-label': title,
         ...(previousOnCell ? previousOnCell(...args) : {}),
       }),
-    } as T
+    } as unknown as T
   })
 }

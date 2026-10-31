@@ -10,6 +10,7 @@ import {
 import { CLEANUP_ENDPOINTS, RETENTION_OPTIONS, retentionLabel, retentionOptionFromKey } from '@/lib/logCleanup'
 import { apiFetch } from '@/lib/utils'
 import { PageHeader } from '@/components/PageHeader'
+import { withDataLabels } from '@/lib/tableCards'
 
 const { Text } = Typography
 
@@ -216,8 +217,9 @@ export default function TaskHistory() {
 
       <Card className="app-card">
         <Table
+          className="table-cards"
           rowKey="id"
-          columns={columns}
+          columns={withDataLabels(columns)}
           dataSource={logs}
           loading={loading}
           rowSelection={{
