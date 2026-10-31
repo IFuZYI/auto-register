@@ -1448,8 +1448,17 @@ body {
     display: none;
   }
 
+  /* tbody 也必须变 block。只把 `tr` 设成 block、tbody 仍是 `table-row-group`
+     时，浏览器会为这些 block 子元素生成匿名表格盒，tr 的宽度仍然按**内容**
+     算（实测 646px，容器只有 324px），卡片就会被裁掉。 */
+  .table-cards .ant-table-tbody {
+    display: block;
+    width: 100%;
+  }
+
   .table-cards .ant-table-tbody > tr.ant-table-row {
     display: block;
+    width: 100%;
     margin-bottom: 10px;
     border: 1px solid var(--border);
     border-radius: 10px;
@@ -1517,7 +1526,72 @@ body {
     overflow-x: visible !important;
   }
 
+  /* 表格本身必须压回容器宽度。
+     antd 会按列的 `width` 生成 `<colgroup><col style="width:260px">`，
+     这些 col 宽度会把 table 撑到 646px（容器只有 324px），而 `.ant-table-content`
+     的 `overflow-x` 已经被我们改成 visible —— 结果就是内容被裁掉、还没有滚动条。
+     只设 `table-layout: auto` 不够，col 的宽度仍然生效。 */
   .table-cards table {
+    /* 连 `table` 本身也要变 block：`table` 仍是 `display: table` 时，
+       里面的 block 级 tbody 会被包进匿名 table-cell，宽度还是按列算
+       （实测 646px，容器 324px）。彻底退出表格格式化上下文才行。 */
+    display: block !important;
     table-layout: auto !important;
+    width: 100% !important;
   }
+
+  .table-cards col {
+    width: auto !important;
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   仪表盘 · 统计卡
+
+   390px 实测：四张卡一行一张、每张 120px，四个数字吃掉整个首屏
+   （844px 里的 ~500px），而「四张卡」的唯一用途就是**对比着看** ——
+   堆成一列就没法对比了。改成 2×2。
+
+   内边距与数字字号必须走 class：内联样式盖不过媒体查询，写死
+   `padding: 22px 24px` 时 171px 宽的卡里有 48px 是空白。
+   ═══════════════════════════════════════════════════════════════ */
+.stat-card__body {
+  padding: 22px 24px;
+  position: relative;
+  z-index: 1;
+}
+
+.stat-card__value {
+  font-size: 34px;
+  font-weight: 700;
+  letter-spacing: -0.04em;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+
+@media (max-width: 575px) {
+  .stat-card__body {
+    padding: 14px 14px;
+  }
+
+  .stat-card__value {
+    font-size: 26px;
+  }
+}
+
+/* 单元格内单行截断（长邮箱 / 长错误信息）。
+   不能直接给 `td` 设 `text-overflow`：折叠成卡片时 td 是 flex 容器，
+   文本节点没有自己的盒子，省略号不会出现。所以包一层 span。 */
+.cell-ellipsis {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* 折叠成卡片时，值那一侧的 span 要能被 flex 压缩，否则 nowrap 会把它撑破。 */
+.table-cards .ant-table-tbody > tr.ant-table-row > td > .cell-ellipsis {
+  min-width: 0;
 }

@@ -265,12 +265,20 @@ class TableCardsContractTests(unittest.TestCase):
         css = (FRONTEND / "src" / "index.css").read_text(encoding="utf-8")
         idx = css.find(".table-cards")
         self.assertGreater(idx, -1, "index.css 里没有 .table-cards 规则")
-        block = css[idx : idx + 2200]
+        block = css[idx : idx + 3600]
         self.assertIn("content: attr(data-label)", block, "卡片上没有渲染列名")
         self.assertIn(".ant-table-thead", block, "没有隐藏表头")
         self.assertIn("display: none", block)
         # 选择列没有 title，折叠后会渲染出裸复选框 —— 必须隐藏
         self.assertIn(".ant-table-selection-column", block, "选择列没处理，会渲染出无标签的复选框")
+
+        # 折叠态必须彻底退出表格格式化上下文。只把 `tr` 设成 block、`table`
+        # 仍是 `display: table` 时，浏览器会把 block 级 tbody 包进匿名
+        # table-cell，宽度仍按列算 —— 实测 tr 646px、容器 324px，卡片被裁掉。
+        # 这三条一起才成立，少任何一条都会退回到「内容被裁、也没有滚动条」。
+        self.assertIn("display: block !important", block, "table 没有退出表格格式化上下文")
+        self.assertIn(".table-cards .ant-table-tbody {", block, "tbody 没有变 block")
+        self.assertIn(".table-cards col {", block, "colgroup 的列宽没有清掉（会把表撑到 646px）")
 
 
 class TaskRowDensityTests(unittest.TestCase):

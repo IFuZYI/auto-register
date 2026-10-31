@@ -37,7 +37,7 @@ function StatCard({ title, value, icon, color, index, hint }: StatCardProps) {
       className="stat-card stagger-item"
       style={{ '--stagger-index': index } as React.CSSProperties}
     >
-      <div style={{ padding: '22px 24px', position: 'relative', zIndex: 1 }}>
+      <div className="stat-card__body">
         <div
           style={{
             display: 'flex',
@@ -62,16 +62,7 @@ function StatCard({ title, value, icon, color, index, hint }: StatCardProps) {
               {title}
               <HelpTip text={hint} />
             </div>
-            <div
-              style={{
-                fontSize: 34,
-                fontWeight: 700,
-                letterSpacing: '-0.04em',
-                lineHeight: 1,
-                fontVariantNumeric: 'tabular-nums',
-                color: 'var(--text)',
-              }}
-            >
+            <div className="stat-card__value">
               {value}
             </div>
           </div>
@@ -168,7 +159,7 @@ export default function Dashboard() {
 
       <Row gutter={[GRID_GAP, GRID_GAP]}>
         {statCards.map(({ title, value, icon, color, hint }, i) => (
-          <Col xs={24} sm={12} lg={6} key={title}>
+          <Col xs={12} sm={12} lg={6} key={title}>
             <StatCard title={title} value={value} icon={icon} color={color} index={i} hint={hint} />
           </Col>
         ))}

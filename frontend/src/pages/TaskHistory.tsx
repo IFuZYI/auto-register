@@ -138,7 +138,14 @@ export default function TaskHistory() {
       title: '邮箱',
       dataIndex: 'email',
       key: 'email',
-      render: (text: string) => <span style={{ fontFamily: 'monospace', fontSize: 12 }}>{text}</span>,
+      width: 260,
+      // 单行截断 + `title` 看全文：邮箱最长 40 字符，不截断会把这一列
+      // 撑到 300px 以上，挤掉右边的「错误信息」。
+      render: (text: string) => (
+        <span className="cell-ellipsis" style={{ fontFamily: 'monospace', fontSize: 12 }} title={text}>
+          {text}
+        </span>
+      ),
     },
     {
       title: '状态',
@@ -155,7 +162,15 @@ export default function TaskHistory() {
       title: '错误信息',
       dataIndex: 'error',
       key: 'error',
-      render: (text: string) => text || '-',
+      // 错误信息是一条**日志**，不是正文：最长实测 200+ 字符。
+      // 不截断时它把行撑到 406px（390px 视口实测），一屏只看得见 2 条，
+      // 而 2229 条记录根本翻不到头。截断 + `title` 悬停看全文。
+      render: (text: string) =>
+        text ? (
+          <span className="cell-ellipsis" title={text}>{text}</span>
+        ) : (
+          '-'
+        ),
     },
   ]
 
