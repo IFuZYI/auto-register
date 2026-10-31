@@ -1,3 +1,4 @@
+import re
 from dataclasses import dataclass
 from typing import Any, Optional, Protocol
 from urllib.parse import urlparse
@@ -37,6 +38,18 @@ def normalize_import_email(value: str) -> str:
     return str(value or "").strip().lower()
 
 
+
+# 微软的 client_id 一律是 GUID（36 位，8-4-4-4-12）。refresh_token 不是 ——
+# MSA 的是 `M.C5xx_...` 开头的一长串。所以「谁像 GUID」能可靠地分辨这两段，
+# 用来兼容两种导出顺序。
+_CLIENT_ID_RE = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
+
+
+def looks_like_client_id(value: str) -> bool:
+    return bool(_CLIENT_ID_RE.match(str(value or "").strip()))
+
 def _is_valid_email(email: str) -> bool:
     return "@" in str(email or "").strip()
 
@@ -57,8 +70,21 @@ class MicrosoftOAuthRowParser:
 
         email = parts[0]
         password = parts[1]
-        client_id = parts[2]
-        refresh_token = parts[3]
+        third = parts[2]
+        fourth = parts[3]
+
+        # 字段顺序有两种真实存在的导出格式：
+        #   邮箱----密码----client_id----refresh_token   （本项目的文档顺序）
+        #   邮箱----密码----refresh_token----client_id   （多数「Outlook 令牌导出」
+        #                                                工具的顺序，密码位常是 x）
+        # 顺序反了不会在解析阶段报错，而是在**探测可用性**时被微软拒掉：
+        # 拿 refresh_token 当 client_id 去换 token，返回
+        #   400 invalid_grant / AADSTS7000012: The grant was obtained for a different tenant
+        # —— 提示语里一个字都没提「字段顺序」，用户只会以为 token 坏了。
+        # 实测（2026-10-31，10 条真实账号）：按原顺序 0/10 可用，换序后 10/10。
+        client_id, refresh_token = third, fourth
+        if not looks_like_client_id(client_id) and looks_like_client_id(refresh_token):
+            client_id, refresh_token = refresh_token, client_id
 
         if not _is_valid_email(email):
             raise ValueError(f"行 {line_number}: 无效的邮箱地址: {email}")

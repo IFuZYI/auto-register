@@ -154,7 +154,11 @@ class MicrosoftMailImportStrategy(BaseMailImportStrategy):
             type="microsoft",
             label="微软邮箱（Outlook / Hotmail，本地导入）",
             description="导入微软邮箱本地账号池，运行时从数据库取账号并通过 Graph / IMAP 策略轮询邮件（默认 Graph）。",
-            helper_text="支持两种格式并自动识别：1) 邮箱----密码----client_id----refresh_token（微软 OAuth）；2) 邮箱----mailapi_url（MailAPI URL 轮询取码）。",
+            helper_text=(
+                "支持两种格式并自动识别：1) 邮箱----密码----client_id----refresh_token"
+                "（微软 OAuth；后两段顺序写反也能认，会按 GUID 形状自动纠正）；"
+                "2) 邮箱----mailapi_url（MailAPI URL 轮询取码）。"
+            ),
             content_placeholder=(
                 "example@outlook.com----password----client_id----refresh_token\n"
                 "example@hotmail.com----password----client_id----refresh_token\n"
