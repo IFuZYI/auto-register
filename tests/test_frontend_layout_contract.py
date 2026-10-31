@@ -245,7 +245,10 @@ class TableCardsContractTests(unittest.TestCase):
     def test_helper_derives_label_from_column_title(self):
         src = (FRONTEND / "src" / "lib" / "tableCards.ts").read_text(encoding="utf-8")
         self.assertIn("'data-label': title", src, "没有给单元格挂 data-label")
-        self.assertIn("typeof column.title === 'string'", src,
+        # 泛型改成不加约束后，内部先把列转成 `col` 再取 title（antd 的
+        # `ColumnsType<T>` 是 interface、没有 index signature，
+        # `T extends Record<string, unknown>` 会让它赋值不进去）。
+        self.assertIn("typeof col.title === 'string'", src,
                       "非字符串标题（自定义节点）必须跳过 —— 否则 attr() 拿到 [object Object]")
         self.assertIn("previousOnCell", src, "覆盖了列原有的 onCell")
 
