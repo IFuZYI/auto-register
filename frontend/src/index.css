@@ -1091,7 +1091,7 @@ body {
 }
 
 .set-row + .set-row {
-  border-top: 1px solid rgba(255, 255, 255, 0.045);
+  border-top: 1px solid color-mix(in srgb, var(--border) 45%, transparent);
 }
 
 .set-row__label {
@@ -1275,7 +1275,7 @@ body {
   gap: 8px;
   padding: 12px 16px;
   border-top: 1px solid var(--border);
-  background: rgba(255, 255, 255, 0.012);
+  background: color-mix(in srgb, var(--border) 18%, transparent);
 }
 
 /* ── 自动维护卡片 ─────────────────────────────────────────────
@@ -1376,7 +1376,7 @@ body {
   align-items: center;
   gap: 12px;
   padding: 8px 14px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.045);
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 45%, transparent);
   font-size: 12px;
 }
 
@@ -1481,7 +1481,7 @@ body {
     width: auto !important;
     max-width: none !important;
     padding: 9px 12px !important;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.045);
+    border-bottom: 1px solid color-mix(in srgb, var(--border) 45%, transparent);
     text-align: right;
   }
 
