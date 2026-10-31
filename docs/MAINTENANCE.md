@@ -530,6 +530,7 @@ const columns = withDataLabels(columns)   // lib/tableCards.ts，标签从列的
 - **选择列没有 `title`**，折叠后会渲染出裸复选框 —— 窄屏直接隐藏。
 - **长文本用 `.cell-ellipsis` 包一层 span**。直接给 `td` 设 `text-overflow` 无效：折叠时 td 是 flex 容器，文本节点没有自己的盒子。
 - **低价值列在窄屏隐藏**（`responsive: ['md']`），只留「是什么 / 谁的 / 能不能用 / 操作」。别名表 10 列全摊开是 421px/条。
+- **不要写死 `rgba(255,255,255,0.045)` 这种「暗色下的发丝线」**。亮色主题下它等于白底画白线 —— 分隔线彻底消失，而且不报错。用 `color-mix(in srgb, var(--border) 45%, transparent)`：`--border` 由 `applyThemeVars()` 按主题注入，两个主题下是同一条线的两个版本。
 
 ---
 
