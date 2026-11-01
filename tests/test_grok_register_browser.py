@@ -649,3 +649,146 @@ class SignupSubmitTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SubmitEmailCodeTests(unittest.TestCase):
+    """点提交必须**确认点上了**。
+
+    线上实测（2026-11-01）：日志写着「发码已提交（Sign up）」，实际一个请求都
+    没发出去 —— 按钮在邮箱视图刚出现时还是禁用态（React 还没挂上事件处理），
+    `el.click()` 打在禁用按钮上什么都不发生，而旧的 `click_button` 照样把文案
+    返回。9 秒后判定成 `no_confirmation`，提示是「未确认发信（页面未给出理由）」
+    —— 把「点了个空」说成「上游没确认」，排查方向全错。
+    """
+
+    def _page(self, states):
+        """`states` 是 `submit_button_state` 的连续返回（最后一次重复）。"""
+        seq = list(states)
+        page = MagicMock()
+        page._evaluated = []
+
+        def _ev(js, *a):
+            page._evaluated.append(str(js))
+            if "aria-disabled" in str(js):
+                return seq.pop(0) if len(seq) > 1 else seq[0]
+            if "bestScore" in str(js):
+                return "Sign up"
+            return ""
+
+        page.evaluate.side_effect = _ev
+        return page
+
+    def test_waits_for_the_button_to_become_enabled(self):
+        from platforms.grok import signup_pages
+
+        page = self._page([
+            {"label": "Sign up", "disabled": True, "found": True},
+            {"label": "Sign up", "disabled": True, "found": True},
+            {"label": "Sign up", "disabled": False, "found": True},
+        ])
+        with patch.object(signup_pages.time, "sleep", lambda *a: None):
+            label, state = signup_pages.submit_email_code(page, wait_timeout=5)
+        self.assertEqual(label, "Sign up")
+        self.assertFalse(state["disabled"], "应该等到按钮可用才点")
+        # 三次读状态 + 一次点击
+        kinds = [("aria-disabled" in j) for j in page._evaluated]
+        self.assertEqual(kinds.count(True), 3)
+        self.assertEqual(kinds.count(False), 1)
+
+    def test_reports_disabled_when_it_never_opens_up(self):
+        from platforms.grok import signup_pages
+
+        page = self._page([{"label": "Sign up", "disabled": True, "found": True}])
+        with patch.object(signup_pages.time, "sleep", lambda *a: None), \
+             patch.object(signup_pages.time, "monotonic", side_effect=[0.0, 0.0, 99.0]):
+            _label, state = signup_pages.submit_email_code(page, wait_timeout=1)
+        self.assertTrue(state["disabled"], "一直禁用要如实上报，不能假装点上了")
+
+    def test_no_button_is_reported_as_not_found(self):
+        from platforms.grok import signup_pages
+
+        page = self._page([{"label": "", "disabled": True, "found": False}])
+        with patch.object(signup_pages.time, "sleep", lambda *a: None), \
+             patch.object(signup_pages.time, "monotonic", side_effect=[0.0, 0.0, 99.0]):
+            _label, state = signup_pages.submit_email_code(page, wait_timeout=1)
+        self.assertFalse(state["found"])
+
+
+class SendCodeDiagnosisTests(unittest.TestCase):
+    """判定「没发出去」和「发出去了上游不认」要能分开。
+
+    两者在旧提示里都只是「未确认发信（页面未给出理由）」—— 一个要修点击、
+    一个要改接口匹配，混在一起等于没提示。
+    """
+
+    EMAIL_FORM = "SpaceXSI Sign up with your email Email Sign up Go back"
+
+    def _page(self, auth_urls=()):
+        """假 page：发码提交按文案点得到，但页面永远停在邮箱表单。"""
+        from platforms.grok import register_browser as rb  # noqa: F401
+
+        page = MagicMock()
+        handler = {"fn": None}
+
+        def _ev(js, *a):
+            js = str(js)
+            if "aria-disabled" in js:
+                return {"label": "Sign up", "disabled": False, "found": True}
+            if "bestScore" in js:
+                return "Sign up"
+            return self.EMAIL_FORM
+
+        page.evaluate.side_effect = _ev
+        page.locator.return_value.first.count.return_value = 1
+        page.locator.return_value.count.return_value = 1
+        page.on.side_effect = lambda event, fn: handler.__setitem__("fn", fn)
+        page._handler = handler
+        # 轮询用的是 `page.wait_for_timeout`（桩上是空操作）—— 让它推一个假时钟，
+        # 否则 `while` 永远退不出来（踩过：用例挂死，faulthandler 停在 page_text）。
+        page._clock = {"t": 0.0}
+        page.wait_for_timeout.side_effect = (
+            lambda ms=0: page._clock.__setitem__("t", page._clock["t"] + (ms or 0) / 1000.0)
+        )
+        return page
+
+    def _run(self, page, auth_urls=()):
+        from platforms.grok import register_browser as rb
+
+        # 轮询是「睡一觉再看表」，所以 `sleep` 必须把假时钟往前推 ——
+        # 只把 `monotonic` 钉成常数会让 `while` 永远退不出来（踩过：那条用例
+        # 直接挂死，报出来的是 faulthandler 在别处的一行 genexpr）。
+        clock = page._clock
+        fired = {"done": False}
+
+        def _tick(ms=0):
+            clock["t"] += (ms or 0) / 1000.0 + 0.05
+            if not fired["done"] and page._handler["fn"] is not None:
+                # 监听挂上之后把响应喂进去（真实场景是提交后异步到达）。
+                for url in auth_urls:
+                    resp = MagicMock()
+                    resp.url = url
+                    resp.status = 200
+                    resp.text.return_value = "{}"
+                    page._handler["fn"](resp)
+                fired["done"] = True
+
+        page.wait_for_timeout.side_effect = _tick
+
+        with patch.object(rb.time, "sleep", lambda s=0: _tick((s or 0) * 1000)), \
+             patch.object(rb.time, "monotonic", lambda: clock["t"]):
+            return rb._send_code_stage(page, "a@b.com")
+
+    def test_no_request_at_all_says_so(self):
+        out = self._run(self._page())
+        self.assertFalse(out["ok"])
+        self.assertIn("没抓到任何 /auth/ 请求", out["error"],
+                      "提交没生效必须说出来，不能只说「页面未给出理由」")
+
+    def test_other_auth_requests_are_surfaced(self):
+        """只见到别的 auth 请求 —— 那是发码接口改名了，提示里要能看出来。"""
+        out = self._run(self._page(), auth_urls=[
+            "https://accounts.x.ai/api/auth/sign-up/send-code",
+        ])
+        self.assertFalse(out["ok"])
+        self.assertIn("其它 auth 请求", out["error"])
+        self.assertIn("send-code", out["error"])

@@ -708,61 +708,85 @@ class TopLevelResultHonestyTests(unittest.TestCase):
     一种错：任务会把这号当成功入库，实际是个空壳。
     """
 
-    def _page(self, texts):
-        seq = list(texts)
-        page = MagicMock()
+    def _page(self, final_text):
+        """按**阶段**给页面文案，不按「第几次读」给。
 
-        def _ev(js, *a):
-            js = str(js)
-            # 只有**真正读页面文案**的那次才从队列里取。
-            #
-            # 踩过：这段原来是「JS 里含 innerText 就取一次」，而按文案点击的
-            # 打分脚本、读「提交按钮是否禁用」的脚本里也都有 innerText —— 于是
-            # 点一次按钮顺手吃掉一份文案，队列提前耗尽，后面的判定读到别的
-            # 页面的文案，测试红在完全不相干的地方（加了「等按钮可用再点」之后
-            # `TopLevelResultHonestyTests` 就是这么红的）。
-            if "aria-disabled" in js:          # 读提交按钮状态
-                return {"label": "Sign up", "disabled": False, "found": True}
-            if "bestScore" in js:              # 按文案点击（不改变页面文案）
-                return "Sign up"
-            if "innerText" in js:
-                if len(seq) > 1:
-                    return seq.pop(0)
-                return seq[0]
-            return ""
+        踩过两次：这段原先按「第 N 次读页面文案就返回第 N 个字符串」造，于是
+        任何**读次数**的变化都会让后面每个阶段读到上一页的文案 —— 加了「等按钮
+        可用再点」之后（点击本身不再消费队列），资料页读到的是验证码页的文案，
+        Turnstile 门禁判定整个失效，测试红在一个看起来毫不相干的地方。
 
-        page.evaluate.side_effect = _ev
-        page.locator.return_value.first.count.return_value = 1
-        page.locator.return_value.count.return_value = 1
-        return page
-
-    def _run(self, final_texts):
-        from platforms.grok import register_browser as rb
-        from platforms.grok import signup_pages
-
+        按阶段给就没这个问题：入口点开没有、提交点过没有、码进去没有，这三件
+        事决定看到哪一页。点击文案靠 `labels` 区分 —— 入口那次带
+        `sign up with email`，提交那次是 `_EMAIL_SUBMIT_LABELS`。
+        """
         entry = ("SpaceXSI You are signing into Grok Sign up with your email "
                  "Email Sign up Go back")
         code_page = ("Verify your email We've emailed a one time security code "
                      "Please enter it below: Resend (27) Confirm")
-        # 读取顺序：等入口页 → 按文案点 “Sign up with email” → 发码前的阻断检查
-        # → 按文案点提交 → 轮询判定 —— 这些都该看到 entry / code_page，
-        # 之后才是最终页面（资料页被 Turnstile 拦住）。多给几份重复项，
-        # 让「按文案点击也要读一次文本」这类实现细节不影响判定。
-        page = self._page([entry, entry, code_page, code_page, code_page, *final_texts])
+        st = {"email_view": False, "submitted": False, "code_done": False}
+
+        def _ev(js, *a):
+            js = str(js)
+            if "aria-disabled" in js:          # 读提交按钮状态
+                return {"label": "Sign up", "disabled": False, "found": True}
+            if "bestScore" in js:              # 按文案点击
+                labels = [str(x).lower() for x in ((a[0] or {}).get("labels") or [])]
+                if any("sign up with email" in x for x in labels):
+                    st["email_view"] = True
+                else:
+                    st["submitted"] = True
+                return "Sign up"
+            if "innerText" in js:              # 读页面文案
+                if not st["submitted"]:
+                    return entry
+                if not st["code_done"]:
+                    return code_page
+                return final_text
+            return ""
+
+        page = MagicMock()
+        page.evaluate.side_effect = _ev
+        page.locator.return_value.first.count.return_value = 1
+        page.locator.return_value.count.return_value = 1
+        # `_wait_for_sso_cookie` 是「轮询到 35 秒」的忙等（`wait_for_timeout`
+        # 在桩上是空操作）。让它推动一个假时钟 —— 走到的分支和真机一样，
+        # 但不用真等 35 秒（不推的话这条用例要跑半分钟，失败还看不出原因）。
+        page._clock = {"t": 1_000_000.0}
+        page.wait_for_timeout.side_effect = (
+            lambda ms=0: page._clock.__setitem__("t", page._clock["t"] + (ms or 0) / 1000.0)
+        )
+        page._st = st
+        return page
+
+    def _run(self, final_text):
+        from platforms.grok import register_browser as rb
+        from platforms.grok import signup_pages
+
+        page = self._page(final_text)
+
+        def _enter(_page, _code, **_kw):
+            # 码进去了才轮到资料页 —— 这是阶段之间的最后一跳。
+            page._st["code_done"] = True
+            return True
+
         fake = _FakeCamoufox("")
         fake.cm.__enter__.return_value.new_page.return_value = page
 
         with patch.object(signup_pages, "set_field_value", return_value=True), \
-             patch.object(signup_pages, "enter_code", return_value=True), \
+             patch.object(signup_pages, "enter_code", side_effect=_enter), \
              patch.object(signup_pages, "ensure_turnstile_token", return_value=""), \
              patch.object(signup_pages, "click_profile_submit", return_value="Complete sign up"), \
              patch.object(rb, "_read_code", return_value="863-689"), \
+             patch.object(rb.time, "time", lambda: page._clock["t"]), \
+             patch.object(rb.time, "sleep", lambda *a: None), \
+             patch.object(signup_pages.time, "sleep", lambda *a: None), \
              patch("camoufox.sync_api.Camoufox", return_value=fake.cm):
             return rb.register_grok_via_browser("a@icloud.com")
 
     def test_blocked_profile_stage_is_not_a_success(self):
         gate = "Complete the verification challenge, then try again."
-        res = self._run([gate, gate, gate])
+        res = self._run(gate)
         self.assertFalse(res["ok"], f"没拿到 SSO 就不能报成功: {res}")
         self.assertEqual(res.get("sso"), "")
         self.assertTrue(res.get("turnstile_blocked"))
