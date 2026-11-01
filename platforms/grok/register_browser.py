@@ -970,7 +970,9 @@ def register_grok_via_browser(
             _log(log, f"[Grok] 验证码 {code}")
 
             if not signup_pages.wait_for_code_input(page, timeout=60):
-                result["error"] = "验证码输入框未出现"
+                # 现场快照 —— 分不清「没跳页」「在 iframe 里」「停在提示页」时，
+                # 只有把当时的页面结构打出来才看得出是哪种。
+                result["error"] = "验证码输入框未出现｜" + _page_snapshot(page)
                 return result
             # 新版是 `input[name=code]`、maxlength=6、满 6 位自动提交（码要去掉连字符）
             if not signup_pages.enter_code(page, code, log=log):
@@ -1065,6 +1067,58 @@ def _mail_received_ts(msg: Any) -> Optional[float]:
     except Exception as exc:  # noqa: BLE001 - 时间解析失败只影响新旧判断
         logger.debug("邮件时间解析失败: %s", exc)
         return None
+
+
+def _page_snapshot(page: Any) -> str:
+    """验证码框没出现时的现场快照（URL / 标题 / 正文 / 所有 input / iframe）。"""
+    js = """
+    () => {
+      const pick = (el) => ({
+        tag: el.tagName.toLowerCase(),
+        type: el.getAttribute('type') || '',
+        name: el.getAttribute('name') || '',
+        id: el.id || '',
+        maxlength: el.getAttribute('maxlength') || '',
+        ph: el.getAttribute('placeholder') || '',
+        ac: el.getAttribute('autocomplete') || '',
+        vis: !!(el.offsetWidth || el.offsetHeight),
+      });
+      const inputs = Array.from(document.querySelectorAll('input,textarea'))
+        .slice(0, 20).map(pick);
+      const frames = Array.from(document.querySelectorAll('iframe'))
+        .slice(0, 6).map(f => f.src || '(no src)');
+      return {
+        url: location.href,
+        title: document.title,
+        text: (document.body ? document.body.innerText : '').slice(0, 220),
+        inputs, frames,
+        otpInShadow: (() => {
+          try {
+            const all = document.querySelectorAll('*');
+            for (const el of all) {
+              if (el.shadowRoot && el.shadowRoot.querySelector('input')) return true;
+            }
+          } catch (e) {}
+          return false;
+        })(),
+      };
+    }
+    """
+    try:
+        snap = page.evaluate(js)
+    except Exception as exc:
+        return f"快照失败: {exc}"
+    if not isinstance(snap, dict):
+        return f"快照异常: {snap!r}"
+    parts = [
+        f"url={str(snap.get('url'))[:90]}",
+        f"title={str(snap.get('title'))[:60]!r}",
+        f"inputs={snap.get('inputs')}",
+        f"iframe={snap.get('frames')}",
+        f"shadow_input={snap.get('otpInShadow')}",
+        f"text={str(snap.get('text'))[:160]!r}",
+    ]
+    return " ".join(parts)[:900]
 
 
 def _read_code(
