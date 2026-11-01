@@ -994,6 +994,21 @@ def find_code_input(page: Any) -> str:
                 return sel
         except Exception as exc:
             logger.debug("探测 %s 失败: %s", sel, exc)
+    # 主文档里没有 —— 再看**子 frame**（OTP 组件被塞进 iframe 是常见做法，
+    # 而 `page.locator` 默认只看主文档，这种会表现为「框不存在」）。
+    try:
+        for frame in list(getattr(page, "frames", []) or []):
+            if frame is getattr(page, "main_frame", None):
+                continue
+            for sel in CODE_INPUT_CANDIDATES:
+                try:
+                    if frame.locator(sel).count() > 0:
+                        logger.debug("验证码框在子 frame 里: %s %s", getattr(frame, "url", ""), sel)
+                        return sel
+                except Exception as exc:
+                    logger.debug("子 frame 探测 %s 失败: %s", sel, exc)
+    except Exception as exc:
+        logger.debug("遍历 frame 失败: %s", exc)
     return ""
 
 
@@ -1012,8 +1027,23 @@ def enter_code(
         return False
     _sleep = sleep or time.sleep
     selector = find_code_input(page) or CODE_INPUT
+    # 框可能在子 frame 里 —— `page.locator` 只看主文档，得换到 frame 上。
+    host = page
     try:
-        target = page.locator(selector)
+        if page.locator(selector).count() == 0:
+            for frame in list(getattr(page, "frames", []) or []):
+                if frame is getattr(page, "main_frame", None):
+                    continue
+                try:
+                    if frame.locator(selector).count() > 0:
+                        host = frame
+                        break
+                except Exception as exc:
+                    logger.debug("frame 定位 %s 失败: %s", selector, exc)
+    except Exception as exc:
+        logger.debug("主文档定位 %s 失败: %s", selector, exc)
+    try:
+        target = host.locator(selector)
         first = getattr(target, "first", None)
         if first is None:
             if log:
