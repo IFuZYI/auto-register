@@ -446,6 +446,42 @@ def _send_code_stage(
             body = ""
         captured.append({"status": getattr(resp, "status", None), "body": body})
 
+    # 抓**请求**（不只是响应）：如果我们的请求体和真页面不一样（少 Castle /
+    # Turnstile 令牌、少某个头），服务端就会回 `email-signup-unavailable` ——
+    # 那是通用拒绝，看响应永远看不出差在哪，只有对比请求才看得出来。
+    def _on_request(req: Any) -> None:
+        try:
+            url = str(getattr(req, "url", "") or "")
+            if "/auth/" not in url:
+                return
+            method = str(getattr(req, "method", "") or "")
+            if method.upper() != "POST":
+                return
+            try:
+                body = req.post_data or ""
+            except Exception:
+                body = ""
+            try:
+                hdrs = req.headers or {}
+            except Exception:
+                hdrs = {}
+            keys = sorted(k for k in hdrs if any(
+                s in k.lower() for s in ("castle", "turnstile", "cf-", "x-", "referer", "origin")
+            ))
+            if len(seen_req) < 10:
+                seen_req.append(
+                    f"{method} {url.split('?')[0]} body={str(body)[:160]!r} "
+                    f"headers={ {k: hdrs.get(k) for k in keys} }"
+                )
+        except Exception as exc:
+            logger.debug("记录请求失败: %s", exc)
+
+    seen_req: list[str] = []
+
+    try:
+        page.on("request", _on_request)
+    except Exception as exc:
+        logger.debug("无法监听请求: %s", exc)
     try:
         page.on("response", _on_response)
     except Exception:
@@ -570,6 +606,14 @@ def _send_code_stage(
             break
         page.wait_for_timeout(int(poll * 1000))
     verdict = signup_pages.classify_send_code_page(text)
+    if verdict.get("kind") == signup_pages.SEND_RESULT_EMAIL_UNAVAILABLE and seen_req:
+        # 被拒时把**发出去的请求**也带上：请求体和真页面不一样（少 Castle /
+        # Turnstile 令牌、少某个头）是这类通用拒绝最常见的原因，而看响应永远
+        # 看不出来。
+        verdict = dict(verdict)
+        verdict["detail"] = (
+            str(verdict.get("detail") or "") + "｜发出去的请求: " + " ;; ".join(seen_req[:2])[:500]
+        )
     if verdict["kind"] == signup_pages.SEND_RESULT_NO_CONFIRMATION:
         verdict = dict(verdict)
         # detail 会被 `send_code_error_text` 套进「未确认发信（…）」里，
@@ -586,6 +630,8 @@ def _send_code_stage(
             why += f"｜只见到 {len(seen)} 个其它 auth 请求（首个 {seen[0][:90]}）—— 发码接口可能改名了"
         if state and state.get("disabled"):
             why += "｜提交按钮是禁用态"
+        if seen_req:
+            why += "｜发出去的请求: " + " ;; ".join(seen_req[:2])[:400]
         diag = (state or {}).get("diag") or {}
         if diag:
             btns = "/".join(str(b) for b in (diag.get("buttons") or [])[:4]) or "无"

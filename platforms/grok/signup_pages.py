@@ -47,6 +47,17 @@ PROFILE_PAGE_URL = SIGNUP_URL
 
 EMAIL_INPUT = "input#email"
 CODE_INPUT = "input[name=code]"
+#: 验证码框的**兜底选择器**。线上实测（2026-11-01）：新版是**六个
+#: `maxlength=1` 的无名输入框**（参考实现的原话：「OTP widget = six unnamed
+#: `maxlength=1` boxes: click the **first** one and `keyboard.type(code)`」），
+#: 只认 `input[name=code]` 会报「验证码输入框未出现」。
+CODE_INPUT_CANDIDATES = (
+    "input[name=code]",
+    'input[autocomplete="one-time-code"]',
+    'input[inputmode="numeric"][maxlength="1"]',
+    'input[maxlength="1"]',
+    'input[data-testid="code"]',
+)
 GIVEN_NAME_INPUT = "input#givenName"
 FAMILY_NAME_INPUT = "input#familyName"
 PASSWORD_INPUT = "input#password"
@@ -960,6 +971,32 @@ def ensure_turnstile_token(
 _CODE_ADVANCED_MARKERS = ("complete your sign up", "first name", "last name")
 
 
+def wait_for_code_input(page: Any, *, timeout: float = 60.0, poll: float = 0.5) -> bool:
+    """等验证码框出现（多选择器兜底，见 `CODE_INPUT_CANDIDATES`）。"""
+    deadline = time.monotonic() + max(0.0, float(timeout))
+    while True:
+        if find_code_input(page):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(poll)
+
+
+def find_code_input(page: Any) -> str:
+    """返回**当前页面上真的存在**的验证码框选择器（都没有则空串）。
+
+    多框 OTP 只返回第一个选择器 —— 调用方点它、然后逐字打字，浏览器会自动
+    跳到下一格，这正是参考实现的做法。
+    """
+    for sel in CODE_INPUT_CANDIDATES:
+        try:
+            if _count(page, sel) > 0:
+                return sel
+        except Exception as exc:
+            logger.debug("探测 %s 失败: %s", sel, exc)
+    return ""
+
+
 def enter_code(
     page: Any,
     code: str,
@@ -974,8 +1011,9 @@ def enter_code(
     if not digits:
         return False
     _sleep = sleep or time.sleep
+    selector = find_code_input(page) or CODE_INPUT
     try:
-        target = page.locator(CODE_INPUT)
+        target = page.locator(selector)
         first = getattr(target, "first", None)
         if first is None:
             if log:
