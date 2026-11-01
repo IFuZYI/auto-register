@@ -457,8 +457,23 @@ def _send_code_stage(
     if pre is not None:
         return _stage_verdict_fields(pre, email, log=log)
 
-    if not signup_pages.set_field_value(page, signup_pages.EMAIL_INPUT, email):
-        filled = False
+    # 逐字**输入**，不用 `fill`。
+    #
+    # 参考实现（Grok-farm README）：「Click the email field and **type** the
+    # address — `fill()` leaves React state unarmed and the submit never fires.」
+    # 我们的 `set_field_value` 是原生 setter + 派发事件，通常够；但真机上有
+    # 受控组件只认「真实按键」的情况，所以先试打字，失败再退回 setter。
+    filled = False
+    try:
+        field = page.locator(signup_pages.EMAIL_INPUT).first
+        field.click(timeout=6000)
+        page.keyboard.type(email, delay=45)
+        filled = str(field.input_value() or "").strip() == email
+    except Exception:
+        logger.debug("逐字输入邮箱失败，退回 setter", exc_info=True)
+    if not filled:
+        filled = signup_pages.set_field_value(page, signup_pages.EMAIL_INPUT, email)
+    if not filled:
         try:
             page.locator(signup_pages.EMAIL_INPUT).first.fill(email, timeout=8000)
             filled = True
@@ -486,6 +501,12 @@ def _send_code_stage(
     # 提交梯子（三档：按钮 → form.requestSubmit → Enter，见
     # `signup_pages.submit_email_code`）。点了不等于发出去了，所以每轮都看
     # 「页面动没动」：动了（邮箱框没了 / 抓到响应）才收工。
+    # 别抢跑：Castle / Turnstile 的反机器人令牌要几秒才落地，令牌没到手就提交，
+    # 服务端只会回一句 `account:email-signup-unavailable`（通用拒绝）。
+    # 参考实现的原话：「Turnstile/Castle needs 30-45 s to settle — do not shorten
+    # it before the submit path.」我们取 12 秒上限、拿到令牌就立刻走。
+    settled = signup_pages.wait_for_antibot_token(page, timeout=12.0)
+    _log(log, f"[Grok] 反机器人令牌{'已就绪' if settled else '未出现（继续尝试提交）'}")
     label, state = signup_pages.submit_email_code(page)
     attempts = 1
     while attempts < 3:

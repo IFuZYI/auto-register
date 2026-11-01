@@ -583,6 +583,65 @@ def _run_submit_js(page: Any, *, dry_run: bool = False) -> dict[str, Any]:
     return out if isinstance(out, dict) else {}
 
 
+#: 反机器人令牌的痕迹（Castle / Turnstile / Cloudflare）。
+#: Castle 把令牌放在 `window`、`sessionStorage` 或请求头里，名字不固定，
+#: 所以按**子串**扫，宁可多认几个也不要漏。
+_ANTIBOT_JS = """
+() => {
+  const hits = [];
+  try {
+    for (const k of Object.keys(window)) {
+      if (/castle|turnstile|cf_chl|__cf/i.test(k)) hits.push('win:' + k);
+    }
+  } catch (e) {}
+  try {
+    for (const store of [window.sessionStorage, window.localStorage]) {
+      for (let i = 0; i < (store.length || 0); i++) {
+        const k = store.key(i) || '';
+        if (/castle|turnstile|cf_chl/i.test(k)) hits.push('store:' + k);
+      }
+    }
+  } catch (e) {}
+  try {
+    if (document.querySelector('input[name="cf-turnstile-response"]')) hits.push('input:turnstile');
+    if (document.querySelector('[name="castleRequestToken"], [data-castle-token]')) hits.push('input:castle');
+  } catch (e) {}
+  return hits;
+}
+"""
+
+
+def wait_for_antibot_token(page: Any, *, timeout: float = 12.0, poll: float = 0.4) -> bool:
+    """等 Castle / Turnstile 的反机器人令牌落地，返回是否等到。
+
+    **为什么必须等**（2026-11-01，用户实测对照）：同一个 `@icloud.com` 地址，
+    手动操作能过、自动化过不去。差别是节奏 —— 我们的日志里「已进入邮箱注册视图」
+    到「提交发码」只隔 **1 秒**，而参考实现明写：
+
+    > Turnstile/Castle needs 30-45 s to settle — do not shorten it before the
+    > submit path.
+
+    令牌没到手就提交，服务端回的是 `account:email-signup-unavailable` —— 一个
+    通用拒绝，看着像「域名配额」或「出口被标记」，实际是「这次请求不可信」。
+
+    拿不到也不挡：超时就返回 False，让调用方照常提交（fail-open）—— 有些出口
+    上令牌是懒加载的，等太久反而把整轮拖死。
+    """
+    deadline = time.monotonic() + max(0.0, float(timeout))
+    while True:
+        try:
+            hits = page.evaluate(_ANTIBOT_JS)
+        except Exception as exc:
+            logger.debug("读反机器人令牌失败: %s", exc)
+            hits = []
+        if hits:
+            logger.debug("反机器人令牌: %s", hits)
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(poll)
+
+
 def submit_button_state(page: Any) -> dict[str, Any]:
     """当前「提交」按钮的文案与是否禁用（**不提交**）。
 
