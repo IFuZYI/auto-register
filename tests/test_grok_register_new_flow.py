@@ -728,15 +728,18 @@ class TopLevelResultHonestyTests(unittest.TestCase):
 
         def _ev(js, *a):
             js = str(js)
-            if "aria-disabled" in js:          # 读提交按钮状态
-                return {"label": "Sign up", "disabled": False, "found": True}
-            if "bestScore" in js:              # 按文案点击
-                labels = [str(x).lower() for x in ((a[0] or {}).get("labels") or [])]
-                if any("sign up with email" in x for x in labels):
-                    st["email_view"] = True
-                else:
-                    st["submitted"] = True
-                return "Sign up"
+            # 顺序要紧：提交脚本里也有 `bestScore` 这个变量名，先判它就会
+            # 把提交当成「入口点击」，页面永远停在邮箱表单（踩过）。
+            if "aria-disabled" in js:          # 提交发码脚本（三档梯子 / dryRun 只读状态）
+                args = a[0] if a else {}
+                if args.get("dryRun"):
+                    return {"label": "Sign up", "disabled": False, "found": True, "reason": ""}
+                st["submitted"] = True
+                return {"how": "button", "label": "Sign up", "reason": "", "found": True,
+                        "disabled": False, "hasInput": True, "inputOk": True, "diag": {}}
+            if "bestScore" in js:              # 按文案点击（入口那次「Sign up with email」）
+                st["email_view"] = True
+                return "Sign up with email"
             if "innerText" in js:              # 读页面文案
                 if not st["submitted"]:
                     return entry

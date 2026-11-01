@@ -652,66 +652,101 @@ if __name__ == "__main__":
 
 
 class SubmitEmailCodeTests(unittest.TestCase):
-    """点提交必须**确认点上了**。
+    """提交发码：**点了要真的点上去**，且三档依次降级。
 
     线上实测（2026-11-01）：日志写着「发码已提交（Sign up）」，实际一个请求都
-    没发出去 —— 按钮在邮箱视图刚出现时还是禁用态（React 还没挂上事件处理），
-    `el.click()` 打在禁用按钮上什么都不发生，而旧的 `click_button` 照样把文案
-    返回。9 秒后判定成 `no_confirmation`，提示是「未确认发信（页面未给出理由）」
-    —— 把「点了个空」说成「上游没确认」，排查方向全错。
+    没发出去 —— 按钮当时是禁用态（React 还没挂上事件处理），`el.click()` 打在
+    禁用按钮上什么都不发生，而旧代码照样把文案返回。9 秒后判定成
+    `no_confirmation`，提示是「未确认发信（页面未给出理由）」。
+
+    梯子照 `reference/register/grok-register/registration_browser.py` 移植：
+    按钮 → `form.requestSubmit()` → 输入框 Enter。
     """
 
     def _page(self, states):
-        """`states` 是 `submit_button_state` 的连续返回（最后一次重复）。"""
+        """`states` 是脚本返回值队列（最后一个会重复）。"""
         seq = list(states)
         page = MagicMock()
-        page._evaluated = []
+        page._js = []
 
         def _ev(js, *a):
-            page._evaluated.append(str(js))
-            if "aria-disabled" in str(js):
-                return seq.pop(0) if len(seq) > 1 else seq[0]
-            if "bestScore" in str(js):
-                return "Sign up"
-            return ""
+            page._js.append(str(js))
+            return seq.pop(0) if len(seq) > 1 else seq[0]
 
         page.evaluate.side_effect = _ev
         return page
 
-    def test_waits_for_the_button_to_become_enabled(self):
-        from platforms.grok import signup_pages
+    def _ready(self, **kw):
+        base = {"how": "", "label": "", "reason": "", "found": True,
+                "disabled": False, "hasInput": True, "inputOk": True}
+        base.update(kw)
+        return base
+
+    def test_waits_until_the_input_is_ready(self):
+        from platforms.grok import signup_pages as sp
 
         page = self._page([
-            {"label": "Sign up", "disabled": True, "found": True},
-            {"label": "Sign up", "disabled": True, "found": True},
-            {"label": "Sign up", "disabled": False, "found": True},
+            self._ready(reason="input-empty", inputOk=False, disabled=True),
+            self._ready(reason="input-empty", inputOk=False, disabled=True),
+            self._ready(how="button", label="Sign up"),
         ])
-        with patch.object(signup_pages.time, "sleep", lambda *a: None):
-            label, state = signup_pages.submit_email_code(page, wait_timeout=5)
+        with patch.object(sp.time, "sleep", lambda *a: None):
+            label, state = sp.submit_email_code(page, wait_timeout=5)
         self.assertEqual(label, "Sign up")
-        self.assertFalse(state["disabled"], "应该等到按钮可用才点")
-        # 三次读状态 + 一次点击
-        kinds = [("aria-disabled" in j) for j in page._evaluated]
-        self.assertEqual(kinds.count(True), 3)
-        self.assertEqual(kinds.count(False), 1)
+        self.assertEqual(state["how"], "button", "就绪后应该真提交")
+        self.assertEqual(len(page._js), 3, "前两次应该只是等，不该提交")
 
-    def test_reports_disabled_when_it_never_opens_up(self):
-        from platforms.grok import signup_pages
+    def test_falls_back_to_form_submit(self):
+        from platforms.grok import signup_pages as sp
 
-        page = self._page([{"label": "Sign up", "disabled": True, "found": True}])
-        with patch.object(signup_pages.time, "sleep", lambda *a: None), \
-             patch.object(signup_pages.time, "monotonic", side_effect=[0.0, 0.0, 99.0]):
-            _label, state = signup_pages.submit_email_code(page, wait_timeout=1)
-        self.assertTrue(state["disabled"], "一直禁用要如实上报，不能假装点上了")
+        page = self._page([self._ready(how="form")])
+        _label, state = sp.submit_email_code(page, wait_timeout=0)
+        self.assertEqual(state["how"], "form")
 
-    def test_no_button_is_reported_as_not_found(self):
-        from platforms.grok import signup_pages
+    def test_falls_back_to_enter_on_the_input(self):
+        from platforms.grok import signup_pages as sp
 
-        page = self._page([{"label": "", "disabled": True, "found": False}])
-        with patch.object(signup_pages.time, "sleep", lambda *a: None), \
-             patch.object(signup_pages.time, "monotonic", side_effect=[0.0, 0.0, 99.0]):
-            _label, state = signup_pages.submit_email_code(page, wait_timeout=1)
+        page = self._page([self._ready(how="enter")])
+        _label, state = sp.submit_email_code(page, wait_timeout=0)
+        self.assertEqual(state["how"], "enter")
+
+    def test_gives_up_and_reports_the_reason(self):
+        """一直没就绪要如实说**为什么**，不能只报「未确认发信」。"""
+        from platforms.grok import signup_pages as sp
+
+        page = self._page([self._ready(reason="no-input", found=False, hasInput=False)])
+        clock = {"t": 0.0}
+        with patch.object(sp.time, "sleep", lambda *a: None), \
+             patch.object(sp.time, "monotonic", side_effect=[0.0, 0.0, 99.0]):
+            _label, state = sp.submit_email_code(page, wait_timeout=1)
+        self.assertEqual(state["reason"], "no-input")
         self.assertFalse(state["found"])
+
+    def test_disabled_button_is_never_clicked(self):
+        """按钮禁用时脚本必须走别的档，而不是照点 —— 这是线上那条日志的根因。"""
+        from platforms.grok import signup_pages as sp
+
+        js = sp._SUBMIT_EMAIL_JS
+        self.assertIn("aria-disabled", js)
+        self.assertIn("!enabled(el)", js, "候选里要排掉禁用按钮")
+        self.assertIn("form.requestSubmit", js, "要能降级到 form 提交")
+        self.assertIn("KeyboardEvent", js, "要能降级到输入框 Enter")
+
+    def test_button_state_and_submit_share_one_implementation(self):
+        """「看按钮状态」和「点按钮」必须走同一个脚本的 dryRun。
+
+        两处各写一份选择逻辑，「看状态」和「点」会落在不同元素上 ——
+        而那种错只在线上才看得见。
+        """
+        from platforms.grok import signup_pages as sp
+
+        page = self._page([self._ready(label="Sign up")])
+        state = sp.submit_button_state(page)
+        self.assertEqual(state["label"], "Sign up")
+        self.assertTrue(state["found"])
+        self.assertEqual(state["reason"], "")
+        self.assertIn("dryRun", page._js[0])
+        self.assertEqual(len(page._js), 1)
 
 
 class SendCodeDiagnosisTests(unittest.TestCase):

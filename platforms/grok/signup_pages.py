@@ -417,51 +417,174 @@ def click_email_signup(page: Any) -> str:
     )
 
 
-#: 提交按钮的「文案 + 是否可用」。和 `_CLICK_BY_LABELS_JS` 用同一套打分，
-#: 保证「看状态」和「点」落在同一个元素上。
-_SUBMIT_STATE_JS = """
+#: 提交发码的脚本。**照 `reference/register/grok-register/registration_browser.py`
+#: 那份线上跑通的实现移植**（`fill_email_and_submit` 的降级梯子），三档依次降级：
+#:
+#:   1. 找一个**可见、未禁用**、文案匹配的提交按钮 → `click()`
+#:   2. 没有可用按钮 → 拿输入框所在的 `<form>` 走 `form.requestSubmit()`
+#:      （没有 `requestSubmit` 就派发 `submit` 事件）
+#:   3. 连 form 都没有 → 在输入框上派发 Enter 的 `keydown`/`keyup`
+#:
+#: 以及两个前置校验（同样来自那份实现）：输入框**可见/未禁用/非只读**且
+#: **有值**，`type=email` 时还要过 `checkValidity()`。`disabled` 的按钮直接
+#: **不进候选**（不是点了再祈祷）—— 线上实测就是这个坑：按钮当时禁用，
+#: `el.click()` 什么都不发生，旧代码照样报「已提交」。
+#:
+#: 返回的 `how` 是**触发方式**，不是「服务端接受了」—— 那由响应/页面判定。
+_SUBMIT_EMAIL_JS = """
 (args) => {
-  const wanted = args.labels.map(s => s.toLowerCase());
+  const labels = (args.labels || []).map(s => s.toLowerCase());
   const ban = (args.ban || []).map(s => s.toLowerCase());
-  const nodes = Array.from(document.querySelectorAll(
-    'button, [role="button"], input[type="submit"], a'));
-  const score = (t) => {
-    const s = t.toLowerCase();
-    if (ban.some(b => s.includes(b))) return -1;
-    if (wanted.includes(s)) return 100;
-    if (wanted.some(w => s.includes(w))) return 50;
-    return -1;
+  const isVisible = (node) => {
+    if (!node) return false;
+    const st = window.getComputedStyle(node);
+    if (st.display === 'none' || st.visibility === 'hidden' || st.opacity === '0') return false;
+    const r = node.getBoundingClientRect();
+    return r.width > 0 && r.height > 0;
   };
-  let best = null, bestScore = 0;
-  for (const el of nodes) {
-    const t = (el.innerText || el.value || el.textContent || '').replace(/\\s+/g, ' ').trim();
-    if (!t) continue;
-    const sc = score(t);
+  const textOf = (node) => [
+    node.innerText, node.textContent, node.getAttribute('aria-label'), node.getAttribute('title'),
+    node.getAttribute('placeholder'), node.getAttribute('data-testid'),
+    node.getAttribute('name'), node.getAttribute('id'),
+  ].filter(Boolean).join(' ').replace(/\\s+/g, ' ').trim();
+  const enabled = (n) => !n.disabled && n.getAttribute('aria-disabled') !== 'true';
+
+  const diag = {
+    url: location.href,
+    buttons: Array.from(document.querySelectorAll('button,[role="button"],input[type="submit"]'))
+      .filter(isVisible).map((n) => textOf(n).slice(0, 40)).filter(Boolean).slice(0, 8),
+    inputs: Array.from(document.querySelectorAll('input,textarea')).filter(isVisible)
+      .map((n) => [n.getAttribute('type') || '', n.getAttribute('id') || '', n.getAttribute('name') || ''].join('/'))
+      .slice(0, 8),
+  };
+  const bail = (reason, found, hasInput) => ({
+    how: '', label: '', reason, found, disabled: true, hasInput, inputOk: false, diag,
+  });
+
+  // 输入框：先按调用方给的选择器，再按属性兜底 —— xAI 换过 id/name，
+  // 只认 `input#email` 会在改版当天整条链停摆（而报错会指向「提交没生效」）。
+  let input = null;
+  for (const sel of (args.inputSelectors || [])) {
+    input = Array.from(document.querySelectorAll(sel)).find(
+      (n) => isVisible(n) && enabled(n) && !n.readOnly);
+    if (input) break;
+  }
+  if (!input) {
+    input = Array.from(document.querySelectorAll('input, textarea')).find((n) => {
+      const type = (n.getAttribute('type') || '').toLowerCase();
+      if (['hidden','submit','button','checkbox','radio','file','search'].includes(type)) return false;
+      if (!isVisible(n) || !enabled(n) || n.readOnly) return false;
+      const meta = textOf(n).toLowerCase();
+      return meta.includes('mail') || meta.includes('邮箱') || meta.includes('电子邮件');
+    }) || null;
+  }
+  if (!input) return bail('no-input', false, false);
+  if (!String(input.value || '').trim()) return bail('input-empty', true, true);
+  if ((input.getAttribute('type') || '').toLowerCase() === 'email' && !input.checkValidity())
+    return bail('input-invalid', true, true);
+
+  const label = textOf(input);
+  if (args.dryRun) {
+    // 只看状态、不提交：给「按钮可用了没」这类轮询用。
+    let best = null, bestScore = 0, anyDisabled = false;
+    for (const el of document.querySelectorAll('button,[role="button"],input[type="submit"]')) {
+      if (!isVisible(el)) continue;
+      const s = textOf(el).toLowerCase();
+      if (ban.some((b) => s.includes(b))) continue;
+      const sc = labels.includes(s) ? 100 : (labels.some((w) => s.includes(w)) ? 50 : -1);
+      if (sc <= 0) continue;
+      if (!enabled(el)) { anyDisabled = true; continue; }
+      if (sc > bestScore) { best = el; bestScore = sc; }
+    }
+    return {
+      how: '', label: best ? textOf(best) : '', reason: best ? '' : (anyDisabled ? 'button-disabled' : 'no-button'),
+      found: Boolean(best) || anyDisabled, disabled: !best, hasInput: true, inputOk: true, diag,
+    };
+  }
+
+  // —— 第一档：按钮 ——
+  let best = null, bestScore = 0, anyDisabled = false;
+  for (const el of document.querySelectorAll('button,[role="button"],input[type="submit"]')) {
+    if (!isVisible(el)) continue;
+    const s = textOf(el).toLowerCase();
+    if (ban.some((b) => s.includes(b))) continue;
+    const sc = labels.includes(s) ? 100 : (labels.some((w) => s.includes(w)) ? 50 : -1);
+    if (sc <= 0) continue;
+    if (!enabled(el)) { anyDisabled = true; continue; }
     if (sc > bestScore) { best = el; bestScore = sc; }
   }
-  if (!best) return {label: '', disabled: true, found: false};
-  const label = (best.innerText || best.value || best.textContent || '').replace(/\\s+/g, ' ').trim();
-  const disabled = Boolean(best.disabled)
-    || best.getAttribute('aria-disabled') === 'true'
-    || best.getAttribute('data-disabled') === 'true';
-  return {label, disabled, found: true};
+  if (best) {
+    const btnLabel = textOf(best);
+    try { best.scrollIntoView({ block: 'center' }); } catch (e) {}
+    best.click();
+    return { how: 'button', label: btnLabel, reason: '', found: true, disabled: false, hasInput: true, inputOk: true, diag };
+  }
+
+  // —— 第二档：form.requestSubmit() ——
+  const form = input.closest('form');
+  if (form) {
+    try {
+      if (form.requestSubmit) form.requestSubmit();
+      else form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+      return { how: 'form', label: '', reason: '', found: true, disabled: anyDisabled, hasInput: true, inputOk: true, diag };
+    } catch (e) {}
+  }
+
+  // —— 第三档：在输入框上派发 Enter ——
+  try { input.focus(); } catch (e) {}
+  for (const kind of ['keydown', 'keyup']) {
+    input.dispatchEvent(new KeyboardEvent(kind, {
+      key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true,
+    }));
+  }
+  return { how: 'enter', label: '', reason: '', found: true, disabled: anyDisabled, hasInput: true, inputOk: true, diag };
 }
 """
 
-#: 提交按钮的文案表（与 `click_email_submit` 完全一致）。
+#: 提交按钮的文案表。
 _EMAIL_SUBMIT_LABELS = ["sign up", "continue", "続行", "次へ", "weiter", "continuar", "continuer", "계속"]
 _EMAIL_SUBMIT_BAN = ["with ", "go back", "sign in", "戻る", "zurück"]
 
+#: 找输入框时先试这几个（真值在最前面），都命中不了才按属性兜底。
+_EMAIL_INPUT_SELECTORS = (
+    EMAIL_INPUT,
+    'input[data-testid="email"]',
+    'input[name="email"]',
+    'input[type="email"]',
+    'input[autocomplete="email"]',
+)
+
+
+def _run_submit_js(page: Any, *, dry_run: bool = False) -> dict[str, Any]:
+    args = {
+        "labels": list(_EMAIL_SUBMIT_LABELS),
+        "ban": list(_EMAIL_SUBMIT_BAN),
+        "inputSelectors": list(_EMAIL_INPUT_SELECTORS),
+        "dryRun": bool(dry_run),
+    }
+    try:
+        out = page.evaluate(_SUBMIT_EMAIL_JS, args)
+    except Exception as exc:
+        logger.debug("提交发码脚本失败: %s", exc)
+        return {"how": "", "label": "", "reason": "js-error", "found": False,
+                "disabled": True, "hasInput": False, "inputOk": False,
+                "diag": {"error": str(exc)[:160]}}
+    return out if isinstance(out, dict) else {}
+
 
 def submit_button_state(page: Any) -> dict[str, Any]:
-    """当前「提交」按钮的文案与是否禁用（找不到时 found=False）。"""
-    args = {"labels": list(_EMAIL_SUBMIT_LABELS), "ban": list(_EMAIL_SUBMIT_BAN)}
-    try:
-        out = page.evaluate(_SUBMIT_STATE_JS, args)
-    except Exception as exc:
-        logger.debug("读提交按钮状态失败: %s", exc)
-        return {"label": "", "disabled": True, "found": False}
-    return out if isinstance(out, dict) else {"label": "", "disabled": True, "found": False}
+    """当前「提交」按钮的文案与是否禁用（**不提交**）。
+
+    走的是同一个脚本的 `dryRun` —— 两处各写一份选择逻辑的话，「看状态」和
+    「点」迟早会落在不同元素上，而那种错只在线上才看得见。
+    """
+    state = _run_submit_js(page, dry_run=True)
+    return {
+        "label": state.get("label") or "",
+        "disabled": bool(state.get("disabled", True)),
+        "found": bool(state.get("found")),
+        "reason": state.get("reason") or "",
+    }
 
 
 def email_input_present(page: Any) -> bool:
@@ -470,35 +593,25 @@ def email_input_present(page: Any) -> bool:
 
 
 def submit_email_code(page: Any, *, wait_timeout: float = 8.0, poll: float = 0.3) -> tuple[str, dict]:
-    """等提交按钮**可用**再点，返回 `(点到文案, 点击前状态)`。
+    """等输入框可提交再提交；三档降级（按钮 → form → Enter）。返回 `(文案, 状态)`。
 
-    为什么不能直接 `click_button`（线上实测 2026-11-01）：
+    为什么要等 + 为什么要降级（线上实测 2026-11-01）：
 
-    邮箱视图刚出现时 React 还没挂上事件处理，或者按钮因为邮箱校验没过而
-    `disabled` —— 这两种情况下 `el.click()` **什么都不会发生**，但
-    `click_button` 照样把按钮文案返回，日志于是写着「发码已提交（Sign up）」，
-    实际上一个请求都没发出去。接着等 9 秒超时，结论是
-    `no_confirmation: 未确认发信（页面未给出理由）` —— 提示把「点了个空」
-    说成了「上游没确认」，排查方向全错。
+    日志写着「发码已提交（Sign up）」，实际一个请求都没发出去 —— 邮箱视图刚出现
+    时 React 还没挂上事件处理，或者按钮因为校验没过而 `disabled`，两种情况下
+    `el.click()` **什么都不会发生**，而旧代码照样把按钮文案返回。接着等 9 秒超时，
+    结论是 `no_confirmation: 未确认发信（页面未给出理由）`：把「点了个空」说成了
+    「上游没确认」。
 
-    所以这里先轮询到按钮存在且未禁用（最多 `wait_timeout` 秒），再点，
-    并把点击前的状态返回给调用方记日志。
+    所以：每次都跑一遍完整脚本 —— 输入框没就绪（缺失 / 空 / 校验不过）就等下一轮；
+    就绪就直接提交，且按钮不可用时自动改用 `form.requestSubmit()` 或 Enter。
     """
     deadline = time.monotonic() + max(0.0, float(wait_timeout))
-    state: dict[str, Any] = {"label": "", "disabled": True, "found": False}
-    while True:
-        state = submit_button_state(page)
-        if state.get("found") and not state.get("disabled"):
-            break
-        if time.monotonic() >= deadline:
-            break
+    state = _run_submit_js(page)
+    while state.get("reason") in ("no-input", "input-empty", "input-invalid") and time.monotonic() < deadline:
         time.sleep(poll)
-    label = click_email_submit(page)
-    return label, state
-
-
-def click_email_submit(page: Any) -> str:
-    return click_button(page, list(_EMAIL_SUBMIT_LABELS), ban=list(_EMAIL_SUBMIT_BAN))
+        state = _run_submit_js(page)
+    return str(state.get("label") or ""), state
 
 
 def click_profile_submit(page: Any) -> str:

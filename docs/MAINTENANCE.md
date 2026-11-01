@@ -505,7 +505,7 @@ git diff --stat
 | 前端「保存了但没生效」 | 表单字段名与配置键不一致 | 两处对照（§2.3） |
 | Outlook 导入全失败，报 `AADSTS7000012: The grant was obtained for a different tenant` | `client_id` 与 `refresh_token` 两段顺序反了（多数令牌导出工具是 `邮箱----密码----token----client_id`） | 已按 GUID 形状自动纠正（§5.2）；仍报这个错说明两段都不像 GUID，原样交给微软给真实错误 |
 | 定时任务设了间隔却不跑 | 间隔回调返回 0（开关关着 / 间隔非法 / 范围不在白名单） | 看 `services/local_maintenance.get_*_interval_seconds` 的返回值；0 = 主动不跑，不是「还没到」 |
-| Grok 注册报 `no_confirmation: 未确认发信（页面未给出理由）` | 页面文案还是那一屏邮箱表单、**没有任何报错**，说明请求根本没发出去（按钮当时是禁用态 / React 还没挂上事件处理） | 看提示尾巴：`没抓到任何 /auth/ 请求` = 点击空转；`只见到其它 auth 请求` = 发码接口改名了。`submit_email_code` 会等到按钮可用再点，最多重试 3 次 |
+| Grok 注册报 `no_confirmation: 未确认发信（页面未给出理由）` | 页面文案还是那一屏邮箱表单、**没有任何报错**，说明请求根本没发出去（按钮当时是禁用态 / React 还没挂上事件处理） | 看提示尾巴：`已用 X 触发提交` 说明用的是哪一档（按钮 / `form.requestSubmit()` / 输入框 Enter）；`没抓到任何 /auth/ 请求` = 三档都试了还是没发出去；`只见到其它 auth 请求` = 发码接口改名了；`页面按钮[…] 输入框[…]` 是当时的快照 |
 | Grok 账号没有 AT / RT | **不是故障**：2026-10-23 起注册只产 SSO（device flow 每次都 `授权未确认`，白烧 4 分钟/号），且 SSO 是 HS256 JWT、载荷只有 `session_id`、没有 `exp` | 刷新走 SSO → 登录协议；列表看「2API 接入 / 探测」，不看「AT 到期」（那一列只给 ChatGPT） |
 | 窄屏表格「内容被裁、也没有滚动条」 | 只把 `tr` 设成 `block`，`table` 还是 `display: table` —— 浏览器把 block 级 tbody 包进匿名 table-cell，宽度仍按列算 | `table` / `tbody` 都设 `display: block`，并 `col { width: auto }`（见 §5.1） |
 
@@ -588,3 +588,26 @@ GUID 就交换；**两段都像或都不像时不动** —— 猜错比不猜更
 
 
 | `tests/test_chatgpt_platform_rt_route.py` | ChatGPT 换 RT 的两条路线（Codex / 密码登录）、路线开关、补 RT 策略顺序与 `partial` 清理 |
+## 5.3 Grok 发码的提交梯子（照参考实现移植）
+
+`platforms/grok/signup_pages.py::_SUBMIT_EMAIL_JS` 一个脚本干完三件事，依次降级：
+
+1. **按钮**：在 `button / [role=button] / input[type=submit]` 里找**可见、未禁用**
+   （`!disabled && aria-disabled !== 'true'`）且文案匹配的，`scrollIntoView` 后 `click()`；
+2. **form**：没有可用按钮 → 拿输入框所在的 `<form>` 走 `form.requestSubmit()`
+   （没有这个方法就派发 `submit` 事件）；
+3. **Enter**：连 form 都没有 → 在输入框上派发 `keydown`/`keyup` 的 Enter。
+
+提交前还有两道闸：输入框必须**可见 / 未禁用 / 非只读 / 有值**，`type=email` 时还要过
+`checkValidity()`。不满足就返回 `input-empty` / `input-invalid`，由调用方等下一轮
+（而不是硬提交一个空值）。
+
+**为什么这么写**（线上实测 2026-11-01）：日志写着「发码已提交（Sign up）」，
+实际一个请求都没发出去 —— 按钮当时是禁用态，`el.click()` 什么都不发生，而旧代码
+照样把文案返回，9 秒后归到「未确认发信（页面未给出理由）」，把「点了个空」说成了
+「上游没确认」。
+
+三条路都在真浏览器里用合成页验过（可见按钮 → `button`；禁用按钮 → `form`；
+`display:none` 的按钮 → `form`；无 form 无按钮 → `enter`；空输入框 → 不提交；
+没有 `#email` 只有 `data-testid=email` → 靠属性兜底仍能提交）。
+

@@ -483,29 +483,29 @@ def _send_code_stage(
     # 「上游没确认」，排查方向全错。
     #
     # 所以：等按钮可用再点，点完看页面有没有动，没动就再点（最多 3 次）。
+    # 提交梯子（三档：按钮 → form.requestSubmit → Enter，见
+    # `signup_pages.submit_email_code`）。点了不等于发出去了，所以每轮都看
+    # 「页面动没动」：动了（邮箱框没了 / 抓到响应）才收工。
     label, state = signup_pages.submit_email_code(page)
     attempts = 1
     while attempts < 3:
-        if label and not state.get("disabled"):
-            page.wait_for_timeout(1200)
-            # 页面动了（邮箱框没了 / 出现了验证码框）就说明点上了。
-            if not signup_pages.email_input_present(page) or captured:
-                break
+        page.wait_for_timeout(1200)
+        if captured or not signup_pages.email_input_present(page):
+            break
         label, state = signup_pages.submit_email_code(page)
         attempts += 1
-    if not label:
-        try:
-            page.keyboard.press("Enter")
-        except Exception:
-            logger.debug("提交按钮按 Enter 也失败", exc_info=True)
+    how = str((state or {}).get("how") or "")
+    how_text = {"button": label or "按钮", "form": "form.requestSubmit()", "enter": "输入框 Enter"}.get(how, "")
     suffix = ""
-    if state and not state.get("found"):
-        suffix = "｜⚠ 没找到提交按钮，改按 Enter"
-    elif state and state.get("disabled"):
-        suffix = "｜⚠ 按钮一直是禁用态（邮箱校验没过？）"
+    if state and not state.get("found") and state.get("reason") in ("no-button", "button-disabled"):
+        suffix = "｜⚠ 没有可用的提交按钮"
+    # 只有**找到了按钮但它禁用**才说这句。没找到按钮时 `disabled` 也是 True，
+    # 再说一遍「按钮是禁用态」会让人去找一个不存在的东西。
+    if state and state.get("disabled") and state.get("found"):
+        suffix += "｜⚠ 按钮是禁用态（邮箱校验没过？）"
     if attempts > 1:
         suffix += f"｜重试 {attempts} 次"
-    _log(log, f"[Grok] 发码已提交（{label or 'Enter'}）{suffix}")
+    _log(log, f"[Grok] 发码已提交（{how_text or label or '？'}）{suffix}")
     # 记下发码时刻（墙钟）：读码只看比它晚到的信，否则同地址重试会读到
     # 上一轮留在邮箱里的旧码（线上实测 2026-11-01，别名 535）。
     sent_at = time.time()
@@ -557,12 +557,19 @@ def _send_code_stage(
         # 还要把「请求有没有发出去」写清楚：没发出去（按钮禁用 / 没挂上事件）
         # 和发出去了但上游不认，是两件完全不同的事，提示里必须能分开。
         why = f"页面未给出理由: {str(text)[:120]}"
+        if how_text:
+            why += f"｜已用 {how_text} 触发提交"
         if not captured and not seen:
             why += "｜没抓到任何 /auth/ 请求 —— 提交大概率没生效"
         elif not captured:
             why += f"｜只见到 {len(seen)} 个其它 auth 请求（首个 {seen[0][:90]}）—— 发码接口可能改名了"
         if state and state.get("disabled"):
             why += "｜提交按钮是禁用态"
+        diag = (state or {}).get("diag") or {}
+        if diag:
+            btns = "/".join(str(b) for b in (diag.get("buttons") or [])[:4]) or "无"
+            ins = "/".join(str(x) for x in (diag.get("inputs") or [])[:4]) or "无"
+            why += f"｜页面按钮[{btns}] 输入框[{ins}]"
         verdict["detail"] = why
     return _stage_verdict_fields(verdict, email, log=log)
 
