@@ -969,13 +969,21 @@ def register_grok_via_browser(
                 return result
             _log(log, f"[Grok] 验证码 {code}")
 
-            if not signup_pages.wait_for_code_input(page, timeout=60):
-                # 现场快照 —— 分不清「没跳页」「在 iframe 里」「停在提示页」时，
-                # 只有把当时的页面结构打出来才看得出是哪种。
-                result["error"] = "验证码输入框未出现｜" + _page_snapshot(page)
+            # 等「验证码框」或「资料页」先出现 —— 2026-11-01 现场快照证明，
+            # 码进去之后页面**不换 URL**，只把 email 框隐藏、换成资料表单。
+            # 只等验证码框的话，等到超时就报「验证码输入框未出现」，而实际上
+            # 已经该填资料了（看着像失败，实际走到倒数第二步）。
+            arrived = signup_pages.wait_for_code_or_profile(page, timeout=60)
+            if not arrived:
+                result["error"] = "验证码页未出现｜" + _page_snapshot(page)
                 return result
+            if arrived == "profile":
+                _log(log, "[Grok] 页面已在资料页（验证码这步已过），直接填资料")
+                code_entered = True
+            else:
+                code_entered = False
             # 新版是 `input[name=code]`、maxlength=6、满 6 位自动提交（码要去掉连字符）
-            if not signup_pages.enter_code(page, code, log=log):
+            if not code_entered and not signup_pages.enter_code(page, code, log=log):
                 txt = signup_pages.page_text(page)
                 if _looks_already_registered(txt):
                     result["already_registered"] = True

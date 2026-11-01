@@ -971,6 +971,39 @@ def ensure_turnstile_token(
 _CODE_ADVANCED_MARKERS = ("complete your sign up", "first name", "last name")
 
 
+def profile_form_present(page: Any) -> bool:
+    """资料页（givenName + password 可见）是否已经出现。
+
+    2026-11-01 现场快照：验证码进去之后页面**留在同一个 URL**
+    （`/sign-up?redirect=grok-com`），只是把 `input[name=email]` 隐藏、换成
+    `givenName` / `familyName` / `password` / `marketingOptIn` 四个可见字段。
+    所以「等验证码框」等到超时，其实早就该填资料了 —— 那时唯一的症状就是
+    `验证码输入框未出现`，看着像失败，实际已经走到倒数第二步。
+    """
+    try:
+        if _count(page, "input[name=givenName]") < 1:
+            return False
+        if _count(page, "input[name=password]") < 1:
+            return False
+        return True
+    except Exception as exc:
+        logger.debug("探测资料页失败: %s", exc)
+        return False
+
+
+def wait_for_code_or_profile(page: Any, *, timeout: float = 60.0, poll: float = 0.5) -> str:
+    """等「验证码框」或「资料页」先出现，返回 `code` / `profile` / 空串（超时）。"""
+    deadline = time.monotonic() + max(0.0, float(timeout))
+    while True:
+        if find_code_input(page):
+            return "code"
+        if profile_form_present(page):
+            return "profile"
+        if time.monotonic() >= deadline:
+            return ""
+        time.sleep(poll)
+
+
 def wait_for_code_input(page: Any, *, timeout: float = 60.0, poll: float = 0.5) -> bool:
     """等验证码框出现（多选择器兜底，见 `CODE_INPUT_CANDIDATES`）。"""
     deadline = time.monotonic() + max(0.0, float(timeout))
