@@ -93,8 +93,9 @@ def _pick_usable_exit(
         log(task_id, f"出口预检：{_redact_proxy(current)} 不可注册，换下一个")
         try:
             report_bad(current)
-        except Exception:
-            logger.debug("预检摘除出口失败", exc_info=True)
+        except Exception as exc:
+            # 摘不掉也要继续换出口：记录是哪一条、什么错，别静默。
+            logger.debug("预检摘除出口 %s 失败: %s", _redact_proxy(current), exc)
         current = normalize(get_next())
     log(task_id, f"出口预检：连试 {_GROK_EXIT_PROBE_TRIES} 个出口都不可注册，本轮放弃")
     return ""

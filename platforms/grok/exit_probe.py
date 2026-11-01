@@ -109,9 +109,10 @@ def probe_exit(
         doc = json.loads(text) if text else {}
         if isinstance(doc, dict):
             code = str(doc.get("code") or doc.get("error") or "")
-    except Exception:
-        # 不是 JSON 也没关系：下面按子串兜底。
-        pass
+    except Exception as exc:
+        # 不是 JSON 也没关系：下面按子串兜底。绑上异常并留痕 ——
+        # 上游偶尔回 HTML 错误页，知道「解不开的是什么」比静默有用。
+        logger.debug("出口预检响应不是 JSON（%s）: %s", exc, text[:120])
     if not code and UNAVAILABLE_CODE in text:
         code = UNAVAILABLE_CODE
 
