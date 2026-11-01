@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import pathlib
 import shutil
 import subprocess
 import unittest
@@ -70,19 +71,23 @@ class AtLifecycleDisplayContractTests(unittest.TestCase):
         return (FRONTEND / "src" / "pages" / "Accounts.tsx").read_text(encoding="utf-8")
 
     def test_list_has_at_expiry_column(self):
-        """列表要有「AT 有效期」列（用 atListSummary 渲染，两平台通用）。"""
+        """ChatGPT 列表要有「AT 到期」列（用 atListSummary 渲染）。
+
+        2026-11-01 起这一列**只给 ChatGPT**：Grok 从 2026-10-23 起注册只产 SSO、
+        不产 AT，这一列对 Grok 每一行都是「无 AT」—— 占 132px 还让人以为号坏了。
+        当初「两平台都要显示」的理由（Grok 的 AT 也是 JWT）随那个决定一起失效了；
+        Grok 换成自己的「2API 接入 / 探测」两列（见
+        `PlatformAwareAccountColumnsTests`）。
+        """
         src = self._src()
         self.assertIn("atListSummary", src, "列表没有用 atListSummary —— AT 日期在列表不可见")
         self.assertIn("title: 'AT 到期'", src, "列表没有「AT 到期」列标题")
-        # 列必须在**公共区**（两平台都显示）——ChatGPT 与 Grok 的 AT 都是
-        # JWT，详情弹窗本来就是共享的，列表不该只给一个平台。
-        # 锚点：列定义出现在 `if (isChatgptPlatform)` 之前。
         at_idx = src.find("title: 'AT 到期'")
         branch_idx = src.find("if (isChatgptPlatform) {")
-        self.assertLess(
+        self.assertGreater(
             at_idx,
             branch_idx,
-            "「AT 到期」列只在 ChatGPT 分支里 —— Grok 列表看不到（同类 UI 不一致）",
+            "「AT 到期」现在只能在 ChatGPT 分支里（Grok 那列永远空）",
         )
 
     def test_scroll_x_covers_the_new_column(self):
@@ -1041,3 +1046,92 @@ class ViewportAdaptiveCapContractTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PlatformAwareAccountColumnsTests(unittest.TestCase):
+    """账号列表/详情按平台给字段（用户 2026-11-01：Grok 的信息和 GPT 不一样）。
+
+    前端没有组件测试基础设施，能钉住的是「这段结构必须存在 / 必须不在这边」。
+    钉的都是踩过或差点踩的点，不是排版偏好。
+    """
+
+    SRC = pathlib.Path("/data/workspace/Register/frontend/src/pages/Accounts.tsx")
+
+    def _src(self) -> str:
+        return self.SRC.read_text(encoding="utf-8")
+
+    def _chatgpt_branch(self) -> str:
+        src = self._src()
+        i = src.index("if (isChatgptPlatform) {")
+        j = src.index("} else {", i)
+        return src[i:j]
+
+    def _grok_branch(self) -> str:
+        """`if (isChatgptPlatform) { … } else { … }` 的 else 段。
+
+        右边界取「`title: '注册时间'` 那个 `columns.push(`」——也就是平台分支
+        结束、公共列开始的地方。
+        """
+        src = self._src()
+        i = src.index("} else {", src.index("if (isChatgptPlatform) {"))
+        reg = src.index("title: '注册时间'")
+        j = src.rindex("columns.push(", i, reg)
+        return src[i:j]
+
+    def test_at_expiry_column_is_chatgpt_only(self):
+        """「AT 到期」只能是 ChatGPT 的列。
+
+        Grok 从 2026-10-23 起注册只产 SSO、不产 AT —— 这一列对 Grok 每一行都是
+        「无 AT」，占着 132px 还让人以为号是坏的。
+        """
+        self.assertIn("title: 'AT 到期'", self._chatgpt_branch(), "AT 列应该在 ChatGPT 分支里")
+        self.assertNotIn("title: 'AT 到期'", self._grok_branch(), "Grok 不该再有 AT 列")
+
+    def test_grok_gets_its_own_two_columns(self):
+        grok = self._grok_branch()
+        self.assertIn("title: '2API 接入'", grok, "Grok 要看 2API 接没接上")
+        self.assertIn("title: '探测'", grok, "Grok 要看探测结论")
+        self.assertIn("grok2api_ingested", grok)
+        self.assertIn("probe_status", grok)
+
+    def test_dead_region_column_is_gone(self):
+        """「地区」列删掉 —— 1080 行里 0 行有值，编辑表单里也没有这一项。"""
+        self.assertNotIn("dataIndex: 'region'", self._src(), "恒为 `-` 的列不该留着")
+
+    def test_credential_column_is_platform_aware(self):
+        src = self._src()
+        block = src[src.index("title: '凭据'"):src.index("title: '状态'")]
+        self.assertIn("isGrok", block, "凭据列要按平台分叉")
+        self.assertIn("['SSO', hasSso", block, "Grok 的主凭证是 SSO")
+        self.assertIn("['RT', hasRt", block, "GPT 才看 RT")
+
+    def test_grok_probe_column_renders_nothing_without_data(self):
+        """没有探测数据时返回 null，不写「未检测」。
+
+        「未检测」和「没有这个信息」在界面上是同一件事，写出来只是多一个
+        每行都出现的灰色词 —— 和「缺省值不渲染」这条规矩冲突。
+        """
+        grok = self._grok_branch()
+        self.assertIn("if (!status && !summary) return null", grok)
+
+    def test_detail_sso_row_reads_the_sso_not_the_at(self):
+        """详情里标着「SSO」的那一行必须读 SSO。
+
+        踩过：它读的是 `getAccessToken`，而 Grok 既没有 `extra.access_token`
+        也没有 `has_access_token` —— 账号明明有 152 字符的 SSO，界面显示「无」。
+        """
+        src = self._src()
+        self.assertIn("const getSsoCredential = (", src, "缺 SSO 取值函数")
+        block = src[src.index("label={currentPlatform === 'grok' ? 'SSO'"):]
+        block = block[:block.index("empty=")]
+        self.assertIn("getSsoCredential(currentAccount)", block)
+
+    def test_refresh_token_empty_hint_is_platform_aware(self):
+        """Grok 的 RT 空值说明不能写「补过 RT 才会有」—— 那条路对 Grok 不存在。"""
+        src = self._src()
+        self.assertIn("Grok 用 SSO 走登录协议刷新，不需要 RT", src)
+
+    def test_grok_detail_has_its_own_group(self):
+        src = self._src()
+        self.assertIn('title="Grok 接入"', src, "Grok 详情该有自己的一组")
+        self.assertIn('title="本地真实状态"', src, "GPT 那组不能被顶掉")

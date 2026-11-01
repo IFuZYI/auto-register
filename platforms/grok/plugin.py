@@ -676,7 +676,7 @@ class GrokPlatform(BasePlatform):
         邮箱来源：`mail_provider=icloud_local` 时用 iCloud 号池（能读码）；
         其它渠道走通用的 `mailbox.get_email()` + `wait_for_code`。
         """
-        from .register_browser import register_grok_via_browser
+        from .register_browser import configured_captcha, register_grok_via_browser
 
         # 邮箱：iCloud 号池要拿 alias_id 才能读码；其它渠道用 mailbox 对象
         alias_id = None
@@ -750,6 +750,9 @@ class GrokPlatform(BasePlatform):
                 mailbox_account=mailbox_account if alias_id is None else None,
                 # 等码最长 240 秒，把任务控制传下去让「停止/跳过」能打断它
                 task_control=getattr(self, "_task_control", None),
+                # 界面上配的验证码解决器（审计 R-21 的另一半）：配了就进铸币链；
+                # 没配 / 没 key 时 `configured_captcha` 返回 None，行为与以前一致。
+                captcha=configured_captcha(self.config, log=log),
                 log=log,
             )
         except TaskInterruption:

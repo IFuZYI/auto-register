@@ -1,4 +1,4 @@
-"""发码被拒后的处置：识别、消耗地址、不再重试。
+"""发码被拒后的处置：识别、地址回收、重试判定。
 
 背景（线上实测，2026-10-23）：`shine_academe.9c@icloud.com` 被反复领取、
 反复失败。真机抓包确认发码请求确实发出（`POST /api/auth/send-verification-code`），
@@ -8,14 +8,27 @@
 - `Email sign-up isn't available right now. Sign up another way.`（邮箱侧被限）
 - 什么都不说（静默，只停在表单）
 
-三个后果，逐个钉住：
+第一版据此定下的规则是「三种都算这个地址被用掉 → 记 used → 判不可重试」。
 
-1. 这三种都不该落进「页面未确认发信」的兜底 —— 那句话描述现象、不描述原因，
-   用户看不出该换邮箱还是该等；
-2. 它们属于「这个地址这轮用掉了」→ 必须记 `used`，不能记 `failed`
-   （`failed` 在 iCloud 池里会 `release` 回 `available`，下次又被领出来撞同一堵墙）；
-3. 它们属于「重开一轮也是同样结局」→ 必须判不可重试（dead-end），
-   否则第 2 轮白跑（每次约 4 分钟）。
+**2026-11-01 修正（有反证实验，这条老规则是错的）**：对同一个出口 IP 换地址
+做 A/B，再对同一个地址换出口 IP 做 A/B，结论是这两类拒绝的归属完全不同：
+
+- `email:send-validation-code-rate-limited`（HTTP 400，同一接口的机器读错误码）
+  **跟邮箱走**：别名 534 半小时内被我们自己请求 5 次后，在全部 3 个代理上都恒
+  返回它；同期未使用过的别名在住宅出口上一次就 `200 {"ok":true"}`。
+  重开一轮（甚至换个出口）**不改结局**，但等冷却后同一地址仍可用。
+- `account:email-signup-unavailable`（HTTP 400 错误的 `code` 字段）
+  **跟出口 IP 走**：`9.142.43.158` / `9.142.43.133` 两条机房代理上恒出现；
+  换成住宅代理 `us.1024proxy.io` 后，**同一个地址立刻发码成功**。→ 地址根本没被用掉。
+- 地址的发码预算实测约 4–6 次（含失败），之后第 3 种结局（静默）也会转为限流。
+
+所以现在钉住的是：
+
+1. 三种拒绝都要被识别成各自的类型（不能都落进「页面未确认发信」的兜底）；
+2. **两类拒绝都不消耗地址**（`consumes_address=False`）—— 烧掉地址会让号池
+   被无谓消耗，而地址其实还能在别的出口上用；真正该换的是出口 / 等冷却；
+3. 两类都**可重试**（`retryable=True`），重试走新出口即可；
+4. 只有「该邮箱已经有账号」（`email:existing-email` 一类）才消耗地址并判死。
 """
 
 from __future__ import annotations
@@ -48,8 +61,10 @@ class SendCodeRejectionDetectionTests(unittest.TestCase):
             "Too many code requests. Please wait a few minutes before requesting another code."
         )
         self.assertEqual(out["kind"], "rate_limited")
-        self.assertEqual(out["retry_after_hint"], "minutes")
-        self.assertTrue(out["consumes_address"], "限流的地址本轮已用掉，不能放回池子")
+        self.assertEqual(out["retry_after_hint"], 180)
+        self.assertFalse(out["consumes_address"],
+                         "限流跟邮箱走、且会冷却：地址没被用掉，不能烧号池")
+        self.assertTrue(out["retryable"], "换个出口或等冷却后还能用这个地址")
 
     def test_email_signup_unavailable(self):
         out = self._classify(
@@ -57,16 +72,20 @@ class SendCodeRejectionDetectionTests(unittest.TestCase):
             "Email sign-up isn’t available right now. Sign up another way."
         )
         self.assertEqual(out["kind"], "email_unavailable")
-        self.assertTrue(out["consumes_address"])
+        self.assertFalse(out["consumes_address"],
+                         "A/B 实测换个住宅出口同一地址立刻成功 → 地址没被用掉")
+        self.assertTrue(out["retryable"], "该换的是出口 IP，不是地址")
 
     def test_silent_form(self):
-        """只停在表单、既没发信也没报错 —— 也是被拒，不是「未确认」。"""
+        """只停在表单、既没发信也没报错 —— 第 3 种结局，地址同样不烧。"""
         out = self._classify(
             "You are signing into\nGrok\nSign up with your email\nEmail\n"
             "Sign upGo back\n\nBy continuing, you agree to the SpaceXSI Terms of Service"
         )
         self.assertEqual(out["kind"], "no_confirmation")
-        self.assertTrue(out["consumes_address"])
+        self.assertFalse(out["consumes_address"],
+                         "客户端连请求都没发出（实测有这种轮次）—— 更不该烧地址")
+        self.assertTrue(out["retryable"])
 
     def test_success_is_not_mistaken(self):
         out = self._classify(
@@ -74,8 +93,8 @@ class SendCodeRejectionDetectionTests(unittest.TestCase):
         )
         self.assertEqual(out["kind"], "sent")
 
-    def test_all_rejections_are_fatal(self):
-        """三种拒绝都不能重试 —— 重开一轮是同样结局。"""
+    def test_all_rejections_keep_the_address(self):
+        """三种拒绝都必须保住地址 —— 它们都不代表这个号被用掉了。"""
         from platforms.grok.register_browser import classify_send_code_page
 
         for text in (
@@ -84,7 +103,18 @@ class SendCodeRejectionDetectionTests(unittest.TestCase):
             "Sign up with your email\nEmail\nSign upGo back",
         ):
             out = classify_send_code_page(text)
-            self.assertFalse(out["retryable"], f"{out['kind']} 不该重试")
+            self.assertFalse(out["consumes_address"], f"{out['kind']} 不该烧地址")
+
+    def test_only_existing_account_is_fatal(self):
+        """唯一该判死并消耗地址的：这个邮箱已经有账号了。"""
+        from platforms.grok.register_browser import classify_send_code_page
+
+        out = classify_send_code_page(
+            "An account with this email already exists. Sign in instead."
+        )
+        self.assertEqual(out["kind"], "already_registered")
+        self.assertTrue(out["consumes_address"])
+        self.assertFalse(out["retryable"])
 
 
 class SendCodeRejectionBookkeepingTests(unittest.TestCase):

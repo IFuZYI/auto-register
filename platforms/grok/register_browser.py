@@ -9,9 +9,37 @@
 | 发码 | 必须走真实页面（协议 gRPC/REST 都「假接受」：grpc=0 / ok:true 但零投递） |
 | 域名 | x.ai 接受主流域（@icloud.com 实测通过）；拒绝小域名（YYDS 8/8 被拒） |
 | 验证码 | 页面会自动格式化（`955-995` → `955995`），用键盘逐字输入才稳 |
-| 提交按钮 | 是 `type=submit` 且**无文本**，按 Enter 最可靠（按文本匹配 "Sign up" 会落空） |
-| 建号表单 | 验证码通过后出现 givenName / familyName / password → 提交即得 SSO |
 | OAuth | 协议 device flow 的 approve 被 CF 403，**必须走浏览器兜底** |
+
+## 2026-11-01：x.ai 换新版前端（Next.js / SpaceXSI 品牌），旧流程失效
+真机 + 前端 bundle 反查（`accounts.x.ai/_next/static/**`）确认的**新四步**：
+
+1. 入口 `https://accounts.x.ai/sign-up?redirect=grok-com`：只有 6 个按钮
+   （X / email / Apple / Google / GitHub / Sign in），**没有邮箱输入框**。
+   点文案精确等于 `Sign up with email` 的按钮才进下一步（按 `signup` 子串匹配会
+   点到 `Sign up with GitHub`，跳到 github.com 的 OAuth 页）。
+2. 邮箱页：`input#email` → 提交 → `POST /api/auth/send-verification-code`
+   `{email, castleRequestToken}`（Castle 令牌由页面自动生成）。
+3. 验证码页：`input[name=code]`（`maxlength=6`、**不含连字符**、满 6 位自动提交）
+   → `POST /api/auth/sign-up/verify-email {email, code}`。
+4. 资料页：`input#givenName` / `input#familyName` / `input#password` + **Turnstile**
+   → `POST /api/auth/sign-up/create-account`（带 `turnstileToken`）→ SSO cookie。
+
+**发码被拒有两种，处置完全不同（A/B 实测）**：
+
+| 响应 | 归属 | 处置 |
+|---|---|---|
+| `400 {"code":"email:send-validation-code-rate-limited"}` | 跟**邮箱**走（约 4–6 次/地址，含失败） | 可重试，地址不消耗 |
+| `400 {"code":"account:email-signup-unavailable"}` | 跟**出口 IP** 声誉走（换住宅出口同一地址立刻成功） | 可重试，地址不消耗 |
+| 页面 `Something went wrong…`（客户端没发出请求） | 环境问题 | 可重试，地址不消耗 |
+| 页面「这个邮箱已有账号」 | 该地址确实用掉了 | **消耗地址，不可重试** |
+
+旧实现把前三种都当「地址已消耗」→ 每次失败都烧一个别名，且被判死不再重试
+（审计 R-22）。新版分类逻辑在 `signup_pages.py`，这里是兼容转发。
+
+资料页的 Turnstile 令牌由**本页 widget** 经 `window.turnstile.render` 的
+callback 交给 React state，**写 DOM 隐藏域无效**；sitekey 见
+`signup_pages.TURNSTILE_SITEKEY`，铸币兜底走 `turnstile_mint.py`。
 
 ## 与 plugin.py 的关系
 `plugin.py` 是任务框架调用的入口（邮箱由号池注入）。本模块把上面这套
@@ -26,19 +54,27 @@ logger = logging.getLogger(__name__)
 
 import re
 import time
+import os
+import random
 from typing import Any, Callable, Optional
 
-from core.proxy_utils import build_playwright_proxy_config
+from core.proxy_utils import build_playwright_proxy_config, build_requests_proxy_config
 from core.task_runtime import TaskInterruption
 
 # SIGNUP_URL / CODE_RE 复用 constants 里的定义：各自已有单一来源，
 # 在这里再写一份意味着改一处要同步 N 处（评审发现）。
+from . import signup_pages
 from .constants import CODE_RE_ANY as CODE_RE
-from .constants import SIGNUP_URL
+from .constants import FAMILY_NAMES, GIVEN_NAMES, SIGNUP_URL
 from .profile import generate_password
 
 #: iCloud 租约的续约间隔（秒）—— 与渠道层同一口径（modules/mail/icloud_*.py）。
 LEASE_RENEW_INTERVAL_SECONDS = 60
+
+#: 提交发码后等「确认已发信」的时长（秒）。真实链路里 API 响应是几百毫秒级、
+#: 验证码页 1–3 秒内出现；超时还没有任何确认就是「客户端没发出请求」那一类
+#: （实测出现的 "Something went wrong. Refresh the page and try again."）。
+SEND_CODE_SETTLE_TIMEOUT = 8.0
 
 LogFn = Optional[Callable[[str], None]]
 
@@ -64,25 +100,23 @@ _ALREADY_REGISTERED_PATTERNS = (
 #: 发码页面的判定结果。线上实测（2026-10-23，抓包确认）：
 #: 发码请求确实发出（`POST /api/auth/send-verification-code`），x.ai 会用
 #: 三种不同文案拒绝 / 接受，含义完全不同，必须分开处置。
+#:
+#: 2026-11-01 修正：分类逻辑搬到 `signup_pages`（新版前端的可机器读错误码 +
+#: 文案表），这里保留常量与函数名做兼容。**旧版「三类拒绝都算地址已消耗」的
+#: 结论是错的** —— 实测同一地址换住宅代理即可成功发码（`email-signup-unavailable`
+#: 跟出口 IP 声誉走），限流也只是一段时间。烧地址会导致号池被无谓消耗。
 SEND_CODE_SENT = "sent"
 SEND_CODE_RATE_LIMITED = "rate_limited"
 SEND_CODE_EMAIL_UNAVAILABLE = "email_unavailable"
 SEND_CODE_NO_CONFIRMATION = "no_confirmation"
+SEND_CODE_ALREADY_REGISTERED = "already_registered"
+SEND_CODE_TRANSIENT = "transient_error"
+SEND_CODE_CF_CHALLENGE = "cloudflare_challenge"
+SEND_CODE_DOMAIN_REJECTED = "email_domain_rejected"
 
-#: 限流文案（最明确的一类）。
-_RATE_LIMIT_MARKERS = (
-    "too many code requests",
-    "too many requests",
-    "please wait a few minutes",
-)
-#: 「邮箱注册当前不可用」—— 服务端对邮箱侧的限制。
-_EMAIL_UNAVAILABLE_MARKERS = (
-    "email sign-up isn't available",
-    "email sign-up isn’t available",
-    "email signup isn't available",
-    "sign up another way",
-)
-#: 「已经发出了」的确认文案。
+#: 限流 / 不可用 / 已发出的文案表保留在 `signup_pages`（唯一事实源）
+_RATE_LIMIT_MARKERS = signup_pages._RATE_LIMIT_MARKERS
+_EMAIL_UNAVAILABLE_MARKERS = signup_pages._EMAIL_UNAVAILABLE_MARKERS
 _SENT_MARKERS = (
     "we've emailed",
     "we’ve emailed",
@@ -92,56 +126,27 @@ _SENT_MARKERS = (
 
 
 def classify_send_code_page(text: str) -> dict:
-    """判定发码提交后的页面处于哪种状态。
+    """判定发码提交后的页面处于哪种状态（转发到 `signup_pages`）。
 
     返回 `{"kind", "retryable", "consumes_address", "retry_after_hint", "detail"}`。
 
-    为什么必须分类而不是笼统报「未确认发信」：三种拒绝的原因不同、
-    该做的事也不同 —— 但它们有一个共同点：**这个地址在这一轮已经被用掉了**。
-    记成 `failed` 会被 iCloud 池 `release` 回 `available`，下次又被领出来
-    撞同一堵墙（线上实测同一个地址被反复领取十余次）。
-
-    `retryable` 恒为 False 对三类拒绝：重开一轮是全新的代理/会话，但
-    「这个邮箱的发码配额」与「此刻 x.ai 的邮箱注册入口」都不会因此改变。
+    历史上这里把「任何没认出来的文本」都当作地址已消耗（`consumes_address=True`），
+    后果是 CF 挑战页 / 网络半截 / 未渲染完都在白烧别名（审计 R-22）。
+    2026-11-01 起：**只有「该邮箱已有账号」与「域名被拒」才消耗地址**。
     """
     blob = str(text or "")
     low = blob.lower()
-
-    def _hit(markers) -> bool:
-        return any(m in low for m in markers)
-
-    if _hit(_SENT_MARKERS):
+    if any(m in low for m in _SENT_MARKERS):
         return {
             "kind": SEND_CODE_SENT,
-            "retryable": True,
+            "retryable": False,
             "consumes_address": False,
             "retry_after_hint": "",
+            "already_registered": False,
             "detail": "",
         }
-    if _hit(_RATE_LIMIT_MARKERS):
-        return {
-            "kind": SEND_CODE_RATE_LIMITED,
-            "retryable": False,
-            "consumes_address": True,
-            "retry_after_hint": "minutes",
-            "detail": "x.ai 取码限流（这个邮箱本轮已用掉，换地址或等冷却）",
-        }
-    if _hit(_EMAIL_UNAVAILABLE_MARKERS):
-        return {
-            "kind": SEND_CODE_EMAIL_UNAVAILABLE,
-            "retryable": False,
-            "consumes_address": True,
-            "retry_after_hint": "",
-            "detail": "x.ai 当前不提供邮箱注册（服务端策略，换地址也无用）",
-        }
-    # 停在表单、既没确认发信也没报错 —— 同样是被拒，只是没给理由。
-    return {
-        "kind": SEND_CODE_NO_CONFIRMATION,
-        "retryable": False,
-        "consumes_address": True,
-        "retry_after_hint": "",
-        "detail": f"x.ai 未确认发信（页面未给出理由）: {blob[:120]}",
-    }
+    return signup_pages.classify_send_code_page(blob)
+
 
 
 def _looks_already_registered(text: str) -> bool:
@@ -150,6 +155,31 @@ def _looks_already_registered(text: str) -> bool:
     if not blob:
         return False
     return any(p.search(blob) for p in _ALREADY_REGISTERED_PATTERNS)
+
+
+def _resolve_exit_ip(proxy: str, *, timeout: float = 12.0) -> str:
+    """尽力解析代理的出口 IP，用于让 camoufox 对齐时区/语言。
+
+    为什么不等 camoufox 自己来：它的 `geoip=True` 会用 6 个公有 IP 探测服务
+    逐个反查、每个 5s 超时，住宅代理上实测直接抛
+    `camoufox.exceptions.InvalidIP: Failed to get IP address: … read timeout=5`，
+    浏览器起不来（2026-11-01）。这里自己做、自己做超时控制，拿不到就返回空串，
+    调用方退化成 `geoip=False`（实测能正常起浏览器，只是会打一条 LeakWarning）。
+    """
+    cfg = build_requests_proxy_config(proxy)
+    if not cfg:
+        return ""
+    import requests
+
+    for url in ("https://api.ipify.org", "https://ifconfig.me/ip"):
+        try:
+            resp = requests.get(url, proxies=cfg, timeout=timeout)
+            ip = (resp.text or "").strip()
+            if resp.ok and ip and len(ip) <= 45 and " " not in ip and "<" not in ip:
+                return ip
+        except Exception as exc:
+            logger.debug("出口 IP 解析失败 %s: %s", url, exc)
+    return ""
 
 
 def _log(fn: LogFn, msg: str) -> None:
@@ -346,6 +376,360 @@ def _submit_signup_form(page: Any) -> None:
 _gen_password = generate_password
 
 
+#: 发码后「页面已进入验证码页」的确认文案
+_CODE_PAGE_MARKERS = (
+    "verify your email",
+    "one time security code",
+    "please enter it below",
+    "didn't receive a code",
+)
+
+
+def _looks_like_code_page(text: str) -> bool:
+    low = str(text or "").lower().replace("\u2019", "'")
+    return any(m in low for m in _CODE_PAGE_MARKERS)
+
+
+def _stage_verdict_fields(verdict: dict, email: str, *, log: LogFn = None) -> dict:
+    """把 `signup_pages` 的判定翻成 `register_grok_via_browser` 的结果字段。"""
+    kind = str((verdict or {}).get("kind") or "")
+    out = {
+        "ok": False,
+        "kind": kind,
+        "error": signup_pages.send_code_error_text(verdict, email),
+        "retryable": bool((verdict or {}).get("retryable")),
+        "consumes_address": bool((verdict or {}).get("consumes_address")),
+        "already_registered": bool((verdict or {}).get("already_registered")),
+        "email_unavailable": kind == signup_pages.SEND_RESULT_EMAIL_UNAVAILABLE,
+        "rate_limited": kind == signup_pages.SEND_RESULT_RATE_LIMITED,
+        "cloudflare_challenge": kind == signup_pages.SEND_RESULT_CF_CHALLENGE,
+    }
+    _log(log, f"[Grok] 发码结局 {kind}: {out['error'][:120]}")
+    return out
+
+
+def _send_code_stage(
+    page: Any,
+    email: str,
+    *,
+    log: LogFn = None,
+    timeout: float | None = None,
+    _test_responses: Optional[list] = None,
+) -> dict:
+    """填邮箱 → 提交 → 判定发码结局。
+
+    判定优先级：**API 响应的机器可读错误码 > 页面文案**。新前端的发码接口是
+    `POST /api/auth/send-verification-code`，响应体带 `code`
+    （`account:email-signup-unavailable` / `email:send-validation-code-rate-limited`），
+    比文案可靠得多（文案是排版撇号、还会变）。抓不到响应时才看页面。
+    """
+    settle = SEND_CODE_SETTLE_TIMEOUT if timeout is None else float(timeout)
+    captured: list[dict[str, Any]] = []
+    seen: list[str] = []
+
+    def _on_response(resp: Any) -> None:
+        try:
+            url = str(getattr(resp, "url", "") or "")
+        except Exception:
+            url = ""
+        if "send-verification-code" not in url:
+            # 不是发码接口也记一笔：判定成 `no_confirmation` 时最需要知道的
+            # 就是「请求到底发出去没有、发去了哪个地址」。上游改过一次接口
+            # 路径，监听器按子串匹配，改名后一声不响地什么都抓不到。
+            if "/auth/" in url and len(seen) < 20:
+                seen.append(f"{getattr(resp, 'status', '?')} {url}")
+            return
+        body = ""
+        try:
+            body = resp.text()
+        except Exception:
+            body = ""
+        captured.append({"status": getattr(resp, "status", None), "body": body})
+
+    try:
+        page.on("response", _on_response)
+    except Exception:
+        logger.debug("无法监听网络响应，退化到只看页面文案", exc_info=True)
+
+    # 加载后页面如果已经是失败态（限流 / 邮箱注册不可用 / 已有账号 / CF 挑战）
+    # 就没必要再填表发一次码 —— 每发一次都在烧地址的发码配额（4–6 次/地址）。
+    pre = signup_pages.detect_blocking_state(signup_pages.page_text(page))
+    if pre is not None:
+        return _stage_verdict_fields(pre, email, log=log)
+
+    if not signup_pages.set_field_value(page, signup_pages.EMAIL_INPUT, email):
+        filled = False
+        try:
+            page.locator(signup_pages.EMAIL_INPUT).first.fill(email, timeout=8000)
+            filled = True
+        except Exception:
+            logger.debug("直接 fill 邮箱失败", exc_info=True)
+        if not filled:
+            return {
+                "ok": False, "kind": "", "retryable": True, "consumes_address": False,
+                "already_registered": False, "email_unavailable": False, "rate_limited": False,
+                "cloudflare_challenge": False,
+                "error": "找不到邮箱输入框（新版入口页未出现 Sign up with email）",
+            }
+    page.wait_for_timeout(300)
+    _log(log, f"[Grok] 已填邮箱 {email}，提交发码…")
+    state: dict[str, Any] = {}
+
+    # 点提交要**确认它真的发出去了**。邮箱视图刚出现时 React 可能还没挂上
+    # 事件处理，或者按钮因为校验没过而 disabled —— 这时 `el.click()` 什么都不会
+    # 发生，但 `click_button` 照样返回按钮文案。线上实测（2026-11-01）日志写着
+    # 「发码已提交（Sign up）」，实际一个请求都没发出去，9 秒后结论是
+    # `no_confirmation: 未确认发信（页面未给出理由）` —— 把「点了个空」说成了
+    # 「上游没确认」，排查方向全错。
+    #
+    # 所以：等按钮可用再点，点完看页面有没有动，没动就再点（最多 3 次）。
+    label, state = signup_pages.submit_email_code(page)
+    attempts = 1
+    while attempts < 3:
+        if label and not state.get("disabled"):
+            page.wait_for_timeout(1200)
+            # 页面动了（邮箱框没了 / 出现了验证码框）就说明点上了。
+            if not signup_pages.email_input_present(page) or captured:
+                break
+        label, state = signup_pages.submit_email_code(page)
+        attempts += 1
+    if not label:
+        try:
+            page.keyboard.press("Enter")
+        except Exception:
+            logger.debug("提交按钮按 Enter 也失败", exc_info=True)
+    suffix = ""
+    if state and not state.get("found"):
+        suffix = "｜⚠ 没找到提交按钮，改按 Enter"
+    elif state and state.get("disabled"):
+        suffix = "｜⚠ 按钮一直是禁用态（邮箱校验没过？）"
+    if attempts > 1:
+        suffix += f"｜重试 {attempts} 次"
+    _log(log, f"[Grok] 发码已提交（{label or 'Enter'}）{suffix}")
+    # 记下发码时刻（墙钟）：读码只看比它晚到的信，否则同地址重试会读到
+    # 上一轮留在邮箱里的旧码（线上实测 2026-11-01，别名 535）。
+    sent_at = time.time()
+
+    deadline = time.monotonic() + max(0.0, settle)
+    poll = 0.5
+    while True:
+        for resp in _test_responses or ():
+            _on_response(resp)
+        if captured:
+            verdict = signup_pages.classify_send_code_result(
+                captured[-1].get("status"), captured[-1].get("body"),
+                signup_pages.page_text(page),
+            )
+            if verdict["kind"] == signup_pages.SEND_RESULT_SENT:
+                return {
+                    "ok": True, "kind": verdict["kind"], "error": "", "retryable": False,
+                    "consumes_address": False, "already_registered": False,
+                    "email_unavailable": False, "rate_limited": False,
+                    "cloudflare_challenge": False, "sent_at": sent_at,
+                }
+            return _stage_verdict_fields(verdict, email, log=log)
+        text = signup_pages.page_text(page)
+        if _looks_like_code_page(text):
+            _log(log, "[Grok] 页面已进入验证码页")
+            return {
+                "ok": True, "kind": SEND_CODE_SENT, "error": "", "retryable": False,
+                "consumes_address": False, "already_registered": False,
+                "email_unavailable": False, "rate_limited": False, "cloudflare_challenge": False,
+                "sent_at": sent_at,
+            }
+        blocking = signup_pages.detect_blocking_state(text)
+        if blocking is not None:
+            return _stage_verdict_fields(blocking, email, log=log)
+        if _looks_already_registered(text):
+            return _stage_verdict_fields(
+                signup_pages._verdict_for_kind(signup_pages.SEND_RESULT_ALREADY_REGISTERED),
+                email, log=log,
+            )
+        if time.monotonic() >= deadline:
+            break
+        page.wait_for_timeout(int(poll * 1000))
+    verdict = signup_pages.classify_send_code_page(text)
+    if verdict["kind"] == signup_pages.SEND_RESULT_NO_CONFIRMATION:
+        verdict = dict(verdict)
+        # detail 会被 `send_code_error_text` 套进「未确认发信（…）」里，
+        # 所以这里不能再说一次「未确认发信」——线上实测套了两层（2026-11-01）。
+        #
+        # 还要把「请求有没有发出去」写清楚：没发出去（按钮禁用 / 没挂上事件）
+        # 和发出去了但上游不认，是两件完全不同的事，提示里必须能分开。
+        why = f"页面未给出理由: {str(text)[:120]}"
+        if not captured and not seen:
+            why += "｜没抓到任何 /auth/ 请求 —— 提交大概率没生效"
+        elif not captured:
+            why += f"｜只见到 {len(seen)} 个其它 auth 请求（首个 {seen[0][:90]}）—— 发码接口可能改名了"
+        if state and state.get("disabled"):
+            why += "｜提交按钮是禁用态"
+        verdict["detail"] = why
+    return _stage_verdict_fields(verdict, email, log=log)
+
+
+#: 等入口页渲染出注册按钮的秒数（超时就刷新一次再等一轮）。
+#: 15 秒够用了：实测正常出口上 `domcontentloaded` + 3 秒就渲染完；
+#: 超过这个时间还不渲染基本就是出口 IP 被 CF 半拦，刷新也救不回来，早点换出口。
+ENTRY_WAIT_TIMEOUT = 15.0
+
+
+def _open_entry_page(
+    page: Any,
+    *,
+    log: LogFn = None,
+    timeout: float | None = None,
+    diag: Optional[dict] = None,
+) -> bool:
+    """等入口页就绪；没就绪刷新一次再等。
+
+    线上实测（2026-11-01）：`goto` 之后入口页偶尔停在 Cloudflare 挑战/白屏，
+    这时 `open_email_form` 会盲点 6 次（约 72 秒）全部「未命中」才放弃，
+    而那一次出口其实是好的。刷新一次几乎总能救回来，且失败也别把整轮时间耗光
+    —— 只刷一次。
+    """
+    wait = ENTRY_WAIT_TIMEOUT if timeout is None else timeout
+    if signup_pages.wait_for_entry(page, timeout=wait, log=log):
+        return True
+    _log(log, "[Grok] 入口页未渲染出注册按钮，刷新一次再等…")
+    try:
+        page.reload()
+    except Exception as exc:
+        logger.debug("刷新入口页失败: %s", exc)
+    if signup_pages.wait_for_entry(page, timeout=wait, log=log):
+        return True
+    if diag is not None:
+        # 把页面内容留成证据：批量跑时连着几个出口都报同一句话，没有页面文本
+        # 就只能猜是 CF 挑战、前端没加载、还是文案变了（2026-11-01 实测）。
+        text = signup_pages.page_text(page)
+        verdict = signup_pages.detect_blocking_state(text)
+        diag["cloudflare"] = bool(
+            verdict and verdict.get("kind") == signup_pages.SEND_RESULT_CF_CHALLENGE
+        )
+        diag["page_text"] = str(text or "")[:300]
+    return False
+
+
+def _profile_stage(
+    page: Any,
+    password: str,
+    *,
+    given_name: str = "",
+    family_name: str = "",
+    proxy: str = "",
+    log: LogFn = None,
+    captcha: Any = None,
+) -> dict:
+    """资料页：填三件套 → 拿 Turnstile 令牌 → 提交。
+
+    新版资料页多了一个 Cloudflare Turnstile widget（sitekey
+    `0x4AAAAAAAhr9JGVDZbrZOo0`）。它的令牌只走 `render({callback})` 进 React
+    state，**不落 DOM**：令牌为空时前端直接拦下提交、页面显示
+    "Complete the verification challenge, then try again."（埋点
+    `error_type=turnstile_failed`）。所以：先等 widget 自己出票，超时就用
+    `turnstile_mint` 铸一个、再经劫持到的 callback 灌进应用状态。
+    """
+    out: dict[str, Any] = {
+        "ok": False,
+        "error": "",
+        "turnstile_blocked": False,
+        "turnstile_token": "",
+        "retryable": True,
+        "consumes_address": False,
+        "missing_fields": [],
+    }
+    missing = signup_pages.fill_profile(
+        page,
+        given_name=given_name or random.choice(GIVEN_NAMES),
+        family_name=family_name or random.choice(FAMILY_NAMES),
+        password=password,
+        log=log,
+    )
+    out["missing_fields"] = missing
+    if missing:
+        # 读回为空 = 没真填上。盲提交只会停在原页，表象是「未拿到 SSO」——
+        # 排查方向全错（实测 2026-10-06）。直接报字段名。
+        out["error"] = f"建号表单填充失败（读回为空）: {', '.join(missing)}"
+        return out
+
+    token = signup_pages.ensure_turnstile_token(
+        page, page_url=signup_pages.PROFILE_PAGE_URL, proxy=proxy, log=log, captcha=captcha,
+    )
+    out["turnstile_token"] = token
+    if not token:
+        _log(log, "[Grok] 未拿到 Turnstile 令牌，仍尝试提交（大概率会被拦）")
+
+    label = signup_pages.click_profile_submit(page) or signup_pages.click_profile_submit(page)
+    _log(log, f"[Grok] 提交建号资料（{label or '未命中按钮'}）")
+    page.wait_for_timeout(3000)
+
+    text = signup_pages.page_text(page)
+    if signup_pages.looks_turnstile_gated(text) or (not token and signup_pages.has_profile_form(text)):
+        out["turnstile_blocked"] = True
+        out["error"] = (
+            "资料页未通过人机验证挑战（Turnstile）"
+            + ("：没有拿到令牌" if not token else "")
+            + "，换出口 IP 或稍后重试即可，地址仍然可用"
+        )
+        return out
+    out["ok"] = True
+    return out
+
+
+def configured_captcha(config: Any = None, *, log: LogFn = None) -> Any:
+    """按注册配置建验证码解决器；没配或不可用就返回 None。
+
+    审计 R-21 的另一半：`RegisterConfig.captcha_solver` 长期没人读 —— 界面上
+    「验证码解决器」配了 YesCaptcha，浏览器流程却只会走页面 widget / 屏外 Chrome /
+    本地 solver（线上实测 2026-11-01：资料页卡住时配好的解决器一次都没被试）。
+
+    刻意不接的取值：
+      - `yescaptcha` 但没 key：接上只会让每次注册先白等一次外部 API，更亏；
+      - `manual`：浏览器流程里没人能手工点；
+      - 未知值（含 `2captcha`，`core/base_captcha.py` 里没有实现）：不能瞎猜。
+    """
+    if config is None:
+        return None
+    solver = str(getattr(config, "captcha_solver", "") or "").strip().lower()
+    extra = dict(getattr(config, "extra", None) or {})
+    try:
+        if solver == "yescaptcha":
+            key = str(extra.get("yescaptcha_key") or os.getenv("YESCAPTCHA_KEY") or "").strip()
+            if not key:
+                _log(log, "[Grok] 配置了 yescaptcha 但没填 key，跳过（避免每次注册白等外部 API）")
+                return None
+            from core.base_captcha import YesCaptcha
+            return YesCaptcha(key)
+        if solver == "local_solver":
+            from core.base_captcha import LocalSolverCaptcha
+            url = str(extra.get("solver_url") or os.getenv("LOCAL_SOLVER_URL") or "").strip() or None
+            return LocalSolverCaptcha(url)
+    except Exception as exc:  # noqa: BLE001 - 解决器起不来不该挡住注册
+        _log(log, f"[Grok] 验证码解决器初始化失败（忽略）: {type(exc).__name__}: {exc}")
+        return None
+    return None
+
+
+#: 打开注册页的超时（毫秒）。线上实测（2026-11-01）：出口挂掉时 Playwright 要等
+#: 满 70 秒才抛，而批量跑每个地址要试 6 个出口 —— 70 秒 × 6 全花在等超时上。
+#: 正常出口 `domcontentloaded` 只要 1-7 秒（JP/ES/IT/GB 探头实测），所以 45 秒
+#: 还没打开就是出口不通，早点交回上层换出口。
+NAV_TIMEOUT_MS = 45_000
+
+
+def _nav_error_text(exc: BaseException) -> str:
+    """导航失败的短描述：不搬运 Playwright 那一整段 `Call log`，也不带毫秒数。
+
+    线上实测（批量第 2 轮第 5 个号）裸抛的是
+    `TimeoutError: Page.goto: Timeout 70000ms exceeded.\nCall log:\n  - navigating to …`，
+    原样写进结果等于把日志刷满，上层还看不出这是出口问题。
+    """
+    name = type(exc).__name__
+    if isinstance(exc, TimeoutError) or name == "TimeoutError":
+        return "打开超时"
+    head = " ".join(str(exc).strip().splitlines()[:1]).strip()[:120] or name
+    return f"{name}: {head}"
+
+
 def register_grok_via_browser(
     email: str,
     *,
@@ -358,8 +742,9 @@ def register_grok_via_browser(
     mailbox_account: Any = None,
     task_control: Any = None,
     log: LogFn = None,
+    captcha: Any = None,
 ) -> dict[str, Any]:
-    """用浏览器走完 x.ai 注册，返回 `{ok, email, password, sso, error}`。
+    """用浏览器走完 x.ai 注册（新版 Next.js 四步流程），返回 `{ok, email, password, sso, error}`。
 
     验证码来源二选一：
       - `alias_id`：iCloud 号池（本项目主链路），走 `icloud_service` 读信；
@@ -370,6 +755,10 @@ def register_grok_via_browser(
     会在 `error` 里说明原因（而不是静默超时）。
 
     `task_control` 用于让等码阶段可被「停止/跳过」打断（默认要等 240 秒）。
+
+    失败时结果里会带 `retryable` / `consumes_address` / `already_registered`：只有
+    「该邮箱已有账号」这类才允许把号池地址标成已消耗（新版线上实测结论见
+    `platforms/grok/signup_pages` 模块 docstring）。
     """
     result: dict[str, Any] = {
         "ok": False, "email": email, "password": password or _gen_password(),
@@ -382,116 +771,94 @@ def register_grok_via_browser(
         result["error"] = f"camoufox 不可用: {exc}"
         return result
 
-    kwargs: dict[str, Any] = {"headless": headless}
+    # 语言钉成英文：camoufox 会按 `geoip` 对齐 `navigator.language` /
+    # `Accept-Language`（`.venv/.../camoufox/fingerprints.py:1775`），于是 JP
+    # 出口自动出日语页面、ES/FR/IT 出口出西/法/意语页面（2026-11-01 实测：
+    # JP 出口 183.77.203.114 返回 `メールで登録`，被我们的英文文案表判成
+    # 「入口页没渲染」）。显式传 `locale` 覆盖，让后续文案表/选择器不依赖出口国家。
+    kwargs: dict[str, Any] = {"headless": headless, "locale": ["en-US", "en"]}
     if proxy:
         cfg = build_playwright_proxy_config(proxy) or {}
         if cfg:
             kwargs["proxy"] = cfg
-            kwargs["geoip"] = True
+            # 时区/语言要对齐出口 IP（不然指纹自相矛盾），但**不能让 camoufox
+            # 自己去查**：它的 `geoip=True` 会用 6 个公有 IP 探测服务逐个反查、
+            # 每个 5s 超时，住宅代理上直接抛
+            # `camoufox.exceptions.InvalidIP: Failed to get IP address: … read
+            # timeout=5`，浏览器起不来（2026-11-01 实测）。所以自己解析一次，
+            # 拿得到就把 IP 传进去（camoufox 支持 `geoip="1.2.3.4"`），
+            # 拿不到就退化成 False 保住启动可靠性。
+            kwargs["geoip"] = _resolve_exit_ip(proxy) or False
 
     try:
         with Camoufox(**kwargs) as browser:
             page = browser.new_page()
             _log(log, "[Grok] 打开注册页…")
-            page.goto(SIGNUP_URL, wait_until="domcontentloaded", timeout=70000)
-            page.wait_for_timeout(5000)
-            _log(log, "[Grok] 页面已加载")
-
-            # 勾条款（有就勾）
             try:
-                cb = page.locator("input[type=checkbox]").first
-                if cb.count() and not cb.is_checked():
-                    cb.check(timeout=4000)
-                    page.wait_for_timeout(700)
-            except Exception:
-                logger.debug("忽略异常（保留原行为）", exc_info=True)
+                page.goto(SIGNUP_URL, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
+            except Exception as exc:
+                # 导航失败（出口不通 / 代理连不上 / 被 CF 断连）必须归类，不能裸抛：
+                # 线上实测（2026-11-01 批量第 2 轮）结果里只留下 `kind=None` 和一坨
+                # Playwright 调用日志，上层判不出「该换出口」还是「流程坏了」。
+                result["error"] = (
+                    f"打开注册页失败（{_nav_error_text(exc)}）—— 出口不通或太慢，"
+                    "换一个出口 IP 重试，地址仍然可用"
+                )
+                result["retryable"] = True
+                result["consumes_address"] = False
+                result["nav_failed"] = True
+                return result
+            page.wait_for_timeout(3000)
+            _dismiss_cookie_banner(page)
 
-            # 进邮箱注册视图。
-            #
-            # **等表单就绪，不等固定时长**（出处：reference/grok/grok-hub-clean
-            # 的 `register.py`，那是参考项目里最新且跑通的实现）。
-            # 原实现是「点一次 + 固定等 3 秒 + 找不到输入框就判死」——实测
-            # 会间歇失败：x.ai 有时先渲染 cookie 弹窗、有时过 CF 后才出表单，
-            # 3 秒不够，于是「找不到邮箱输入框」。
-            # 参考实现改成最多 3 轮：每轮先关弹窗 → 检查输入框 → 没出就再点
-            # 一次「Sign up with email」→ 仍没出就 reload 页面重来。
-            email_input = "input#email, input[type=email], input[name=email]"
-            for attempt in range(1, 4):
-                page.wait_for_timeout(3000)
-                # 关 cookie 弹窗：它盖住按钮时点击会落空（文案兜底清单见
-                # `_dismiss_cookie_banner` —— 真机是 OneTrust 'Allow All'）
-                _dismiss_cookie_banner(page)
-                if page.locator(email_input).count():
-                    break
-                try:
-                    page.get_by_role("button", name="Sign up with email").click(timeout=6000)
-                except Exception:
-                    logger.debug("忽略异常（保留原行为）", exc_info=True)
-                page.wait_for_timeout(2500)
-                if page.locator(email_input).count():
-                    break
-                _log(log, f"[Grok] 邮箱表单未就绪，重载页面（第 {attempt} 轮）")
-                try:
-                    page.reload(wait_until="domcontentloaded", timeout=70000)
-                except Exception:
-                    logger.debug("忽略异常（保留原行为）", exc_info=True)
-            page.wait_for_timeout(800)
+            # 先等入口页真的渲染出来（`Sign up with email` 等文案出现）。
+            # 等不到就直接收工：页面还是壳的时候按钮根本不存在，循环点 6 次只会
+            # 「未命中」刷满日志、白烧一分钟（线上实测 2026-11-01），而换一个出口
+            # 立刻就正常 —— 所以这里必须把它报成「出口问题」，让上层换出口重试。
+            entry_diag: dict = {}
+            if not _open_entry_page(page, log=log, diag=entry_diag):
+                page_head = (entry_diag.get("page_text") or "").strip().replace("\n", " ")[:160]
+                if entry_diag.get("cloudflare"):
+                    why = "入口页被 Cloudflare 挑战挡住（Just a moment / cf-chl-widget）"
+                else:
+                    why = "入口页只返回了外壳，注册按钮没渲染出来"
+                result["error"] = (
+                    f"{why} —— 换一个出口 IP 重试，地址仍然可用"
+                    + (f"；页面开头：{page_head}" if page_head else "")
+                )
+                result["entry_diag"] = entry_diag
+                result["retryable"] = True
+                result["consumes_address"] = False
+                result["entry_not_rendered"] = True
+                return result
+
+            # 进邮箱注册视图：新版入口页有 6 个按钮（X/email/Apple/Google/GitHub/Sign in），
+            # 必须按文案精确命中 “Sign up with email”，点一次还可能被 cookie 弹窗吃掉，
+            # 所以要循环等 `input#email` 真的出现。
+            if not signup_pages.open_email_form(page, log=log):
+                result["error"] = "找不到邮箱输入框（新版入口页未出现 Sign up with email）"
+                result["retryable"] = True
+                return result
             _log(log, "[Grok] 已进入邮箱注册视图")
 
-            # 填邮箱
-            filled = False
-            for sel in ("input#email", "input[type=email]", "input[name=email]"):
-                try:
-                    page.locator(sel).first.fill(email, timeout=5000)
-                    filled = True
-                    break
-                except Exception:
-                    continue
-            if not filled:
-                result["error"] = "找不到邮箱输入框（已重试 3 轮）"
-                return result
-            page.wait_for_timeout(800)
-            _log(log, "[Grok] 已填入邮箱，提交发码…")
-
-            # 提交发码
-            try:
-                page.get_by_role("button", name="Sign up").last.click(timeout=5000)
-            except Exception:
-                page.keyboard.press("Enter")
-            page.wait_for_timeout(8000)
-            _log(log, "[Grok] 发码已提交")
-
-            txt = page.evaluate("() => document.body.innerText.slice(0,300)") or ""
-            low = txt.lower()
-            if "invalid" in low:
-                result["error"] = f"域名被 x.ai 拒收: {email.split('@')[-1]}"
-                return result
-            # 「该邮箱已有账号」也可能在**发码阶段**就出现（不等验证码环节）。
-            # 不在这里认出来的话，会走到下面的拒绝分支，把已消耗的别名记成
-            # failed → 放回 available → 反复重领（评审发现）。
-            if _looks_already_registered(txt):
-                result["already_registered"] = True
-                result["consumes_address"] = True
-                result["error"] = "该邮箱已有 x.ai 账号（别名已消耗）"
-                return result
-
-            # 发码被拒的统一判定（限流 / 邮箱注册不可用 / 静默无理由）。
-            # 三者**都**意味着「这个地址本轮已用掉，且重开一轮也是同样结局」——
-            # 线上实测同一个地址被反复领取十余次，全栽在这里。
-            verdict = classify_send_code_page(txt)
-            if verdict["kind"] != SEND_CODE_SENT:
-                result["consumes_address"] = True
-                result["retryable"] = verdict["retryable"]
-                result["error"] = verdict["detail"]
-                _log(log, f"[Grok] 发码被拒（{verdict['kind']}）: {verdict['detail'][:80]}")
+            stage = _send_code_stage(page, email, log=log)
+            # `kind` 一起带上：上层（任务日志、重试决策）需要知道究竟落的是
+            # 限流 / 出口被拒 / 已有账号 —— 只给错误文本的话又得再做一次字符串匹配。
+            # 但 **`ok` 不能从这里带上来**：它在这里的含义是「信发出去了」，
+            # 而顶层 `ok` 的含义是「拿到 SSO 了」。混用会导致没 SSO 也报成功
+            # （线上实测 2026-11-01：资料页被 Turnstile 挡住却返回 ok=True）。
+            result.update({k: v for k, v in stage.items() if k != "ok"})
+            if not stage["ok"]:
                 return result
             _log(log, "[Grok] 页面已发信，等验证码…")
 
-            # 读验证码
             code = _read_code(
                 alias_id, code_timeout, log,
                 mailbox=mailbox, mailbox_account=mailbox_account,
                 task_control=task_control,
+                # 只认这次发码之后到的信：邮箱里还躺着历史邮件和上一轮的旧码，
+                # 不设这条线就会读到别人的码（2026-11-01：读到营销信的 `for-ios`）。
+                after=stage.get("sent_at"),
             )
             if not code:
                 result["error"] = (
@@ -502,61 +869,32 @@ def register_grok_via_browser(
                 return result
             _log(log, f"[Grok] 验证码 {code}")
 
-            # 填码：键盘逐字输入（页面会自动格式化去掉连字符）
-            field = None
-            deadline = time.time() + 60
-            while time.time() < deadline and field is None:
-                for sel in ("input[name=code]", "input#code",
-                            "input[autocomplete=one-time-code]", "input[inputmode=numeric]"):
-                    try:
-                        loc = page.locator(sel).first
-                        if loc.count() and loc.is_visible():
-                            field = sel
-                            break
-                    except Exception:
-                        continue
-                if field is None:
-                    page.wait_for_timeout(2500)
-            if field is None:
+            if not signup_pages.wait_for_code_input(page, timeout=60):
                 result["error"] = "验证码输入框未出现"
                 return result
-            page.locator(field).first.click(timeout=5000)
-            page.wait_for_timeout(400)
-            for ch in code:
-                page.keyboard.type(ch, delay=120)
-            page.wait_for_timeout(1500)
-
-            # 提交：按钮是 type=submit 且无文本，按 Enter 最稳
-            page.keyboard.press("Enter")
-            page.wait_for_timeout(12000)
-
-            step = page.evaluate("() => document.body.innerText.slice(0,300)") or ""
-            # 「该邮箱已有账号」= 这个别名早先已经注册过（号池里领到了旧号）。
-            # 它是**已消耗**的，不是失败的 —— 上层要据此标 `used` 而不是
-            # `failed`，否则会被放回 available 再领一次，反复撞同一堵墙。
-            if _looks_already_registered(step):
-                result["already_registered"] = True
-                result["error"] = "该邮箱已有 x.ai 账号（别名已消耗）"
-                return result
-            inputs = page.evaluate(
-                """() => [...document.querySelectorAll('input')]
-                        .filter(i => i.offsetParent)
-                        .map(i => ({t: i.type, n: i.name}))"""
-            )
-            if not any(i.get("t") == "password" for i in inputs):
-                result["error"] = f"未进入建号表单: {step[:150]}"
+            # 新版是 `input[name=code]`、maxlength=6、满 6 位自动提交（码要去掉连字符）
+            if not signup_pages.enter_code(page, code, log=log):
+                txt = signup_pages.page_text(page)
+                if _looks_already_registered(txt):
+                    result["already_registered"] = True
+                    result["consumes_address"] = True
+                    result["error"] = "该邮箱已有 x.ai 账号（别名已消耗）"
+                    return result
+                result["error"] = f"验证码提交后未进入建号表单: {txt[:150]}"
                 return result
 
-            # 建号表单
+            if not signup_pages.wait_for_profile_form(page, timeout=60):
+                result["error"] = "验证码通过后未出现建号资料表单"
+                return result
+
             _log(log, "[Grok] 填建号资料…")
-            missing = _fill_signup_form(page, result["password"])
-            if missing:
-                # 读回为空 = 没真填上。盲提交只会停在原页，表象是「未拿到
-                # SSO」—— 排查方向全错（实测 2026-10-06）。直接报字段名。
-                result["error"] = f"建号表单填充失败（读回为空）: {', '.join(missing)}"
+            prof = _profile_stage(
+                page, result["password"], proxy=proxy, log=log, captcha=captcha,
+            )
+            for key in ("error", "retryable", "consumes_address", "turnstile_blocked"):
+                result[key] = prof[key]
+            if not prof["ok"]:
                 return result
-            page.wait_for_timeout(1500)
-            _submit_signup_form(page)
 
             # 提交后 x.ai 用 cookie-chain 跳链下发 sso（详见 `_wait_for_sso_cookie`）。
             # 必须轮询等它落地，不能只等固定时长 —— 否则跳链没跑完就返回，
@@ -568,12 +906,65 @@ def register_grok_via_browser(
                 result["sso"] = sso
                 _log(log, f"[Grok] 注册成功，SSO len={len(sso)}")
             else:
-                final = page.evaluate("() => document.body.innerText.slice(0,300)") or ""
+                final = signup_pages.page_text(page)
                 result["error"] = f"未拿到 SSO（等 35 秒）: {final[:150]}"
             return result
+    except TaskInterruption:
+        # 「停止/跳过」是控制流，不是失败：必须原样抛给上层（审计 R-07）。
+        # 之前这里被 catch-all 吞掉，用户点了停止却看到「注册失败」。
+        raise
     except Exception as exc:
         result["error"] = f"{type(exc).__name__}: {str(exc)[:150]}"
         return result
+
+
+#: 验证码**只认大写**：x.ai 的码固定是 `ABC-123` 形式。
+#: 不能带 `re.IGNORECASE` —— 线上实测（2026-11-01，别名 535）营销信正文里的
+#: `for-ios` 会被大小写不敏感的 `[A-Z0-9]{3}-[A-Z0-9]{3}` 当成验证码填进页面。
+_CODE_UPPER_RE = re.compile(r"\b([A-Z0-9]{3}-[A-Z0-9]{3})\b")
+
+#: 码信主题关键词（小写子串匹配）。x.ai 固定是 `Grok confirmation code: XXX-XXX`。
+_CODE_MAIL_SUBJECT_MARKERS = (
+    "confirmation code", "verification", "verify", "grok", "spacex", "xai",
+)
+
+#: 码信发件人特征。iCloud 隐藏邮箱会把 `@` 写成 `_at_`、`.` 写成 `_`，
+#: 所以 `noreply@x.ai` 到手是 `noreply_at_x_ai_xxxx@icloud.com`。
+_CODE_MAIL_SENDER_RE = re.compile(r"x[._-]?ai|grok", re.IGNORECASE)
+
+
+def _sender_text(msg: Any) -> str:
+    """发件人的可读文本（MailAddress 或裸字符串都能处理）。"""
+    sender = getattr(msg, "sender", "")
+    return str(getattr(sender, "email", None) or sender or "")[:48]
+
+
+def _is_code_mail(msg: Any) -> bool:
+    """这封信像不像 x.ai 的验证码信。
+
+    为什么必须判：邮箱里本来就躺着历史邮件（营销信、其它站点通知），
+    只看「有没有 `XXX-XXX` 形状的字符串」等于把别人的正文当验证码用。
+    """
+    subject = str(getattr(msg, "subject", "") or "").lower()
+    if any(marker in subject for marker in _CODE_MAIL_SUBJECT_MARKERS):
+        return True
+    sender = getattr(msg, "sender", "")
+    sender_text = getattr(sender, "email", None) or str(sender or "")
+    return bool(_CODE_MAIL_SENDER_RE.search(sender_text))
+
+
+def _mail_received_ts(msg: Any) -> Optional[float]:
+    """取邮件的接收时间戳；拿不到返回 None（调用方按「时间未知」放行）。"""
+    stamp = getattr(msg, "received_at", None) or getattr(msg, "sent_at", None)
+    if stamp is None:
+        return None
+    try:
+        if isinstance(stamp, (int, float)):
+            return float(stamp)
+        return stamp.timestamp()
+    except Exception as exc:  # noqa: BLE001 - 时间解析失败只影响新旧判断
+        logger.debug("邮件时间解析失败: %s", exc)
+        return None
 
 
 def _read_code(
@@ -584,8 +975,13 @@ def _read_code(
     mailbox: Any = None,
     mailbox_account: Any = None,
     task_control: Any = None,
+    after: Optional[float] = None,
 ) -> str:
     """等验证码：iCloud 走 `icloud_service`，其它渠道走渠道自己的 `wait_for_code`。
+
+    `after` 是「本次发码的时刻」（墙钟秒）。只看比它晚到的信：同一地址重试时
+    邮箱里还躺着上一轮的码和一堆历史邮件，不设这条线就会把旧码/别人的码填进去
+    （线上实测 2026-11-01：读到营销信里的 `for-ios`，页面停在 `Verify your email`）。
 
     为什么两条路：iCloud 本地渠道的 `fetch_alias_messages(alias_id)` 是按别名
     过滤的专用接口，读得比通用 `wait_for_code` 更准；而 Outlook/tempmail 等
@@ -658,14 +1054,34 @@ def _read_code(
                     # `subject` / `snippet` / `text_body`（没有 `text`/`preview`）。
                     # 原先读 `text`/`preview` 会全部落到空串 —— 实测只有主题
                     # 真的被搜到，x.ai 一旦把码移出主题就静默读不到。
-                    hit = CODE_RE.search(
-                        " ".join(
-                            str(getattr(m, attr, "") or "")
-                            for attr in ("subject", "snippet", "text_body", "html_body")
-                        )
+                    blob = " ".join(
+                        str(getattr(m, attr, "") or "")
+                        for attr in ("subject", "snippet", "text_body", "html_body")
                     )
-                    if hit:
-                        return hit.group(1)
+                    is_code_mail = _is_code_mail(m)
+                    hit = _CODE_UPPER_RE.search(blob) if is_code_mail else None
+                    if hit is None:
+                        # 这封信没给出可用码。若里面有「像码」的串，留痕：历史邮件
+                        # 里的营销文案（`for-ios`）和「x.ai 换了主题/发件人」都会
+                        # 在这里现形，否则改版时排查方向全错（2026-11-01 实测）。
+                        loose = None if is_code_mail else CODE_RE.search(blob)
+                        if loose is not None and log:
+                            log(
+                                f"[Grok] 跳过可疑验证码 {loose.group(1)}（来自 "
+                                f"{_sender_text(m)}「{str(getattr(m, 'subject', '') or '')[:40]}」）"
+                            )
+                        continue
+                    candidate = hit.group(1)
+                    if after is not None:
+                        ts = _mail_received_ts(m)
+                        if ts is not None and ts < after - 20.0:
+                            # 上一轮留下的旧码：等新码，别拿过期码去填
+                            if log:
+                                log(f"[Grok] 跳过上一轮的旧码 {candidate}（早于本次发码）")
+                            continue
+                    if log:
+                        log(f"[Grok] 验证码 {candidate}（来自 {_sender_text(m)}）")
+                    return candidate
                 time.sleep(10)
             return ""
 

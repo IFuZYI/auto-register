@@ -100,18 +100,29 @@ class AlreadyRegisteredPatternTests(unittest.TestCase):
 
         from platforms.grok import register_browser as rb
 
-        src = inspect.getsource(rb.register_grok_via_browser)
-        # 发码后那段（在 _read_code 调用之前）必须有 already_registered 判定
-        before_read = src.split("_read_code(")[0]
-        self.assertIn("_looks_already_registered", before_read,
+        # 2026-11-01：发码阶段的判定搬进了 `_send_code_stage`，主流程只负责
+        # 编排 —— 所以查这一阶段自己的源码，行为要求不变。
+        src = inspect.getsource(rb._send_code_stage)
+        self.assertIn("_looks_already_registered", src,
                       "发码阶段就该检查「已有账号」，否则会误记为失败")
 
 
+@patch("platforms.grok.register_browser.ENTRY_WAIT_TIMEOUT", 0)
 class RegisterFlowTests(unittest.TestCase):
-    """用桩浏览器验证控制流（不真起浏览器）。"""
+    """用桩浏览器验证控制流（不真起浏览器）。
+
+    入口页等待设成 0：这些用例喂的页面文案里没有 `Sign up with email` 这类按钮，
+    真等就是 20 秒 × 2（超时后刷新一次再等），每个用例白烧 40 秒。
+    """
+
+    #: 真页面永远先有入口页那排按钮；桩里也带上，否则会命中「入口页没渲染」的快速失败
+    #: （2026-11-01 起：入口页渲染不出来直接判定出口被半拦，不再盲点按钮）。
+    _ENTRY_BANNER = ("SpaceXSI You are signing into Grok Sign up with your email "
+                     "Email Sign up Go back ")
 
     def _fake_camoufox(self, page_text: str, inputs=None, cookies=None):
         """构造一个假的 Camoufox 上下文管理器。"""
+        page_text = self._ENTRY_BANNER + page_text
         page = MagicMock()
         page.evaluate.side_effect = lambda js, *a: (
             page_text if "innerText" in str(js) else (inputs if inputs is not None else [])
@@ -173,14 +184,18 @@ class RegisterFlowTests(unittest.TestCase):
             captured.update(kwargs)
             return cm
 
-        with patch("camoufox.sync_api.Camoufox", side_effect=_factory):
+        # 出口 IP 解析要 mock 掉（测试不联网）；这里模拟「解析不到」
+        with patch("camoufox.sync_api.Camoufox", side_effect=_factory), \
+             patch("platforms.grok.register_browser._resolve_exit_ip", return_value=""):
             register_grok_via_browser(
                 "a@icloud.com", proxy="socks5://user:pw@9.9.9.9:6740"
             )
         self.assertIn("proxy", captured, "代理必须传给 camoufox")
         self.assertEqual(captured["proxy"]["server"], "http://9.9.9.9:6740",
                          "带认证的 socks5 必须降级成 http")
-        self.assertTrue(captured.get("geoip"), "有代理时应对齐 geoip")
+        self.assertIs(captured.get("geoip"), False,
+                      "解析不到出口 IP 时必须退化成 False：让 camoufox 自己探 6 个公有 IP "
+                      "服务（各 5s 超时）会在住宅代理上抛 InvalidIP，浏览器起不来")
 
     def test_sso_is_read_from_cookies(self):
         """拿到 SSO 才算成功 —— 从浏览器 cookie 里取。"""

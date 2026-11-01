@@ -16,6 +16,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -57,17 +58,68 @@ def _is_snap_wrapper(path: str) -> bool:
         return False
 
 
+#: 系统里的 Chrome/Chromium 常见位置（按优先级）。
+#: 单独列成模块常量是为了让测试可以把它清空、从而验证后面的兜底路径。
+_SYSTEM_CHROME_CANDIDATES = (
+    "/usr/bin/google-chrome",
+    "/usr/bin/google-chrome-stable",
+    "/usr/bin/chromium",
+    "/usr/bin/chromium-browser",
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+    r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+)
+
+#: Playwright 浏览器缓存里 Chromium 的相对路径（各平台布局）。
+_PLAYWRIGHT_CHROMIUM_RELATIVE = (
+    "chrome-linux64/chrome",
+    "chrome-linux/chrome",
+    "chrome-mac/Chromium.app/Contents/MacOS/Chromium",
+    "chrome-win/chrome.exe",
+)
+
+
+def _playwright_chromium_candidates() -> list[str]:
+    """扫 Playwright 的浏览器缓存目录，返回其中的 Chromium 可执行文件。
+
+    为什么不问 Playwright 自己：`p.chromium.executable_path` 要把 driver
+    进程（node）拉起来，本机实测那个进程会被杀掉
+    （`TargetClosedError: Target page, context or browser has been closed`），
+    于是 `find_chrome()` 返回空串 → 铸币三连 `chrome not found`，
+    而真正可用的二进制一直躺在
+    `~/.cache/ms-playwright/chromium-1248/chrome-linux64/chrome` 里。
+    目录布局是确定性的，直接扫，快且无副作用。
+
+    `PLAYWRIGHT_BROWSERS_PATH` 按 Playwright 的约定支持多个目录（os.pathsep 分隔）。
+    """
+    roots: list[Path] = []
+    for part in os.getenv("PLAYWRIGHT_BROWSERS_PATH", "").split(os.pathsep):
+        part = part.strip()
+        if part:
+            roots.append(Path(part))
+    roots.append(Path.home() / ".cache" / "ms-playwright")
+
+    found: list[str] = []
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for rel in _PLAYWRIGHT_CHROMIUM_RELATIVE:
+            found.extend(
+                sorted(str(p) for p in root.glob(f"chromium*/{rel}") if p.is_file())
+            )
+    return found
+
+
 def find_chrome() -> str:
     """定位可用的 Chrome/Chromium 可执行文件。
 
-    优先级：真二进制 > Playwright 自带 chromium > snap 转发脚本。
-    snap 排最后是因为它在 root 下必失败（见 `_is_snap_wrapper`），
-    而 Playwright 自带的 Chromium 是能用的，不该被 snap 挡住。
+    优先级：真二进制 > Playwright 缓存里的 Chromium > Playwright driver 兜底 >
+    snap 转发脚本。snap 排最后是因为它在 root 下必失败（见 `_is_snap_wrapper`）。
 
     结果缓存：本函数在每次浏览器启动路径上都会被调用（Grok 注册 / oauth /
-    sso 三条链路各一处，外加每次 mint），而 Playwright 兜底分支为了读一个
-    静态路径要把整个 driver 进程拉起来（实测 1.28s）。同进程内 PATH 与环境
-    不会变，缓存掉这次开销。
+    sso 三条链路各一处，外加每次 mint），而 driver 兜底分支为了读一个静态路径
+    要把整个 node 进程拉起来（实测 1.28s）。同进程内 PATH 与环境不会变，
+    缓存掉这次开销。
     """
     return _find_chrome_cached()
 
@@ -77,13 +129,7 @@ def _find_chrome_cached() -> str:
     candidates = [
         os.getenv("GROK_CHROME_PATH", ""),
         os.getenv("CHROME_PATH", ""),
-        "/usr/bin/google-chrome",
-        "/usr/bin/google-chrome-stable",
-        "/usr/bin/chromium",
-        "/usr/bin/chromium-browser",
-        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+        *_SYSTEM_CHROME_CANDIDATES,
     ]
     existing = [c for c in candidates if c and Path(c).exists()]
 
@@ -92,7 +138,12 @@ def _find_chrome_cached() -> str:
         if not _is_snap_wrapper(c):
             return c
 
-    # 第二轮：Playwright 自带 chromium（非 snap，root 下可用）
+    # 第二轮：Playwright 浏览器缓存（确定性路径，不需要起 driver）
+    for c in _playwright_chromium_candidates():
+        if not _is_snap_wrapper(c):
+            return c
+
+    # 第三轮：问 Playwright driver（会起 node 进程，可能被杀掉 → 见 _playwright_chromium_candidates）
     try:
         from playwright.sync_api import sync_playwright
 
@@ -116,6 +167,49 @@ def mint_via_captcha(captcha: Any, site_key: str, page_url: str) -> str:
     return token
 
 
+#: X11 socket 目录（用来判断 `DISPLAY` 指向的 display 是不是真的在跑）。
+#: 单独列成模块常量是为了让测试指到临时目录。
+_X11_SOCKET_DIR = "/tmp/.X11-unix"
+
+#: 没有 X display 时给 headed 浏览器套的虚拟屏幕（`xvfb-run` 参数）。
+_XVFB_ARGS = ("xvfb-run", "-a", "-s", "-screen 0 1280x800x24")
+
+
+def _display_is_usable() -> bool:
+    """`DISPLAY` 是否指向一个真实存在的 X display。"""
+    display = (os.environ.get("DISPLAY") or "").strip()
+    if not display:
+        return False
+    # `:77` / `localhost:77.0` → 77；socket 名是 `X77`
+    num = display.split(":")[-1].split(".")[0].strip()
+    if not num:
+        return False
+    return Path(_X11_SOCKET_DIR, f"X{num}").exists()
+
+
+def _virtual_display_prefix() -> list[str]:
+    """headed 浏览器需要的 display 前缀（没有真的 X server 时用 xvfb-run）。
+
+    为什么要这个：offscreen mint 拉起的是 **headed** 浏览器（真 headless 会被
+    Turnstile 拦），而线上服务器没有 X server，Playwright 会报
+    `Looks like you launched a headed browser without having a XServer running.`
+    再把进程关掉 —— 外面只能看到退化成 `TargetClosedError: BrowserType.launch`，
+    完全指不到真因（实测 2026-11-01，三连失败都是这个）。
+
+    本机 `/usr/bin/Xvfb` 与 `/usr/bin/xvfb-run` 都在，所以直接套 `xvfb-run -a`
+    （`-a` 自动挑空闲 display 号，避免和已有 Xvfb 抢编号）。
+    """
+    if _display_is_usable():
+        return []
+    if shutil.which("xvfb-run"):
+        return list(_XVFB_ARGS)
+    logger.warning(
+        "没有可用的 X display，也没装 xvfb-run：headed 浏览器会启动失败"
+        "（Turnstile mint 需要一块屏幕）"
+    )
+    return []
+
+
 def mint_via_offscreen_chrome(
     site_key: str,
     page_url: str,
@@ -135,6 +229,7 @@ def mint_via_offscreen_chrome(
     last_err = ""
     for attempt in range(1, max(1, retries) + 1):
         args = [
+            *_virtual_display_prefix(),
             sys.executable,
             str(_SCRIPT_PATH),
             "--site-key",
@@ -152,7 +247,8 @@ def mint_via_offscreen_chrome(
         _log(
             log,
             f"[Grok] Turnstile mint {attempt}/{retries} "
-            f"(chrome={bool(chrome)}, proxy={bool(proxy)}, headed-offscreen)",
+            f"(chrome={bool(chrome)}, proxy={bool(proxy)}, headed-offscreen,"
+            f" display={os.environ.get('DISPLAY') or 'xvfb-run'})",
         )
         creationflags = 0
         if os.name == "nt":

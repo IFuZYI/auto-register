@@ -92,6 +92,16 @@ class LocalSolverCaptcha(BaseCaptcha):
             )
             if res.status_code == 200:
                 data = res.json()
+                # solver 解不出来时回的是 `{"errorCode": "ERROR_CAPTCHA_UNSOLVABLE",
+                # "errorDescription": …, "errorId": 1}` —— **里面没有 `status` 字段**。
+                # 不认它就会把「已经失败」当成「还在 processing」，一路轮询满 60 次
+                # （120 秒）才抛超时。线上实测 2026-11-01（`127.0.0.1:8889`）：
+                # 服务 15 秒就回了失败，浏览器流程却要为此白等两分钟。
+                if data.get("errorCode"):
+                    raise RuntimeError(
+                        "LocalSolver Turnstile 失败: "
+                        f"{data.get('errorCode')} {data.get('errorDescription') or ''}".strip()
+                    )
                 status = data.get("status")
                 if status == "ready":
                     token = data.get("solution", {}).get("token")

@@ -400,6 +400,22 @@ export default function Accounts() {
     return Boolean(extra.totp_secret) || extra.has_totp_secret === true
   }
 
+  /**
+   * Grok 的登录凭证主体是 **SSO**（不是 AT）—— 列表读 `has_sso` 布尔，
+   * 详情读 `extra.sso` 正文。`token` 列对 grok 也是 SSO 的镜像，作兜底。
+   *
+   * 为什么要单独一个：Grok 没有 AT/RT（2026-10-23 起注册只产 SSO），
+   * 用「有没有 RT / 有没有 AT」去判断这个号还能不能用，结论永远是「不能」。
+   */
+  const hasSsoCredential = (
+    record: { has_token?: boolean; extra_json?: string } | null | undefined,
+  ): boolean => {
+    const extra = rowExtra(record)
+    if (extra.has_sso === true || extra.sso) return true
+    // 列表行的兜底：`token` 列非空 + 平台是 grok = 有 SSO。
+    return currentPlatform === 'grok' && Boolean(record?.has_token)
+  }
+
   const getRefreshToken = (record: any): string => {
     try {
       const extra = JSON.parse(record.extra_json || '{}')
@@ -412,6 +428,27 @@ export default function Accounts() {
     } catch {
       return ''
     }
+  }
+
+  /**
+   * 取 Grok 的 **SSO 正文**。
+   *
+   * 不能拿 `getAccessToken` 顶替 —— 它按「AT」的规则找（`extra.access_token`
+   * → `has_access_token`），而 Grok 这两样都没有，于是详情里标着「SSO」的那
+   * 一行显示「无」。**账号明明有 SSO**（`extra.sso` / `token` 列都是它）。
+   *
+   * 取法按可靠性：详情端的 `extra.sso` 正文 > `token` 列（grok 的列镜像就是
+   * SSO）> 列表行的 `has_sso` 布尔（只够判「有没有」，正文只在详情端点）。
+   */
+  const getSsoCredential = (
+    record: { token?: string; has_token?: boolean; extra_json?: string } | null | undefined,
+  ): string => {
+    const extra = rowExtra(record)
+    const body = String(extra.sso || '').trim()
+    if (body) return body
+    const col = String(record?.token || '').trim()
+    if (col) return col
+    return extra.has_sso === true || record?.has_token ? HAS_TOKEN_PLACEHOLDER : ''
   }
 
   /**
@@ -984,36 +1021,56 @@ export default function Accounts() {
       ),
     },
     {
-      // 密码 / RT / 2FA 合成一列：三件事回答同一个问题 ——「这个号还能不能救」。
-      // 原来占三列（密码、RT、本地状态里的 2FA 徽章），每列一个彩色块。
+      // 「这个号还能不能救」的依据。
+      //
+      // **按平台给不同的三件事**（用户 2026-11-01：Grok 的信息和 GPT 不一样）：
+      // Grok 浏览器注册只产出 SSO（2026-10-23 的既定行为），`RT` 那一格永远
+      // 是「无」，`2FA` 也基本没绑过 —— 一行三格里两格画着删除线，看着像坏号。
+      // GPT 看「密码 / RT / 2FA」，Grok 看「SSO / 密码」。
+      //
       // 列表响应本来就不带凭据正文（安全加固），所以这里只表达「有没有」，
       // 正文的复制入口在详情抽屉里（tooltip 里写明）。
       title: '凭据',
       key: 'credentials',
       width: 120,
-      // 窄屏折叠成卡片时隐藏：凭据是「这号能不能救」的细节，详情里有；
-      // 卡片上优先放「是谁、什么状态、什么时候到期」。
       responsive: ['md'],
       render: (_: any, record: any) => {
+        const isGrok = currentPlatform === 'grok'
         const hasPwd = Boolean(record.has_password)
+        const hasSso = hasSsoCredential(record)
         const hasRt = Boolean(getRefreshToken(record))
         const hasTotp = hasTotpSecret(record)
+        // 显式标类型：不标的话 TS 把元组推成 `(string | boolean)[]`，
+        // 下面 `key={name}` 会报 `Type 'string | boolean' is not assignable to Key`。
+        const facts: Array<[string, boolean, string]> = isGrok
+          ? [
+              ['SSO', hasSso, 'Grok 的登录凭证本体'],
+              ['密码', hasPwd, '注册时设的密码'],
+            ]
+          : [
+              ['密码', hasPwd, '注册时设的密码'],
+              ['RT', hasRt, '有 RT 才能不登录就换新的 AT'],
+              ['2FA', hasTotp, '绑了 2FA 的号更难被扫'],
+            ]
+        const spoken = facts.map(([name, ok]) => `${name}${ok ? '有' : '无'}`).join('，')
         return (
           <Tooltip
             title={
-              `密码 ${hasPwd ? '有' : '无'}；RT ${hasRt ? '有' : '无'}；2FA ${hasTotp ? '已绑' : '未绑'}。` +
-              '正文在「详情」里复制。'
+              facts.map(([name, ok, why]) => `${name} ${ok ? '有' : '无'}（${why}）`).join('；') +
+              '。正文在「详情」里复制。'
             }
           >
             <Space
               size={9}
               style={{ whiteSpace: 'nowrap' }}
-              // 读屏用户拿不到颜色/删除线 —— 用 aria-label 把三种状态说全。
-              aria-label={`密码${hasPwd ? '有' : '无'}，RT${hasRt ? '有' : '无'}，2FA${hasTotp ? '已绑' : '未绑'}`}
+              // 读屏用户拿不到颜色/删除线 —— 用 aria-label 把状态说全。
+              aria-label={spoken}
             >
-              <span style={factStyle(hasPwd)}>密码</span>
-              <span style={factStyle(hasRt)}>RT</span>
-              <span style={factStyle(hasTotp)}>2FA</span>
+              {facts.map(([name, ok]) => (
+                <span key={name} style={factStyle(Boolean(ok))}>
+                  {name}
+                </span>
+              ))}
             </Space>
           </Tooltip>
         )
@@ -1035,49 +1092,56 @@ export default function Accounts() {
         )
       },
     },
-    {
-      // AT 有效期：ChatGPT 与 Grok 的 AT 都是 JWT（都带 iat/exp），
-      // 两个平台的列表都要显示 —— 详情弹窗本来就是共享的，列表不该分家。
-      //
-      // 日期只显示 `MM-DD`：完整年份在这张表里没有信息量（都在今年），
-      // 而 `到期 2026-11-09` 需要 95px、该列内容宽只有 ~92px，实测被截断成
-      // 「到期 2026-11…」。完整时间与剩余时长在 tooltip 里。
-      title: 'AT 到期',
-      key: 'at_lifecycle',
-      width: 132,
-      render: (_: unknown, record: { token?: string; has_token?: boolean; extra_json?: string }) => {
-        const parsed = (() => {
-          try {
-            return JSON.parse(record.extra_json || '{}')
-          } catch {
-            return {}
-          }
-        })()
-        const at = atSummaryFromClaims(parsed) ?? atListSummary(getAccessToken(record))
-        const hasDate = Boolean(at.expiresShort || at.remainingText)
-        if (at.label === '无 AT' && !hasDate) {
-          return <Text style={metaLineStyle}>无 AT</Text>
-        }
-        const shortDate = at.expiresShort ? String(at.expiresShort).slice(5) : ''
-        return (
-          <Tooltip
-            title={[at.tooltip || at.label, at.expiresShort ? `到期 ${at.expiresShort}` : '', at.remainingText]
-              .filter(Boolean)
-              .join(' · ')}
-          >
-            <Space size={6} style={{ whiteSpace: 'nowrap' }}>
-              <Tag color={at.color} style={{ marginInlineEnd: 0 }}>
-                {at.label}
-              </Tag>
-              {shortDate ? <span style={metaLineStyle}>{shortDate}</span> : null}
-            </Space>
-          </Tooltip>
-        )
-      },
-    },
   ]
 
   if (isChatgptPlatform) {
+    // AT 有效期与本地探测结论都是 ChatGPT 专有（Grok 的对应物见上面的 else 分支）。
+    columns.push(
+      {
+        // AT 有效期。**只给 ChatGPT**（用户 2026-11-01）。
+        //
+        // 原来两个平台共用这一列，可是 grok 的 AT 早就不产了（注册只留 SSO），
+        // 于是 Grok 每一行的这格都是「无 AT」—— 一个恒定为空、只在说「我没有」
+        // 的列，占着 132px 还让人以为号是坏的。Grok 真正该看的两件事
+        // （2API 有没有接上、探测结论）另开一列，见下面 `isChatgptPlatform` 分支。
+        //
+        // 日期只显示 `MM-DD`：完整年份在这张表里没有信息量（都在今年），
+        // 而 `到期 2026-11-09` 需要 95px、该列内容宽只有 ~92px，实测被截断成
+        // 「到期 2026-11…」。完整时间与剩余时长在 tooltip 里。
+        title: 'AT 到期',
+        key: 'at_lifecycle',
+        width: 132,
+        render: (_: unknown, record: { token?: string; has_token?: boolean; extra_json?: string }) => {
+          const parsed = (() => {
+            try {
+              return JSON.parse(record.extra_json || '{}')
+            } catch {
+              return {}
+            }
+          })()
+          const at = atSummaryFromClaims(parsed) ?? atListSummary(getAccessToken(record))
+          const hasDate = Boolean(at.expiresShort || at.remainingText)
+          if (at.label === '无 AT' && !hasDate) {
+            return <Text style={metaLineStyle}>无 AT</Text>
+          }
+          const shortDate = at.expiresShort ? String(at.expiresShort).slice(5) : ''
+          return (
+            <Tooltip
+              title={[at.tooltip || at.label, at.expiresShort ? `到期 ${at.expiresShort}` : '', at.remainingText]
+                .filter(Boolean)
+                .join(' · ')}
+            >
+              <Space size={6} style={{ whiteSpace: 'nowrap' }}>
+                <Tag color={at.color} style={{ marginInlineEnd: 0 }}>
+                  {at.label}
+                </Tag>
+                {shortDate ? <span style={metaLineStyle}>{shortDate}</span> : null}
+              </Space>
+            </Tooltip>
+          )
+        },
+      },
+    )
     columns.push({
       // 账号状态：授权状态 + Codex 可用性 + 套餐 + Plus 试用。
       // 原来是两列（本地状态 260px + Plus 试用 140px）、一行四个 Tag。
@@ -1151,13 +1215,59 @@ export default function Accounts() {
       },
     })
   } else {
+    // Grok 看它自己的两件正事 —— 取代原来的「AT 到期」空列和恒为 `-` 的「地区」列
+    // （用户 2026-11-01：Grok 的信息和 GPT 不一样）。
+    //
+    // - 2API 接没接上，是 grok 号「能不能用」的直接判据（库里 362/390 有值）；
+    // - 探测结论只有真跑过才有（390 行里 9 行），没有就**什么都不渲染** ——
+    //   不写「未检测」，那和「没有这个信息」是同一件事。
+    // - 「地区」列删掉：两个平台都是 0/1080 有值，而且编辑表单里根本没这一项，
+    //   永远显示 `-` 的一列只是占 90px。
     columns.push(
       {
-        title: '地区',
-        dataIndex: 'region',
-        key: 'region',
-        width: 90,
-        render: (text: string) => <span style={metaLineStyle}>{text || '-'}</span>,
+        title: '2API 接入',
+        key: 'grok2api',
+        width: 104,
+        // 只用到 `extra_json` —— 直接声明出来，不用 `any`（eslint 会拦）。
+        render: (_: unknown, record: { extra_json?: string }) => {
+          const extra = rowExtra(record)
+          // 老账号可能根本没有这个键（2026-10-23 之前注册的）—— 那就是未接入。
+          const ingested = extra.grok2api_ingested === true
+          const result = String(extra.grok2api_result || '')
+          return (
+            <Tooltip title={result || (ingested ? '已接入' : '未接入')}>
+              <Tag color={ingested ? 'green' : 'default'} style={{ marginInlineEnd: 0 }}>
+                {ingested ? '已接入' : '未接入'}
+              </Tag>
+            </Tooltip>
+          )
+        },
+      },
+      {
+        // `probe_status` 是 HTTP 码或 `refresh_ok` 这种短标记，`probe_summary`
+        // 是那句人话 —— 两个都给：光看码不知道上游到底怎么了。
+        title: '探测',
+        key: 'grok_probe',
+        width: 152,
+        // 只用到 `extra_json` —— 直接声明出来，不用 `any`（eslint 会拦）。
+        render: (_: unknown, record: { extra_json?: string }) => {
+          const extra = rowExtra(record)
+          const status = String(extra.probe_status || '')
+          const summary = String(extra.probe_summary || '')
+          if (!status && !summary) return null
+          // 只有 2xx / 明确的成功标记算好 —— `0`、`401`、`403`、空一律按异常。
+          const ok = /^2\d\d$/.test(status) || status === 'refresh_ok' || status === 'ok'
+          return (
+            <Tooltip title={[status, summary].filter(Boolean).join(' · ')}>
+              <Space size={6} style={{ whiteSpace: 'nowrap' }}>
+                <Tag color={ok ? 'green' : 'red'} style={{ marginInlineEnd: 0 }}>
+                  {status || '异常'}
+                </Tag>
+                {summary ? <span style={metaLineStyle}>{summary}</span> : null}
+              </Space>
+            </Tooltip>
+          )
+        },
       },
       {
         title: '试用链接',
@@ -1840,7 +1950,13 @@ export default function Accounts() {
                     </Form.Item>
                   ) : (
                     <SecretLine
-                      value={getAccessToken(currentAccount) || ''}
+                      // Grok 那一行装的是 SSO，用 AT 的取法读必然是空（实测：
+                      // 详情里「SSO」显示「无」，而库里这一行有 152 字符的 SSO）。
+                      value={
+                        (currentPlatform === 'grok'
+                          ? getSsoCredential(currentAccount)
+                          : getAccessToken(currentAccount)) || ''
+                      }
                       empty="无"
                       onEdit={() => setEditingToken(true)}
                       editLabel="替换"
@@ -1849,7 +1965,16 @@ export default function Accounts() {
                 </DetailRow>
 
                 <DetailRow label="Refresh Token">
-                  <SecretLine value={getRefreshToken(currentAccount) || ''} empty="无（补过 RT 才会有）" />
+                  <SecretLine
+                      value={getRefreshToken(currentAccount) || ''}
+                      empty={
+                        currentPlatform === 'grok'
+                          // Grok 就没有 RT 这条路：刷新走 SSO → 登录协议（device flow）。
+                          // 写「补过 RT 才会有」会让人去找一个不存在的东西。
+                          ? '无 —— Grok 用 SSO 走登录协议刷新，不需要 RT'
+                          : '无（补过 RT 才会有）'
+                      }
+                    />
                 </DetailRow>
 
                 {currentAccount.totpSecret ? (
@@ -1888,6 +2013,44 @@ export default function Accounts() {
                 >
                   <DetailRow label="出口">
                     <SecretLine value={currentAccount.registerProxy} />
+                  </DetailRow>
+                </DetailGroup>
+              ) : null}
+
+              {currentPlatform === 'grok' ? (
+                // Grok 没有 AT/RT，也没有 ChatGPT 那套探测 —— 它有的是这两个：
+                // 有没有接进 grok2api、以及有没有跑过探测。原来这一块对 Grok
+                // 是**整段不存在**，抽屉看着比 GPT 短一截，像是少了什么。
+                <DetailGroup title="Grok 接入" collapsible defaultOpen={false}>
+                  <DetailRow label="2API">
+                    <Tag
+                      color={rowExtra(currentAccount).grok2api_ingested === true ? 'green' : 'default'}
+                      style={{ marginInlineEnd: 8 }}
+                    >
+                      {rowExtra(currentAccount).grok2api_ingested === true ? '已接入' : '未接入'}
+                    </Tag>
+                    <Text type="secondary" style={{ fontSize: 12 }}>
+                      {String(rowExtra(currentAccount).grok2api_result || '') || '（无详情）'}
+                    </Text>
+                  </DetailRow>
+                  <DetailRow label="注册方式">
+                    <Text>{String(rowExtra(currentAccount).register_mode || '') || '—'}</Text>
+                  </DetailRow>
+                  <DetailRow label="探测">
+                    {(() => {
+                      const extra = rowExtra(currentAccount)
+                      const status = String(extra.probe_status || '')
+                      const summary = String(extra.probe_summary || '')
+                      if (!status && !summary) {
+                        return <Text type="secondary">尚未探测。可在操作菜单里点「探测」。</Text>
+                      }
+                      return (
+                        <>
+                          <Tag style={{ marginInlineEnd: 8 }}>{status || '异常'}</Tag>
+                          <Text type="secondary" style={{ fontSize: 12 }}>{summary}</Text>
+                        </>
+                      )
+                    })()}
                   </DetailRow>
                 </DetailGroup>
               ) : null}

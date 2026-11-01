@@ -260,6 +260,20 @@ class TestMailboxChannels(unittest.TestCase):
         self.assertIn("wait_for_code", src)
         self.assertIn("create_mailbox", src, "未注入时应能自行创建")
 
+    def test_passes_configured_captcha_solver(self):
+        """浏览器流程要带上界面上配的验证码解决器（审计 R-21 的另一半）。
+
+        以前 `mint_turnstile` 的 `captcha` 永远是 None，`RegisterConfig.captcha_solver`
+        没人读，配了也白配。
+        """
+        import inspect
+
+        from platforms.grok import plugin as plugin_mod
+
+        src = inspect.getsource(plugin_mod.GrokPlatform._register_via_browser)
+        self.assertIn("configured_captcha", src)
+        self.assertIn("captcha=configured_captcha(self.config", src)
+
     def test_uses_project_otp_timeout(self):
         """应复用平台的 OTP 超时解析（不写死魔法值）。"""
         import inspect

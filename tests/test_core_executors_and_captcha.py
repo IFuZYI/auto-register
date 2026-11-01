@@ -532,6 +532,31 @@ class LocalSolverCaptchaSolveTests(unittest.TestCase):
 
         self.assertIn("LocalSolver Turnstile 失败", str(ctx.exception))
 
+    def test_error_code_response_raises_immediately(self):
+        """solver 回 errorCode 要立刻失败，别当「还在 processing」轮询满 60 次。
+
+        线上实测（2026-11-01，`127.0.0.1:8889`）：解不出来时服务 15 秒就回了
+        `{"errorCode":"ERROR_CAPTCHA_UNSOLVABLE","errorId":1}` —— 这个响应里
+        **没有 `status` 字段**，老实现直接跳过、继续轮询 60 次（120 秒）才抛超时。
+        浏览器流程里等于每个出口白等两分钟。
+        """
+        first = self._turnstile_resp()
+        unsolvable = self._result_resp({
+            "errorCode": "ERROR_CAPTCHA_UNSOLVABLE",
+            "errorDescription": "Workers could not solve the Captcha",
+            "errorId": 1,
+        })
+
+        with mock.patch("requests.get", side_effect=[first, unsolvable]) as get:
+            with mock.patch("time.sleep") as sleep:
+                with self.assertRaises(RuntimeError) as ctx:
+                    LocalSolverCaptcha("http://s:1").solve_turnstile("https://p", "k")
+
+        self.assertIn("ERROR_CAPTCHA_UNSOLVABLE", str(ctx.exception))
+        self.assertIn("Workers could not solve", str(ctx.exception))
+        self.assertEqual(get.call_count, 2, "errorCode 之后不该再轮询")
+        self.assertEqual(sleep.call_count, 1)
+
     def test_non_200_result_is_skipped(self):
         """非 200 的轮询响应不算结果，跳过继续轮询，直到 ready。"""
         first = self._turnstile_resp()
