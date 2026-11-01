@@ -52,6 +52,54 @@ if TYPE_CHECKING:  # 仅类型标注用（from __future__ import annotations 下
     )
 
 
+#: Grok 出口预检最多换几个出口。5 个够用了：池子里真有能用的，前几个就会中；
+#: 全都不行说明这批出口整体被标记了，再换也是白烧时间。
+_GROK_EXIT_PROBE_TRIES = 5
+
+
+def _truthy_extra(value: object, default: bool) -> bool:
+    if value is None or value == "":
+        return default
+    return str(value).strip().lower() not in ("0", "false", "no", "off", "")
+
+
+def _pick_usable_exit(
+    proxy: str, *, task_id: str, extra: dict, log, get_next, report_bad, normalize
+) -> str:
+    """Grok 注册前先探出口，别拿 iCloud 别名去撞一堵已知会撞的墙。
+
+    `account:email-signup-unavailable` 跟**出口 IP 声誉**走、不跟邮箱走
+    （`platforms/grok/signup_pages.py` 顶部的实测结论）。而预检打的是同一个
+    接口、用的是永远收不到信的 `@example.invalid`，所以：
+
+    - 被拒 → 这个出口别用了，`report_proxy_error` 摘掉，换下一个；
+    - 没被拒 / 预检本身没跑成 → 放行（fail-open，预检不该变成新的失败点）。
+
+    关掉用 `grok_exit_preflight=0`。
+    """
+    if not _truthy_extra(extra.get("grok_exit_preflight"), True):
+        return proxy
+    from platforms.grok.exit_probe import probe_exit
+
+    current = proxy
+    for attempt in range(_GROK_EXIT_PROBE_TRIES):
+        if not current:
+            return ""
+        result = probe_exit(current)
+        if result.get("ok"):
+            if attempt:
+                log(task_id, f"出口预检：换到第 {attempt + 1} 个出口才通过")
+            return current
+        log(task_id, f"出口预检：{_redact_proxy(current)} 不可注册，换下一个")
+        try:
+            report_bad(current)
+        except Exception:
+            logger.debug("预检摘除出口失败", exc_info=True)
+        current = normalize(get_next())
+    log(task_id, f"出口预检：连试 {_GROK_EXIT_PROBE_TRIES} 个出口都不可注册，本轮放弃")
+    return ""
+
+
 def _run_register(task_id: str, req: RegisterTaskRequest):
     from services import task_service as _api  # 延迟 import：patch 打在 task_service 上必须被看到
     from core.registry import get
@@ -218,6 +266,18 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
                 attempt_id = control.start_attempt()
                 control.checkpoint(attempt_id=attempt_id)
                 _proxy = normalize_proxy_url(_get_proxy())
+                # Grok：先花 2 秒探出口，比「领别名 → 起浏览器 → 填表 → 被拒」
+                # （半分钟 + 一个别名）便宜得多。
+                if getattr(req, "platform", "") == "grok":
+                    _proxy = _pick_usable_exit(
+                        _proxy,
+                        task_id=task_id,
+                        extra=_base_extra,
+                        log=_api.log,
+                        get_next=_get_proxy,
+                        report_bad=_proxy_pool.report_proxy_error,
+                        normalize=normalize_proxy_url,
+                    )
                 if req.register_delay_seconds > 0:
                     with start_gate_lock:
                         control.checkpoint(attempt_id=attempt_id)
