@@ -804,7 +804,16 @@ def register_grok_via_browser(
     # 出口自动出日语页面、ES/FR/IT 出口出西/法/意语页面（2026-11-01 实测：
     # JP 出口 183.77.203.114 返回 `メールで登録`，被我们的英文文案表判成
     # 「入口页没渲染」）。显式传 `locale` 覆盖，让后续文案表/选择器不依赖出口国家。
-    kwargs: dict[str, Any] = {"headless": headless, "locale": ["en-US", "en"]}
+    # camoufox 的强项要用上（2026-11-01）：原来只传了 headless/locale，等于
+    # 开着一辆防弹车但没装防弹玻璃。
+    #   humanize=True  —— 拟人化鼠标轨迹 / 打字节奏 / 滚动，这是它的核心；
+    #   os=["windows"] —— 固定操作系统指纹，别每次启动随机一套。
+    kwargs: dict[str, Any] = {
+        "headless": headless,
+        "locale": ["en-US", "en"],
+        "humanize": True,
+        "os": ["windows"],
+    }
     if proxy:
         cfg = build_playwright_proxy_config(proxy) or {}
         if cfg:
