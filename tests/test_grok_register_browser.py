@@ -7,6 +7,7 @@
   4. 域名被拒 / 限流要给出可区分的错误
 """
 
+import pathlib
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -827,3 +828,33 @@ class SendCodeDiagnosisTests(unittest.TestCase):
         self.assertFalse(out["ok"])
         self.assertIn("其它 auth 请求", out["error"])
         self.assertIn("send-code", out["error"])
+
+
+class GrokComWarmupTests(unittest.TestCase):
+    """注册前先落一次 grok.com。
+
+    用户问「为什么不在 grok.com 注册」。答案是：注册确实在 accounts.x.ai ——
+    grok.com 的「Sign up」就是跳过去，`?redirect=grok-com` 正是把这次注册标记成
+    Grok 而不是通用 xAI 账号。但先访问一次 grok.com 能拿到它的会话 cookie，让
+    这一串请求看起来是「从应用点进来的人」。参考实现的出口体检也是两个域名
+    都探（`proxy_pool_v3.py:884`），说明两个域名的信誉分开算。
+    """
+
+    SRC = pathlib.Path("/data/workspace/Register/platforms/grok/register_browser.py")
+
+    def test_visits_grok_com_before_the_signup_page(self):
+        src = self.SRC.read_text(encoding="utf-8")
+        i = src.index('_log(log, "[Grok] 打开注册页…")')
+        j = src.index("page.goto(SIGNUP_URL", i)
+        block = src[i:j]
+        self.assertIn("https://grok.com/", block, "注册前要先落一次 grok.com")
+        self.assertLess(block.index("grok.com"), block.index("SIGNUP_URL") if "SIGNUP_URL" in block else len(block))
+
+    def test_warmup_failure_does_not_abort(self):
+        """预热失败只记 debug —— 拿不到 cookie 不该让整轮失败。"""
+        src = self.SRC.read_text(encoding="utf-8")
+        i = src.index('_log(log, "[Grok] 打开注册页…")')
+        block = src[i:src.index("page.goto(SIGNUP_URL", i)]
+        self.assertIn("except Exception as exc:", block)
+        self.assertIn("不影响注册", block)
+        self.assertNotIn("return result", block, "预热里不能提前 return 掉整轮")

@@ -801,6 +801,23 @@ def register_grok_via_browser(
         with Camoufox(**kwargs) as browser:
             page = browser.new_page()
             _log(log, "[Grok] 打开注册页…")
+            # 先落一次 grok.com 再进注册页（best-effort，失败继续）。
+            #
+            # 用户问「为什么不在 grok.com 注册」—— 注册确实在 accounts.x.ai
+            # （grok.com 的「Sign up」就是跳到这里，`?redirect=grok-com` 正是
+            # 把这次注册标记成 Grok 而不是通用 xAI 账号）。但先访问一次
+            # grok.com 会拿到它的会话 cookie / 让 CF 把这一串请求看成「从应用
+            # 点进来的人」，而不是「直接打开注册页的脚本」。参考实现的出口体检
+            # 也是**两个域名都探**（`proxy_pool_v3.py:884` 同时打
+            # accounts.x.ai 和 grok.com），说明这两个域名的信誉是分开算的。
+            #
+            # 失败不管：拿不到 cookie 只是少了这点加成，不该因此整轮失败。
+            try:
+                page.goto("https://grok.com/", wait_until="domcontentloaded", timeout=20000)
+                page.wait_for_timeout(1200)
+                _dismiss_cookie_banner(page)
+            except Exception as exc:
+                logger.debug("预热 grok.com 失败（不影响注册）: %s", exc)
             try:
                 page.goto(SIGNUP_URL, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
             except Exception as exc:
