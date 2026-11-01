@@ -505,6 +505,8 @@ git diff --stat
 | 前端「保存了但没生效」 | 表单字段名与配置键不一致 | 两处对照（§2.3） |
 | Outlook 导入全失败，报 `AADSTS7000012: The grant was obtained for a different tenant` | `client_id` 与 `refresh_token` 两段顺序反了（多数令牌导出工具是 `邮箱----密码----token----client_id`） | 已按 GUID 形状自动纠正（§5.2）；仍报这个错说明两段都不像 GUID，原样交给微软给真实错误 |
 | 定时任务设了间隔却不跑 | 间隔回调返回 0（开关关着 / 间隔非法 / 范围不在白名单） | 看 `services/local_maintenance.get_*_interval_seconds` 的返回值；0 = 主动不跑，不是「还没到」 |
+| Grok 注册报 `no_confirmation: 未确认发信（页面未给出理由）` | 页面文案还是那一屏邮箱表单、**没有任何报错**，说明请求根本没发出去（按钮当时是禁用态 / React 还没挂上事件处理） | 看提示尾巴：`没抓到任何 /auth/ 请求` = 点击空转；`只见到其它 auth 请求` = 发码接口改名了。`submit_email_code` 会等到按钮可用再点，最多重试 3 次 |
+| Grok 账号没有 AT / RT | **不是故障**：2026-10-23 起注册只产 SSO（device flow 每次都 `授权未确认`，白烧 4 分钟/号），且 SSO 是 HS256 JWT、载荷只有 `session_id`、没有 `exp` | 刷新走 SSO → 登录协议；列表看「2API 接入 / 探测」，不看「AT 到期」（那一列只给 ChatGPT） |
 | 窄屏表格「内容被裁、也没有滚动条」 | 只把 `tr` 设成 `block`，`table` 还是 `display: table` —— 浏览器把 block 级 tbody 包进匿名 table-cell，宽度仍按列算 | `table` / `tbody` 都设 `display: block`，并 `col { width: auto }`（见 §5.1） |
 
 ### 5.1 窄屏（< 768px）的表格折叠
