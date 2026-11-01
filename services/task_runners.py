@@ -75,9 +75,13 @@ def _pick_usable_exit(
     - 被拒 → 这个出口别用了，`report_proxy_error` 摘掉，换下一个；
     - 没被拒 / 预检本身没跑成 → 放行（fail-open，预检不该变成新的失败点）。
 
-    关掉用 `grok_exit_preflight=0`。
+    **默认关闭**（`grok_exit_preflight=1` 才开）。2026-11-01 更正：
+    `account:email-signup-unavailable` 主要跟**邮箱域名配额**走，不是出口 IP ——
+    同一出口同一域名连注册 3~4 个之后整个域名几小时内一律回这个码。用
+    `@example.invalid` 去探出口，探的是另一条判定分支，结论不可信，还会把好
+    出口误摘。要开只在你确认出口侧有问题时开。
     """
-    if not _truthy_extra(extra.get("grok_exit_preflight"), True):
+    if not _truthy_extra(extra.get("grok_exit_preflight"), False):
         return proxy
     from platforms.grok.exit_probe import probe_exit
 

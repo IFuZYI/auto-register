@@ -100,7 +100,7 @@ class PickUsableExitTests(unittest.TestCase):
             out = _pick_usable_exit(
                 "p0",
                 task_id="t",
-                extra={},
+                extra={"grok_exit_preflight": "1"},
                 log=lambda *a: None,
                 get_next=lambda: nexts.pop(0) if nexts else "px",
                 report_bad=reported.append,
@@ -137,3 +137,24 @@ class PickUsableExitTests(unittest.TestCase):
             )
         self.assertEqual(out, "p0")
         self.assertEqual(called, [], "关掉时不该发任何探测请求")
+
+
+class PreflightDefaultTests(unittest.TestCase):
+    """预检默认**关**。
+
+    2026-11-01 更正：`email-signup-unavailable` 主要是**邮箱域名配额**（同一域名
+    一个窗口 3~4 个），不是出口 IP。用 `@example.invalid` 探出口探的是另一条
+    判定分支，结论不可信，还会把好出口误摘 —— 所以默认不开。
+    """
+
+    def test_default_is_off(self):
+        from services.task_runners import _pick_usable_exit
+
+        called = []
+        with patch("platforms.grok.exit_probe.probe_exit", lambda p: called.append(p) or {"ok": False}):
+            out = _pick_usable_exit(
+                "p0", task_id="t", extra={}, log=lambda *a: None,
+                get_next=lambda: "p1", report_bad=lambda p: None, normalize=lambda v: v,
+            )
+        self.assertEqual(out, "p0")
+        self.assertEqual(called, [], "默认不该发任何探测请求")

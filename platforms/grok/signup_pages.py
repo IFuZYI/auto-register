@@ -156,7 +156,8 @@ def _verdict_for_kind(kind: str, *, detail: str = "") -> dict[str, Any]:
             detail=detail,
         )
     if kind == SEND_RESULT_EMAIL_UNAVAILABLE:
-        # 出口 IP 的问题：换 IP 后同一地址还能用，绝不能烧地址
+        # 域名配额的问题（见 `send_code_error_text` 里的实测记录）：地址没被消耗，
+        # 但**同一个域名**再试也一样，所以「重试」必须换域名才有意义。
         return _verdict(kind, retryable=True, consumes_address=False, detail=detail)
     if kind == SEND_RESULT_ALREADY_REGISTERED:
         return _verdict(
@@ -252,9 +253,19 @@ def send_code_error_text(verdict: dict[str, Any], email: str) -> str:
     kind = (verdict or {}).get("kind")
     detail = str((verdict or {}).get("detail") or "")
     if kind == SEND_RESULT_EMAIL_UNAVAILABLE:
+        # 2026-11-01 更正：这个码主要跟**邮箱域名配额**走，不是出口 IP。
+        # 实测记录（Grok-farm 项目在同一 sticky 出口、同一 Gmail 账号上量的）：
+        #   13:29 接受 / 13:32 接受 / 13:42 接受 / 13:47 拒 / 13:50 拒
+        # 也就是同一域名一个窗口只能注册 3~4 个，之后**整个域名**在几小时内
+        # 一律回这个码 —— 换出口没用，换域名才有用。
+        # 我们的 iCloud 隐藏邮箱全都落在 `icloud.com` 这一个域名上，所以一旦
+        # 撞到配额，池子里**每一个别名**都会被拒（这正是 2026-11-01 两轮
+        # 不同出口、不同别名、同一个码的原因）。
+        domain = str(email or "").rsplit("@", 1)[-1] or "该域名"
         return (
             f"{email}：x.ai 拒绝邮箱注册（account:email-signup-unavailable）—— "
-            "出口 IP 被判定不可注册，换住宅代理后同一地址仍然可用"
+            f"**{domain} 这个域名这一窗口的注册配额用完了**（同一域名约 3~4 个/窗口，"
+            "几小时后恢复）。换出口没有用，要换**邮箱域名**；地址本身没被消耗。"
         )
     if kind == SEND_RESULT_RATE_LIMITED:
         hint = (verdict or {}).get("retry_after_hint") or EDITORIAL_RETRY_AFTER_SECONDS
