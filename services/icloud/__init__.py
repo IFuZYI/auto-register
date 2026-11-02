@@ -73,7 +73,7 @@ from services.icloud.remote import (  # noqa: F401
     generate_remote_alias,
     list_remote_accounts,
     remote_client,
-    remote_password,
+    remote_api_key,
     resolve_remote_account,
     sync_remote_account,
 )
@@ -108,7 +108,7 @@ __all__ = [
     "release_stale_claims",
     "renew_alias_claim",
     "remote_client",
-    "remote_password",
+    "remote_api_key",
     "resolve_account",
     "resolve_remote_account",
     "set_account_enabled",

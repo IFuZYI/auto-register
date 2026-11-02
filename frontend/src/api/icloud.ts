@@ -10,8 +10,8 @@ export interface ICloudCredentialState {
   has_web_auth_token?: boolean
   has_imap_credentials?: boolean
   credentials_unreadable?: boolean
-  /** 远程账号：是否保存了远端服务的管理员密码（密文）。 */
-  has_remote_password?: boolean
+  /** 远程账号：是否保存了远端服务的 API 秘钥（密文）。 */
+  has_remote_api_key?: boolean
   /** 远程账号：凭据在远端服务里（本机没有 Apple 凭据）。 */
   remote?: boolean
 }

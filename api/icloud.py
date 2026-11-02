@@ -42,6 +42,9 @@ _ERROR_STATUS = {
     "session_expired": 409,
     "credentials_unreadable": 409,
     "mail_access_denied": 403,
+    # 远端 API 秘钥的权限/范围问题：是「这把秘钥不能做这件事」，不是上游挂了。
+    "permission_denied": 403,
+    "account_not_allowed": 403,
     "provider_rate_limited": 429,
     # upstream_rejected 是"Apple 收到了并明确拒绝"，属于请求语义问题而不是网关故障。
     # 用 5xx 表达还有个致命副作用：Cloudflare 会把 5xx 的响应体整个换成自己的错误页，
@@ -102,20 +105,17 @@ class RemoteAccountRequest(BaseModel):
     """接入一个远端 icloud-hme 账号（一行一个远端账号）。"""
 
     base_url: str
-    # 新服务用 API 秘钥；`admin_password` 保留给旧客户端/旧服务。
-    api_key: str = ""
-    admin_password: str = ""
+    api_key: str
     remote_account_id: str
     name: str = ""
     proxy: str = ""
 
 
 class DiscoverRemoteRequest(BaseModel):
-    """只读探针：用凭据登录远端并列出账号（不落库）。"""
+    """只读探针：用 API 秘钥列出远端账号（不落库）。"""
 
     base_url: str
-    api_key: str = ""
-    admin_password: str = ""
+    api_key: str
     proxy: str = ""
 
 
@@ -258,14 +258,13 @@ def update_account(account_id: int, body: AccountUpdateRequest):
 
 @router.post("/remote-accounts/discover")
 def discover_remote_accounts(body: DiscoverRemoteRequest):
-    """只读探针：登录远端并列出它的账号（不落库）。
+    """只读探针：用 API 秘钥列出远端账号（不落库）。
 
     弹窗用它做「获取账号列表」：先让用户看到远端有哪些账号、再选一个接入，
     比「先接入再发现选错了」少一轮删除。"""
     try:
         return {"items": icloud_service.discover_remote_accounts(
             base_url=body.base_url,
-            admin_password=body.admin_password,
             api_key=body.api_key,
             proxy=body.proxy,
         )}
@@ -275,11 +274,10 @@ def discover_remote_accounts(body: DiscoverRemoteRequest):
 
 @router.post("/remote-accounts")
 def add_remote_account(body: RemoteAccountRequest):
-    """接入远端 icloud-hme 账号：验证凭据 → 落库（密码 AES 加密，绝不回显）。"""
+    """接入远端 icloud-hme 账号：确认远端账号存在 → 落库（API 秘钥 AES 加密，绝不回显）。"""
     try:
         return icloud_service.add_remote_account(
             base_url=body.base_url,
-            admin_password=body.admin_password,
             api_key=body.api_key,
             remote_account_id=body.remote_account_id,
             name=body.name,

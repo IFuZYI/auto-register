@@ -105,7 +105,7 @@ from services.icloud import (  # noqa: E402,F401  （必须在 ICloud* 等 impor
     release_alias_claim,
     release_stale_claims,
     remote_client,
-    remote_password,
+    remote_api_key,
     renew_alias_claim,
     resend_login_code,
     resolve_account,

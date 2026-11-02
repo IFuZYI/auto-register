@@ -213,7 +213,7 @@ Docker 部署细节、环境变量清单与 Turnstile Solver 说明见 [部署�
 在「邮箱服务」里维护收件来源，注册时从号池取地址：
 
 - **iCloud 隐私邮箱（本地）**：添加 Apple ID 主号（账号密码或 Cookie 导入），再批量生成隐私邮箱别名
-- **iCloud 隐私邮箱（远程）**：接入独立部署的 icloud-hme 服务（服务地址 + 管理员密码），
+- **iCloud 隐私邮箱（远程）**：接入独立部署的 icloud-hme 服务（服务地址 + API 秘钥），
   别名由该服务生成、收件也走它 —— 主号凭据不进本机库
 - **Outlook（本地）**：导入微软号池（Outlook / Hotmail / MailAPI URL 三类）
 

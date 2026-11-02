@@ -19,7 +19,7 @@ from sqlmodel import SQLModel, create_engine, select
 
 from platforms.icloud.errors import ICloudError
 from core.db import platform_session
-from tests.remote_hme_double import ADMIN_PASSWORD, RemoteHMEDouble
+from tests.remote_hme_double import API_KEY, RemoteHMEDouble
 
 
 @pytest.fixture
@@ -75,7 +75,7 @@ class TestAddRemoteAccount:
     def test_add_remote_account_stores_encrypted_password(self, service, remote):
         account = service.add_remote_account(
             base_url=remote.base_url,
-            admin_password=ADMIN_PASSWORD,
+            api_key=API_KEY,
             remote_account_id="acc_1",
             name="远程主号",
         )
@@ -84,38 +84,38 @@ class TestAddRemoteAccount:
         assert account["base_url"] == remote.base_url
         assert account["remote_account_id"] == "acc_1"
         # 密码必须加密落库、绝不回显
-        assert "admin_password" not in account
+        assert "api_key" not in account
         row = service.get_account(account["id"])
-        assert row.remote_password_cipher and ADMIN_PASSWORD not in row.remote_password_cipher
-        assert service.remote_password(row) == ADMIN_PASSWORD
+        assert row.remote_password_cipher and API_KEY not in row.remote_password_cipher
+        assert service.remote_api_key(row) == API_KEY
 
     def test_add_remote_account_rejects_duplicate_binding(self, service, remote):
         service.add_remote_account(
-            base_url=remote.base_url, admin_password=ADMIN_PASSWORD, remote_account_id="acc_1"
+            base_url=remote.base_url, api_key=API_KEY, remote_account_id="acc_1"
         )
         with pytest.raises(ICloudError) as excinfo:
             service.add_remote_account(
-                base_url=remote.base_url, admin_password=ADMIN_PASSWORD, remote_account_id="acc_1"
+                base_url=remote.base_url, api_key=API_KEY, remote_account_id="acc_1"
             )
         assert excinfo.value.code == "invalid_config"
 
     def test_add_remote_account_rejects_unknown_remote_id(self, service, remote):
         with pytest.raises(ICloudError) as excinfo:
             service.add_remote_account(
-                base_url=remote.base_url, admin_password=ADMIN_PASSWORD, remote_account_id="acc_missing"
+                base_url=remote.base_url, api_key=API_KEY, remote_account_id="acc_missing"
             )
         assert excinfo.value.code == "invalid_config"
 
-    def test_add_remote_account_rejects_bad_password(self, service, remote):
+    def test_add_remote_account_rejects_bad_api_key(self, service, remote):
         with pytest.raises(ICloudError) as excinfo:
             service.add_remote_account(
-                base_url=remote.base_url, admin_password="wrong", remote_account_id="acc_1"
+                base_url=remote.base_url, api_key="sk-wrong", remote_account_id="acc_1"
             )
         assert excinfo.value.code == "invalid_config"
 
     def test_remote_accounts_list_alongside_local(self, service, remote):
         service.add_remote_account(
-            base_url=remote.base_url, admin_password=ADMIN_PASSWORD, remote_account_id="acc_1"
+            base_url=remote.base_url, api_key=API_KEY, remote_account_id="acc_1"
         )
         accounts = service.list_accounts()
         assert [item["source"] for item in accounts] == ["remote"]
@@ -128,7 +128,7 @@ class TestSyncRemote:
     def _add(self, service, remote, **kwargs):
         return service.add_remote_account(
             base_url=remote.base_url,
-            admin_password=ADMIN_PASSWORD,
+            api_key=API_KEY,
             remote_account_id=kwargs.pop("remote_account_id", "acc_1"),
             **kwargs,
         )
@@ -225,7 +225,7 @@ class TestSyncRemote:
 class TestRemoteAliasOperations:
     def _add(self, service, remote):
         return service.add_remote_account(
-            base_url=remote.base_url, admin_password=ADMIN_PASSWORD, remote_account_id="acc_1"
+            base_url=remote.base_url, api_key=API_KEY, remote_account_id="acc_1"
         )
 
     def test_generate_alias_refuses_remote_account(self, service, remote):
@@ -287,7 +287,7 @@ class TestRemoteAliasOperations:
 class TestRemoteMessages:
     def _add_with_alias(self, service, remote):
         account = service.add_remote_account(
-            base_url=remote.base_url, admin_password=ADMIN_PASSWORD, remote_account_id="acc_1"
+            base_url=remote.base_url, api_key=API_KEY, remote_account_id="acc_1"
         )
         remote.aliases["acc_1"] = [
             {"email": "a@icloud.com", "anonymousId": "anon-a", "label": "x", "active": True, "createdAt": "2026-01-01T00:00:00Z"}

@@ -409,8 +409,8 @@ grok2api），操作面在界面「面板管理」页（那里有本地 ↔ 远�
 | --- | --- | --- | --- |
 | GET | `/api/icloud/accounts` | — | 列出 iCloud 主号（含 `source`：`local` / `remote`） |
 | POST | `/api/icloud/accounts/import-cookie` | `{email?,display_name?,region?,cookie_header?,cookies_json?,imap_host?,imap_port?,imap_username?,imap_password?}` | 导入 iCloud Web Cookie 会话 |
-| POST | `/api/icloud/remote-accounts` | `{base_url,admin_password,remote_account_id,name?,proxy?}` | 接入远端 icloud-hme 账号（一行一个远端账号）。密码 AES 加密落库、绝不回显；重复接入同一 `(base_url, remote_account_id)` 返回 400 |
-| POST | `/api/icloud/remote-accounts/discover` | `{base_url,admin_password,proxy?}` | 只读探针：登录远端并列出它的账号（不落库）。给「添加远程服务」弹窗用 |
+| POST | `/api/icloud/remote-accounts` | `{base_url,api_key,remote_account_id,name?,proxy?}` | 接入远端 icloud-hme 账号（一行一个远端账号）。API 秘钥 AES 加密落库、绝不回显；重复接入同一 `(base_url, remote_account_id)` 返回 400 |
+| POST | `/api/icloud/remote-accounts/discover` | `{base_url,api_key,proxy?}` | 只读探针：用 API 秘钥列出远端账号（不落库）。给「添加远程服务」弹窗用 |
 | PATCH | `/api/icloud/accounts/{account_id}` | `{enabled}` | 启用或禁用主号（本地 / 远程通用） |
 | POST | `/api/icloud/accounts/{account_id}/check` | — | 探测账号登录态。本地主号对现有 Cookie 做低风险 validate；远程账号让 icloud-hme 服务执行探活 |
 | DELETE | `/api/icloud/accounts/{account_id}` | — | 删除主号（同时移除本地记录的别名） |

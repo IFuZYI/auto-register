@@ -359,7 +359,7 @@ export default function ICloudPage() {
         account.source === 'remote' ? (
           // 远程账号的凭据在 icloud-hme 服务里 —— 显示「远端凭据」而不是
           // 误报 Web Session / IMAP 缺失（本机确实没有这些凭据，但这不代表异常）。
-          <Tag color={account.credential_state.has_remote_password ? 'purple' : 'red'}>
+          <Tag color={account.credential_state.has_remote_api_key ? 'purple' : 'red'}>
             远端凭据
           </Tag>
         ) : (

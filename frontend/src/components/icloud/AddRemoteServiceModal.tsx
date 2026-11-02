@@ -122,7 +122,7 @@ export function AddRemoteServiceModal({
           name="api_key"
           label="API 秘钥"
           rules={[{ required: true, message: '请填写 API 秘钥' }]}
-          extra="新服务填 sk- 开头的 API 秘钥；旧服务仍可填管理员密码。加密保存，绝不回显"
+          extra="管理台「秘钥」页创建的 API 秘钥；加密保存，绝不回显"
         >
           <Input.Password autoComplete="new-password" />
         </Form.Item>

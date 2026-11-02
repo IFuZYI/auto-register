@@ -379,7 +379,7 @@ register_job("my_job", interval_seconds=lambda: ..., runner=lambda: ...)
 | `test_environment_preflight.py` | 环境预检与错误分类：camoufox 配对探测、Node 运行时探测、任务级预检（runner 在分配邮箱前拦截）、环境错误判不可重试（dead-end 提前收手） | 改 `core/environment.py` 的判定；平台去掉 `check_environment` 钩子 |
 | `test_chatgpt_auto_maintenance.py` | ChatGPT Token 自动维护：临期窗口内随机时刻（至少提前 1h）、**失效/过期账号进重试队列**（不看临期窗口）、封禁/达失败上限不重复尝试、**自动链检测出封禁 → 状态落 banned + 移出队列**、失败退避 1h→6h、未换发算失败、每轮限量防高并发、stale 计划清理、scheduler 注册与配置白名单、前端开关接线 | 改 `services/chatgpt_maintenance.py` 的窗口/退避/限量逻辑；失效账号不再自动尝试；封禁检测不再落状态；去掉周期任务注册；开关漏进 CONFIG_KEYS 或前端 BOOLEAN_KEYS |
 | `test_icloud_remote_columns.py` | 远程仓库的库结构：source / base_url / remote_account_id 列、老库回填 `local`、email 单列唯一被移除（同邮箱允许两边各一行）、(base_url, remote_account_id) 部分唯一索引、迁移幂等 | 改 `core/db/models_platform.py` 或 `_migrate_icloud_remote_schema` |
-| `test_icloud_remote_client.py` | 远程客户端契约：管理员密码换会话 + CSRF（旧服务兼容）、API 秘钥 `X-API-Key`（新服务）、会话复用与重启自动重登、错误码映射（冷却 → `provider_rate_limited`）、inbox limit/offset/start/end/refresh | 改 `platforms/icloud/remote_client.py` |
+| `test_icloud_remote_client.py` | 远程客户端契约：API 秘钥 `X-API-Key`（唯一鉴权，无登录/Cookie/CSRF）、缺钥与错钥的错误映射、写操作也走秘钥、错误码映射（冷却 → `provider_rate_limited`）、inbox limit/offset/start/end/refresh | 改 `platforms/icloud/remote_client.py` |
 | `test_icloud_remote_service.py` | 远程服务层：接入（加密落库 / 重复接入拒绝）、同步与**本地优先去重**（`skipped_local`）、**远程账号拒绝生成隐私邮箱**（`invalid_config`）、远程停用/删除、远程收件映射 | 改 `services/icloud/remote.py` 的去重或写路径 |
 | `test_icloud_remote_fixes.py` | 远程仓库的两个修复：远端时间串 naive → UTC 归一（否则同步 500）、远程账号禁止生成隐私邮箱（只允许本地账号）、生成弹窗只列本地主号 | 改 `_parse_remote_datetime`、`generate_alias` 的远程分支、`GenerateAliasModal` |
 | `test_icloud_remote_mailbox.py` | 远程邮箱渠道：工厂注册、**只复用池内已入池别名（池空报错，不在远端新建）**、收码与发码时间窗、池记账钩子、**等码期间租约续约** | 改 `modules/mail/icloud_remote.py` 或去掉 `wait_for_code` 里的续约 |
@@ -396,7 +396,7 @@ register_job("my_job", interval_seconds=lambda: ..., runner=lambda: ...)
 | `test_icloud_alias_filter.py` | iCloud 别名筛选规则（Python 复刻 `filterAliases`）：关键词四字段、三态展示口径（`pooled` 命中 available+used）、旧口径值筛空、平台口径、AND 组合 | 改 `lib/icloud.ts` 的 `filterAliases` 或 `poolStatus.ts` 的 `poolDisplayStatus` |
 
 **测试基础设施**：`tests/remote_hme_double.py` 是 icloud-hme 服务的**真实 HTTP 双端**
-（stdlib http.server，强制校验 Cookie 会话与 CSRF）。远程链路的测试都对着它跑 ——
+（stdlib http.server，只认 `X-API-Key`，无 Cookie/CSRF 会话）。远程链路的测试都对着它跑 ——
 不要改成 in-process mock：客户端若没把请求发到双端（比如硬编码生产地址），
 真实双端会直接连接失败，mock 不会。
 

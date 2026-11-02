@@ -4,7 +4,6 @@
 - 本地行（`source=local`）：凭据在本机，直连 Apple；
 - 远程行（`source=remote`）：凭据在独立的 icloud-hme 服务里，本机只存
   「服务地址 + API 秘钥密文 + 远端账号 id」，经 `remote_client` 调它的 API。
-
 **本地优先去重**（用户要求 2026-10-09）：同步远端别名时，若地址在本地已有
 行（`source=local`），保留本地行、不建远程行 —— 同一个地址不允许两行，
 本地那行是「自己生成/管理」的那个，远程镜像不该把它顶掉。
@@ -46,11 +45,11 @@ SOURCE_REMOTE = "remote"
 # ------------------------------------------------------------------ 客户端
 
 
-def remote_password(row: ICloudAccountModel) -> str:
+def remote_api_key(row: ICloudAccountModel) -> str:
     """解密远程账号的 API 秘钥（调用方永远拿不到密文本身）。
 
-    列名 `remote_password_cipher` 是历史命名 —— 2026-11-02 服务端鉴权升级为
-    API 秘钥后，这里存的是 `sk-` 开头的秘钥（旧部署可能仍是管理员密码）。
+    列名 `remote_password_cipher` 是历史命名 —— 2026-11-02 起服务端鉴权全面
+    改为 API 秘钥，这里存的就是秘钥（`sk-` 开头），不再有管理员密码登录。
     """
     cipher = str(getattr(row, "remote_password_cipher", "") or "")
     if not cipher:
@@ -62,7 +61,16 @@ def remote_password(row: ICloudAccountModel) -> str:
             "invalid_config",
             f"远程账号 {row.email} 的 API 秘钥无法解密（加密密钥已变更），请重新接入该账号",
         ) from exc
-    return payload.decode("utf-8") if isinstance(payload, bytes) else str(payload)
+    key = payload.decode("utf-8") if isinstance(payload, bytes) else str(payload)
+    key = key.strip()
+    if not key.startswith("sk-"):
+        # 2026-11-02：管理员密码登录已删除。存量部署里若还存着旧密码，
+        # 直接报可行动的错，而不是拿它去请求、得到一个含糊的 401。
+        raise ICloudError(
+            "invalid_config",
+            f"远程账号 {row.email} 存的是旧版管理员密码，密码登录已停用，请重新接入并填写 API 秘钥",
+        )
+    return key
 
 
 def remote_client(
@@ -73,7 +81,7 @@ def remote_client(
         raise ICloudError("invalid_config", f"账号 {row.email} 不是远程账号")
     return RemoteHMEClient(
         str(getattr(row, "base_url", "") or ""),
-        remote_password(row),
+        remote_api_key(row),
         proxy=proxy or str(getattr(row, "proxy", "") or ""),
         timeout=timeout,
     )
@@ -85,23 +93,22 @@ def remote_client(
 def discover_remote_accounts(
     *,
     base_url: str,
-    admin_password: str = "",
-    proxy: str = "",
     api_key: str = "",
+    proxy: str = "",
 ) -> list[dict[str, Any]]:
-    """只读探针：登录远端并列出它的账号（不落库）。
+    """只读探针：用 API 秘钥列出远端的账号（不落库）。
 
     给「添加远程服务」弹窗用 —— 先让用户看到远端有哪些账号、再选一个接入，
     比「先接入再发现选错了」少一轮删除。
-
-    `api_key` 优先；`admin_password` 仅兼容旧客户端 / 旧服务。
     """
     url = str(base_url or "").strip().rstrip("/")
-    credential = str(api_key or admin_password or "").strip()
+    credential = str(api_key or "").strip()
     if not url:
         raise ICloudError("invalid_config", "请填写远程服务地址")
     if not credential:
         raise ICloudError("invalid_config", "请填写远程服务 API 秘钥")
+    if not credential.startswith("sk-"):
+        raise ICloudError("invalid_config", "API 秘钥应以 sk- 开头（管理员密码登录已停用）")
     client = RemoteHMEClient(url, credential, proxy=str(proxy or "").strip())
     accounts = client.list_accounts()
     return [
@@ -121,27 +128,26 @@ def discover_remote_accounts(
 def add_remote_account(
     *,
     base_url: str,
-    admin_password: str = "",
+    api_key: str = "",
     remote_account_id: str,
     name: str = "",
     proxy: str = "",
-    api_key: str = "",
 ) -> dict[str, Any]:
     """把远程服务里的一个账号接入本地（一行一个远端账号）。
 
-    流程：验证凭据 → 确认远端账号存在（拿它的 icloud_email）→ 落库。
+    流程：用 API 秘钥列出远端账号 → 确认目标存在（拿它的 icloud_email）→ 落库。
     重复接入（同 base_url + remote_account_id）直接拒绝 —— 同一远端账号
     接两次会产生两行、两个池子，取号时会互相顶掉。
-
-    `api_key` 优先；`admin_password` 仅兼容旧客户端 / 旧服务。
     """
     url = str(base_url or "").strip().rstrip("/")
-    credential = str(api_key or admin_password or "").strip()
+    credential = str(api_key or "").strip()
     target = str(remote_account_id or "").strip()
     if not url:
         raise ICloudError("invalid_config", "请填写远程服务地址")
     if not credential:
         raise ICloudError("invalid_config", "请填写远程服务 API 秘钥")
+    if not credential.startswith("sk-"):
+        raise ICloudError("invalid_config", "API 秘钥应以 sk- 开头（管理员密码登录已停用）")
     if not target:
         raise ICloudError("invalid_config", "请选择要接入的远端账号")
 
@@ -187,7 +193,7 @@ def add_remote_account(
 
 
 def _account_public_dict(row: ICloudAccountModel) -> dict[str, Any]:
-    """远程账号的脱敏 DTO（绝不回密码/密文）。"""
+    """远程账号的脱敏 DTO（绝不回秘钥/密文）。"""
     return {
         "id": row.id,
         "email": row.email,
@@ -203,7 +209,7 @@ def _account_public_dict(row: ICloudAccountModel) -> dict[str, Any]:
         "sync_error": row.sync_error,
         "last_sync_at": row.last_sync_at.isoformat() if row.last_sync_at else None,
         "created_at": row.created_at.isoformat() if row.created_at else None,
-        "credential_state": {"remote": True, "has_remote_password": bool(row.remote_password_cipher)},
+        "credential_state": {"remote": True, "has_remote_api_key": bool(row.remote_password_cipher)},
         "quota": {"limit": 0, "used": 0, "remaining": 0, "reset_at": None, "managed_by": "remote"},
     }
 
@@ -651,7 +657,7 @@ __all__ = [
     "generate_remote_alias",
     "list_remote_accounts",
     "remote_client",
-    "remote_password",
+    "remote_api_key",
     "resolve_remote_account",
     "sync_remote_account",
 ]

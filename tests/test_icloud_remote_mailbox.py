@@ -24,7 +24,7 @@ from sqlmodel import SQLModel, create_engine
 from core.base_mailbox import MailboxAccount, create_mailbox
 from modules.mail.icloud_remote import ICloudRemoteMailbox
 from platforms.icloud.errors import ICloudError
-from tests.remote_hme_double import ADMIN_PASSWORD, RemoteHMEDouble
+from tests.remote_hme_double import API_KEY, RemoteHMEDouble
 
 
 @pytest.fixture
@@ -55,7 +55,7 @@ def service(tmp_path, monkeypatch, remote):
 
     account = icloud_service.add_remote_account(
         base_url=remote.base_url,
-        admin_password=ADMIN_PASSWORD,
+        api_key=API_KEY,
         remote_account_id="acc_1",
     )
     yield icloud_service, account

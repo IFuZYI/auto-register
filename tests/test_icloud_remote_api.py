@@ -19,7 +19,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlmodel import SQLModel, create_engine
 
-from tests.remote_hme_double import ADMIN_PASSWORD, RemoteHMEDouble
+from tests.remote_hme_double import API_KEY, RemoteHMEDouble
 
 
 @pytest.fixture
@@ -63,7 +63,7 @@ def _add_remote(client) -> dict:
         "/api/icloud/remote-accounts",
         json={
             "base_url": client.remote.base_url,
-            "admin_password": ADMIN_PASSWORD,
+            "api_key": API_KEY,
             "remote_account_id": "acc_1",
             "name": "远程主号",
         },
@@ -83,15 +83,15 @@ class TestAddRemoteAccount:
         assert account["base_url"] == client.remote.base_url
         assert account["remote_account_id"] == "acc_1"
         # 密码绝不回显
-        assert "admin_password" not in account
+        assert "api_key" not in account
         assert "remote_password_cipher" not in account
 
-    def test_bad_password_maps_to_400(self, client):
+    def test_bad_api_key_maps_to_400(self, client):
         response = client.post(
             "/api/icloud/remote-accounts",
             json={
                 "base_url": client.remote.base_url,
-                "admin_password": "wrong",
+                "api_key": "sk-wrong",
                 "remote_account_id": "acc_1",
             },
         )
@@ -102,7 +102,7 @@ class TestAddRemoteAccount:
             "/api/icloud/remote-accounts",
             json={
                 "base_url": "http://127.0.0.1:9",
-                "admin_password": ADMIN_PASSWORD,
+                "api_key": API_KEY,
                 "remote_account_id": "acc_1",
             },
         )
@@ -114,7 +114,7 @@ class TestAddRemoteAccount:
             "/api/icloud/remote-accounts",
             json={
                 "base_url": client.remote.base_url,
-                "admin_password": ADMIN_PASSWORD,
+                "api_key": API_KEY,
                 "remote_account_id": "acc_1",
             },
         )
@@ -126,7 +126,7 @@ class TestDiscoverRemoteAccounts:
         """「获取账号列表」是只读探针：列出远端账号，但不落库。"""
         response = client.post(
             "/api/icloud/remote-accounts/discover",
-            json={"base_url": client.remote.base_url, "admin_password": ADMIN_PASSWORD},
+            json={"base_url": client.remote.base_url, "api_key": API_KEY},
         )
         assert response.status_code == 200, response.text
         items = response.json()["items"]
@@ -135,17 +135,17 @@ class TestDiscoverRemoteAccounts:
         # 没有落库
         assert client.get("/api/icloud/accounts").json()["items"] == []
 
-    def test_discover_bad_password_maps_to_400(self, client):
+    def test_discover_bad_api_key_maps_to_400(self, client):
         response = client.post(
             "/api/icloud/remote-accounts/discover",
-            json={"base_url": client.remote.base_url, "admin_password": "wrong"},
+            json={"base_url": client.remote.base_url, "api_key": "sk-wrong"},
         )
         assert response.status_code == 400
 
     def test_discover_unreachable_maps_to_503(self, client):
         response = client.post(
             "/api/icloud/remote-accounts/discover",
-            json={"base_url": "http://127.0.0.1:9", "admin_password": ADMIN_PASSWORD},
+            json={"base_url": "http://127.0.0.1:9", "api_key": API_KEY},
         )
         assert response.status_code == 503
 

@@ -3,9 +3,8 @@
 被 `test_icloud_remote_client.py`（客户端契约）与 `test_icloud_remote_service.py`
 （服务层远程分支）共用。刻意用真实 HTTP 服务而不是 in-process mock：
 - 客户端/服务层若没把请求发到双端（例如硬编码了生产地址），测试会直接连接失败；
-- 双端**强制校验 CSRF**：写操作缺 `X-CSRF-Token` 或 token 不对时回
-  `403 CSRF_INVALID` —— 拒绝的是「CSRF 机制被移除后」的那条路径；
-- 双端**校验 Cookie 会话**：没有 `hme_session` 时回 401。
+- 双端**只认 `X-API-Key`**：缺头或值不对回 `401 INVALID_API_KEY`，不再有
+  Cookie / CSRF / 管理员密码登录。
 
 这是 `tests/` 下的辅助模块（无 `test_` 前缀，pytest 不会收集它）。
 """
@@ -16,21 +15,16 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-ADMIN_PASSWORD = "test-admin-pass"
+API_KEY = "sk-test-key"
 
 
 class RemoteHMEDouble:
     """icloud-hme 服务的最小双端（只实现本项目用到的契约）。"""
 
-    def __init__(self, accounts: list[dict] | None = None) -> None:
-        self.csrf_token = "tok-1"
-        # 真实服务的会话 Cookie 带 `Path=/`（见 reference/panel/icloud-hme/API.md）；
-        # 不带 Path 时默认路径是 `/api/auth`，后续 `/api/accounts` 请求收不到它。
-        self.cookie_value = "hme_session=sess-1"
-        self.session_cookie = f"{self.cookie_value}; Path=/"
-        self.login_count = 0
+    def __init__(self, accounts: list[dict] | None = None, api_key: str = API_KEY) -> None:
+        self.api_key = api_key
+        self.seen_keys: list[str] = []
         self.requests: list[tuple[str, str, dict]] = []
-        self.fail_next_login = False
         self.inbox_messages: dict[str, list[dict]] = {}
         self.aliases: dict[str, list[dict]] = {}
         self.create_error: dict | None = None
@@ -87,52 +81,39 @@ class RemoteHMEDouble:
                 return data if isinstance(data, dict) else {}
 
             def _authed(self) -> bool:
-                cookie = self.headers.get("Cookie") or ""
-                if double.cookie_value not in cookie:
-                    self._json(401, {"success": False, "code": "AUTH_REQUIRED", "message": "请先登录"})
-                    return False
-                return True
-
-            def _csrf_ok(self) -> bool:
-                token = (self.headers.get("X-CSRF-Token") or "").strip()
-                if token != double.csrf_token:
-                    self._json(403, {"success": False, "code": "CSRF_INVALID", "message": "CSRF 校验失败"})
+                key = (self.headers.get("X-API-Key") or "").strip()
+                double.seen_keys.append(key)
+                if key != double.api_key:
+                    self._json(401, {"success": False, "code": "INVALID_API_KEY", "message": "API 秘钥无效或已停用"})
                     return False
                 return True
 
             # -------------------------------------------------- 路由
 
             def do_POST(self):  # noqa: N802
-                path = urlparse(self.path).path
+                parsed = urlparse(self.path)
+                path = parsed.path
+                query = parse_qs(parsed.query)
                 body = self._read_body()
                 double.requests.append(("POST", path, body))
-
-                if path == "/api/auth/login":
-                    if double.fail_next_login:
-                        double.fail_next_login = False
-                        self._json(401, {"success": False, "code": "INVALID_CREDENTIALS", "message": "密码错误"})
-                        return
-                    if body.get("password") != ADMIN_PASSWORD:
-                        self._json(401, {"success": False, "code": "INVALID_CREDENTIALS", "message": "密码错误"})
-                        return
-                    double.login_count += 1
-                    self.send_response(200)
-                    payload = json.dumps(
-                        {"success": True, "data": {"csrf_token": double.csrf_token, "expires_at": "2026-10-10T00:00:00Z"}}
-                    ).encode("utf-8")
-                    self.send_header("Content-Type", "application/json")
-                    self.send_header("Set-Cookie", double.session_cookie)
-                    self.send_header("Content-Length", str(len(payload)))
-                    self.end_headers()
-                    self.wfile.write(payload)
-                    return
 
                 if not self._authed():
                     return
 
+                if path == "/api/inbox/previews":
+                    account_id = (query.get("account_id", [""])[0] or "").strip()
+                    ids = [str(item) for item in (body.get("ids") or [])]
+                    known = {
+                        str(m.get("id")): str(m.get("preview") or "")
+                        for m in double.inbox_messages.get(account_id, [])
+                    }
+                    self._json(
+                        200,
+                        {"success": True, "data": {mid: known.get(mid, f"摘要-{mid}") for mid in ids}},
+                    )
+                    return
+
                 if path == "/api/create":
-                    if not self._csrf_ok():
-                        return
                     if double.create_error is not None:
                         self._json(429, {"success": False, **double.create_error})
                         return
@@ -167,8 +148,6 @@ class RemoteHMEDouble:
                     return
 
                 if path.endswith("/deactivate") or path.endswith("/reactivate"):
-                    if not self._csrf_ok():
-                        return
                     active = path.endswith("/reactivate")
                     anonymous = path.split("/")[-2]
                     double.active_calls.append((anonymous, active))
@@ -176,8 +155,6 @@ class RemoteHMEDouble:
                     return
 
                 if path.endswith("/check"):
-                    if not self._csrf_ok():
-                        return
                     self._json(200, {"success": True, "data": {"id": path.split("/")[-2], "status": "active"}})
                     return
 
@@ -188,12 +165,6 @@ class RemoteHMEDouble:
                 path = parsed.path
                 query = parse_qs(parsed.query)
                 double.requests.append(("GET", path, {k: v[0] for k, v in query.items()}))
-
-                if path == "/api/auth/session":
-                    if not self._authed():
-                        return
-                    self._json(200, {"success": True, "data": {"csrf_token": double.csrf_token, "expires_at": "x"}})
-                    return
 
                 if not self._authed():
                     return
@@ -270,8 +241,6 @@ class RemoteHMEDouble:
                 if not self._authed():
                     return
                 if path.startswith("/api/aliases/"):
-                    if not self._csrf_ok():
-                        return
                     anonymous = path.rsplit("/", 1)[-1]
                     double.deleted_aliases.append(anonymous)
                     self._json(200, {"success": True, "data": {"anonymous_id": anonymous}})
@@ -293,9 +262,5 @@ class RemoteHMEDouble:
     def base_url(self) -> str:
         return f"http://127.0.0.1:{self.port}"
 
-    def restart_with_new_csrf(self) -> None:
-        """模拟服务重启：内存会话/CSRF 换了新的，但 Cookie 还在浏览器里。"""
-        self.csrf_token = f"tok-{self.login_count + 100}"
 
-
-__all__ = ["RemoteHMEDouble", "ADMIN_PASSWORD"]
+__all__ = ["RemoteHMEDouble", "API_KEY"]
