@@ -68,24 +68,53 @@ def _pick_usable_exit(
 ) -> str:
     """Grok 注册前先探出口，别拿 iCloud 别名去撞一堵已知会撞的墙。
 
-    `account:email-signup-unavailable` 跟**出口 IP 声誉**走、不跟邮箱走
-    （`platforms/grok/signup_pages.py` 顶部的实测结论）。而预检打的是同一个
-    接口、用的是永远收不到信的 `@example.invalid`，所以：
+    分两层，**第一层永远开、第二层才 opt-in**：
 
-    - 被拒 → 这个出口别用了，`report_proxy_error` 摘掉，换下一个；
-    - 没被拒 / 预检本身没跑成 → 放行（fail-open，预检不该变成新的失败点）。
+    1. **连通性**（`probe_reachable`，无条件执行）：curl 连不上（超时 / rc≠0 /
+       HTTP 000）就是这个出口此刻是死的 —— 实测这类出口在浏览器里表现为
+       `net::ERR_CONNECTION_CLOSED`，Turnstile 铸币三次全挂，白烧一个别名加
+       两三分钟。这一层只判传输层，**4xx/5xx 一律放行**（Cloudflare 403 是常态，
+       浏览器能过），所以不会误杀好出口。
+    2. **可注册性**（`probe_exit`，`grok_exit_preflight=1` 才开）：打真正的发码
+       接口，看有没有被回 `account:email-signup-unavailable`。这条信号的归属
+       有争议（出口声誉 vs 邮箱域名窗口，两边的实测记录互相矛盾：2026-11-01
+       的 A/B 指向出口，同一份记录里另一条又指向域名），而且探针用的是
+       `@example.invalid`（另一个域名），**结论不可信**，所以默认不开 ——
+       开了可能把好出口误摘。
 
-    **默认关闭**（`grok_exit_preflight=1` 才开）。2026-11-01 更正：
-    `account:email-signup-unavailable` 主要跟**邮箱域名配额**走，不是出口 IP ——
-    同一出口同一域名连注册 3~4 个之后整个域名几小时内一律回这个码。用
-    `@example.invalid` 去探出口，探的是另一条判定分支，结论不可信，还会把好
-    出口误摘。要开只在你确认出口侧有问题时开。
+    被摘掉的出口经 `report_bad`（= `report_proxy_error`）当场置 `is_active=False`，
+    下一次挑出口就会跳过它。
     """
-    if not _truthy_extra(extra.get("grok_exit_preflight"), False):
-        return proxy
-    from platforms.grok.exit_probe import probe_exit
+    from platforms.grok.exit_probe import probe_exit, probe_reachable
 
     current = proxy
+
+    # ── 第一层：连通性（永远执行）────────────────────────────────────
+    reachable = ""
+    for attempt in range(_GROK_EXIT_PROBE_TRIES):
+        if not current:
+            break
+        reach = probe_reachable(current)
+        if reach.get("ok"):
+            if attempt:
+                log(task_id, f"出口连通性检查：换到第 {attempt + 1} 个出口才通")
+            reachable = current
+            break
+        log(task_id, f"出口连通性检查：{_redact_proxy(current)} {reach.get('detail') or '连不上'}，换下一个")
+        try:
+            report_bad(current)
+        except Exception as exc:
+            logger.debug("摘除死出口 %s 失败: %s", _redact_proxy(current), exc)
+        current = normalize(get_next())
+    if not reachable:
+        # 连试 N 个出口都连不上：本轮放弃（别拿一个未验证的出口去烧别名）。
+        log(task_id, f"出口连通性检查：连试 {_GROK_EXIT_PROBE_TRIES} 个出口都连不上，本轮放弃")
+        return ""
+    current = reachable
+
+    # ── 第二层：可注册性（opt-in）──────────────────────────────────
+    if not _truthy_extra(extra.get("grok_exit_preflight"), False):
+        return current
     for attempt in range(_GROK_EXIT_PROBE_TRIES):
         if not current:
             return ""

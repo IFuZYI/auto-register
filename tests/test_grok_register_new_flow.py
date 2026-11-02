@@ -1499,3 +1499,46 @@ class EmailPageMintWithoutSolverTests(unittest.TestCase):
             rb._send_code_stage(page, "a@icloud.com", proxy="", captcha=None, timeout=0)
 
         self.assertFalse(calls, "按钮可点就不该去铸币")
+
+
+class CookieBannerBeforeSubmitTests(unittest.TestCase):
+    """提交前若页面还停在 cookie 横幅上，必须再关一次。
+
+    线上实测（2026-11-02 18:13，出口 9.142.37.16）：`发码结局 no_confirmation:
+    未确认发信（页面未给出理由: Cookie notice. Essential cookies keep the site
+    working…）` —— 横幅晚渲染盖住提交按钮，点了等于没点。
+    """
+
+    def _run(self, *, text):
+        from platforms.grok import register_browser as rb
+        from platforms.grok import signup_pages as pages
+
+        page = _FakeCamoufox(text, with_entry=False).page
+
+        def evaluate(script, *args):
+            js = str(script)
+            if "tokenLen" in js:
+                return {"tokenLen": 0, "inputExists": True}
+            if "document.body" in js:
+                return text
+            return {"label": "Sign up", "disabled": True, "found": True, "reason": ""}
+
+        page.evaluate.side_effect = evaluate
+        logs: list[str] = []
+        dismissed: list[int] = []
+        with patch.object(rb, "_dismiss_cookie_banner", side_effect=lambda p: dismissed.append(1)), \
+                patch.object(pages, "ensure_turnstile_token", side_effect=lambda *a, **k: ""):
+            rb._send_code_stage(page, "a@icloud.com", proxy="", captcha=None, timeout=0, log=lambda m: logs.append(str(m)))
+        return dismissed, logs
+
+    def test_banner_present_triggers_redismiss(self):
+        dismissed, logs = self._run(
+            text="Cookie notice. Essential cookies keep the site working and stay on. "
+                 "Sign up with email Email Sign up"
+        )
+        self.assertTrue(dismissed, "页面还停在 cookie 横幅时必须再关一次")
+        self.assertTrue(any("cookie 横幅" in line for line in logs), logs)
+
+    def test_no_banner_does_not_spend_time(self):
+        dismissed, _logs = self._run(text="Sign up with email Email Sign up")
+        self.assertFalse(dismissed, "没有横幅就别白等按钮超时")

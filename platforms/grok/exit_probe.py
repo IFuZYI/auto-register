@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import shutil
 import subprocess
 from typing import Any, Callable, Optional
@@ -130,9 +131,72 @@ def probe_exit(
     }
 
 
+#: 连通性检查打的目标：**只要连得上就行**，不看内容。
+REACH_URL = "https://grok.com"
+#: 连通性检查的墙钟上限（秒）。比注册接口短 —— 这里只判传输层。
+REACH_TIMEOUT = 12
+
+
+def probe_reachable(
+    proxy: str,
+    *,
+    url: str = REACH_URL,
+    timeout: int = REACH_TIMEOUT,
+    runner: Callable[..., Any] | None = None,
+) -> dict[str, Any]:
+    """探出口**连通性**：能不能连出去，不判「能不能注册」。
+
+    与 `probe_exit` 的分工：
+    - `probe_exit` 问的是业务判定（打发码接口看有没有被企业级拒），只能 fail-open
+      —— 403 挑战页、限流、格式错都「证明不了出口坏」；
+    - 本函数问的是**传输层**：curl 连不上（进程超时 / 退出码非 0 / HTTP 000）
+      就是确定坏 —— 实测这类出口在浏览器里表现为
+      `net::ERR_CONNECTION_CLOSED`（Turnstile 铸币三次全挂），白烧一个别名
+      加两三分钟。
+
+    **HTTP 4xx/5xx 一律算可用**：`accounts.x.ai` 对裸 curl 回 Cloudflare 403
+    是常态（浏览器能过挑战），不能据此摘出口。
+
+    返回 `{"ok": bool, "detail": str, "status": str, "skipped": bool}`。
+    """
+    proxy = str(proxy or "").strip()
+    if not proxy:
+        return {"ok": True, "detail": "没有代理，跳过连通性检查", "status": "", "skipped": True}
+    if runner is None and not _curl_bin():
+        return {"ok": True, "detail": "没有 curl，跳过连通性检查", "status": "", "skipped": True}
+
+    cmd = [
+        "curl", "-sS", "-o", os.devnull,
+        "--max-time", str(int(timeout)),
+        "-x", proxy,
+        "-w", "%{http_code}",
+        str(url),
+    ]
+    run = runner or subprocess.run
+    try:
+        proc = run(cmd, capture_output=True, text=True, timeout=timeout + 5)
+    except Exception as exc:
+        # 进程级失败（超时被杀 / 起不来）＝ 这个出口此刻连不上，换下一个。
+        return {"ok": False, "detail": f"出口连不上（{type(exc).__name__}）", "status": "", "skipped": False}
+
+    status = str(getattr(proc, "stdout", "") or "").strip()
+    rc = int(getattr(proc, "returncode", 0) or 0)
+    if rc != 0 or status in ("", "000"):
+        return {
+            "ok": False,
+            "detail": f"出口连不上（curl rc={rc} status={status or '000'}）",
+            "status": status,
+            "skipped": False,
+        }
+    return {"ok": True, "detail": f"出口连通（HTTP {status}）", "status": status, "skipped": False}
+
+
 __all__ = [
     "PROBE_ADDRESS",
+    "REACH_TIMEOUT",
+    "REACH_URL",
     "SEND_CODE_URL",
     "UNAVAILABLE_CODE",
     "probe_exit",
+    "probe_reachable",
 ]

@@ -148,13 +148,120 @@ class PreflightDefaultTests(unittest.TestCase):
     """
 
     def test_default_is_off(self):
+        """默认关的是**可注册性**预检（打真实发码接口那层），连通性层不受它影响。"""
         from services.task_runners import _pick_usable_exit
 
         called = []
-        with patch("platforms.grok.exit_probe.probe_exit", lambda p: called.append(p) or {"ok": False}):
+        with patch("platforms.grok.exit_probe.probe_exit", lambda p: called.append(p) or {"ok": False}), \
+                patch("platforms.grok.exit_probe.probe_reachable",
+                      lambda p, **kw: {"ok": True, "detail": "出口连通（HTTP 200）", "status": "200"}):
             out = _pick_usable_exit(
                 "p0", task_id="t", extra={}, log=lambda *a: None,
                 get_next=lambda: "p1", report_bad=lambda p: None, normalize=lambda v: v,
             )
         self.assertEqual(out, "p0")
-        self.assertEqual(called, [], "默认不该发任何探测请求")
+        self.assertEqual(called, [], "默认不该打真实发码接口（那层信号归属有争议）")
+
+
+class ProbeReachableTests(unittest.TestCase):
+    """连通性检查：传输层失败＝出口确定坏，HTTP 4xx/5xx 一律放行。
+
+    背景（2026-11-02 实测）：两条 `9.142.*` 出口周期性地整条连不上 —— curl 回
+    `000`，同一时刻浏览器里就是 `net::ERR_CONNECTION_CLOSED`，Turnstile 铸币
+    三次全挂、白烧一个别名加两三分钟。而 `accounts.x.ai` 对裸 curl 回
+    Cloudflare 403 是**常态**（浏览器能过挑战），不能据此摘出口。
+    """
+
+    def test_http_200_is_reachable(self):
+        out = exit_probe.probe_reachable(
+            "socks5h://u:p@1.2.3.4:1080",
+            runner=lambda *a, **k: _proc("200"),
+        )
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["status"], "200")
+
+    def test_http_403_is_still_reachable(self):
+        """Cloudflare 403 是挑战页，不是出口坏 —— 误杀会摘掉好出口。"""
+        out = exit_probe.probe_reachable(
+            "socks5h://u:p@1.2.3.4:1080",
+            runner=lambda *a, **k: _proc("403"),
+        )
+        self.assertTrue(out["ok"], "4xx 不能判死")
+
+    def test_http_000_is_unreachable(self):
+        out = exit_probe.probe_reachable(
+            "socks5h://u:p@1.2.3.4:1080",
+            runner=lambda *a, **k: _proc("000", code=7),
+        )
+        self.assertFalse(out["ok"], "连不上就是死出口")
+        self.assertFalse(out["skipped"])
+
+    def test_empty_status_with_zero_exit_code_is_unreachable(self):
+        out = exit_probe.probe_reachable(
+            "socks5h://u:p@1.2.3.4:1080",
+            runner=lambda *a, **k: _proc(""),
+        )
+        self.assertFalse(out["ok"])
+
+    def test_timeout_is_unreachable(self):
+        def _boom(*a, **k):
+            raise subprocess.TimeoutExpired("curl", 17)
+
+        out = exit_probe.probe_reachable("socks5h://u:p@1.2.3.4:1080", runner=_boom)
+        self.assertFalse(out["ok"], "超时的出口同样不能用（就是要避免白烧别名）")
+
+    def test_no_proxy_is_a_skip(self):
+        out = exit_probe.probe_reachable("")
+        self.assertTrue(out["ok"])
+        self.assertTrue(out["skipped"])
+
+
+class PickUsableExitTests(unittest.TestCase):
+    """`_pick_usable_exit` 的连通性层：**不依赖** `grok_exit_preflight` 开关。"""
+
+    def _call(self, *, reach_results, extra=None):
+        from services import task_runners
+
+        logs: list[str] = []
+        bads: list[str] = []
+        counter = {"n": 0}
+        popped: list[str] = []
+
+        def _next() -> str:
+            counter["n"] += 1
+            value = f"socks5h://cand{counter['n']}"
+            popped.append(value)
+            return value
+
+        with patch.object(
+            exit_probe, "probe_reachable", side_effect=reach_results
+        ):
+            out = task_runners._pick_usable_exit(
+                "socks5h://bad0",
+                task_id="t",
+                extra=dict(extra or {}),
+                log=lambda _tid, msg: logs.append(msg),
+                get_next=_next,
+                report_bad=bads.append,
+                normalize=lambda value: value,
+            )
+        return out, logs, bads
+
+    def test_dead_exit_is_rotated_even_with_preflight_off(self):
+        out, logs, bads = self._call(
+            reach_results=[
+                {"ok": False, "detail": "出口连不上（curl rc=7 status=000）"},
+                {"ok": True, "detail": "出口连通（HTTP 200）", "status": "200"},
+            ]
+        )
+        self.assertEqual(out, "socks5h://cand1")
+        self.assertEqual(bads, ["socks5h://bad0"], "死出口必须被摘掉")
+        self.assertTrue(any("连通性检查" in line for line in logs), logs)
+
+    def test_all_exits_dead_gives_up_instead_of_using_unverified_one(self):
+        out, logs, _bads = self._call(
+            reach_results=[{"ok": False, "detail": "连不上"}] * 5,
+            extra={"grok_exit_preflight": "0"},
+        )
+        self.assertEqual(out, "", "全连不上时本轮放弃，别拿未验证的出口烧别名")
+        self.assertTrue(any("本轮放弃" in line for line in logs), logs)

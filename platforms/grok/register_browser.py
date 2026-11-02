@@ -568,6 +568,15 @@ def _send_code_stage(
     # 服务端只会回一句 `account:email-signup-unavailable`（通用拒绝）。
     # 参考实现的原话：「Turnstile/Castle needs 30-45 s to settle — do not shorten
     # it before the submit path.」我们取 12 秒上限、拿到令牌就立刻走。
+    # 提交前再看一眼 cookie 横幅：线上实测（2026-11-02 18:13）有一轮页面文本停在
+    # `Cookie notice. Essential cookies keep the site working…` —— 横幅晚渲染时
+    # 会盖住提交按钮，点了个空，最后被判成 `no_confirmation`（「页面未给出理由」）。
+    # 只在这种文本出现时才去关，避免每次提交都白等几秒的按钮超时。
+    page_text_now = str(signup_pages.page_text(page) or "")
+    if "cookie notice" in page_text_now.lower() or "essential cookies" in page_text_now.lower():
+        _log(log, "[Grok] 提交前检测到 cookie 横幅，先关掉")
+        _dismiss_cookie_banner(page)
+
     gate = signup_pages.wait_until_submittable(page, timeout=15.0)
     if (not gate.get("ready")) and (not gate.get("token_len")) and gate.get("input_exists"):
         # 走到这里的条件 = 「按钮禁用 + 页面上确实有 Turnstile 字段 + 没票」：
