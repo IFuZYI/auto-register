@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 from unittest import mock
 
 import platforms.grok.turnstile_mint as mint_mod
@@ -208,3 +209,75 @@ class SnapWrapperDetectionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OffscreenMintResourceGuardTests(unittest.TestCase):
+    """铸币要串行 + 内存不足就跳过。
+
+    事故（2026-11-02 18:25）：3 个 Grok 注册并发跑，每个都要起一个屏外 Chromium
+    铸币，2GB 内存的机器直接把主进程打爆 —— 服务无 traceback 消失，日志停在
+    「已进入邮箱注册视图」，任务全部变孤儿。
+    """
+
+    def test_low_memory_skips_without_spawning_chrome(self):
+        from platforms.grok import turnstile_mint as tm
+
+        with patch.object(tm, "_available_mb", return_value=10), patch.object(
+            tm, "find_chrome", side_effect=AssertionError("内存不足时不该去找浏览器")
+        ):
+            with self.assertRaises(RuntimeError) as excinfo:
+                tm.mint_via_offscreen_chrome("0xKEY", "https://accounts.x.ai/sign-up")
+        self.assertIn("内存不足", str(excinfo.exception))
+
+    def test_enough_memory_proceeds_to_locked_impl(self):
+        from platforms.grok import turnstile_mint as tm
+
+        calls = []
+        with patch.object(tm, "_available_mb", return_value=9999), patch.object(
+            tm, "find_chrome", return_value="/usr/bin/google-chrome"
+        ), patch.object(
+            tm, "_mint_offscreen_locked", side_effect=lambda *a, **k: calls.append(a) or "TOKEN"
+        ), patch.object(tm, "_SCRIPT_PATH") as script:
+            script.exists.return_value = True
+            out = tm.mint_via_offscreen_chrome("0xKEY", "https://accounts.x.ai/sign-up")
+        self.assertEqual(out, "TOKEN")
+        self.assertEqual(len(calls), 1)
+
+    def test_mint_is_serialised_across_threads(self):
+        """两个线程同时铸币时，锁内的实现不得重叠执行。"""
+        import threading as _threading
+        import time as _time
+
+        from platforms.grok import turnstile_mint as tm
+
+        active = {"now": 0, "max": 0}
+        guard = _threading.Lock()
+
+        def fake_locked(*_a, **_k):
+            with guard:
+                active["now"] += 1
+                active["max"] = max(active["max"], active["now"])
+            _time.sleep(0.15)
+            with guard:
+                active["now"] -= 1
+            return "TOKEN"
+
+        with patch.object(tm, "_available_mb", return_value=9999), patch.object(
+            tm, "find_chrome", return_value="/usr/bin/google-chrome"
+        ), patch.object(tm, "_mint_offscreen_locked", side_effect=fake_locked), patch.object(
+            tm, "_SCRIPT_PATH"
+        ) as script:
+            script.exists.return_value = True
+            threads = [
+                _threading.Thread(
+                    target=tm.mint_via_offscreen_chrome,
+                    args=("0xKEY", "https://accounts.x.ai/sign-up"),
+                )
+                for _ in range(3)
+            ]
+            for th in threads:
+                th.start()
+            for th in threads:
+                th.join()
+
+        self.assertEqual(active["max"], 1, "铸币必须串行（同时起多个 Chromium 会 OOM）")

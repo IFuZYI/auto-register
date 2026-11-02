@@ -19,6 +19,7 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from functools import lru_cache
 from pathlib import Path
@@ -210,6 +211,31 @@ def _virtual_display_prefix() -> list[str]:
     return []
 
 
+#: 屏外铸币的**全局串行锁**：每铸一次都会起一整个 Chromium（含 xvfb），
+#: 并发跑 3 个注册就等于 3 个 Chromium 抢内存 —— 本机 2GB RAM 上实测直接把
+#: 主进程 OOM 掉（2026-11-02 18:25，服务无 traceback 直接消失，日志停在
+#: 「已进入邮箱注册视图」）。串行之后多出来的等待（十几秒）远比崩一次便宜。
+_MINT_LOCK = threading.Lock()
+
+#: 低于这个可用内存（MB）就不再起铸币浏览器 —— 宁可这一轮报「拿不到令牌」，
+#: 也不要为了补一张票把整个服务搞崩。默认 200MB：本机（2GB RAM）空载时
+#: MemAvailable 也只有 ~300MB，阈值定太高会等于永久关掉内建铸币。
+#: 可用 `GROK_MINT_MIN_FREE_MB` 覆盖（调小=更激进，调大=更保守）。
+MIN_FREE_MB_FOR_MINT = int(os.getenv("GROK_MINT_MIN_FREE_MB", "200") or 200)
+
+
+def _available_mb() -> int:
+    """读 `/proc/meminfo` 的 MemAvailable（MB）；读不到返回一个大数（=放行）。"""
+    try:
+        with open("/proc/meminfo", encoding="utf-8") as handle:
+            for line in handle:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) // 1024
+    except Exception:  # noqa: BLE001 - 读不到就别拦
+        logger.debug("读 MemAvailable 失败", exc_info=True)
+    return 10**6
+
+
 def mint_via_offscreen_chrome(
     site_key: str,
     page_url: str,
@@ -225,7 +251,30 @@ def mint_via_offscreen_chrome(
     if not _SCRIPT_PATH.exists():
         raise RuntimeError(f"未找到 mint 脚本: {_SCRIPT_PATH}")
 
+    free_mb = _available_mb()
+    if free_mb < MIN_FREE_MB_FOR_MINT:
+        # 内存不够就别起 Chromium：宁可这一轮没票，也不要 OOM 掉整个服务
+        # （2026-11-02 实测：3 个并发注册 + 铸币把 2GB 的机器打爆）。
+        raise RuntimeError(
+            f"可用内存不足（{free_mb}MB < {MIN_FREE_MB_FOR_MINT}MB），跳过屏外铸币"
+        )
+
     chrome = find_chrome()
+    last_err = ""
+    with _MINT_LOCK:
+        return _mint_offscreen_locked(site_key, page_url, proxy, timeout, retries, log, chrome)
+
+
+def _mint_offscreen_locked(
+    site_key: str,
+    page_url: str,
+    proxy: str,
+    timeout: float,
+    retries: int,
+    log: LogFn,
+    chrome: str,
+) -> str:
+    """锁内实现（见 `mint_via_offscreen_chrome` 的串行锁与内存闸门）。"""
     last_err = ""
     for attempt in range(1, max(1, retries) + 1):
         args = [
