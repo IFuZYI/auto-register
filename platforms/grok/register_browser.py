@@ -415,6 +415,8 @@ def _send_code_stage(
     log: LogFn = None,
     timeout: float | None = None,
     _test_responses: Optional[list] = None,
+    proxy: str = "",
+    captcha: Any = None,
 ) -> dict:
     """填邮箱 → 提交 → 判定发码结局。
 
@@ -562,7 +564,23 @@ def _send_code_stage(
     # 服务端只会回一句 `account:email-signup-unavailable`（通用拒绝）。
     # 参考实现的原话：「Turnstile/Castle needs 30-45 s to settle — do not shorten
     # it before the submit path.」我们取 12 秒上限、拿到令牌就立刻走。
-    gate = signup_pages.wait_until_submittable(page, timeout=60.0)
+    gate = signup_pages.wait_until_submittable(page, timeout=15.0)
+    if not gate.get("token_len") and captcha is not None:
+        # **邮箱页也有 Turnstile**（`input[name=cf-turnstile-response]`），
+        # 和资料页是同一个 sitekey。之前只在资料页铸币，邮箱页全靠 widget 自己
+        # 出票 —— 出不来时按钮就一直是禁用态，然后我们硬发 `form.requestSubmit()`
+        # 拿到 `account:email-signup-unavailable`（2026-11-02 连续十次）。
+        # 这里补上：先等 widget，超时就用同一套铸币 + 注入。
+        _log(log, "[Grok] 邮箱页 Turnstile 无票，尝试铸币…")
+        token = signup_pages.ensure_turnstile_token(
+            page, page_url=signup_pages.SIGNUP_URL, proxy=proxy,
+            log=log, captcha=captcha, timeout=20.0,
+        )
+        if token:
+            _log(log, f"[Grok] 邮箱页 Turnstile 令牌已就绪（len={len(token)}）")
+        gate = signup_pages.wait_until_submittable(page, timeout=10.0)
+    elif not gate.get("token_len"):
+        _log(log, "[Grok] 邮箱页 Turnstile 无票，且没配验证码解决器（只能等 widget 自己出票）")
     if not gate.get("ready"):
         # **不提交**。按钮禁用 / 没令牌时硬提交，服务端只会回
         # `account:email-signup-unavailable`（2026-11-02 线上日志连续 10 次都是
@@ -978,7 +996,7 @@ def register_grok_via_browser(
                 return result
             _log(log, "[Grok] 已进入邮箱注册视图")
 
-            stage = _send_code_stage(page, email, log=log)
+            stage = _send_code_stage(page, email, log=log, proxy=proxy, captcha=captcha)
             # `kind` 一起带上：上层（任务日志、重试决策）需要知道究竟落的是
             # 限流 / 出口被拒 / 已有账号 —— 只给错误文本的话又得再做一次字符串匹配。
             # 但 **`ok` 不能从这里带上来**：它在这里的含义是「信发出去了」，
