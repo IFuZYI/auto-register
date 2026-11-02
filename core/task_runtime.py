@@ -221,6 +221,12 @@ class RegisterTaskStore:
                 meta=dict(meta or {}),
                 progress=f"0/{total}",
             )
+            existing = self._records.get(task_id)
+            if existing is not None and existing.status in {"pending", "running"}:
+                # 理论上调用方已保证 id 唯一（`_new_task_id`）；真撞上时
+                # 宁可报错，也不要静默把「还在跑的」那条覆盖掉 —— 覆盖会
+                # 让它在任务页消失，线程却还在往同一条记录写日志。
+                raise ValueError(f"任务 ID 冲突且原任务仍在运行: {task_id}")
             self._records[task_id] = record
             return record
 

@@ -279,5 +279,37 @@ class PlatformMailboxRequirementTests(unittest.TestCase):
         self.assertTrue(by_name["grok"]["uses_mailbox"])
 
 
+class TaskIdUniquenessTests(unittest.TestCase):
+    """任务 id 必须唯一 —— 撞车会让先起的那条从「任务运行」页消失。
+
+    事故形态：id 只用毫秒时间戳，同一毫秒内起两条同种任务时
+    `RegisterTaskStore.create` 的 `self._records[task_id] = record`
+    直接覆盖前一条，DB 主键也相同；线程还在跑，日志却并到同一张卡片上。
+    """
+
+    def test_ids_generated_in_the_same_millisecond_differ(self):
+        from api.tasks import _new_task_id
+
+        ids = [_new_task_id("task") for _ in range(200)]
+        self.assertEqual(len(set(ids)), len(ids), "同一毫秒内生成的 id 必须互不相同")
+        self.assertTrue(all(i.startswith("task_") for i in ids))
+
+    def test_store_refuses_to_overwrite_a_live_task(self):
+        store = RegisterTaskStore()
+        store.create("task_x", platform="chatgpt", total=1, source="manual")
+        with self.assertRaises(ValueError):
+            store.create("task_x", platform="chatgpt", total=1, source="manual")
+
+    def test_store_allows_reusing_the_id_of_a_finished_task(self):
+        from core.task_runtime import RegisterTaskRecord
+
+        store = RegisterTaskStore()
+        record: RegisterTaskRecord = store.create(
+            "task_y", platform="chatgpt", total=1, source="manual"
+        )
+        record.status = "done"
+        store.create("task_y", platform="chatgpt", total=1, source="manual")
+
+
 if __name__ == "__main__":
     unittest.main()

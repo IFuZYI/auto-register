@@ -337,7 +337,11 @@ def _open_auto_task(
 
         from services import task_service as _api
 
-        task_id = f"{source}_{int(_time.time() * 1000)}"
+        import secrets as _secrets
+
+        # 与 `api/tasks.py::_new_task_id` 同一口径：毫秒 + 随机后缀，避免
+        # 同一毫秒内起两轮时后一条覆盖前一条（任务页看不到前一条）。
+        task_id = f"{source}_{int(_time.time() * 1000)}_{_secrets.token_hex(3)}"
         _api.task_store.create(
             task_id,
             platform=platform,

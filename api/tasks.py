@@ -288,6 +288,23 @@ def _prepare_register_request(req: RegisterTaskRequest) -> RegisterTaskRequest:
     return prepared
 
 
+def _new_task_id(prefix: str) -> str:
+    """生成任务 id：`前缀_毫秒_随机后缀`。
+
+    只用毫秒时间戳会**撞车**：同一种任务在同一毫秒内起两个（脚本连开、
+    手快连点两下、定时器批量触发），`RegisterTaskStore.create` 是
+    `self._records[task_id] = record` —— 后者直接覆盖前者，DB 主键也是
+    这个 id，于是先起的那条从「任务运行」页消失（线程还在跑，日志并到
+    同一张卡片上）。加 6 位随机后缀把碰撞概率降到可忽略。
+
+    历史 id（`task_1793000000000`）保持不变可读，前后缀格式没变，
+    没有代码从 id 里解析时间。
+    """
+    import secrets
+
+    return f"{prefix}_{int(time.time() * 1000)}_{secrets.token_hex(3)}"
+
+
 def _create_task_record(
     task_id: str, req: RegisterTaskRequest, source: str, meta: dict | None = None
 ):
@@ -309,7 +326,7 @@ def enqueue_register_task(
     meta: dict | None = None,
 ) -> str:
     prepared = _prepare_register_request(req)
-    task_id = f"task_{int(time.time() * 1000)}"
+    task_id = _new_task_id("task")
     _create_task_record(task_id, prepared, source, meta)
     if background_tasks is None:
         thread = threading.Thread(
@@ -363,7 +380,7 @@ def create_backfill_rt_task(req: BackfillRtTaskRequest, background_tasks: Backgr
             detail = "没有匹配的账号"
         raise HTTPException(400, detail)
 
-    task_id = f"backfill_rt_{int(time.time() * 1000)}"
+    task_id = _new_task_id("backfill_rt")
     _task_store.create(
         task_id,
         platform="chatgpt",
@@ -450,7 +467,7 @@ def create_batch_action_task(
         raise HTTPException(400, "所选账号不存在" if missing_ids else "没有匹配的账号")
 
     label = str(req.action_label or action_id)
-    task_id = f"action_{int(time.time() * 1000)}"
+    task_id = _new_task_id("action")
     _task_store.create(
         task_id,
         platform=platform,
@@ -507,7 +524,7 @@ def create_probe_status_task(
     if not account_ids:
         raise HTTPException(400, "所选账号不存在" if missing_ids else "没有匹配的账号")
 
-    task_id = f"probe_status_{int(time.time() * 1000)}"
+    task_id = _new_task_id("probe_status")
     _task_store.create(
         task_id,
         platform="chatgpt",
@@ -560,7 +577,7 @@ def create_bind_2fa_task(req: Bind2faTaskRequest, background_tasks: BackgroundTa
             detail = "没有匹配的账号"
         raise HTTPException(400, detail)
 
-    task_id = f"bind_2fa_{int(time.time() * 1000)}"
+    task_id = _new_task_id("bind_2fa")
     _task_store.create(
         task_id,
         platform="chatgpt",
@@ -612,7 +629,7 @@ def create_refresh_token_task(req: RefreshTokenTaskRequest, background_tasks: Ba
         detail = "所选账号不存在" if missing_ids else "没有匹配的账号"
         raise HTTPException(400, detail)
 
-    task_id = f"refresh_token_{int(time.time() * 1000)}"
+    task_id = _new_task_id("refresh_token")
     _task_store.create(
         task_id,
         platform="chatgpt",
@@ -701,7 +718,7 @@ def create_recover_accounts_task(
         )
 
     candidates = candidates[: int(req.limit)]
-    task_id = f"recover_{int(time.time() * 1000)}"
+    task_id = _new_task_id("recover")
     _task_store.create(
         task_id,
         platform="chatgpt",
