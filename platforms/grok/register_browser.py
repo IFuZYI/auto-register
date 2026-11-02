@@ -598,7 +598,17 @@ def _send_code_stage(
             ),
         }
     _log(log, f"[Grok] 可以提交（令牌 {gate.get('token_len')} 字符，按钮{'可点' if not gate.get('button_disabled') else '仍禁用'}）")
+    # 提交前再确认一次邮箱还在框里：等令牌的十几秒里页面可能重渲染把受控字段
+    # 清空，`_SUBMIT_EMAIL_JS` 会因为 `input-empty` 直接放弃（返回 found=true /
+    # disabled=true，日志看着像「按钮是禁用态」，其实是**框空了**）。
+    if not signup_pages.email_value_matches(page, email):
+        _log(log, "[Grok] 邮箱框被清空，重新输入")
+        signup_pages.retype_email(page, email)
     label, state = signup_pages.submit_email_code(page)
+    if state.get("reason") in ("input-empty", "input-invalid", "no-input"):
+        _log(log, f"[Grok] 提交未生效（{state.get('reason')}），再补一次邮箱后重试")
+        signup_pages.retype_email(page, email)
+        label, state = signup_pages.submit_email_code(page)
     attempts = 1
     while attempts < 3:
         page.wait_for_timeout(1200)

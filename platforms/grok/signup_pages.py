@@ -747,6 +747,37 @@ def email_input_present(page: Any) -> bool:
     return _count(page, EMAIL_INPUT) > 0
 
 
+def email_value_matches(page: Any, email: str) -> bool:
+    """邮箱框里现在是不是这个地址（空/不一致都算不匹配）。"""
+    try:
+        val = page.evaluate("""
+        () => {
+          const el = document.querySelector('input#email, input[name="email"], input[type="email"]');
+          return el ? String(el.value || '') : '';
+        }
+        """)
+        return str(val or "").strip() == str(email or "").strip()
+    except Exception as exc:
+        logger.debug("读邮箱框失败: %s", exc)
+        return False
+
+
+def retype_email(page: Any, email: str) -> bool:
+    """把邮箱重新打进框里（点一下 → 全选 → 删除 → 逐字打）。"""
+    try:
+        field = page.locator(EMAIL_INPUT).first
+        field.click(timeout=6000)
+        page.keyboard.press("ControlOrMeta+a")
+        page.keyboard.press("Delete")
+        page.keyboard.type(email, delay=55)
+        page.keyboard.press("Tab")
+        page.wait_for_timeout(500)
+        return email_value_matches(page, email)
+    except Exception as exc:
+        logger.debug("重输邮箱失败: %s", exc)
+        return False
+
+
 def submit_email_code(page: Any, *, wait_timeout: float = 8.0, poll: float = 0.3) -> tuple[str, dict]:
     """等输入框可提交再提交；三档降级（按钮 → form → Enter）。返回 `(文案, 状态)`。
 
