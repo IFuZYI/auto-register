@@ -350,16 +350,31 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
                     mail_provider = merged_extra.get("mail_provider", "")
                     if mail_provider:
                         account.extra.setdefault("mail_provider", mail_provider)
-                    # 记下**注册时用的代理**：之后复用这个账号（测活、补 RT、
-                    # 绑 2FA…）时优先回到同一个出口 IP —— 同一账号反复换 IP
-                    # 容易被上游当成异常登录。代理不可用时会被换成新的并
-                    # 覆盖这个字段（见 `proxy_pool.resolve_for_account`）。
+                    # 注册链路走的是 `register` 标签的出口；账号**绑定**以及
+                    # 随后的自动上传必须落到带 `bind` 标签的代理上（用户
+                    # 2026-11-02 要求：最后绑定、上传的不能还是注册代理）。
                     #
-                    # 注册时没走代理（`_proxy` 为空，如池子当时是空的）就**不写**：
-                    # 不写空值，让复用路径的 resolve 知道「还没绑定」并补上 ——
-                    # 绑定不再只发生在注册这一刻（用户要求）。
-                    if _proxy:
-                        account.extra["register_proxy"] = _proxy
+                    # `resolve_for_account` 的规则正好是我们要的：
+                    # - 注册代理本身也带 `bind` 标签 → 原样保留（不白换出口）；
+                    # - 只有 `register` 标签 / 没绑定 / 已失效 → 从可绑定池里
+                    #   挑负载最轻的一个；
+                    # - 一个带 `bind` 标签的代理都没有 → 保持旧行为（保留注册
+                    #   代理），存量部署不因没配标签而丢绑定。
+                    bound_proxy, switched = _proxy_pool.resolve_for_account(_proxy or "")
+                    if bound_proxy:
+                        account.extra["register_proxy"] = bound_proxy
+                    if switched and bound_proxy:
+                        if _proxy:
+                            _api.log(
+                                task_id,
+                                "注册完成，绑定代理切换: "
+                                f"{_redact_proxy(_proxy)} → {_redact_proxy(bound_proxy)}",
+                            )
+                        else:
+                            _api.log(
+                                task_id,
+                                f"注册完成，绑定代理: {_redact_proxy(bound_proxy)}",
+                            )
                 saved_account = save_account(account)
                 if _proxy:
                     _proxy_pool.report_success(_proxy)

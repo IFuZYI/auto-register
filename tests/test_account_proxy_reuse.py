@@ -200,8 +200,11 @@ class TestRegistrationRecordsProxy:
         from api import tasks as tasks_mod
 
         src = inspect.getsource(tasks_mod._run_register)
-        assert 'account.extra["register_proxy"] = _proxy' in src, (
-            "注册成功必须记下用的代理 —— 否则复用路径没有「原代理」可谈"
+        assert "resolve_for_account(" in src, (
+            "注册成功后要按绑定标签挑代理 —— 不能把注册代理直接当绑定代理"
+        )
+        assert 'account.extra["register_proxy"]' in src, (
+            "注册成功必须记下绑定代理 —— 否则复用路径没有「原代理」可谈"
         )
 
     def test_batch_task_reads_register_proxy(self):

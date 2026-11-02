@@ -2008,8 +2008,8 @@ export default function Accounts() {
 
               {currentAccount.registerProxy ? (
                 <DetailGroup
-                  title="注册代理"
-                  hint="注册这个账号时用的出口。复用时（测活、补 RT、绑 2FA）优先回到它 —— 同一账号反复换 IP 容易被上游当成异常登录。原代理不可用时会自动换成新的并更新这里。"
+                  title="绑定代理"
+                  hint="账号绑定的出口（带 bind 标签）。注册完成后会从注册出口切到这里；复用时（测活、补 RT、绑 2FA）优先回到它 —— 同一账号反复换 IP 容易被上游当成异常登录。原代理不可用时会自动换成新的并更新这里。"
                 >
                   <DetailRow label="出口">
                     <SecretLine value={currentAccount.registerProxy} />

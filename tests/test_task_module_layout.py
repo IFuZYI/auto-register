@@ -21,7 +21,8 @@ class TaskRunnerLayoutTests(unittest.TestCase):
         from api import tasks as tasks_mod
 
         src = inspect.getsource(tasks_mod._run_register)
-        self.assertIn('account.extra["register_proxy"] = _proxy', src)
+        self.assertIn("resolve_for_account(", src)
+        self.assertIn('account.extra["register_proxy"]', src)
 
         src_batch = inspect.getsource(tasks_mod._run_account_batch_task)
         self.assertIn("_resolve_proxy_for_account(", src_batch)

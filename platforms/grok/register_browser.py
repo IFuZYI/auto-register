@@ -605,25 +605,34 @@ def _send_code_stage(
         _log(log, "[Grok] 邮箱框被清空，重新输入")
         signup_pages.retype_email(page, email)
     label, state = signup_pages.submit_email_code(page)
+    first_state = dict(state or {})   # 第一次的结论才是「我们怎么发的」
     if state.get("reason") in ("input-empty", "input-invalid", "no-input"):
         _log(log, f"[Grok] 提交未生效（{state.get('reason')}），再补一次邮箱后重试")
         signup_pages.retype_email(page, email)
         label, state = signup_pages.submit_email_code(page)
     attempts = 1
     while attempts < 3:
-        page.wait_for_timeout(1200)
+        page.wait_for_timeout(1500)
         if captured or not signup_pages.email_input_present(page):
+            break
+        # **按钮变禁用 = 请求在飞**，不是「没点着」。
+        # 2026-11-02 线上：第一次点成功后 React 把按钮置灰（pending），我们却
+        # 以为没生效又发 `form.requestSubmit()` 两次 —— 重复提交把页面打成
+        # `something went wrong` / 静默失败，最后归因成「未确认发信」。
+        st = signup_pages.submit_button_state(page)
+        if st.get("found") and st.get("disabled"):
+            logger.debug("按钮已置灰（请求在飞），不再重复提交")
             break
         label, state = signup_pages.submit_email_code(page)
         attempts += 1
-    how = str((state or {}).get("how") or "")
+    how = str((first_state or {}).get("how") or (state or {}).get("how") or "")
     how_text = {"button": label or "按钮", "form": "form.requestSubmit()", "enter": "输入框 Enter"}.get(how, "")
     suffix = ""
     if state and not state.get("found") and state.get("reason") in ("no-button", "button-disabled"):
         suffix = "｜⚠ 没有可用的提交按钮"
     # 只有**找到了按钮但它禁用**才说这句。没找到按钮时 `disabled` 也是 True，
     # 再说一遍「按钮是禁用态」会让人去找一个不存在的东西。
-    if state and state.get("disabled") and state.get("found"):
+    if first_state and first_state.get("disabled") and first_state.get("found"):
         suffix += "｜⚠ 按钮是禁用态（邮箱校验没过？）"
     if attempts > 1:
         suffix += f"｜重试 {attempts} 次"

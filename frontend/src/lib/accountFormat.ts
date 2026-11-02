@@ -29,8 +29,8 @@ export function normalizeAccount(account: AccountLike) {
   const chatgptLocal = extra.chatgpt_local && typeof extra.chatgpt_local === 'object' ? extra.chatgpt_local : {}
   const plusCheck = extra.plus_check && typeof extra.plus_check === 'object' ? extra.plus_check : {}
   const totpSecret = String(extra.totp_secret || '')
-  // 注册这个账号时用的出口代理。复用时优先回到它（见后端
-  // `proxy_pool.resolve_for_account`），原代理不可用会被换成新的。
+  // 账号绑定的出口代理（注册完成后由后端 `proxy_pool.resolve_for_account`
+  // 切到带 bind 标签的代理）。复用时优先回到它，原代理不可用会被换成新的。
   const registerProxy = String(extra.register_proxy || '')
   // `extra.sync_statuses`（面板上传/同步状态）不在这里解析：面板状态在
   // 「面板管理」页看（那里有本地 ↔ 远端对比），账号页只管账号本身。

@@ -198,6 +198,12 @@ chatgpt2api 时漏了三处、面板页直接 404）：
 **代理绑定失败不阻断上传**：代理是优化，不是账号能不能用的前提。失败原因并进
 上传结果的消息里，用户看得到「传上去了、代理没绑上」。
 
+**注册完成时的绑定**（2026-11-02）：注册链路按 `register` 标签选出口，但账号的
+`register_proxy` 必须落在带 `bind` 标签的代理上。注册成功后 `_run_register` 调
+`proxy_pool.resolve_for_account(注册代理)`：注册代理本身也带 `bind` 就保留，否则
+从可绑定池里挑负载最轻的换过去；一个 `bind` 都没有的存量部署保持旧行为（保留
+注册代理）。自动上传读的就是这个字段，所以「绑定」和「上传」不会再用注册代理。
+
 **面板自动同步**（面板 ↔ 本地）：在 `services/chatgpt_maintenance.py` 的
 `PANEL_AUTO_SYNC` 注册一项 `(开关键, 平台, 是否删远端旧记录, 任务 source)`，
 调度器按 `get_panel_auto_sync_interval_seconds(panel)` 决定跑不跑。
