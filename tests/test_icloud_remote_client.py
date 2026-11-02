@@ -63,6 +63,73 @@ class TestApiKeyAuth:
             dead.list_accounts()
         assert excinfo.value.code == "upstream_unavailable"
 
+    def test_empty_base_url_fails_before_sending(self, remote):
+        blank = RemoteHMEClient("", API_KEY, timeout=5)
+        with pytest.raises(ICloudError) as excinfo:
+            blank.list_accounts()
+        assert excinfo.value.code == "invalid_config"
+        assert remote.requests == []
+
+
+class _ErrorResponse:
+    """固定返回一个错误码的最小响应对象（钉住客户端的错误码映射表）。"""
+
+    def __init__(self, code: str, status_code: int = 429) -> None:
+        self.status_code = status_code
+        self._code = code
+
+    def json(self):
+        return {"success": False, "code": self._code, "message": "上游拒绝"}
+
+
+class TestErrorCodeMap:
+    """`_ERROR_CODE_MAP` 的每条服务端错误码都必须映射到既定语义。
+
+    这层映射是「上游说什么 → 上层怎么处理（退避/停用/换秘钥）」的唯一依据，
+    漏一条就会静默降级成 `upstream_error`（502），所以逐条钉住 —— 变异测试
+    证明删掉 RATE_LIMITED / UPSTREAM_FAILURE 两条时，其余测试全绿。
+    """
+
+    @pytest.mark.parametrize(
+        ("upstream", "expected"),
+        [
+            ("INVALID_API_KEY", "invalid_config"),
+            ("PERMISSION_DENIED", "permission_denied"),
+            ("ACCOUNT_NOT_ALLOWED", "account_not_allowed"),
+            ("RATE_LIMITED", "provider_rate_limited"),
+            ("CREATION_COOLDOWN", "provider_rate_limited"),
+            ("CREATION_HOURLY_LIMIT", "provider_rate_limited"),
+            ("CREATION_LIMIT_REACHED", "provider_rate_limited"),
+            ("VALIDATION_ERROR", "invalid_config"),
+            ("ACCOUNT_NOT_FOUND", "invalid_config"),
+            ("ALIAS_NOT_FOUND", "invalid_config"),
+            ("TASK_NOT_FOUND", "invalid_config"),
+            ("UPSTREAM_FAILURE", "upstream_unavailable"),
+            ("INTERNAL_ERROR", "upstream_unavailable"),
+        ],
+    )
+    def test_every_mapped_code(self, upstream, expected):
+        from unittest import mock
+
+        client = RemoteHMEClient("http://hme.example", "sk-test-key", timeout=5)
+        with mock.patch.object(
+            client._session, "request", return_value=_ErrorResponse(upstream)
+        ):
+            with pytest.raises(ICloudError) as excinfo:
+                client.list_accounts()
+        assert excinfo.value.code == expected
+
+    def test_unknown_code_falls_back_to_upstream_error(self):
+        from unittest import mock
+
+        client = RemoteHMEClient("http://hme.example", "sk-test-key", timeout=5)
+        with mock.patch.object(
+            client._session, "request", return_value=_ErrorResponse("SOMETHING_NEW")
+        ):
+            with pytest.raises(ICloudError) as excinfo:
+                client.list_accounts()
+        assert excinfo.value.code == "upstream_error"
+
     def test_write_requests_work_without_csrf(self, remote, client):
         client.create_alias("acc_1", "GitHub")
         client.delete_alias("acc_1", "anon-9")
@@ -94,11 +161,43 @@ class TestApiKeyMode:
             client._session, "request", return_value=self._response([{"id": "acc_1"}])
         ) as request:
             assert client.list_accounts()[0]["id"] == "acc_1"
-        assert request.call_args.kwargs["headers"]["X-API-Key"] == "sk-test-key"
-        assert all(
-            call.args[0] != "POST" or call.args[1] != "/api/auth/login"
-            for call in request.call_args_list
-        ), "API 秘钥模式不应再走登录接口"
+        assert request.call_args.kwargs["headers"]["X-API-Key"] == API_KEY
+        # 注意：`call.args[1]` 是**绝对 URL**（`http://hme.example/api/...`），
+        # 直接与裸路径 `/api/auth/login` 比较永远为真 —— 这里必须比 URL 的 path，
+        # 否则「不再走登录接口」这条断言是假的（变异测试证实过）。
+        from urllib.parse import urlparse
+
+        paths = [urlparse(call.args[1]).path for call in request.call_args_list]
+        assert paths, "断言必须在真的发过请求时才成立"
+        assert "/api/auth/login" not in paths, "API 秘钥模式不应再走登录接口"
+
+    def test_write_request_carries_key_at_http_layer(self):
+        """写操作（POST/DELETE）在 HTTP 层也必须带 X-API-Key，而不是只在读路径上。"""
+        from unittest import mock
+
+        client = RemoteHMEClient("http://hme.example", "sk-test-key", timeout=5)
+        with mock.patch.object(
+            client._session, "request", return_value=self._response({"success": True})
+        ) as request:
+            client.delete_alias("acc_1", "anon-9")
+            client.create_alias("acc_1", "GitHub")
+        for call in request.call_args_list:
+            assert call.kwargs["headers"]["X-API-Key"] == "sk-test-key"
+
+    def test_over_long_manual_label_is_truncated_before_send(self):
+        """手动标签超过上限必须先截断，再发出去（服务端只校验、不会帮你截）。"""
+        from unittest import mock
+
+        from platforms.icloud.remote_client import MAX_LABEL_LENGTH
+
+        client = RemoteHMEClient("http://hme.example", "sk-test-key", timeout=5)
+        with mock.patch.object(
+            client._session, "request", return_value=self._response({"email": "a@icloud.com"})
+        ) as request:
+            client.create_alias("acc_1", "x" * (MAX_LABEL_LENGTH + 50))
+        sent = request.call_args.kwargs["json"]["label"]
+        assert len(sent) == MAX_LABEL_LENGTH
+        assert sent == "x" * MAX_LABEL_LENGTH
 
     def test_inbox_passes_new_pagination_and_refresh_params(self):
         from unittest import mock

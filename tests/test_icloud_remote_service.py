@@ -1,7 +1,9 @@
 """远程 iCloud 仓库服务层：接入、同步、去重（本地优先）、生成、删除、收件。
 
-核心契约（用户需求 2026-10-09）：
-- 远程账号按「服务地址 + 管理员密码 + 远端账号 id」接入，一行一个远端账号；
+核心契约（用户需求 2026-10-09 / 2026-11-02）：
+- 远程账号按「服务地址 + API 秘钥 + 远端账号 id」接入，一行一个远端账号；
+- 秘钥必须是 `sk-` 开头的 API 秘钥 —— 管理员密码登录已删除，残留的旧密码
+  在 `remote_api_key()` 处直接报 `invalid_config`，不会发出任何请求；
 - 同步把远端别名拉进本地库（source=remote），**同地址去重时本地优先**：
   本地已有该地址则不建远程行、不改本地行；
 - 远程行可以像本地一样生成/停用/激活/删除（走远程 API）；
@@ -12,6 +14,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import os
 
 import pytest
@@ -72,7 +75,7 @@ def _seed_local_account(email: str = "owner@icloud.com") -> int:
 
 
 class TestAddRemoteAccount:
-    def test_add_remote_account_stores_encrypted_password(self, service, remote):
+    def test_add_remote_account_stores_encrypted_api_key(self, service, remote):
         account = service.add_remote_account(
             base_url=remote.base_url,
             api_key=API_KEY,
@@ -83,10 +86,30 @@ class TestAddRemoteAccount:
         assert account["email"] == "owner@icloud.com"
         assert account["base_url"] == remote.base_url
         assert account["remote_account_id"] == "acc_1"
-        # 密码必须加密落库、绝不回显
+        # 秘钥必须加密落库、绝不回显
         assert "api_key" not in account
         row = service.get_account(account["id"])
-        assert row.remote_password_cipher and API_KEY not in row.remote_password_cipher
+        cipher = row.remote_password_cipher
+        assert cipher and API_KEY not in cipher
+        # 「加密」必须有实际强度，不能只有「密文里不含明文」——可逆 base64
+        # 也满足后者（变异测试 M9 证实）。三条一起钉：AEAD 信封前缀、
+        # 同明文两次密文不同（随机 nonce）、换密钥解不开。
+        assert cipher.startswith("v1:"), "落库的不是 AEAD 信封，只是编码"
+        import core.secret_box as secret_box_module
+
+        assert secret_box_module.secret_box.encrypt(API_KEY.encode()) != cipher
+        saved = os.environ.get("CREDENTIAL_ENCRYPTION_KEY")
+        os.environ["CREDENTIAL_ENCRYPTION_KEY"] = base64.b64encode(os.urandom(32)).decode()
+        try:
+            from core.secret_box import SecretBox
+
+            with pytest.raises(Exception):
+                SecretBox().decrypt(cipher)
+        finally:
+            if saved is None:
+                os.environ.pop("CREDENTIAL_ENCRYPTION_KEY", None)
+            else:
+                os.environ["CREDENTIAL_ENCRYPTION_KEY"] = saved
         assert service.remote_api_key(row) == API_KEY
 
     def test_add_remote_account_rejects_duplicate_binding(self, service, remote):
@@ -106,7 +129,7 @@ class TestAddRemoteAccount:
             )
         assert excinfo.value.code == "invalid_config"
 
-    def test_add_remote_account_rejects_bad_api_key(self, service, remote):
+    def test_add_remote_account_maps_upstream_key_rejection(self, service, remote):
         with pytest.raises(ICloudError) as excinfo:
             service.add_remote_account(
                 base_url=remote.base_url, api_key="sk-wrong", remote_account_id="acc_1"
@@ -361,6 +384,126 @@ class TestRemoteMessages:
         with pytest.raises(ICloudError) as excinfo:
             service.fetch_alias_messages_detailed(99999)
         assert excinfo.value.code == "alias_not_found"
+
+
+# ------------------------------------------------------------------ 秘钥格式与不泄露
+
+
+class TestCredentialFormat:
+    """API 秘钥格式与「绝不回显」的硬约束。
+
+    这些用例存在的原因：删除密码登录后，任何「非 sk- 凭据/空凭据/密文泄露」
+    的回归都必须被测试挡住 —— 变异测试证明，缺了它们，把 `sk-` 校验整段删掉
+    整套测试仍然全绿。
+    """
+
+    def _seed_remote_row(self, service, cipher: str) -> int:
+        from core.db import ICloudAccountModel
+
+        with platform_session("icloud") as session:
+            row = ICloudAccountModel(
+                email="legacy@icloud.com",
+                source="remote",
+                base_url="http://127.0.0.1:1",
+                remote_account_id="acc_legacy",
+                remote_password_cipher=cipher,
+            )
+            session.add(row)
+            session.commit()
+            session.refresh(row)
+            return int(row.id or 0)
+
+    def test_add_rejects_non_sk_credential_before_any_request(self, service, remote):
+        with pytest.raises(ICloudError) as excinfo:
+            service.add_remote_account(
+                base_url=remote.base_url,
+                api_key="admin-pass-123",
+                remote_account_id="acc_1",
+            )
+        assert excinfo.value.code == "invalid_config"
+        assert "sk-" in str(excinfo.value)
+        assert remote.requests == [], "格式校验必须在发请求之前"
+
+    def test_discover_rejects_non_sk_credential_before_any_request(self, service, remote):
+        with pytest.raises(ICloudError) as excinfo:
+            service.discover_remote_accounts(
+                base_url=remote.base_url, api_key="admin-pass-123"
+            )
+        assert excinfo.value.code == "invalid_config"
+        assert remote.requests == []
+
+    def test_stored_legacy_password_is_rejected(self, service):
+        """存量部署里残留的管理员密码：报可行动的错，且不构造客户端。"""
+        cipher = service.secret_box.encrypt(b"admin-pass-123")
+        account_id = self._seed_remote_row(service, cipher)
+        row = service.get_account(account_id)
+        with pytest.raises(ICloudError) as excinfo:
+            service.remote_api_key(row)
+        assert excinfo.value.code == "invalid_config"
+        assert "API 秘钥" in str(excinfo.value)
+        with pytest.raises(ICloudError) as excinfo:
+            service.remote_client(row)
+        assert excinfo.value.code == "invalid_config"
+
+    def test_missing_cipher_is_rejected(self, service):
+        """空密文必然报 invalid_config。
+
+        注意：把 `remote_api_key()` 里的 `if not cipher` 守卫删掉，这里仍然是
+        `invalid_config`（空串进 decrypt 会抛 CredentialKeyError，同样被包成
+        invalid_config）—— 该变异是**等价变异**，不是测试空洞。
+        """
+        account_id = self._seed_remote_row(service, "")
+        row = service.get_account(account_id)
+        with pytest.raises(ICloudError) as excinfo:
+            service.remote_api_key(row)
+        assert excinfo.value.code == "invalid_config"
+
+    def test_legacy_password_row_reports_credential_not_ok(self, service):
+        """存量旧密码行在列表里必须显示「凭据不可用」，不能骗用户说正常。"""
+        cipher = service.secret_box.encrypt(b"admin-pass-123")
+        self._seed_remote_row(service, cipher)
+        listed = service.list_accounts()[0]
+        assert listed["credential_state"]["has_remote_api_key"] is False
+
+    def test_account_payload_is_an_exact_whitelist(self, service, remote):
+        """DTO 是白名单：任何新增字段都必须在这里显式登记，避免密钥被顺手带出。"""
+        account = service.add_remote_account(
+            base_url=remote.base_url, api_key=API_KEY, remote_account_id="acc_1"
+        )
+        assert set(account) == {
+            "id",
+            "email",
+            "display_name",
+            "region",
+            "status",
+            "enabled",
+            "source",
+            "base_url",
+            "remote_account_id",
+            "proxy",
+            "alias_count",
+            "sync_error",
+            "last_sync_at",
+            "created_at",
+            "credential_state",
+            "quota",
+        }
+        assert set(account["credential_state"]) == {"remote", "has_remote_api_key"}
+        assert set(account["quota"]) == {
+            "limit",
+            "used",
+            "remaining",
+            "reset_at",
+            "managed_by",
+        }
+        dumped = json.dumps(account, ensure_ascii=False)
+        assert API_KEY not in dumped
+        assert "sk-" not in dumped
+        assert "admin-pass" not in dumped
+        # 列表接口走的是同一份 DTO，必须同样干净
+        listed = service.list_accounts()[0]
+        assert set(listed["credential_state"]) == {"remote", "has_remote_api_key"}
+        assert API_KEY not in json.dumps(listed, ensure_ascii=False)
 
 
 if __name__ == "__main__":

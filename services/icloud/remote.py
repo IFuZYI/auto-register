@@ -194,6 +194,13 @@ def add_remote_account(
 
 def _account_public_dict(row: ICloudAccountModel) -> dict[str, Any]:
     """远程账号的脱敏 DTO（绝不回秘钥/密文）。"""
+    # `has_remote_api_key` 表达的是「凭据可用」，不是「这一列非空」——
+    # 否则存量行还存着旧管理员密码时，UI 会显示紫色「远端凭据」正常，
+    # 而每次远端操作都报 invalid_config。
+    try:
+        credential_ok = bool(remote_api_key(row))
+    except ICloudError:
+        credential_ok = False
     return {
         "id": row.id,
         "email": row.email,
@@ -209,7 +216,7 @@ def _account_public_dict(row: ICloudAccountModel) -> dict[str, Any]:
         "sync_error": row.sync_error,
         "last_sync_at": row.last_sync_at.isoformat() if row.last_sync_at else None,
         "created_at": row.created_at.isoformat() if row.created_at else None,
-        "credential_state": {"remote": True, "has_remote_api_key": bool(row.remote_password_cipher)},
+        "credential_state": {"remote": True, "has_remote_api_key": credential_ok},
         "quota": {"limit": 0, "used": 0, "remaining": 0, "reset_at": None, "managed_by": "remote"},
     }
 

@@ -31,13 +31,11 @@ export function AddRemoteServiceModal({
   const [options, setOptions] = useState<RemoteAccountOption[]>([])
 
   /**
-   * 登录远端并拉取账号列表。
+   * 用 API 秘钥拉取远端账号列表（只读探针，不落库）。
    *
    * 走「先接入再列账号」不划算：接入会落库，选错账号还得删。
-   * 这里用同样的凭据先探一次账号列表（远端接口是管理员会话制的，
-   * 没有免登录的「列账号」端点），所以借「不存在的远端账号」会被
-   * add 接口拒绝的语义 —— 见下方实现：先请求一次 add 的干跑不可行，
-   * 改为直接调后端的列表探针。
+   * 后端的 `/icloud/remote-accounts/discover` 就是为这个场景提供的：
+   * 拿 base_url + api_key 直接列出远端账号，凭据只在这次请求里用一次。
    */
   const discover = async () => {
     const values = await form.validateFields(['base_url', 'api_key'])

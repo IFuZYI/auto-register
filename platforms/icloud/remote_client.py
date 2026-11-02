@@ -268,7 +268,7 @@ class RemoteHMEClient:
     # ------------------------------------------------------------ 探活
 
     def health(self) -> dict[str, Any]:
-        """探活：能登录并列出账号就算可用。"""
+        """探活：能被 API 秘钥列出账号就算可用。"""
         accounts = self.list_accounts()
         return {"ok": True, "accounts": len(accounts)}
 

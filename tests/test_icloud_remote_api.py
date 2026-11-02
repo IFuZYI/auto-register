@@ -86,7 +86,7 @@ class TestAddRemoteAccount:
         assert "api_key" not in account
         assert "remote_password_cipher" not in account
 
-    def test_bad_api_key_maps_to_400(self, client):
+    def test_upstream_key_rejection_maps_to_400(self, client):
         response = client.post(
             "/api/icloud/remote-accounts",
             json={
@@ -107,6 +107,18 @@ class TestAddRemoteAccount:
             },
         )
         assert response.status_code == 503
+
+    def test_missing_api_key_is_rejected_at_the_boundary(self, client):
+        """`api_key` 是必填字段：缺了就 422，而不是落库一个没凭据的账号。"""
+        response = client.post(
+            "/api/icloud/remote-accounts",
+            json={
+                "base_url": client.remote.base_url,
+                "remote_account_id": "acc_1",
+            },
+        )
+        assert response.status_code == 422
+        assert client.get("/api/icloud/accounts").json()["items"] == []
 
     def test_duplicate_binding_rejected(self, client):
         _add_remote(client)
@@ -135,7 +147,14 @@ class TestDiscoverRemoteAccounts:
         # 没有落库
         assert client.get("/api/icloud/accounts").json()["items"] == []
 
-    def test_discover_bad_api_key_maps_to_400(self, client):
+    def test_discover_requires_api_key(self, client):
+        response = client.post(
+            "/api/icloud/remote-accounts/discover",
+            json={"base_url": client.remote.base_url},
+        )
+        assert response.status_code == 422
+
+    def test_discover_upstream_key_rejection_maps_to_400(self, client):
         response = client.post(
             "/api/icloud/remote-accounts/discover",
             json={"base_url": client.remote.base_url, "api_key": "sk-wrong"},
