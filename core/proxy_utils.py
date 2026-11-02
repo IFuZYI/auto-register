@@ -218,6 +218,17 @@ _PROXY_ERROR_MARKERS = (
     "failed to connect",
     "cannot connect",
     "代理",
+    # 下面两类是**我们自己的**文案 / Playwright 的网络层错误串：只可能来自出口，
+    # 不会跟「等验证码超时」混淆。旧表刻意不含裸 timeout 是对的，但
+    # `register_browser` 的导航失败文案（"出口不通或太慢"）含的是「出口」不是
+    # 「timeout」，于是**导航超时的烂出口永远不会被摘掉**，下一轮还会挑到它
+    # （2026-11-02 实测：同一出口连栽两轮）。
+    "出口不通或太慢",
+    "err_connection_closed",
+    "err_connection_reset",
+    "err_connection_timed_out",
+    "err_tunnel_connection_failed",
+    "err_proxy_connection_failed",
 )
 
 

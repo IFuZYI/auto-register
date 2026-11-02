@@ -312,6 +312,22 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
                         report_bad=_proxy_pool.report_proxy_error,
                         normalize=normalize_proxy_url,
                     )
+                    if not _proxy:
+                        # 连通性检查把候选出口全否了：**不要**退化成「直连」——
+                        # 本机直连 x.ai 一样被拒（实测 accounts.x.ai 对本机 IP
+                        # 回 Cloudflare 403），只是把「明确的出口问题」换成
+                        # 「看不懂的失败」。这一轮直接判失败并给出原因，
+                        # 地址不消耗，等出口恢复再来。
+                        _api.log(
+                            task_id,
+                            "[Grok] 没有可用出口（连通性/延迟检查全部未通过），本轮放弃；"
+                            "地址未消耗，等出口质量恢复后重试",
+                        )
+                        return AttemptResult.failed(
+                            "没有可用出口（连通性检查未通过）",
+                            retryable=True,
+                            email=req.email or "",
+                        )
                 if req.register_delay_seconds > 0:
                     with start_gate_lock:
                         control.checkpoint(attempt_id=attempt_id)

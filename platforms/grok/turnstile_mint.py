@@ -231,8 +231,8 @@ def _available_mb() -> int:
             for line in handle:
                 if line.startswith("MemAvailable:"):
                     return int(line.split()[1]) // 1024
-    except Exception:  # noqa: BLE001 - 读不到就别拦
-        logger.debug("读 MemAvailable 失败", exc_info=True)
+    except Exception as exc:  # noqa: BLE001 - 读不到就别拦
+        logger.debug("读 MemAvailable 失败: %s", exc)
     return 10**6
 
 

@@ -136,6 +136,11 @@ REACH_URL = "https://grok.com"
 #: 连通性检查的墙钟上限（秒）。比注册接口短 —— 这里只判传输层。
 REACH_TIMEOUT = 12
 
+#: 单次探测的**延迟门槛**（秒）。超过它就算「太慢」：浏览器要拉全量 JS 过
+#: Cloudflare 挑战，curl 都慢到 8 秒的出口一定会以 `Page.goto: Timeout 70000ms`
+#: 收场（2026-11-02 实测：curl 探通的出口在浏览器里两轮都打开超时）。
+REACH_MAX_SECONDS = float(os.getenv("GROK_REACH_MAX_SECONDS", "8") or 8)
+
 
 def probe_reachable(
     proxy: str,
@@ -169,7 +174,7 @@ def probe_reachable(
         "curl", "-sS", "-o", os.devnull,
         "--max-time", str(int(timeout)),
         "-x", proxy,
-        "-w", "%{http_code}",
+        "-w", "%{http_code} %{time_total}",
         str(url),
     ]
     run = runner or subprocess.run
@@ -179,7 +184,13 @@ def probe_reachable(
         # 进程级失败（超时被杀 / 起不来）＝ 这个出口此刻连不上，换下一个。
         return {"ok": False, "detail": f"出口连不上（{type(exc).__name__}）", "status": "", "skipped": False}
 
-    status = str(getattr(proc, "stdout", "") or "").strip()
+    raw = str(getattr(proc, "stdout", "") or "").strip()
+    parts = raw.split()
+    status = parts[0] if parts else ""
+    try:
+        elapsed = float(parts[1]) if len(parts) > 1 else 0.0
+    except ValueError:
+        elapsed = 0.0
     rc = int(getattr(proc, "returncode", 0) or 0)
     if rc != 0 or status in ("", "000"):
         return {
@@ -188,11 +199,24 @@ def probe_reachable(
             "status": status,
             "skipped": False,
         }
-    return {"ok": True, "detail": f"出口连通（HTTP {status}）", "status": status, "skipped": False}
+    if elapsed > REACH_MAX_SECONDS:
+        return {
+            "ok": False,
+            "detail": f"出口太慢（{elapsed:.1f}s > {REACH_MAX_SECONDS:g}s）",
+            "status": status,
+            "skipped": False,
+        }
+    return {
+        "ok": True,
+        "detail": f"出口连通（HTTP {status}，{elapsed:.1f}s）",
+        "status": status,
+        "skipped": False,
+    }
 
 
 __all__ = [
     "PROBE_ADDRESS",
+    "REACH_MAX_SECONDS",
     "REACH_TIMEOUT",
     "REACH_URL",
     "SEND_CODE_URL",

@@ -175,10 +175,27 @@ class ProbeReachableTests(unittest.TestCase):
     def test_http_200_is_reachable(self):
         out = exit_probe.probe_reachable(
             "socks5h://u:p@1.2.3.4:1080",
-            runner=lambda *a, **k: _proc("200"),
+            runner=lambda *a, **k: _proc("200 0.42"),
         )
         self.assertTrue(out["ok"])
         self.assertEqual(out["status"], "200")
+
+    def test_slow_exit_is_rejected(self):
+        """curl 都慢到 12 秒的出口，浏览器一定 `Page.goto` 超时（实测两轮都栽）。"""
+        out = exit_probe.probe_reachable(
+            "socks5h://u:p@1.2.3.4:1080",
+            runner=lambda *a, **k: _proc("200 12.5"),
+        )
+        self.assertFalse(out["ok"])
+        self.assertIn("太慢", out["detail"])
+
+    def test_status_without_timing_is_treated_as_fast_enough(self):
+        """老式 `-w %{http_code}` 输出（没有耗时）不能因为解析不出时间就判死。"""
+        out = exit_probe.probe_reachable(
+            "socks5h://u:p@1.2.3.4:1080",
+            runner=lambda *a, **k: _proc("200"),
+        )
+        self.assertTrue(out["ok"])
 
     def test_http_403_is_still_reachable(self):
         """Cloudflare 403 是挑战页，不是出口坏 —— 误杀会摘掉好出口。"""
@@ -265,3 +282,20 @@ class PickUsableExitTests(unittest.TestCase):
         )
         self.assertEqual(out, "", "全连不上时本轮放弃，别拿未验证的出口烧别名")
         self.assertTrue(any("本轮放弃" in line for line in logs), logs)
+
+
+class NoUsableExitGuardTests(unittest.TestCase):
+    """出口全被否时**不许退化成直连**。
+
+    本机直连 x.ai 一样被拒（`accounts.x.ai` 对本机 IP 回 Cloudflare 403），
+    只把「明确的出口问题」换成「看不懂的失败」，还白烧一个别名。
+    """
+
+    def test_register_flow_gives_up_with_a_clear_reason(self):
+        import inspect
+
+        from services import task_runners
+
+        src = inspect.getsource(task_runners._run_register)
+        self.assertIn("没有可用出口（连通性/延迟检查全部未通过），本轮放弃", src)
+        self.assertIn("没有可用出口（连通性检查未通过）", src)
