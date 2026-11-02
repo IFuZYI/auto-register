@@ -632,6 +632,11 @@ def _send_code_stage(
     # 2026-11-02 实测：点「Sign up」一个 POST 都不发（页面提交处理坏了），
     # 而同一会话直接 fetch 这个接口回 `{"ok":true}`（四个域名全过）。
     # 发完 reload 一次，服务端已记下「这个邮箱待验证」，页面会自己往下走。
+    # 给响应一点时间再判「没发出去」：Castle 令牌是异步取的，点完立刻看会误判。
+    for _wait in range(20):
+        if captured:
+            break
+        page.wait_for_timeout(1000)
     if not captured:
         direct = signup_pages.send_code_via_fetch(page, email)
         if direct.get("ok"):
