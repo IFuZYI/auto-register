@@ -564,9 +564,6 @@ def _send_code_stage(
     # 服务端只会回一句 `account:email-signup-unavailable`（通用拒绝）。
     # 参考实现的原话：「Turnstile/Castle needs 30-45 s to settle — do not shorten
     # it before the submit path.」我们取 12 秒上限、拿到令牌就立刻走。
-    # Castle 就绪（桩或真 SDK）—— 没有它，点按钮**一个请求都不会发**。
-    if not signup_pages.wait_for_castle(page, timeout=15.0):
-        _log(log, "[Grok] Castle 未就绪（提交处理会静默 return），仍尝试提交")
     gate = signup_pages.wait_until_submittable(page, timeout=15.0)
     if not gate.get("token_len") and captcha is not None:
         # **邮箱页也有 Turnstile**（`input[name=cf-turnstile-response]`），
@@ -614,8 +611,8 @@ def _send_code_stage(
         signup_pages.retype_email(page, email)
         label, state = signup_pages.submit_email_code(page)
     attempts = 1
-    while attempts < 3:
-        page.wait_for_timeout(1500)
+    while attempts < 10:
+        page.wait_for_timeout(6000)
         if captured or not signup_pages.email_input_present(page):
             break
         # **按钮变禁用 = 请求在飞**，不是「没点着」。
@@ -632,32 +629,14 @@ def _send_code_stage(
     # 2026-11-02 实测：点「Sign up」一个 POST 都不发（页面提交处理坏了），
     # 而同一会话直接 fetch 这个接口回 `{"ok":true}`（四个域名全过）。
     # 发完 reload 一次，服务端已记下「这个邮箱待验证」，页面会自己往下走。
-    # 给响应一点时间再判「没发出去」：Castle 令牌是异步取的，点完立刻看会误判。
-    for _wait in range(20):
-        if captured:
-            break
-        page.wait_for_timeout(1000)
-    if not captured:
-        direct = signup_pages.send_code_via_fetch(page, email)
-        if direct.get("ok"):
-            _log(log, "[Grok] 页面未发请求，已直接调接口发码（ok:true）")
-            try:
-                page.reload(wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
-                page.wait_for_timeout(2500)
-            except Exception as exc:
-                logger.debug("发码后刷新失败: %s", exc)
-            # **直接判定成功并返回**。不要把结论交给后面的响应分类：
-            # 刷新后页面可能自己再发一次（重复发码 → 上游回 `email-signup-unavailable`），
-            # 那条响应会把「已经发成功了」覆盖成「被拒」（2026-11-02 实测：
-            # 03:06:42 拿到 ok:true，03:06:59 却判成 email_unavailable）。
-            return {
-                "ok": True, "kind": signup_pages.SEND_RESULT_SENT, "error": "",
-                "retryable": False, "consumes_address": False, "already_registered": False,
-                "email_unavailable": False, "rate_limited": False,
-                "cloudflare_challenge": False, "sent_at": time.time(),
-            }
-        else:
-            _log(log, f"[Grok] 直接调接口也没成功（HTTP {direct.get('status')}）：{str(direct.get('body'))[:120]}")
+    # **不做「直接调接口」的兜底**：实测那个接口对任何地址都回 `{"ok":true}`
+    # （防枚举），但**并不会真的发信** —— 用它兜底只会拿到一个假的成功，
+    # 然后卡在「未收到验证码」。
+    #
+    # 真正要做的是给页面**足够的时间**：提交处理要等页面完全水合才生效
+    # （实测约 40 秒后点才发出请求），所以上面的重试已经放宽到每 6 秒一次。
+    #
+    # 只看第一次的结论：第一次是「按钮点下去了」还是「表单没就绪」。
     how = str((first_state or {}).get("how") or (state or {}).get("how") or "")
     how_text = {"button": label or "按钮", "form": "form.requestSubmit()", "enter": "输入框 Enter"}.get(how, "")
     suffix = ""
@@ -983,14 +962,6 @@ def register_grok_via_browser(
     try:
         with Camoufox(**kwargs) as browser:
             page = browser.new_page()
-            # Castle 桩：邮箱页的提交处理要 `window.Castle.createRequestToken()`，
-            # 而 Castle 的第三方脚本在代理链路上经常没加载完 —— 拿不到就**静默
-            # return**，一个请求都不发（2026-11-02 逆向实测）。桩在真 SDK 之前
-            # 注入，真 SDK 加载后会覆盖它，所以不影响真实令牌。
-            try:
-                page.add_init_script(signup_pages.CASTLE_STUB_JS)
-            except Exception as exc:
-                logger.debug("注入 Castle 桩失败: %s", exc)
             _log(log, "[Grok] 打开注册页…")
             # 先落一次 grok.com 再进注册页（best-effort，失败继续）。
             #
