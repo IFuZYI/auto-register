@@ -569,12 +569,16 @@ def _send_code_stage(
     # 参考实现的原话：「Turnstile/Castle needs 30-45 s to settle — do not shorten
     # it before the submit path.」我们取 12 秒上限、拿到令牌就立刻走。
     gate = signup_pages.wait_until_submittable(page, timeout=15.0)
-    if not gate.get("token_len") and captcha is not None:
-        # **邮箱页也有 Turnstile**（`input[name=cf-turnstile-response]`），
-        # 和资料页是同一个 sitekey。之前只在资料页铸币，邮箱页全靠 widget 自己
-        # 出票 —— 出不来时按钮就一直是禁用态，然后我们硬发 `form.requestSubmit()`
-        # 拿到 `account:email-signup-unavailable`（2026-11-02 连续十次）。
-        # 这里补上：先等 widget，超时就用同一套铸币 + 注入。
+    if (not gate.get("ready")) and (not gate.get("token_len")) and gate.get("input_exists"):
+        # 走到这里的条件 = 「按钮禁用 + 页面上确实有 Turnstile 字段 + 没票」：
+        # 页面自己在说「还没准备好」，而它要的正是这张票，所以才补。
+        # 按钮可点时不补票 —— 真机实测空票提交也能发码成功，白等一次铸币
+        # （widget 20s + 屏外 Chrome 最长两三分钟）不划算。
+        # 邮箱页也有 Turnstile（`input[name=cf-turnstile-response]`，与资料页同一
+        # sitekey）。内建的屏外 Chrome 铸币**不依赖**用户配验证码解决器：
+        # `captcha` 为 None 时 `mint_turnstile` 跳过 captcha 直接走 offscreen ——
+        # 所以这里不再用 `captcha is not None` 把这条路径挡掉（那正是「没配
+        # solver 时只会干等 widget、等不到就永远卡在按钮禁用」的由来）。
         _log(log, "[Grok] 邮箱页 Turnstile 无票，尝试铸币…")
         token = signup_pages.ensure_turnstile_token(
             page, page_url=signup_pages.SIGNUP_URL, proxy=proxy,
@@ -582,9 +586,9 @@ def _send_code_stage(
         )
         if token:
             _log(log, f"[Grok] 邮箱页 Turnstile 令牌已就绪（len={len(token)}）")
+        else:
+            _log(log, "[Grok] 邮箱页铸币未拿到令牌（widget 与屏外铸币都没出票）")
         gate = signup_pages.wait_until_submittable(page, timeout=10.0)
-    elif not gate.get("token_len"):
-        _log(log, "[Grok] 邮箱页 Turnstile 无票，且没配验证码解决器（只能等 widget 自己出票）")
     if not gate.get("ready"):
         # **不提交**。按钮禁用 / 没令牌时硬提交，服务端只会回
         # `account:email-signup-unavailable`（2026-11-02 线上日志连续 10 次都是

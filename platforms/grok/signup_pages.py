@@ -275,8 +275,13 @@ def send_code_error_text(verdict: dict[str, Any], email: str) -> str:
         domain = str(email or "").rsplit("@", 1)[-1] or "该域名"
         return (
             f"{email}：x.ai 拒绝邮箱注册（account:email-signup-unavailable）—— "
-            f"**{domain} 这个域名这一窗口的注册配额用完了**（同一域名约 3~4 个/窗口，"
-            "几小时后恢复）。换出口没有用，要换**邮箱域名**；地址本身没被消耗。"
+            "这是**通用拒绝**，实测有三个触发点，按代价从低到高排查："
+            "① **带空 Turnstile 令牌提交**（日志里「令牌 0 字符」就是它；无票时"
+            "现在一律不提交，先看有没有这条）；"
+            f"② **{domain} 域名**这一窗口的注册配额（同域名约 3~4 个/窗口，几小时后"
+            "恢复，要换**邮箱域名**）；"
+            "③ 该**出口**被判定不可注册（换住宅出口可解）。"
+            "地址本身没被消耗。"
         )
     if kind == SEND_RESULT_RATE_LIMITED:
         hint = (verdict or {}).get("retry_after_hint") or EDITORIAL_RETRY_AFTER_SECONDS
@@ -692,7 +697,7 @@ def antibot_state(page: Any) -> dict[str, Any]:
 
 
 def wait_until_submittable(page: Any, *, timeout: float = 60.0, poll: float = 0.5) -> dict[str, Any]:
-    """等「页面真的可以提交」：拿到 Turnstile 令牌**或**提交按钮变成可点。
+    """等「页面真的可以提交」：拿到 Turnstile 令牌**且**按钮不是禁用态。
 
     2026-11-02 线上日志：`反机器人令牌未出现（继续尝试提交）` 紧接着
     `发码已提交（form.requestSubmit()）｜⚠ 按钮是禁用态` —— 我们**绕过页面
@@ -700,7 +705,15 @@ def wait_until_submittable(page: Any, *, timeout: float = 60.0, poll: float = 0.
     按钮禁用就是页面在说「还没准备好」，硬提交等于拿一个必然被拒的请求去
     撞上游，既拿不到码、又白白消耗这个出口的信任分。
 
-    所以：等到真的能提交为止；等不到就**不提交**，把「没准备好」如实报上去。
+    2026-11-02 二次核对（真机 A/B）：**空票提交并不必然被拒**。同一天同一出口，
+    `令牌 0 字符` 的提交拿到了验证码并注册成功；而此前失败的那些尝试里，
+    同一出口换域名（outlook.es）同样被拒 —— 所以
+    `account:email-signup-unavailable` 更像**出口声誉 / 域名窗口**的通用拒绝，
+    不是「空票」本身的错。因此这里**不**把令牌当成硬门槛，只保留按钮口径。
+
+    真正该补票的情形是**按钮禁用**（页面在说「还没准备好」）：调用方在
+    `ready=False` 且页面上有令牌字段时用内建屏外铸币补一张，补不到就如实上报
+    「页面未就绪」，不要硬提交。
     """
     # 用**轮次**而不是墙钟做上限：假页面（测试）里 `wait_for_timeout` 是空操作，
     # 按墙钟算会真的空转 60 秒，把整个测试套件拖死。
@@ -708,10 +721,18 @@ def wait_until_submittable(page: Any, *, timeout: float = 60.0, poll: float = 0.
     state: dict[str, Any] = {}
     for _ in range(budget):
         state = antibot_state(page)
+        token_len = int(state.get("token_len") or 0)
         # 「没看到按钮」不等于「不能提交」—— 有些版本按钮在 shadow DOM 里，
         # 我们的探测看不见。只有**明确看到按钮且它是禁用态**才拦。
         saw_disabled_button = bool(state.get("button_found")) and bool(state.get("button_disabled"))
-        ready = state.get("token_len", 0) > 16 or not saw_disabled_button
+        # 口径：**按钮可点就算 ready**（保持原行为）。
+        #
+        # 2026-11-02 现场实测更正过一次：曾经把这里改成「有令牌字段就必须有票」，
+        # 但真机跑下来，**空票提交也能成功发码**（17:40 那次 `令牌 0 字符` 直接
+        # 拿到验证码并注册成功），所以「空票必被通用拒绝」不成立 —— 硬卡令牌
+        # 反而会拦掉本来能过的提交。真正需要补票的是「按钮禁用」（页面自己在说
+        # 还没准备好），那条路径由调用方在 ready=False 时用内建铸币补一张。
+        ready = token_len > 16 or not saw_disabled_button
         state["ready"] = bool(ready)
         if ready:
             return state

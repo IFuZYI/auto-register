@@ -1382,3 +1382,120 @@ class EntryPageDiagnosticsTests(unittest.TestCase):
         self.assertFalse(res["ok"])
         self.assertIn("外壳", res["error"])
         self.assertIn("grok", res["error"], "没有 CF 特征时也要给出页面开头")
+
+
+class EmailPageTurnstileGateTests(unittest.TestCase):
+    """邮箱页「可提交」的口径：以**按钮**为准，不把令牌当硬门槛。
+
+    2026-11-02 真机 A/B（本次修复的现场证据）：同一出口、`令牌 0 字符` 的提交
+    直接拿到验证码并注册成功 —— 所以「空票必被通用拒绝」不成立。曾经按这个
+    假设改成「有令牌字段就必须有票」，反而会拦掉本来能过的提交。
+    真正需要补票的情形是**按钮禁用**（页面自己在说还没准备好）。
+    """
+
+    class _Page:
+        def __init__(self, *, token_len, input_exists, button_disabled=False, button_found=True):
+            self.token_len = token_len
+            self.input_exists = input_exists
+            self.button_disabled = button_disabled
+            self.button_found = button_found
+
+        def evaluate(self, script, *args):
+            if "tokenLen" in str(script):
+                return {"tokenLen": self.token_len, "inputExists": self.input_exists}
+            return {
+                "label": "Sign up",
+                "disabled": self.button_disabled,
+                "found": self.button_found,
+                "reason": "",
+            }
+
+        def wait_for_timeout(self, ms):
+            return None
+
+    def test_empty_token_with_clickable_button_is_still_submittable(self):
+        """真机证据：空票 + 按钮可点 → 提交，并且确实能发码成功。"""
+        page = self._Page(token_len=0, input_exists=True, button_disabled=False)
+        state = sp.wait_until_submittable(page, timeout=0.05, poll=0.05)
+        self.assertTrue(state["ready"])
+
+    def test_disabled_button_is_not_ready(self):
+        page = self._Page(token_len=0, input_exists=True, button_disabled=True)
+        state = sp.wait_until_submittable(page, timeout=0.05, poll=0.05)
+        self.assertFalse(state["ready"])
+
+    def test_token_makes_it_ready(self):
+        page = self._Page(token_len=64, input_exists=True, button_disabled=False)
+        state = sp.wait_until_submittable(page, timeout=0.05, poll=0.05)
+        self.assertTrue(state["ready"])
+        self.assertEqual(state["token_len"], 64)
+
+    def test_page_without_token_field_keeps_the_button_only_rule(self):
+        page = self._Page(token_len=0, input_exists=False, button_disabled=False)
+        state = sp.wait_until_submittable(page, timeout=0.05, poll=0.05)
+        self.assertTrue(state["ready"])
+
+
+class EmailPageMintWithoutSolverTests(unittest.TestCase):
+    """按钮禁用且页面上有令牌字段时，必须补票，且补票不依赖用户配 solver。
+
+    旧代码：`if not gate.token_len and captcha is not None:` —— 没配 solver 时
+    直接跳过铸币、只干等 widget，等不到就永远卡在「按钮禁用」。
+    内建铸币不需要 solver：`mint_turnstile` 在 captcha=None 时跳过 captcha
+    直接走 offscreen。
+    """
+
+    def test_stage_mints_when_button_is_disabled(self):
+        from platforms.grok import register_browser as rb
+        from platforms.grok import signup_pages as pages
+
+        page = _FakeCamoufox("Sign up with email Email Sign up", with_entry=False).page
+
+        def evaluate(script, *args):
+            text = str(script)
+            if "tokenLen" in text:
+                return {"tokenLen": 0, "inputExists": True}
+            if "document.body" in text:
+                return "Sign up with email Email Sign up"
+            # 按钮禁用 = 页面在说「还没准备好」
+            return {"label": "Sign up", "disabled": True, "found": True, "reason": ""}
+
+        page.evaluate.side_effect = evaluate
+        calls = []
+
+        def fake_ensure(page_arg, **kw):
+            calls.append(kw.get("captcha"))
+            return ""
+
+        with patch.object(pages, "ensure_turnstile_token", side_effect=fake_ensure):
+            stage = rb._send_code_stage(page, "a@icloud.com", proxy="", captcha=None, timeout=0)
+
+        self.assertTrue(calls, "按钮禁用 + 有令牌字段时必须尝试补票（captcha=None 也走 offscreen）")
+        self.assertIsNone(calls[0])
+        self.assertTrue(stage.get("antibot_not_ready"), stage)
+        self.assertFalse(stage.get("consumes_address"), "没提交就谈不上消耗地址")
+
+    def test_stage_does_not_mint_when_button_is_clickable(self):
+        """按钮可点时不补票：真机实测空票也能成功，白等一次铸币不划算。"""
+        from platforms.grok import register_browser as rb
+        from platforms.grok import signup_pages as pages
+
+        page = _FakeCamoufox("Sign up with email Email Sign up", with_entry=False).page
+
+        def evaluate(script, *args):
+            text = str(script)
+            if "tokenLen" in text:
+                return {"tokenLen": 0, "inputExists": True}
+            if "document.body" in text:
+                return "Sign up with email Email Sign up"
+            return {"label": "Sign up", "disabled": False, "found": True, "reason": ""}
+
+        page.evaluate.side_effect = evaluate
+        calls = []
+
+        with patch.object(
+            pages, "ensure_turnstile_token", side_effect=lambda *a, **kw: calls.append(1) or ""
+        ):
+            rb._send_code_stage(page, "a@icloud.com", proxy="", captcha=None, timeout=0)
+
+        self.assertFalse(calls, "按钮可点就不该去铸币")
