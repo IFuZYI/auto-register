@@ -646,7 +646,7 @@ def _send_code_stage(
                 "ok": True, "kind": signup_pages.SEND_RESULT_SENT, "error": "",
                 "retryable": False, "consumes_address": False, "already_registered": False,
                 "email_unavailable": False, "rate_limited": False,
-                "cloudflare_challenge": False, "sent_at": sent_at,
+                "cloudflare_challenge": False, "sent_at": time.time(),
             }
         else:
             _log(log, f"[Grok] 直接调接口也没成功（HTTP {direct.get('status')}）：{str(direct.get('body'))[:120]}")
