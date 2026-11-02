@@ -119,13 +119,24 @@ def test_register_only_proxy_is_switched_to_a_bind_tagged_proxy(proxy_pool_db):
     _add_proxy(BIND_B, tags="bind")
 
     captured, logs = _run_once(proxy=REGISTER_ONLY)
-    bound = normalize_proxy_url(_saved_extra(captured).get("register_proxy") or "")
+    extra = _saved_extra(captured)
+    bound = normalize_proxy_url(extra.get("register_proxy") or "")
 
     assert bound in {normalize_proxy_url(BIND_A), normalize_proxy_url(BIND_B)}, (
         f"账号绑定还是注册代理: {bound}"
     )
     joined = "\n".join(logs)
     assert "绑定代理切换" in joined, f"注册完成日志里没有切换记录: {joined}"
+
+    # 自动上传读的就是 `register_proxy`：开关打开时必须交出新绑定的代理，
+    # 而不是注册出口。
+    from services.chatgpt_sync import upload_proxy_for
+
+    with mock.patch(
+        "core.config_store.config_store.get",
+        side_effect=lambda key, default="": "1" if key == "sub2api_upload_proxy_enabled" else "",
+    ):
+        assert upload_proxy_for("sub2api", extra) == bound
 
 
 def test_proxy_tagged_register_and_bind_is_kept(proxy_pool_db):

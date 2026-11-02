@@ -625,6 +625,22 @@ def _send_code_stage(
             break
         label, state = signup_pages.submit_email_code(page)
         attempts += 1
+    # **兜底：页面自己不发请求时，直接调接口。**
+    # 2026-11-02 实测：点「Sign up」一个 POST 都不发（页面提交处理坏了），
+    # 而同一会话直接 fetch 这个接口回 `{"ok":true}`（四个域名全过）。
+    # 发完 reload 一次，服务端已记下「这个邮箱待验证」，页面会自己往下走。
+    if not captured:
+        direct = signup_pages.send_code_via_fetch(page, email)
+        if direct.get("ok"):
+            _log(log, "[Grok] 页面未发请求，已直接调接口发码（ok:true）")
+            captured.append({"status": direct.get("status"), "body": direct.get("body")})
+            try:
+                page.reload(wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
+                page.wait_for_timeout(2500)
+            except Exception as exc:
+                logger.debug("发码后刷新失败: %s", exc)
+        else:
+            _log(log, f"[Grok] 直接调接口也没成功（HTTP {direct.get('status')}）：{str(direct.get('body'))[:120]}")
     how = str((first_state or {}).get("how") or (state or {}).get("how") or "")
     how_text = {"button": label or "按钮", "form": "form.requestSubmit()", "enter": "输入框 Enter"}.get(how, "")
     suffix = ""

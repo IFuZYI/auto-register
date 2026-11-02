@@ -747,6 +747,47 @@ def email_input_present(page: Any) -> bool:
     return _count(page, EMAIL_INPUT) > 0
 
 
+#: 直接调发码接口（绕过页面自己的提交处理）。
+#:
+#: 2026-11-02 实测：点「Sign up」**一个 POST 都不发**（不是发失败，是根本没发），
+#: 而同一会话里直接 fetch 这个接口回 `{"ok":true}` —— 四个域名（icloud /
+#: outlook / gmail / proton）全过。也就是说：
+#:   * 服务端不拒这个出口、不拒这个域名；
+#:   * 坏的是页面自己的 React 提交处理（它等一个永远不来的反机器人令牌）。
+#: 发完之后 `location.reload()`，服务端已经记下「这个邮箱待验证」，页面会自己
+#: 进到下一步（实测：直接出现 `Create your account`）。
+_SEND_CODE_FETCH_JS = """
+async (email) => {
+  try {
+    const r = await fetch('/api/auth/send-verification-code', {
+      method: 'POST',
+      headers: {'content-type': 'application/json'},
+      body: JSON.stringify({email}),
+      credentials: 'include',
+    });
+    const text = await r.text();
+    return {status: r.status, body: text.slice(0, 300)};
+  } catch (e) {
+    return {status: 0, body: String(e).slice(0, 200)};
+  }
+}
+"""
+
+
+def send_code_via_fetch(page: Any, email: str) -> dict[str, Any]:
+    """直接调发码接口。返回 `{status, body, ok}`。"""
+    try:
+        out = page.evaluate(_SEND_CODE_FETCH_JS, email)
+    except Exception as exc:
+        logger.debug("直接调发码接口失败: %s", exc)
+        return {"status": 0, "body": str(exc)[:200], "ok": False}
+    if not isinstance(out, dict):
+        return {"status": 0, "body": str(out)[:200], "ok": False}
+    body = str(out.get("body") or "")
+    ok = bool(out.get("status")) and "\"ok\":true" in body.replace(" ", "")
+    return {"status": out.get("status"), "body": body, "ok": ok}
+
+
 def email_value_matches(page: Any, email: str) -> bool:
     """邮箱框里现在是不是这个地址（空/不一致都算不匹配）。"""
     try:
