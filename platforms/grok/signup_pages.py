@@ -747,6 +747,62 @@ def email_input_present(page: Any) -> bool:
     return _count(page, EMAIL_INPUT) > 0
 
 
+#: Castle 反机器人 SDK 的**兜底桩**。
+#:
+#: 2026-11-02 逆向结论（实测）：邮箱页的提交处理会先要一个 Castle 令牌
+#: （`window.Castle.createRequestToken()`）。Castle 的脚本是从第三方 CDN 异步
+#: 加载的，**在代理链路上经常没加载完**（抓包：castle.io 一个请求都没有）。
+#: 拿不到 `window.Castle` 时它**静默 return** —— 不报错、不发请求、按钮还是
+#: 可点的。表现就是「点了 Sign up，一个 POST 都没有」，然后我们误判成
+#: 「上游拒绝」「域名配额」。
+#:
+#: 这个桩在页面脚本之前注入：真有 Castle 时会被它覆盖（不影响真实令牌），
+#: 没有时至少让提交处理跑下去。
+CASTLE_STUB_JS = """
+(() => {
+  try {
+    if (window.Castle && typeof window.Castle.createRequestToken === 'function') return;
+    const tok = 'grok-stub-' + Math.random().toString(36).slice(2) + Date.now();
+    window.Castle = window.Castle || {};
+    if (typeof window.Castle.createRequestToken !== 'function') {
+      window.Castle.createRequestToken = function () { return Promise.resolve(tok); };
+    }
+    if (typeof window.Castle.getRequestToken !== 'function') {
+      window.Castle.getRequestToken = function () { return Promise.resolve(tok); };
+    }
+  } catch (e) {}
+})();
+"""
+
+
+def castle_ready(page: Any) -> bool:
+    """页面上的 Castle 是否已经可用（真的或桩）。"""
+    try:
+        return bool(page.evaluate(
+            "() => !!(window.Castle && typeof window.Castle.createRequestToken === 'function')"
+        ))
+    except Exception as exc:
+        logger.debug("探测 Castle 失败: %s", exc)
+        return False
+
+
+def wait_for_castle(page: Any, *, timeout: float = 20.0, poll: float = 0.5) -> bool:
+    """等 Castle 可用（桩注入后通常立刻为真；没注入时等真 SDK 加载）。"""
+    budget = max(1, int(max(0.0, float(timeout)) / max(0.05, poll)))
+    for _ in range(budget):
+        if castle_ready(page):
+            return True
+        waiter = getattr(page, "wait_for_timeout", None)
+        if callable(waiter):
+            try:
+                waiter(int(poll * 1000))
+                continue
+            except Exception:
+                pass
+        time.sleep(poll)
+    return False
+
+
 #: 直接调发码接口（绕过页面自己的提交处理）。
 #:
 #: 2026-11-02 实测：点「Sign up」**一个 POST 都不发**（不是发失败，是根本没发），

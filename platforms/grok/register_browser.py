@@ -564,6 +564,9 @@ def _send_code_stage(
     # 服务端只会回一句 `account:email-signup-unavailable`（通用拒绝）。
     # 参考实现的原话：「Turnstile/Castle needs 30-45 s to settle — do not shorten
     # it before the submit path.」我们取 12 秒上限、拿到令牌就立刻走。
+    # Castle 就绪（桩或真 SDK）—— 没有它，点按钮**一个请求都不会发**。
+    if not signup_pages.wait_for_castle(page, timeout=15.0):
+        _log(log, "[Grok] Castle 未就绪（提交处理会静默 return），仍尝试提交")
     gate = signup_pages.wait_until_submittable(page, timeout=15.0)
     if not gate.get("token_len") and captcha is not None:
         # **邮箱页也有 Turnstile**（`input[name=cf-turnstile-response]`），
@@ -975,6 +978,14 @@ def register_grok_via_browser(
     try:
         with Camoufox(**kwargs) as browser:
             page = browser.new_page()
+            # Castle 桩：邮箱页的提交处理要 `window.Castle.createRequestToken()`，
+            # 而 Castle 的第三方脚本在代理链路上经常没加载完 —— 拿不到就**静默
+            # return**，一个请求都不发（2026-11-02 逆向实测）。桩在真 SDK 之前
+            # 注入，真 SDK 加载后会覆盖它，所以不影响真实令牌。
+            try:
+                page.add_init_script(signup_pages.CASTLE_STUB_JS)
+            except Exception as exc:
+                logger.debug("注入 Castle 桩失败: %s", exc)
             _log(log, "[Grok] 打开注册页…")
             # 先落一次 grok.com 再进注册页（best-effort，失败继续）。
             #
