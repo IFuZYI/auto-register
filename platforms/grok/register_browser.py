@@ -633,12 +633,21 @@ def _send_code_stage(
         direct = signup_pages.send_code_via_fetch(page, email)
         if direct.get("ok"):
             _log(log, "[Grok] 页面未发请求，已直接调接口发码（ok:true）")
-            captured.append({"status": direct.get("status"), "body": direct.get("body")})
             try:
                 page.reload(wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
                 page.wait_for_timeout(2500)
             except Exception as exc:
                 logger.debug("发码后刷新失败: %s", exc)
+            # **直接判定成功并返回**。不要把结论交给后面的响应分类：
+            # 刷新后页面可能自己再发一次（重复发码 → 上游回 `email-signup-unavailable`），
+            # 那条响应会把「已经发成功了」覆盖成「被拒」（2026-11-02 实测：
+            # 03:06:42 拿到 ok:true，03:06:59 却判成 email_unavailable）。
+            return {
+                "ok": True, "kind": signup_pages.SEND_RESULT_SENT, "error": "",
+                "retryable": False, "consumes_address": False, "already_registered": False,
+                "email_unavailable": False, "rate_limited": False,
+                "cloudflare_challenge": False, "sent_at": sent_at,
+            }
         else:
             _log(log, f"[Grok] 直接调接口也没成功（HTTP {direct.get('status')}）：{str(direct.get('body'))[:120]}")
     how = str((first_state or {}).get("how") or (state or {}).get("how") or "")
