@@ -4,33 +4,19 @@
 ----
 把独立部署的 icloud-hme 服务（`reference/panel/icloud-hme`）当作 iCloud 隐私
 邮箱的**远程仓库**：主号凭据与 SRP 登录都留在那个服务里，本机只存
-「服务地址 + 管理员密码 + 远端账号 id」，通过它的 HTTP API 创建别名、列别名、
+「服务地址 + API 秘钥 + 远端账号 id」，通过它的 HTTP API 创建别名、列别名、
 读邮件、停用/删除。
 
-对接的接口（见 reference/panel/icloud-hme/API.md）
---------------------------------------------------
-- ``POST /api/auth/login``       管理员密码换会话 Cookie + ``csrf_token``
-- ``GET  /api/auth/session``     校验会话是否有效（服务重启过）
-- ``GET  /api/accounts``         列出远端账号（接入时选账号用）
-- ``GET  /api/alias-labels``     别名标签名称库
-- ``POST /api/create``           创建 HME 别名（label 自由输入，≤200 字符）
-- ``GET  /api/aliases``          列出别名
-- ``POST /api/aliases/:id/deactivate|reactivate``  停用/激活
-- ``DELETE /api/aliases/:id``    删除
-- ``GET  /api/inbox``            读邮件（IMAP 优先，Web API 回退）
-- ``GET  /api/inbox/:id``        读单封邮件全文
-- ``POST /api/accounts/:id/check``  探测账号登录态
-
-关键约束
---------
-- 非 GET 请求必须带 ``X-CSRF-Token``，否则 ``403 CSRF_INVALID``；
-  token 每次登录都会变，所以必须在取完会话之后拼、重登后的重试也要用新 token。
-- 服务端错误码放在响应体 ``code`` 字段，这里映射成本项目惯用的错误码，
-  让上层（任务重试、渠道切换）能用同一套判断逻辑。
-- ``/api/inbox`` 的 ``limit`` 上限是 50（服务端以代码为准）。
-- 登录失败会限流（同 IP 15 分钟 5 次），所以会话在实例内缓存复用，
-  不每个请求重新登录。
+鉴权（2026-11-02 更新）
+----------------------
+- 新服务：所有请求带 `X-API-Key` 请求头，不需要 Cookie / CSRF；秘钥由
+  管理台「秘钥」页创建，按权限（accounts.list / aliases.list / inbox.* 等）
+  和账号范围授权。
+- 旧服务：仍兼容管理员密码登录（`POST /api/auth/login` 换会话 Cookie +
+  `csrf_token`，非 GET 带 `X-CSRF-Token`）。传入值以 `sk-` 开头时走
+  新鉴权，否则走旧链路 —— 存量部署不会因为这次升级直接失效。
 """
+
 
 from __future__ import annotations
 
@@ -53,6 +39,9 @@ _SESSION_REFRESH_SECONDS = 11 * 3600
 _ERROR_CODE_MAP = {
     "AUTH_REQUIRED": "session_expired",
     "INVALID_CREDENTIALS": "invalid_config",
+    "INVALID_API_KEY": "invalid_config",
+    "PERMISSION_DENIED": "permission_denied",
+    "ACCOUNT_NOT_ALLOWED": "account_not_allowed",
     "RATE_LIMITED": "provider_rate_limited",
     "CREATION_COOLDOWN": "provider_rate_limited",
     "CREATION_HOURLY_LIMIT": "provider_rate_limited",
@@ -60,6 +49,7 @@ _ERROR_CODE_MAP = {
     "CSRF_INVALID": "session_expired",
     "VALIDATION_ERROR": "invalid_config",
     "ACCOUNT_NOT_FOUND": "invalid_config",
+    "ALIAS_NOT_FOUND": "invalid_config",
     "TASK_NOT_FOUND": "invalid_config",
     "UPSTREAM_UNAUTHORIZED": "session_expired",
     "UPSTREAM_FAILURE": "upstream_unavailable",
@@ -86,13 +76,18 @@ class RemoteHMEClient:
     def __init__(
         self,
         base_url: str,
-        admin_password: str = "",
+        api_key: str = "",
         *,
         proxy: str = "",
         timeout: int = DEFAULT_TIMEOUT_SECONDS,
     ) -> None:
         self.base_url = str(base_url or "").strip().rstrip("/")
-        self._password = str(admin_password or "")
+        self._api_key = str(api_key or "").strip()
+        # 2026-11-02：服务端鉴权升级为 `X-API-Key`。为了不让存量部署
+        # （库里存的还是管理员密码）直接失效，`sk-` 开头走新鉴权，其它值
+        # 继续走旧的「登录换 Cookie + CSRF」链路。
+        self._api_key_mode = self._api_key.startswith("sk-")
+        self._password = self._api_key
         self._proxy = str(proxy or "").strip() or None
         self._timeout = int(timeout or DEFAULT_TIMEOUT_SECONDS)
         self._session = requests.Session()
@@ -106,11 +101,15 @@ class RemoteHMEClient:
         if not self.base_url:
             raise ICloudError("invalid_config", "未配置 iCloud 远程服务地址")
         url = f"{self.base_url}{path}"
+        headers = dict(kwargs.pop("headers", {}) or {})
+        if self._api_key_mode:
+            headers["X-API-Key"] = self._api_key
         try:
             response = self._session.request(
                 method,
                 url,
                 timeout=self._timeout,
+                headers=headers,
                 proxies={"http": self._proxy, "https": self._proxy} if self._proxy else None,
                 **kwargs,
             )
@@ -140,7 +139,7 @@ class RemoteHMEClient:
     def _login(self) -> None:
         """管理员登录，拿会话 Cookie 与 CSRF token。"""
         if not self._password:
-            raise ICloudError("invalid_config", "未配置 iCloud 远程服务管理员密码")
+            raise ICloudError("invalid_config", "未配置 iCloud 远程服务凭据（API 秘钥或管理员密码）")
         data = self._request("POST", "/api/auth/login", json={"password": self._password})
         token = ""
         if isinstance(data, dict):
@@ -162,7 +161,11 @@ class RemoteHMEClient:
     def _authed_request(
         self, method: str, path: str, *, _retried: bool = False, **kwargs: Any
     ) -> Any:
-        """带会话的请求；会话过期时自动重登一次。"""
+        """带鉴权的请求：新 API 秘钥模式直接发，旧模式自动重登。"""
+        if self._api_key_mode:
+            # 新服务：每个请求带 `X-API-Key`，没有 Cookie / CSRF 会话。
+            return self._request(method, path, **kwargs)
+
         self._ensure_session()
         extra_headers = dict(kwargs.pop("headers", {}) or {})
         # CSRF token 每次登录都会变，所以必须在取完会话之后再拼，
@@ -212,7 +215,12 @@ class RemoteHMEClient:
         target = str(account_id or "").strip()
         chosen = str(label or "").strip()
         if not chosen:
-            labels = self.list_labels()
+            try:
+                labels = self.list_labels()
+            except ICloudError:
+                # 新 API 秘钥可能没有 alias-labels 权限；标签只是可选装饰，
+                # 不能因为读不到名称库就挡住创建。
+                labels = []
             if labels:
                 chosen = labels[0]
             else:
@@ -262,24 +270,54 @@ class RemoteHMEClient:
         alias: str = "",
         limit: int = 20,
         days: int = 7,
+        offset: int = 0,
+        start: str = "",
+        end: str = "",
+        refresh: bool = False,
     ) -> dict[str, Any]:
         """读收件箱。
 
-        返回原始结构 `{account_id, alias, count, method, warning, messages}`，
-        由调用方决定怎么映射成本项目的邮件模型。
+        返回原始结构 `{account_id, alias, count, total, offset, method,
+        warning, messages}`，由调用方决定怎么映射成本项目的邮件模型。
+
+        新接口（2026-11-02）支持 `offset` / `start` / `end` / `refresh`：
+        列表页要翻页、按日期过滤，旧实现只传 limit/days 会永远停在第一页。
         """
         target = str(account_id or "").strip()
         params: dict[str, Any] = {
             "account_id": target,
             "limit": max(1, min(int(limit or 20), 50)),
-            "days": max(0, int(days or 7)),
+            "days": max(0, min(int(days if days is not None else 7), 3650)),
+            "offset": max(0, min(int(offset or 0), 10000)),
         }
         if alias:
             params["alias"] = str(alias).strip()
+        if start:
+            params["start"] = str(start).strip()
+        if end:
+            params["end"] = str(end).strip()
+        if refresh:
+            params["refresh"] = 1
         data = self._authed_request("GET", "/api/inbox", params=params)
         if not isinstance(data, dict):
-            return {"account_id": target, "messages": []}
+            return {"account_id": target, "messages": [], "count": 0, "total": 0}
         return data
+
+    def fetch_previews(self, account_id: str, message_ids: list[str]) -> dict[str, str]:
+        """批量补邮件摘要（最多 20 个 ID），返回 `id -> 摘要`。"""
+        target = str(account_id or "").strip()
+        ids = [str(item) for item in (message_ids or []) if str(item or "").strip()][:20]
+        if not ids:
+            return {}
+        data = self._authed_request(
+            "POST",
+            "/api/inbox/previews",
+            params={"account_id": target},
+            json={"ids": ids},
+        )
+        if not isinstance(data, dict):
+            return {}
+        return {str(key): str(value or "") for key, value in data.items()}
 
     def fetch_message(self, account_id: str, message_id: str) -> dict[str, Any]:
         """取单封邮件全文（列表里的 preview 最多 2000 字）。"""

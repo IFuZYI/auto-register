@@ -40,14 +40,14 @@ def _session_with(accounts, aliases):
 class PicksAccountWithAvailableAliasesTests(unittest.TestCase):
     """挑选规则：优先有可用别名的主号。"""
 
-    def _pick(self, accounts, aliases, platform: str = ""):
+    def _pick(self, accounts, aliases, platform: str = "", registered=None):
         """走**生产入口** `resolve_remote_account("")`，不是内部函数。
 
         早先直接调 `_first_remote_account_with_aliases` —— 那样把实现换回
         「只取第一个启用的」测试仍然全绿（变异验证抓到），等于没测到接入点。
         这里把 `platform_session` 换成内存库，让生产代码跑真实路径。
         """
-        from contextlib import contextmanager
+        from contextlib import ExitStack, contextmanager
         from unittest import mock
 
         import services.icloud.remote as remote_mod
@@ -59,7 +59,16 @@ class PicksAccountWithAvailableAliasesTests(unittest.TestCase):
             with Session(engine) as s:
                 yield s
 
-        with mock.patch.object(remote_mod, "platform_session", _fake_session):
+        with ExitStack() as stack:
+            stack.enter_context(
+                mock.patch.object(remote_mod, "platform_session", _fake_session)
+            )
+            if registered is not None:
+                stack.enter_context(
+                    mock.patch.object(
+                        remote_mod, "_registered_platforms_for", return_value=registered
+                    )
+                )
             return remote_mod.resolve_remote_account("", platform)
 
     def test_skips_account_without_available_aliases(self):
@@ -120,6 +129,52 @@ class PicksAccountWithAvailableAliasesTests(unittest.TestCase):
         row = self._pick(accounts, aliases, platform="chatgpt")
         self.assertEqual(row.id, 4,
                          "选中了「别名已被本平台用尽」的主号 —— 取号会领不到")
+
+    def test_skips_account_whose_aliases_are_all_registered_on_platform(self):
+        """`accounts` 表登记过本平台的主号也要跳过（比 used_platforms 更权威）。
+
+        生产实测：account 3 的 426 个 available 别名在 `accounts` 表里全都
+        注册过 ChatGPT，但 `used_platforms` 是空的 —— 只看记账会挑中它，
+        取号时全被 `claim_alias` 跳过，最后报「没有邮箱」。
+        """
+        accounts = [
+            {"id": 3, "email": "a@x.com", "source": "remote", "enabled": True},
+            {"id": 4, "email": "b@x.com", "source": "remote", "enabled": True},
+        ]
+        aliases = [
+            {"id": 1, "account_id": 3, "address": "u1@x.com", "status": "active",
+             "pool_status": "available", "used_platforms": ""},
+            {"id": 2, "account_id": 3, "address": "u2@x.com", "status": "active",
+             "pool_status": "available", "used_platforms": ""},
+            {"id": 3, "account_id": 4, "address": "u3@x.com", "status": "active",
+             "pool_status": "available", "used_platforms": ""},
+        ]
+        row = self._pick(
+            accounts,
+            aliases,
+            platform="chatgpt",
+            registered={"u1@x.com": {"chatgpt"}, "u2@x.com": {"chatgpt"}},
+        )
+        self.assertEqual(row.id, 4, "选中了「池里有号、实际全注册过」的主号")
+
+    def test_prefers_account_with_most_claimable_aliases(self):
+        """有多个主号可选时选可领数量最多的，别选只有 1 个干净号的。"""
+        accounts = [
+            {"id": 3, "email": "a@x.com", "source": "remote", "enabled": True},
+            {"id": 4, "email": "b@x.com", "source": "remote", "enabled": True},
+        ]
+        aliases = [
+            {"id": 1, "account_id": 3, "address": "a1@x.com", "status": "active",
+             "pool_status": "available", "used_platforms": ""},
+            {"id": 2, "account_id": 4, "address": "b1@x.com", "status": "active",
+             "pool_status": "available", "used_platforms": ""},
+            {"id": 3, "account_id": 4, "address": "b2@x.com", "status": "active",
+             "pool_status": "available", "used_platforms": ""},
+            {"id": 4, "account_id": 4, "address": "b3@x.com", "status": "active",
+             "pool_status": "available", "used_platforms": ""},
+        ]
+        row = self._pick(accounts, aliases, platform="chatgpt")
+        self.assertEqual(row.id, 4, "没选可领数量最多的主号")
 
     def test_without_platform_filter_ignores_used_platforms(self):
         """不传 platform 时保持旧行为（只看 pool_status）。"""

@@ -134,6 +134,62 @@ class BannedRecoveryEvidenceTests(unittest.TestCase):
         self.assertEqual(account.status, BANNED_ACCOUNT_STATUS)
 
 
+class LegacyExhaustedStatusRepairTests(unittest.TestCase):
+    """存量修复：老数据 `disabled=True` 但 status 还停在 expired/invalid/limited。"""
+
+    def test_legacy_expired_disabled_is_marked_banned(self):
+        from services.chatgpt_maintenance import mark_exhausted_banned
+
+        extra = {AUTO_REFRESH_STATE_KEY: {"attempts": 3, "disabled": True}}
+        row = _Row("expired", extra)
+        self.assertTrue(mark_exhausted_banned(row))
+        self.assertEqual(row.status, BANNED_ACCOUNT_STATUS)
+        self.assertEqual(
+            row.get_extra()[AUTO_REFRESH_STATE_KEY]["disabled_reason"],
+            "recovery_exhausted",
+        )
+
+    def test_configuration_error_is_not_banned(self):
+        from services.chatgpt_maintenance import mark_exhausted_banned
+
+        extra = {
+            AUTO_REFRESH_STATE_KEY: {"attempts": 3, "disabled": True},
+            "chatgpt_token_refresh": {"refresh_kind": "configuration"},
+        }
+        row = _Row("invalid", extra)
+        self.assertFalse(mark_exhausted_banned(row))
+        self.assertEqual(row.status, "invalid")
+
+    def test_registered_account_with_stale_disabled_is_not_banned(self):
+        from services.chatgpt_maintenance import mark_exhausted_banned
+
+        extra = {AUTO_REFRESH_STATE_KEY: {"attempts": 3, "disabled": True}}
+        row = _Row("registered", extra)
+        self.assertFalse(mark_exhausted_banned(row))
+        self.assertEqual(row.status, "registered")
+
+    def test_repair_scans_real_rows_and_saves(self):
+        from core.base_platform import Account
+        from core.db import account_repository
+        from services.chatgpt_maintenance import repair_exhausted_chatgpt_statuses
+
+        acc = account_repository.upsert(
+            Account(
+                platform="chatgpt",
+                email="legacy-exhausted@x.c",
+                password="p",
+                status="expired",
+                extra={AUTO_REFRESH_STATE_KEY: {"attempts": 3, "disabled": True}},
+            )
+        )
+        try:
+            self.assertGreaterEqual(repair_exhausted_chatgpt_statuses(), 1)
+            saved = account_repository.get(str(acc.id), "chatgpt")
+            self.assertEqual(saved.status, BANNED_ACCOUNT_STATUS)
+        finally:
+            account_repository.delete(str(acc.id), "chatgpt")
+
+
 class RecoveryExhaustionDisablesTests(unittest.TestCase):
     """「不成功则禁用」：连续失败达上限就落 banned，不只是置 disabled。"""
 
@@ -193,6 +249,8 @@ class RecoverTaskSelectionTests(unittest.TestCase):
         "lim": ("limited", None),
         "ok": ("registered", None),
         "dead": ("banned", {AUTO_REFRESH_STATE_KEY: {"disabled": True, "attempts": 3}}),
+        # 存量脏数据：disabled=True 但 status 还停在 expired
+        "legacy": ("expired", {AUTO_REFRESH_STATE_KEY: {"disabled": True, "attempts": 3}}),
     }
 
     def setUp(self):
@@ -231,13 +289,16 @@ class RecoverTaskSelectionTests(unittest.TestCase):
         self.assertEqual(body["by_status"].get("expired"), 1, body)
         self.assertEqual(body["by_status"].get("limited"), 1, body)
         self.assertNotIn("registered", body["by_status"], body)
-        # banned + disabled=True 的号不该进「可恢复」列表
+        # banned + disabled=True 的号不该进「可恢复」列表；它也不算
+        # 「已达上限待跳过」—— banned 本来就不在恢复队列里。
+        # 真正要计数的是 legacy（expired + disabled=True）。
         self.assertEqual(body["exhausted"], 1, body)
         emails = {item["email"] for item in body["items"]}
         self.assertIn("rec-inv@x.c", emails)
         self.assertIn("rec-lim@x.c", emails)
         self.assertNotIn("rec-ok@x.c", emails)
         self.assertNotIn("rec-dead@x.c", emails)
+        self.assertNotIn("rec-legacy@x.c", emails)
 
     def test_recover_endpoint_refuses_when_nothing_to_recover(self):
         """没有可恢复的号时明确 400，而不是建一个空任务。"""
@@ -253,6 +314,36 @@ class RecoverTaskSelectionTests(unittest.TestCase):
                 )
         self.assertEqual(ctx.exception.status_code, 400)
         self.assertIn("没有需要恢复的账号", str(ctx.exception.detail))
+
+    def test_recover_endpoint_repairs_legacy_exhausted_before_skipping(self):
+        """点「恢复」时就把存量「已放弃但状态未落禁用」的号补标，别永久跳过。"""
+        from fastapi import HTTPException
+
+        from api.tasks import RecoverAccountsTaskRequest, create_recover_accounts_task
+        from core.base_platform import Account
+        from core.db import account_repository
+
+        acc = account_repository.upsert(
+            Account(
+                platform="chatgpt",
+                email="rec-repair@x.c",
+                password="p",
+                status="expired",
+                extra={AUTO_REFRESH_STATE_KEY: {"attempts": 3, "disabled": True}},
+            )
+        )
+        try:
+            with mock.patch("fastapi.BackgroundTasks") as bg:
+                with self.assertRaises(HTTPException) as ctx:
+                    create_recover_accounts_task(
+                        RecoverAccountsTaskRequest(account_ids=[str(acc.id)]),
+                        bg,
+                    )
+            self.assertEqual(ctx.exception.status_code, 400)
+            saved = account_repository.get(str(acc.id), "chatgpt")
+            self.assertEqual(saved.status, BANNED_ACCOUNT_STATUS)
+        finally:
+            account_repository.delete(str(acc.id), "chatgpt")
 
 
 if __name__ == "__main__":

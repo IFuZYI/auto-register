@@ -651,8 +651,9 @@ def create_recover_accounts_task(
 
     `dry_run` 由 `?preview=1` 走单独的分支（见 `GET /recover/candidates`）。
     """
-    from core.db import AccountModel, platform_session
+    from core.db import AccountModel, account_repository, platform_session
     from services.chatgpt_account_selection import normalize_account_ids
+    from services.chatgpt_maintenance import mark_exhausted_banned
 
     wanted_ids = [str(i) for i in normalize_account_ids(req.account_ids)] if req.account_ids else []
     statuses = {str(s or "").strip().lower() for s in (req.statuses or []) if str(s or "").strip()}
@@ -672,6 +673,7 @@ def create_recover_accounts_task(
 
     candidates: list[str] = []
     skipped_exhausted = 0
+    repaired_exhausted = 0
     for row in rows:
         if wanted_ids and str(row.id) not in wanted_ids:
             continue
@@ -680,6 +682,13 @@ def create_recover_accounts_task(
         if req.skip_exhausted:
             state = (row.get_extra() or {}).get("chatgpt_auto_refresh")
             if isinstance(state, dict) and state.get("disabled"):
+                # 存量修复：老数据只有 disabled=True，status 还停在
+                # expired/invalid/limited。这里补落 banned，否则它会被
+                # 永久跳过、界面永远显示「过期/失效」（用户 2026-11-02 报）。
+                if mark_exhausted_banned(row):
+                    account_repository.save(row, session=s)
+                    s.commit()
+                    repaired_exhausted += 1
                 skipped_exhausted += 1
                 continue
         candidates.append(str(row.id))
@@ -707,7 +716,11 @@ def create_recover_accounts_task(
     _persist_task_snapshot(task_id)
     _log(task_id, f"待恢复账号 {len(candidates)} 个（状态: {', '.join(sorted(allowed))}）")
     if skipped_exhausted:
-        _log(task_id, f"跳过 {skipped_exhausted} 个已达重试上限的账号")
+        _log(
+            task_id,
+            f"跳过 {skipped_exhausted} 个已达重试上限的账号"
+            + (f"（其中 {repaired_exhausted} 个存量号已补标禁用）" if repaired_exhausted else ""),
+        )
     background_tasks.add_task(
         _run_recover_accounts,
         task_id,
@@ -718,6 +731,7 @@ def create_recover_accounts_task(
         "task_id": task_id,
         "total": len(candidates),
         "skipped_exhausted": skipped_exhausted,
+        "repaired_exhausted": repaired_exhausted,
     }
 
 
@@ -737,20 +751,20 @@ def preview_recover_candidates():
     items: list[dict] = []
     for row in rows:
         status = str(row.status or "").strip().lower()
+        if status not in allowed:
+            # 「已达上限」只统计**本来可恢复**的三种状态：registered / banned
+            # 本来就不在恢复队列里，把它们算进 exhausted 会让预览数字
+            # 比任务实际跳过的数量多（实测 9 vs 7）。
+            continue
         state = (row.get_extra() or {}).get("chatgpt_auto_refresh")
         is_exhausted = isinstance(state, dict) and bool(state.get("disabled"))
-        # 「用尽」要**独立于状态**统计：老数据里失败的号还是 invalid
-        # （旧实现只置 disabled、不改状态），新数据里已经落 banned ——
-        # 只看可恢复状态的话，后者永远数不到，界面上会显示「0 个已放弃」。
+        # 这里统计的是「本来可恢复、但已经用尽重试」的号；banned / registered
+        # 不在恢复队列，算进来会让预览的「另有 N 个已达上限」比任务实际
+        # 跳过的数量多（实测 9 vs 7）。
         if is_exhausted:
             exhausted += 1
-            if status not in allowed:
-                continue
-        if status not in allowed:
             continue
         by_status[status] = by_status.get(status, 0) + 1
-        if is_exhausted:
-            continue
         items.append(
             {
                 "id": str(row.id),

@@ -88,6 +88,72 @@ class TestCsrfContract:
         assert remote.active_calls == [("anon-9", False), ("anon-9", True)]
 
 
+class TestApiKeyMode:
+    """2026-11-02 新鉴权：`X-API-Key`，无登录/CSRF。"""
+
+    @staticmethod
+    def _response(data):
+        class _Resp:
+            status_code = 200
+
+            def json(self):
+                return {"success": True, "data": data}
+
+        return _Resp()
+
+    def test_api_key_is_sent_and_no_login_request(self):
+        from unittest import mock
+
+        client = RemoteHMEClient("http://hme.example", "sk-test-key", timeout=5)
+        with mock.patch.object(
+            client._session, "request", return_value=self._response([{"id": "acc_1"}])
+        ) as request:
+            assert client.list_accounts()[0]["id"] == "acc_1"
+        assert request.call_args.kwargs["headers"]["X-API-Key"] == "sk-test-key"
+        assert all(
+            call.args[0] != "POST" or call.args[1] != "/api/auth/login"
+            for call in request.call_args_list
+        ), "API 秘钥模式不应再走登录接口"
+
+    def test_inbox_passes_new_pagination_and_refresh_params(self):
+        from unittest import mock
+
+        client = RemoteHMEClient("http://hme.example", "sk-test-key", timeout=5)
+        with mock.patch.object(
+            client._session,
+            "request",
+            return_value=self._response({"messages": [], "count": 0, "total": 0}),
+        ) as request:
+            client.fetch_inbox(
+                "acc_1",
+                limit=20,
+                offset=40,
+                days=30,
+                start="2026-10-01",
+                end="2026-10-31",
+                refresh=True,
+            )
+        params = request.call_args.kwargs["params"]
+        assert params["offset"] == 40
+        assert params["start"] == "2026-10-01"
+        assert params["end"] == "2026-10-31"
+        assert params["refresh"] == 1
+        assert params["days"] == 30
+
+    def test_previews_posts_ids_and_returns_mapping(self):
+        from unittest import mock
+
+        client = RemoteHMEClient("http://hme.example", "sk-test-key", timeout=5)
+        with mock.patch.object(
+            client._session,
+            "request",
+            return_value=self._response({"1042": "code 123456"}),
+        ) as request:
+            out = client.fetch_previews("acc_1", ["1042", "Junk:88"])
+        assert out == {"1042": "code 123456"}
+        assert request.call_args.kwargs["json"] == {"ids": ["1042", "Junk:88"]}
+
+
 # ------------------------------------------------------------------ 错误码映射
 
 

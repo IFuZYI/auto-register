@@ -211,6 +211,26 @@ export default function ICloudPage() {
     setFilterSource(undefined)
   }
 
+  // 全选按钮：antd 表头的复选框只选当前页；这里选**当前筛选出来的全部**
+  // （跨分页），否则 20 条一页的池子根本没法“全选”。
+  const allVisibleSelected = useMemo(
+    () =>
+      visibleAliases.length > 0 &&
+      visibleAliases.every((alias) => selectedAliasIds.map(Number).includes(Number(alias.id))),
+    [visibleAliases, selectedAliasIds],
+  )
+
+  const toggleSelectAllVisible = () => {
+    const visibleIds = visibleAliases.map((alias) => Number(alias.id))
+    if (allVisibleSelected) {
+      setSelectedAliasIds((prev) =>
+        prev.filter((key) => !visibleIds.includes(Number(key))),
+      )
+      return
+    }
+    setSelectedAliasIds((prev) => Array.from(new Set([...prev.map(Number), ...visibleIds])))
+  }
+
   // 没勾选就按当前筛选出来的全部算，跟账号页导出的口径一致
   const targetAliases = useMemo(() => {
     if (selectedAliasIds.length === 0) return visibleAliases
@@ -817,6 +837,14 @@ export default function ICloudPage() {
                       </Button>
                     </Text>
                   )}
+                  <Button
+                    onClick={toggleSelectAllVisible}
+                    disabled={visibleAliases.length === 0}
+                  >
+                    {allVisibleSelected
+                      ? `取消全选 (${visibleAliases.length})`
+                      : `全选 (${visibleAliases.length})`}
+                  </Button>
                   <Button
                     type="primary"
                     icon={<PlusOutlined />}

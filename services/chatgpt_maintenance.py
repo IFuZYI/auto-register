@@ -187,6 +187,57 @@ def _refresh_kind_of(extra: dict[str, Any]) -> str:
     return str(stamp.get("refresh_kind") or "").strip().lower()
 
 
+#: 「已放弃」但状态还没落 banned 的存量状态集合。
+_EXHAUSTED_SOURCE_STATUSES = frozenset({"expired", "invalid", "limited"})
+
+
+def mark_exhausted_banned(row: Any, extra: dict[str, Any] | None = None) -> bool:
+    """把「已达重试上限但状态还停在过期/失效/限流」的存量号补标禁用。
+
+    2026-10-30 之前的 `record_auto_refresh_result` 只置 `disabled=True`、
+    不改 `status`；这些号会被恢复任务当成「已达上限」跳过，却永远显示
+    「过期/失效」，用户看到的就是「明明已经放弃/封禁了，却没变成禁用」。
+
+    `refresh_kind == "configuration"` 除外 —— 那是我们的 client 配错，
+    不是账号的错，不能补标禁用（与 `record_auto_refresh_result` 同口径）。
+    返回是否发生了改动。
+    """
+    extra = dict(extra if extra is not None else (row.get_extra() or {}))
+    state = extra.get(AUTO_REFRESH_STATE_KEY)
+    if not isinstance(state, dict) or not state.get("disabled"):
+        return False
+    status = str(getattr(row, "status", "") or "").strip().lower()
+    if status not in _EXHAUSTED_SOURCE_STATUSES:
+        return False
+    if _refresh_kind_of(extra) == "configuration":
+        return False
+    setattr(row, "status", "banned")
+    state = dict(state)
+    state["disabled_reason"] = state.get("disabled_reason") or "recovery_exhausted"
+    extra[AUTO_REFRESH_STATE_KEY] = state
+    row.set_extra(extra)
+    return True
+
+
+def repair_exhausted_chatgpt_statuses() -> int:
+    """启动时修复存量：把「已放弃但未落禁用」的 ChatGPT 号补标 banned。
+
+    只动 `expired / invalid / limited` 三种状态；已注册（registered）的号
+    即使带着旧的 disabled 标记也不碰 —— 那多半是恢复成功后没清计数的脏数据，
+    把它标禁用会误杀好号。返回修复条数。
+    """
+    from core.db import account_repository
+
+    fixed = 0
+    for account in account_repository.list_all_accounts():
+        if str(getattr(account, "platform", "") or "").strip().lower() != "chatgpt":
+            continue
+        if mark_exhausted_banned(account):
+            account_repository.save(account)
+            fixed += 1
+    return fixed
+
+
 #: 自动维护任务记录的 source 值（任务运行页据此显示彩色标签）。
 AUTO_REFRESH_SOURCE = "auto_refresh"
 CHATGPT2API_SYNC_SOURCE = "chatgpt2api_sync"

@@ -102,7 +102,9 @@ class RemoteAccountRequest(BaseModel):
     """接入一个远端 icloud-hme 账号（一行一个远端账号）。"""
 
     base_url: str
-    admin_password: str
+    # 新服务用 API 秘钥；`admin_password` 保留给旧客户端/旧服务。
+    api_key: str = ""
+    admin_password: str = ""
     remote_account_id: str
     name: str = ""
     proxy: str = ""
@@ -112,7 +114,8 @@ class DiscoverRemoteRequest(BaseModel):
     """只读探针：用凭据登录远端并列出账号（不落库）。"""
 
     base_url: str
-    admin_password: str
+    api_key: str = ""
+    admin_password: str = ""
     proxy: str = ""
 
 
@@ -263,6 +266,7 @@ def discover_remote_accounts(body: DiscoverRemoteRequest):
         return {"items": icloud_service.discover_remote_accounts(
             base_url=body.base_url,
             admin_password=body.admin_password,
+            api_key=body.api_key,
             proxy=body.proxy,
         )}
     except ICloudError as error:
@@ -276,6 +280,7 @@ def add_remote_account(body: RemoteAccountRequest):
         return icloud_service.add_remote_account(
             base_url=body.base_url,
             admin_password=body.admin_password,
+            api_key=body.api_key,
             remote_account_id=body.remote_account_id,
             name=body.name,
             proxy=body.proxy,

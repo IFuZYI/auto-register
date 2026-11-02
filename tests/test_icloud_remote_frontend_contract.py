@@ -65,6 +65,19 @@ class TestICloudPage:
         assert "远端凭据" in src, "远程账号的会话状态列应显示「远端凭据」"
         assert "远端管理" in src, "远程账号的额度列应显示「远端管理」"
 
+    def test_select_all_button_present(self):
+        """邮箱池要能跨分页全选当前筛选结果。"""
+        src = _read("pages/ICloud.tsx")
+        assert "toggleSelectAllVisible" in src
+        assert "全选 (" in src, "缺少全选按钮"
+        assert "selectedAliasIds" in src
+
+    def test_remote_modal_uses_api_key_field(self):
+        src = _read("components/icloud/AddRemoteServiceModal.tsx")
+        assert 'name="api_key"' in src, "远程服务弹窗没有改成 API 秘钥"
+        assert "api_key" in src
+        assert "admin_password" not in src, "旧的管理员密码字段还在"
+
 
 class TestAliasType:
     def test_source_field_in_type(self):

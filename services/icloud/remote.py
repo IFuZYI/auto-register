@@ -3,7 +3,7 @@
 与本地链路（`accounts.py` / `aliases.py` / `messages.py`）的分工：
 - 本地行（`source=local`）：凭据在本机，直连 Apple；
 - 远程行（`source=remote`）：凭据在独立的 icloud-hme 服务里，本机只存
-  「服务地址 + 管理员密码密文 + 远端账号 id」，经 `remote_client` 调它的 API。
+  「服务地址 + API 秘钥密文 + 远端账号 id」，经 `remote_client` 调它的 API。
 
 **本地优先去重**（用户要求 2026-10-09）：同步远端别名时，若地址在本地已有
 行（`source=local`），保留本地行、不建远程行 —— 同一个地址不允许两行，
@@ -32,7 +32,11 @@ from platforms.icloud import (
 from platforms.icloud.remote_client import RemoteHMEClient
 from services.icloud._locks import _utcnow
 from services.icloud._facade import _facade
-from services.icloud.accounts import _record_to_model, get_account
+from services.icloud.accounts import (
+    _record_to_model,
+    _registered_platforms_for,
+    get_account,
+)
 from services.icloud.aliases import _alias_to_dict, _record_sync_error, _upsert_alias
 
 SOURCE_LOCAL = "local"
@@ -43,16 +47,20 @@ SOURCE_REMOTE = "remote"
 
 
 def remote_password(row: ICloudAccountModel) -> str:
-    """解密远程账号的管理员密码（调用方永远拿不到密文本身）。"""
+    """解密远程账号的 API 秘钥（调用方永远拿不到密文本身）。
+
+    列名 `remote_password_cipher` 是历史命名 —— 2026-11-02 服务端鉴权升级为
+    API 秘钥后，这里存的是 `sk-` 开头的秘钥（旧部署可能仍是管理员密码）。
+    """
     cipher = str(getattr(row, "remote_password_cipher", "") or "")
     if not cipher:
-        raise ICloudError("invalid_config", f"远程账号 {row.email} 未保存管理员密码")
+        raise ICloudError("invalid_config", f"远程账号 {row.email} 未保存 API 秘钥")
     try:
         payload = _facade.secret_box.decrypt(cipher)
     except Exception as exc:  # noqa: BLE001 - 解密失败是配置问题，给出可行动的提示
         raise ICloudError(
             "invalid_config",
-            f"远程账号 {row.email} 的管理员密码无法解密（加密密钥已变更），请重新接入该账号",
+            f"远程账号 {row.email} 的 API 秘钥无法解密（加密密钥已变更），请重新接入该账号",
         ) from exc
     return payload.decode("utf-8") if isinstance(payload, bytes) else str(payload)
 
@@ -60,7 +68,7 @@ def remote_password(row: ICloudAccountModel) -> str:
 def remote_client(
     row: ICloudAccountModel, *, proxy: str | None = None, timeout: int = 30
 ) -> RemoteHMEClient:
-    """按账号行构建远程客户端（地址 + 解密后的密码 + 可选代理）。"""
+    """按账号行构建远程客户端（地址 + 解密后的 API 秘钥 + 可选代理）。"""
     if str(getattr(row, "source", "") or "") != SOURCE_REMOTE:
         raise ICloudError("invalid_config", f"账号 {row.email} 不是远程账号")
     return RemoteHMEClient(
@@ -74,19 +82,27 @@ def remote_client(
 # ------------------------------------------------------------------ 接入
 
 
-def discover_remote_accounts(*, base_url: str, admin_password: str, proxy: str = "") -> list[dict[str, Any]]:
+def discover_remote_accounts(
+    *,
+    base_url: str,
+    admin_password: str = "",
+    proxy: str = "",
+    api_key: str = "",
+) -> list[dict[str, Any]]:
     """只读探针：登录远端并列出它的账号（不落库）。
 
     给「添加远程服务」弹窗用 —— 先让用户看到远端有哪些账号、再选一个接入，
     比「先接入再发现选错了」少一轮删除。
+
+    `api_key` 优先；`admin_password` 仅兼容旧客户端 / 旧服务。
     """
     url = str(base_url or "").strip().rstrip("/")
-    password = str(admin_password or "")
+    credential = str(api_key or admin_password or "").strip()
     if not url:
         raise ICloudError("invalid_config", "请填写远程服务地址")
-    if not password:
-        raise ICloudError("invalid_config", "请填写远程服务管理员密码")
-    client = RemoteHMEClient(url, password, proxy=str(proxy or "").strip())
+    if not credential:
+        raise ICloudError("invalid_config", "请填写远程服务 API 秘钥")
+    client = RemoteHMEClient(url, credential, proxy=str(proxy or "").strip())
     accounts = client.list_accounts()
     return [
         {
@@ -105,24 +121,27 @@ def discover_remote_accounts(*, base_url: str, admin_password: str, proxy: str =
 def add_remote_account(
     *,
     base_url: str,
-    admin_password: str,
+    admin_password: str = "",
     remote_account_id: str,
     name: str = "",
     proxy: str = "",
+    api_key: str = "",
 ) -> dict[str, Any]:
     """把远程服务里的一个账号接入本地（一行一个远端账号）。
 
-    流程：登录远端验证凭据 → 确认远端账号存在（拿它的 icloud_email）→ 落库。
+    流程：验证凭据 → 确认远端账号存在（拿它的 icloud_email）→ 落库。
     重复接入（同 base_url + remote_account_id）直接拒绝 —— 同一远端账号
     接两次会产生两行、两个池子，取号时会互相顶掉。
+
+    `api_key` 优先；`admin_password` 仅兼容旧客户端 / 旧服务。
     """
     url = str(base_url or "").strip().rstrip("/")
-    password = str(admin_password or "")
+    credential = str(api_key or admin_password or "").strip()
     target = str(remote_account_id or "").strip()
     if not url:
         raise ICloudError("invalid_config", "请填写远程服务地址")
-    if not password:
-        raise ICloudError("invalid_config", "请填写远程服务管理员密码")
+    if not credential:
+        raise ICloudError("invalid_config", "请填写远程服务 API 秘钥")
     if not target:
         raise ICloudError("invalid_config", "请选择要接入的远端账号")
 
@@ -136,8 +155,8 @@ def add_remote_account(
             f"该远端账号已接入（{existing.get('email')}），同一服务里的同一个账号只能接入一次",
         )
 
-    client = RemoteHMEClient(url, password, proxy=str(proxy or "").strip())
-    summary = client.account_summary(target)  # 登录 + 校验账号存在；失败抛错
+    client = RemoteHMEClient(url, credential, proxy=str(proxy or "").strip())
+    summary = client.account_summary(target)  # 鉴权 + 校验账号存在；失败抛错
 
     email = str(
         summary.get("icloud_email") or summary.get("real_email") or ""
@@ -155,8 +174,8 @@ def add_remote_account(
         base_url=url,
         remote_account_id=target,
         proxy=str(proxy or "").strip(),
-        # 密文原样存（加解密留在本模块，仓储只搬运）
-        remote_password_cipher=_facade.secret_box.encrypt(password.encode("utf-8")),
+        # 密文原样存（加解密留在本模块，仓储只搬运；列名保留历史命名）
+        remote_password_cipher=_facade.secret_box.encrypt(credential.encode("utf-8")),
     )
     # 重新读一次拿到完整行（仓储返回的就是落库后的形状）
     created = icloud_account_repository.find_remote(
@@ -200,6 +219,51 @@ def list_remote_accounts() -> list[dict[str, Any]]:
     return [_account_public_dict(_record_to_model(r)) for r in rows]
 
 
+def _candidate_is_claimable(
+    candidate: dict[str, Any], platform: str, registered: dict[str, set[str]]
+) -> bool:
+    """这条别名对目标平台是否还能领（与 `claim_alias` 的跳过规则同源）。
+
+    关键：`accounts` 表里的注册证据比 `used_platforms` 记账更权威 ——
+    账号可能注册过但池里没来得及记账，只信 `used_platforms` 会挑中
+    「池里有几百个 available、实际全都注册过」的主号，取号时全被跳过，
+    最后回落到远程不支持的「生成」，用户看到的就是「池里明明有邮箱，
+    却报没有邮箱」。
+    """
+    address = str(candidate.get("address") or "").strip().lower()
+    status = str(candidate.get("pool_status") or "").strip().lower() or "available"
+    if status not in {"available", "used"}:
+        return False
+    wanted = str(platform or "").strip().lower()
+    if wanted and wanted in registered.get(address, set()):
+        return False
+    used_platforms = str(candidate.get("used_platforms") or "")
+    if wanted and f",{wanted}," in used_platforms:
+        return False
+    if status == "used":
+        if not wanted:
+            return False
+    return True
+
+
+def _claimable_account_counts(
+    candidates_by_account: dict[int, list[dict[str, Any]]], platform: str
+) -> dict[int, int]:
+    """每个主号有多少条**真能领**的别名（0 = 不能选）。"""
+    addresses = [
+        str(c.get("address") or "")
+        for rows in candidates_by_account.values()
+        for c in rows
+    ]
+    registered = _registered_platforms_for(addresses)
+    counts: dict[int, int] = {}
+    for account_id, rows in candidates_by_account.items():
+        counts[int(account_id)] = sum(
+            1 for c in rows if _candidate_is_claimable(c, platform, registered)
+        )
+    return counts
+
+
 def _first_remote_account_with_aliases(
     session, platform: str = ""
 ) -> Optional[ICloudAccountModel]:
@@ -212,11 +276,13 @@ def _first_remote_account_with_aliases(
     「生成新别名」，而远程渠道明确不支持生成（只允许本地主号生成）→
     注册直接失败「远程账号不支持生成隐私邮箱」。
 
+    2026-11-02 补：只看 `used_platforms` 还不够 —— 生产库里 account 3 的
+    426 个 `available` 别名在 `accounts` 表里**全部注册过 ChatGPT**，
+    但池里没记账。选主号必须同时看权威注册证据，否则仍会挑到它。
+
     兜底仍然返回第一个启用的：全都没别名时至少让取号走到「生成」那一步，
     报错信息比「没有可用远程账号」准确。
     """
-    from sqlalchemy import or_
-
     accounts = session.exec(
         select(ICloudAccountModel)
         .where(ICloudAccountModel.source == SOURCE_REMOTE)
@@ -226,55 +292,46 @@ def _first_remote_account_with_aliases(
     if not accounts:
         return None
 
-    wanted_platform = str(platform or "").strip().lower()
-
-    # 候选判定：条件用**查询层**写一份（`core/storage/query.py`），
-    # 在当前 session 上执行 —— 与 `claim_alias` 的筛选规则同源。
-    #
-    # 刻意**不**调仓储：这里已经有一个正确的 session（测试会用内存库替换
-    # `platform_session`），而仓储的 JSON 分支会去读 `_store()`、SQLite 分支
-    # 自己开会话 —— 那样就读到了真实库，挑错主号（实测：测试全量跑时红）。
-    from core.storage.query import any_of, eq, to_sql
-
     wanted = [int(a.id) for a in accounts if a.id is not None]
     if not wanted:
         return accounts[0]
+
+    # 候选与 `claim_alias` 的 `find_candidates` 同口径：active + available/used。
+    from core.storage.query import any_of, eq, to_sql
 
     clauses = [
         any_of(*(eq("account_id", a) for a in wanted)),
         eq("status", "active"),
         any_of(
             eq("pool_status", "available"),
+            eq("pool_status", "used"),
             eq("pool_status", None),
             eq("pool_status", ""),
         ),
     ]
-    stmt = select(ICloudAliasModel.id).where(to_sql(ICloudAliasModel, clauses[0]))
+    stmt = select(ICloudAliasModel).where(to_sql(ICloudAliasModel, clauses[0]))
     stmt = stmt.where(to_sql(ICloudAliasModel, clauses[1]))
     stmt = stmt.where(to_sql(ICloudAliasModel, clauses[2]))
-    if wanted_platform:
-        # 还要看这个地址有没有被该平台用掉（代码审查 2026-10-27 I3）：
-        # 真正取号时会按 `used_platforms` 过滤，这里不同步的话会挑到
-        # 「别名都已被本平台用完」的主号 → 领不到 → 回落生成 → 远程拒绝
-        # 生成 → 仍是用户报的那个失败。
-        stmt = stmt.where(
-            or_(
-                ICloudAliasModel.used_platforms.is_(None),
-                ICloudAliasModel.used_platforms == "",
-                ~ICloudAliasModel.used_platforms.contains(f",{wanted_platform},"),
-            )
+
+    candidates_by_account: dict[int, list[dict[str, Any]]] = {}
+    for row in session.exec(stmt).all():
+        candidates_by_account.setdefault(int(row.account_id or 0), []).append(
+            {
+                "address": row.address,
+                "pool_status": row.pool_status,
+                "used_platforms": row.used_platforms,
+            }
         )
-    # **查出来的是别名 id，不是主号 id** —— 第一版把它们当主号 id 比较，
-    # 于是每个主号都「没有可用别名」，全都回落到 accounts[0]（实测：3 个
-    # 相关测试变红）。要的是「这个主号名下有没有能领的别名」。
-    # 用别名表的 account_id 反查（`with_only_columns` 换列，条件不变）
-    stmt_accounts = stmt.with_only_columns(ICloudAliasModel.account_id).distinct()
-    usable_account_ids = {
-        int(v) for v in session.exec(stmt_accounts).all() if v is not None
-    }
-    for account in accounts:
-        if int(account.id or 0) in usable_account_ids:
-            return account
+
+    counts = _claimable_account_counts(candidates_by_account, platform)
+    # 不只挑「有一个能领」的 —— 生产库 account 3 只有 1 条干净别名，
+    # account 4/5 各几百条；挑 3 会很快再次耗尽并报「没有邮箱」。
+    # 选「可领数量最多」的主号，取号才不会走两步就断粮。
+    if any(count > 0 for count in counts.values()):
+        return max(
+            accounts,
+            key=lambda account: (counts.get(int(account.id or 0), 0), -int(account.id or 0)),
+        )
     return accounts[0]
 
 
@@ -315,18 +372,29 @@ def resolve_remote_account(
             if not candidates:
                 row = None
             else:
-                # 挑「有可用别名」的那个（规则与 SQLite 分支同源：查询层）
+                # 与 SQLite 分支同源：每个主号的候选别名 + 权威注册证据一起判，
+                # 不能只看 `used_platforms`（生产库 account 3 的 available 别名
+                # 全部注册过 ChatGPT，但池里没记账 —— 只看记账会挑错主号）。
                 from core.db.icloud_alias_repository import icloud_alias_repository
 
-                usable = set(
-                    icloud_alias_repository.list_ids_for_pool(
-                        account_ids=[int(c["id"]) for c in candidates if c.get("id")],
-                        platform=str(platform or "").strip().lower(),
+                candidates_by_account = {
+                    int(c["id"]): icloud_alias_repository.find_candidates(
+                        account_id=int(c["id"]), active_status="active"
                     )
-                )
-                picked = next(
-                    (c for c in candidates if int(c["id"] or 0) in usable), candidates[0]
-                )
+                    for c in candidates
+                    if c.get("id")
+                }
+                counts = _claimable_account_counts(candidates_by_account, platform)
+                if any(count > 0 for count in counts.values()):
+                    picked = max(
+                        candidates,
+                        key=lambda c: (
+                            counts.get(int(c["id"] or 0), 0),
+                            -int(c["id"] or 0),
+                        ),
+                    )
+                else:
+                    picked = candidates[0]
                 row = _record_to_model(picked)
         else:
             row = _first_remote_account_with_aliases(session, platform)
@@ -535,7 +603,25 @@ def fetch_remote_messages(
         limit=limit,
         days=3650,  # 远端默认 7 天窗口会漏掉旧验证码；页面按时间筛，这里放宽
     )
-    messages = [_to_mail_message(item) for item in (data.get("messages") or [])]
+    raw_messages = data.get("messages") or []
+    # 新接口（2026-11-02）列表里的 `preview` 可能是空串，验证码正文要靠
+    # `/api/inbox/previews` 批量补 —— 不补的话 wait_for_code 只能看到标题，
+    # 明明邮件到了却一直等不到码。
+    missing_ids = [
+        str(item.get("id") or "")
+        for item in raw_messages
+        if isinstance(item, dict) and not str(item.get("preview") or "").strip()
+    ]
+    missing_ids = [item for item in missing_ids if item]
+    if missing_ids:
+        try:
+            previews = client.fetch_previews(row.remote_account_id, missing_ids)
+        except ICloudError:
+            previews = {}
+        for item in raw_messages:
+            if isinstance(item, dict):
+                item["preview"] = previews.get(str(item.get("id") or ""), item.get("preview") or "")
+    messages = [_to_mail_message(item) for item in raw_messages]
     return messages, "remote", ""
 
 

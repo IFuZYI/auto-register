@@ -16,6 +16,7 @@ const KINDS: Record<string, TaskKindMeta> = {
   backfill_rt: { label: '补 RT', color: 'orange' },
   bind_2fa: { label: '绑 2FA', color: 'purple' },
   refresh_token: { label: '刷新 Token', color: 'green' },
+  recover: { label: '恢复账号', color: 'orange' },
   auto_refresh: { label: '自动刷新', color: 'cyan' },
   chatgpt2api_sync: { label: '凭证同步', color: 'magenta' },
 }

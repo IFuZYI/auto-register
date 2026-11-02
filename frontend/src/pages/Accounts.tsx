@@ -240,6 +240,7 @@ export default function Accounts() {
   const [filterEpoch, setFilterEpoch] = useState(0)
   const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([])
   const [recoverLoading, setRecoverLoading] = useState(false)
+  const [recoverTaskId, setRecoverTaskId] = useState<string | null>(null)
 
   const [registerModalOpen, setRegisterModalOpen] = useState(false)
   const [addModalOpen, setAddModalOpen] = useState(false)
@@ -906,6 +907,7 @@ export default function Accounts() {
               body: JSON.stringify({}),
             })
             message.success(`已开始恢复 ${result.total} 个账号`)
+            setRecoverTaskId(result.task_id)
             load()
           } catch (e: unknown) {
             message.error(`恢复启动失败: ${e instanceof Error ? e.message : String(e)}`)
@@ -1733,6 +1735,24 @@ export default function Accounts() {
           </>
         ) : (
           <TaskLogPanel taskId={refreshTokenTaskId} kind="refresh_token" onDone={() => { load() }} />
+        )}
+      </Modal>
+
+      <Modal
+        title="恢复异常账号"
+        open={!!recoverTaskId}
+        onCancel={() => { setRecoverTaskId(null); load() }}
+        footer={null}
+        width={720}
+        maskClosable={false}
+        destroyOnClose
+      >
+        {recoverTaskId && (
+          <TaskLogPanel
+            taskId={recoverTaskId}
+            kind="recover"
+            onDone={() => { load() }}
+          />
         )}
       </Modal>
 

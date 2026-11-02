@@ -193,10 +193,12 @@ def claim_alias(
                 # 也不要把一个已注册过的地址再发给同一个平台）。
                 if not wanted_platform:
                     continue
-                if email_used_by_platform(
-                    str(candidate.get("used_platforms") or ""), wanted_platform
-                ):
-                    continue
+            if wanted_platform and email_used_by_platform(
+                str(candidate.get("used_platforms") or ""), wanted_platform
+            ):
+                # 状态可能被手工放回 available，但 `used_platforms` 已经
+                # 记着本平台用过 —— 不能因为状态被重置就再发一次。
+                continue
             existing = candidate
             break
 

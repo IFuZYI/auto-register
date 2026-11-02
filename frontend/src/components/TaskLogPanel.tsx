@@ -16,6 +16,7 @@ export type TaskKind =
   | 'backfill_rt'
   | 'bind_2fa'
   | 'refresh_token'
+  | 'recover'
   | 'auto_refresh'
   | 'chatgpt2api_sync'
   // 通用批量动作任务（`/tasks/batch-action`）：上传、状态同步、探测、
@@ -27,6 +28,7 @@ const KIND_TEXT: Record<TaskKind, { success: string; registered: string; total: 
   backfill_rt: { success: '补 RT 成功', registered: '已处理', total: '总共账号', done: '补 RT 完成' },
   bind_2fa: { success: '绑定成功', registered: '已处理', total: '总共账号', done: '绑定 2FA 完成' },
   refresh_token: { success: '刷新成功', registered: '已处理', total: '总共账号', done: '刷新 Token 完成' },
+  recover: { success: '恢复成功', registered: '已处理', total: '总共账号', done: '恢复完成' },
   auto_refresh: { success: '刷新成功', registered: '已处理', total: '本轮待刷新', done: '自动刷新完成' },
   chatgpt2api_sync: { success: '推送成功', registered: '已处理', total: '本轮待推送', done: '凭证同步完成' },
   batch_action: { success: '成功', registered: '已处理', total: '总共账号', done: '操作完成' },

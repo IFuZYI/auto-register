@@ -1,7 +1,7 @@
 // 添加远程 iCloud 仓库服务的弹窗。
 //
-// 两段式：填服务地址 + 管理员密码 → 「获取账号列表」→ 选一个远端账号接入。
-// 密码只用于登录远端校验与落库（AES 加密），绝不回显。
+// 两段式：填服务地址 + API 秘钥 → 「获取账号列表」→ 选一个远端账号接入。
+// 秘钥只用于远端鉴权与落库（AES 加密），绝不回显。
 import { useState } from 'react'
 import { Alert, App, Form, Input, Modal, Select, Typography } from 'antd'
 
@@ -40,14 +40,14 @@ export function AddRemoteServiceModal({
    * 改为直接调后端的列表探针。
    */
   const discover = async () => {
-    const values = await form.validateFields(['base_url', 'admin_password'])
+    const values = await form.validateFields(['base_url', 'api_key'])
     setDiscovering(true)
     try {
       const data = await apiFetch('/icloud/remote-accounts/discover', {
         method: 'POST',
         body: JSON.stringify({
           base_url: values.base_url,
-          admin_password: values.admin_password,
+          api_key: values.api_key,
         }),
       })
       const items: RemoteAccountOption[] = (data?.items ?? []).map(
@@ -102,13 +102,13 @@ export function AddRemoteServiceModal({
         message="远程仓库：主号凭据保存在独立的 icloud-hme 服务里"
         description={
           <Text type="secondary">
-            本机只保存服务地址与管理员密码（加密），别名生成与收件都经该服务完成。
+            本机只保存服务地址与 API 秘钥（加密），别名生成与收件都经该服务完成。
             同一服务里的同一个账号只能接入一次；与本地主号同地址时会按「本地优先」去重。
           </Text>
         }
       />
       <Paragraph type="secondary" style={{ marginTop: 0 }}>
-        填写 icloud-hme 服务的地址与管理员密码，先「获取账号列表」，再选择要接入的远端账号。
+        填写 icloud-hme 服务的地址与 API 秘钥，先「获取账号列表」，再选择要接入的远端账号。
       </Paragraph>
       <Form form={form} layout="vertical">
         <Form.Item
@@ -119,10 +119,10 @@ export function AddRemoteServiceModal({
           <Input placeholder="http://127.0.0.1:8081" />
         </Form.Item>
         <Form.Item
-          name="admin_password"
-          label="管理员密码"
-          rules={[{ required: true, message: '请填写管理员密码' }]}
-          extra="仅用于登录远端服务；加密保存，绝不回显"
+          name="api_key"
+          label="API 秘钥"
+          rules={[{ required: true, message: '请填写 API 秘钥' }]}
+          extra="新服务填 sk- 开头的 API 秘钥；旧服务仍可填管理员密码。加密保存，绝不回显"
         >
           <Input.Password autoComplete="new-password" />
         </Form.Item>

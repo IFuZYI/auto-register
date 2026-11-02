@@ -1156,7 +1156,10 @@ def _run_recover_accounts(
             result_message as _result_message,
             to_platform_account as _to_platform_account,
         )
-        from services.chatgpt_maintenance import record_auto_refresh_result
+        from services.chatgpt_maintenance import (
+            AUTO_REFRESH_STATE_KEY,
+            record_auto_refresh_result,
+        )
         from core.base_platform import RegisterConfig
         from core.db import AccountModel, account_repository, platform_session
         from core.registry import get
@@ -1184,6 +1187,7 @@ def _run_recover_accounts(
 
         recovered = bool(result.get("ok"))
         disabled_now = False
+        disabled_reason = ""
         attempts = 0
         with platform_session("chatgpt") as s:
             row = s.get(AccountModel, account_id)
@@ -1196,9 +1200,23 @@ def _run_recover_accounts(
                 state = record_auto_refresh_result(
                     extra, ok=recovered, now=int(_time.time()), row=row
                 )
-                row.set_extra(extra)
                 attempts = int((state or {}).get("attempts") or 0)
                 disabled_now = str(row.status or "").strip().lower() == "banned" and before_status != "banned"
+                # 上游明确「deleted or deactivated」时 `_apply_action_result`
+                # 已经落 banned，但退避计数可能才第 1 次（`disabled=False`）。
+                # 这种号同样是终局禁用：把计数状态也标成 disabled，日志才能
+                # 说清是「上游封禁」还是「重试次数用尽」，预览也不会再把它
+                # 当成「还能救」。
+                if disabled_now:
+                    data = result.get("data") if isinstance(result.get("data"), dict) else {}
+                    disabled_reason = (
+                        "upstream_banned" if bool(data.get("banned")) else "recovery_exhausted"
+                    )
+                    state = dict(state or {})
+                    state["disabled"] = True
+                    state["disabled_reason"] = state.get("disabled_reason") or disabled_reason
+                    extra[AUTO_REFRESH_STATE_KEY] = state
+                row.set_extra(extra)
                 account_repository.save(row, session=s)
                 s.commit()
 
@@ -1212,17 +1230,21 @@ def _run_recover_accounts(
 
         message = str(result.get("error") or _result_message(result) or "恢复失败")
         if disabled_now:
+            reason_text = (
+                "账号已封禁（上游明确 deleted/deactivated），已标注为禁用并移出恢复队列"
+                if disabled_reason == "upstream_banned"
+                else f"连续恢复失败 {attempts} 次，已标注为禁用并移出恢复队列"
+            )
             _api.log(
                 task_id,
-                f"[DISABLED] {email} {message}"
-                f" —— 连续恢复失败 {attempts} 次，已标注为禁用并移出恢复队列",
+                f"[DISABLED] {email} {message} —— {reason_text}",
             )
             _api.save_task_log(
                 "chatgpt",
                 email,
                 "failed",
-                error=f"{message}（连续失败 {attempts} 次，已禁用）",
-                detail={"action": "recover", "disabled": True},
+                error=f"{message}（{reason_text}）",
+                detail={"action": "recover", "disabled": True, "reason": disabled_reason},
             )
         else:
             _api.log(task_id, f"[FAIL] {email} {message}（第 {attempts} 次失败，将退避重试）")

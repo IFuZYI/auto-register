@@ -190,7 +190,7 @@ export function setICloudAccountEnabled(id: number, enabled: boolean): Promise<I
 
 export interface ICloudRemoteAccountPayload {
   base_url: string
-  admin_password: string
+  api_key: string
   remote_account_id: string
   name?: string
   proxy?: string

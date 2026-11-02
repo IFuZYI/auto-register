@@ -161,6 +161,16 @@ async def lifespan(app: FastAPI):
     from platforms.grok.migrate_sso_only import migrate_stored_accounts
 
     migrate_stored_accounts(log=lambda msg: print(msg))
+
+    # 存量修复：老版本的「恢复失败用尽」只置 `disabled=True`、不改 status，
+    # 这些号会被恢复任务当成「已达上限」永久跳过，界面一直显示过期/失效。
+    # 启动时补标 banned（配置类错误除外），幂等。
+    from services.chatgpt_maintenance import repair_exhausted_chatgpt_statuses
+
+    repaired_exhausted = repair_exhausted_chatgpt_statuses()
+    if repaired_exhausted:
+        print(f"[OK] 已补标 {repaired_exhausted} 个重试用尽账号为禁用")
+
     from core.registry import list_platforms
     print(f"[OK] 已加载平台: {[p['name'] for p in list_platforms()]}")
 
