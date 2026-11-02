@@ -614,15 +614,23 @@ _ANTIBOT_JS = """
     }
   } catch (e) {}
   try {
-    if (document.querySelector('input[name="cf-turnstile-response"]')) hits.push('input:turnstile');
-    if (document.querySelector('[name="castleRequestToken"], [data-castle-token]')) hits.push('input:castle');
+    // **必须看 value**：隐藏 input 一直都在，空着等于没解出来。
+    // 2026-11-02 用户日志：按钮一直是禁用态、我们还硬发 `form.requestSubmit()`，
+    // 服务端一律回 `email-signup-unavailable` —— 根子就是这里只判「元素在不在」。
+    for (const el of document.querySelectorAll('input[name="cf-turnstile-response"]')) {
+      if ((el.value || '').length > 16) hits.push('turnstile:' + el.value.length);
+    }
+    for (const el of document.querySelectorAll('[name="castleRequestToken"], [data-castle-token]')) {
+      const v = el.value || el.getAttribute('data-castle-token') || '';
+      if (v.length > 8) hits.push('castle:' + v.length);
+    }
   } catch (e) {}
   return hits;
 }
 """
 
 
-def wait_for_antibot_token(page: Any, *, timeout: float = 12.0, poll: float = 0.4) -> bool:
+def wait_for_antibot_token(page: Any, *, timeout: float = 45.0, poll: float = 0.5) -> bool:
     """等 Castle / Turnstile 的反机器人令牌落地，返回是否等到。
 
     **为什么必须等**（2026-11-01，用户实测对照）：同一个 `@icloud.com` 地址，
@@ -651,6 +659,72 @@ def wait_for_antibot_token(page: Any, *, timeout: float = 12.0, poll: float = 0.
         if time.monotonic() >= deadline:
             return False
         time.sleep(poll)
+
+
+def antibot_state(page: Any) -> dict[str, Any]:
+    """反机器人令牌 + 提交按钮的当前状态（**不提交**）。
+
+    为什么要一起看：按钮禁用通常就是「Turnstile 还没给令牌」。只看令牌会漏掉
+    「令牌有了但按钮还禁用」；只看按钮会漏掉「按钮能点但请求不带令牌」。
+    """
+    out: dict[str, Any] = {"token_len": 0, "input_exists": False,
+                           "button_found": False, "button_disabled": True}
+    try:
+        info = page.evaluate("""
+        () => {
+          const inputs = Array.from(document.querySelectorAll('input[name="cf-turnstile-response"]'));
+          const tokenLen = inputs.reduce((m, el) => Math.max(m, (el.value || '').length), 0);
+          return {tokenLen, inputExists: inputs.length > 0};
+        }
+        """)
+        if isinstance(info, dict):
+            out["token_len"] = int(info.get("tokenLen") or 0)
+            out["input_exists"] = bool(info.get("inputExists"))
+    except Exception as exc:
+        logger.debug("读 turnstile 状态失败: %s", exc)
+    try:
+        st = submit_button_state(page)
+        out["button_found"] = bool(st.get("found"))
+        out["button_disabled"] = bool(st.get("disabled"))
+    except Exception as exc:
+        logger.debug("读提交按钮状态失败: %s", exc)
+    return out
+
+
+def wait_until_submittable(page: Any, *, timeout: float = 60.0, poll: float = 0.5) -> dict[str, Any]:
+    """等「页面真的可以提交」：拿到 Turnstile 令牌**或**提交按钮变成可点。
+
+    2026-11-02 线上日志：`反机器人令牌未出现（继续尝试提交）` 紧接着
+    `发码已提交（form.requestSubmit()）｜⚠ 按钮是禁用态` —— 我们**绕过页面
+    自己的禁用态强行提交**，服务端一律回 `account:email-signup-unavailable`。
+    按钮禁用就是页面在说「还没准备好」，硬提交等于拿一个必然被拒的请求去
+    撞上游，既拿不到码、又白白消耗这个出口的信任分。
+
+    所以：等到真的能提交为止；等不到就**不提交**，把「没准备好」如实报上去。
+    """
+    # 用**轮次**而不是墙钟做上限：假页面（测试）里 `wait_for_timeout` 是空操作，
+    # 按墙钟算会真的空转 60 秒，把整个测试套件拖死。
+    budget = max(1, int(max(0.0, float(timeout)) / max(0.05, poll)))
+    state: dict[str, Any] = {}
+    for _ in range(budget):
+        state = antibot_state(page)
+        # 「没看到按钮」不等于「不能提交」—— 有些版本按钮在 shadow DOM 里，
+        # 我们的探测看不见。只有**明确看到按钮且它是禁用态**才拦。
+        saw_disabled_button = bool(state.get("button_found")) and bool(state.get("button_disabled"))
+        ready = state.get("token_len", 0) > 16 or not saw_disabled_button
+        state["ready"] = bool(ready)
+        if ready:
+            return state
+        # 优先用页面的等待（假页面在测试里是空操作，不会真睡 60 秒）
+        waiter = getattr(page, "wait_for_timeout", None)
+        if callable(waiter):
+            try:
+                waiter(int(poll * 1000))
+                continue
+            except Exception:
+                logger.debug("wait_for_timeout 失败，退回 sleep", exc_info=True)
+        time.sleep(poll)
+    return state
 
 
 def submit_button_state(page: Any) -> dict[str, Any]:

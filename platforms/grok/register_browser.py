@@ -522,6 +522,27 @@ def _send_code_stage(
                 "cloudflare_challenge": False,
                 "error": "找不到邮箱输入框（新版入口页未出现 Sign up with email）",
             }
+    # 填完要**把表单「武装」起来**：受控组件只有收到真实按键 + blur 才会把值
+    # 写进 React state，否则按钮一直 disabled。线上日志（2026-11-02）连续十次
+    # 都是「按钮是禁用态（邮箱校验没过？）」—— 就是这个。
+    for _arm in range(3):
+        try:
+            page.keyboard.press("Tab")          # blur，触发校验
+        except Exception:
+            logger.debug("Tab 失败", exc_info=True)
+        page.wait_for_timeout(700)
+        st = signup_pages.submit_button_state(page)
+        if st.get("found") and not st.get("disabled"):
+            break
+        logger.debug("邮箱字段未武装（第 %s 次）：%s", _arm + 1, st)
+        try:
+            field = page.locator(signup_pages.EMAIL_INPUT).first
+            field.click(timeout=6000)
+            page.keyboard.press("ControlOrMeta+a")
+            page.keyboard.press("Delete")
+            page.keyboard.type(email, delay=60)
+        except Exception:
+            logger.debug("重新输入邮箱失败", exc_info=True)
     page.wait_for_timeout(300)
     _log(log, f"[Grok] 已填邮箱 {email}，提交发码…")
     state: dict[str, Any] = {}
@@ -541,8 +562,24 @@ def _send_code_stage(
     # 服务端只会回一句 `account:email-signup-unavailable`（通用拒绝）。
     # 参考实现的原话：「Turnstile/Castle needs 30-45 s to settle — do not shorten
     # it before the submit path.」我们取 12 秒上限、拿到令牌就立刻走。
-    settled = signup_pages.wait_for_antibot_token(page, timeout=12.0)
-    _log(log, f"[Grok] 反机器人令牌{'已就绪' if settled else '未出现（继续尝试提交）'}")
+    gate = signup_pages.wait_until_submittable(page, timeout=60.0)
+    if not gate.get("ready"):
+        # **不提交**。按钮禁用 / 没令牌时硬提交，服务端只会回
+        # `account:email-signup-unavailable`（2026-11-02 线上日志连续 10 次都是
+        # 这个组合），既拿不到码，又把这个出口的信任分白送掉。
+        # 这一轮直接算「页面没准备好」，地址没消耗，换一轮重来。
+        _log(log, "[Grok] 页面未就绪：Turnstile 没给令牌、提交按钮一直禁用，本轮不提交")
+        return {
+            "ok": False, "kind": "", "retryable": True, "consumes_address": False,
+            "already_registered": False, "email_unavailable": False,
+            "rate_limited": False, "cloudflare_challenge": False,
+            "antibot_not_ready": True,
+            "error": (
+                "页面未就绪（Turnstile 未给令牌 / 提交按钮一直禁用），"
+                "已跳过提交以免被上游判为不可信"
+            ),
+        }
+    _log(log, f"[Grok] 可以提交（令牌 {gate.get('token_len')} 字符，按钮{'可点' if not gate.get('button_disabled') else '仍禁用'}）")
     label, state = signup_pages.submit_email_code(page)
     attempts = 1
     while attempts < 3:
