@@ -415,6 +415,106 @@ def mint_turnstile(
     raise RuntimeError("所有 Turnstile 方案均失败 → " + " | ".join(errors))
 
 
+#: 在**已经打开的页面**里渲染 Turnstile 并取票用的注入脚本。
+#: 与 `scripts/grok_turnstile_mint.py` 的 inject 同源 —— 那条路径在 Chromium 里
+#: 实测能出票，所以逻辑照搬，只是搬进 camoufox 的页面里执行。
+_IN_PAGE_RENDER_JS = """
+(siteKey) => {
+  if (window.turnstile) { window.__grokRender && window.__grokRender(); return "rendered"; }
+  var s = document.createElement('script');
+  s.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js';
+  s.onload = function () { window.__grokRender && window.__grokRender(); };
+  document.head.appendChild(s);
+  window.__grokRender = function () {
+    var d = document.querySelector('div.cf-turnstile[data-sitekey]');
+    if (!d) {
+      d = document.createElement('div');
+      d.className = 'cf-turnstile';
+      d.setAttribute('data-sitekey', siteKey);
+      d.style.cssText = 'position:fixed;top:10px;left:10px;z-index:99999';
+      document.body.appendChild(d);
+    }
+    try {
+      window.turnstile.render(d, {
+        sitekey: siteKey,
+        callback: function (t) {
+          var i = document.querySelector('input[name="cf-turnstile-response"]');
+          if (!i) { i = document.createElement('input'); i.type = 'hidden';
+                    i.name = 'cf-turnstile-response'; document.body.appendChild(i); }
+          i.value = t;
+        },
+      });
+    } catch (e) { /* 已渲染过，忽略 */ }
+  };
+  window.__grokRender();
+  return "injected";
+}
+"""
+
+
+def mint_in_existing_page(
+    page: Any,
+    site_key: str,
+    *,
+    timeout: float = 45,
+    log: LogFn = None,
+) -> str:
+    """在**当前这个页面**里渲染 Turnstile 取票（不起新浏览器）。
+
+    为什么优先这条路（2026-11-02，用户提出「不考虑用 camoufox 吗」）：
+
+    - 注册链路本来就是 **camoufox**，仓库自己的实测结论是「camoufox 是唯一能过
+      x.ai CF 的，chromium 提交发码恒 403」。既然页面已经用能过 CF 的浏览器打开
+      并且停在 accounts.x.ai 上，**在这一页里补一张票**比另起一个 Chromium
+      更可能成功，也更快；
+    - 本机只有 2GB 内存，铸币不能再起一个浏览器（上一次 3 并发就是这么 OOM 的）。
+      同一页面内渲染 = 零额外进程。
+
+    返回令牌（空串＝没拿到）。
+    """
+    token = ""
+    try:
+        page.evaluate(_IN_PAGE_RENDER_JS, site_key)
+        _log(log, "[Grok] 在当前页面内渲染 Turnstile（复用 camoufox 会话）")
+    except Exception as exc:
+        _log(log, f"[Grok] 页面内渲染 Turnstile 失败: {type(exc).__name__}")
+        return ""
+
+    deadline = time.monotonic() + max(0.0, float(timeout))
+    while time.monotonic() < deadline:
+        try:
+            token = str(
+                page.evaluate(
+                    "document.querySelector('input[name=\"cf-turnstile-response\"]')?.value || ''"
+                )
+                or ""
+            ).strip()
+        except Exception as exc:
+            logger.debug("读页面内 Turnstile 令牌失败: %s", exc)
+            token = ""
+        if len(token) > 10:
+            _log(log, f"[Grok] 页面内铸票成功（len={len(token)}）")
+            return token
+        # 没出票就点一下 widget 中心（和参考脚本同一手法）
+        try:
+            box = page.evaluate(
+                """() => { const e = document.querySelector('div.cf-turnstile[data-sitekey]');
+                   if (!e) return null; const r = e.getBoundingClientRect();
+                   return {x: r.left + r.width / 2, y: r.top + r.height / 2}; }"""
+            )
+            if isinstance(box, dict) and box:
+                x, y = float(box.get("x") or 0), float(box.get("y") or 0)
+                page.mouse.move(max(0.0, x - 25), max(0.0, y - 8))
+                page.mouse.move(x, y, steps=8)
+                page.mouse.down()
+                page.mouse.up()
+        except Exception as exc:
+            logger.debug("点击页面内 Turnstile widget 失败: %s", exc)
+        page.wait_for_timeout(1200)
+    _log(log, "[Grok] 页面内铸票超时（未拿到令牌）")
+    return ""
+
+
 __all__ = [
     "mint_turnstile",
     "mint_via_captcha",

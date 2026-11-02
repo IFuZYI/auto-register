@@ -1542,3 +1542,101 @@ class CookieBannerBeforeSubmitTests(unittest.TestCase):
     def test_no_banner_does_not_spend_time(self):
         dismissed, _logs = self._run(text="Sign up with email Email Sign up")
         self.assertFalse(dismissed, "没有横幅就别白等按钮超时")
+
+
+class InPageTurnstileMintTests(unittest.TestCase):
+    """优先在**当前 camoufox 页面**里补票，而不是另起一个浏览器。
+
+    仓库自己的实测结论：camoufox 是唯一能过 x.ai CF 的浏览器（chromium 提交发码
+    恒 403）。既然页面已经用它打开并停在 accounts.x.ai 上，在页面内渲染 Turnstile
+    比另起 Chromium 更可能成；本机 2GB 内存也经不起再起一个浏览器（曾整机 OOM）。
+    """
+
+    class _Page:
+        def __init__(self, tokens):
+            self._tokens = list(tokens)
+            self.evaluated: list[str] = []
+            self.mouse = MagicMock()
+
+        def evaluate(self, script, *args):
+            text = str(script)
+            self.evaluated.append(text)
+            if "cf-turnstile-response" in text and "querySelector" in text:
+                return self._tokens.pop(0) if self._tokens else ""
+            return "injected"
+
+        def wait_for_timeout(self, ms):
+            return None
+
+    def test_returns_token_when_page_renders_it(self):
+        from platforms.grok import turnstile_mint as tm
+
+        page = self._Page(["", "T" * 40])
+        token = tm.mint_in_existing_page(page, "0xKEY", timeout=3)
+        self.assertEqual(token, "T" * 40)
+        self.assertTrue(
+            any("challenges.cloudflare.com" in js for js in page.evaluated),
+            "必须在页面内注入 Turnstile 脚本",
+        )
+
+    def test_empty_when_page_never_renders(self):
+        from platforms.grok import turnstile_mint as tm
+
+        page = self._Page([""] * 20)
+        self.assertEqual(tm.mint_in_existing_page(page, "0xKEY", timeout=0), "")
+
+    def test_ensure_token_prefers_in_page_mint(self):
+        """widget 一直不出票时先走页面内铸票；成了就不该再去起外挂浏览器。
+
+        这里把 `read_turnstile_token` 打桩成空 —— 否则假页面会在「等 widget」那一
+        步就把票交出来，测试等于没测到页面内铸票这条新路径（第一次写的版本就是
+        这样假绿的）。
+        """
+        from platforms.grok import signup_pages as pages
+
+        page = self._Page([""] * 5)
+        external: list[int] = []
+        with patch.object(pages, "read_turnstile_token", return_value=""), patch.object(
+            pages, "_in_page_mint", side_effect=lambda p, k, **kw: "T" * 40
+        ), patch.object(pages, "inject_turnstile_token", return_value=True), patch.object(
+            pages, "_default_mint", side_effect=lambda *a, **k: external.append(1) or ""
+        ):
+            token = pages.ensure_turnstile_token(page, sitekey="0xKEY", timeout=0.2, poll_seconds=0.01)
+        self.assertEqual(token, "T" * 40)
+        self.assertEqual(external, [], "页面内已经拿到票，不该再起外挂铸币")
+
+    def test_in_page_attempt_receives_the_task_log(self):
+        """页面内铸票的日志必须能被任务日志看到。
+
+        实测踩过：`_in_page_mint` 忘了把 `log` 传下去，于是「页面内渲染/超时/失败」
+        三行全被 `_log(None, …)` 吞掉 —— 线上只看到「先尝试在当前页面内渲染」然后
+        直接跳到外挂铸币，排查时完全不知道那 30 秒里发生了什么。
+        """
+        from platforms.grok import signup_pages as pages
+
+        page = self._Page([""] * 5)
+        captured: list[tuple] = []
+
+        def fake_in_page(_page, _key, *, timeout, log=None):
+            captured.append((timeout, log))
+            return ""
+
+        with patch.object(pages, "read_turnstile_token", return_value=""), patch.object(
+            pages, "_in_page_mint", side_effect=fake_in_page
+        ), patch.object(pages, "_default_mint", side_effect=lambda *a, **k: ""):
+            pages.ensure_turnstile_token(
+                page, sitekey="0xKEY", timeout=0.2, poll_seconds=0.01, log=lambda m: None
+            )
+        self.assertTrue(captured)
+        self.assertIsNotNone(captured[0][1], "log 必须透传，否则页面内铸票过程是黑盒")
+
+    def test_falls_back_to_external_mint_when_in_page_fails(self):
+        from platforms.grok import signup_pages as pages
+
+        page = self._Page([""] * 5)
+        external: list[int] = []
+        with patch.object(pages, "read_turnstile_token", return_value=""), patch.object(
+            pages, "_in_page_mint", side_effect=lambda p, k, **kw: ""
+        ), patch.object(pages, "_default_mint", side_effect=lambda *a, **k: external.append(1) or ""):
+            pages.ensure_turnstile_token(page, sitekey="0xKEY", timeout=0.2, poll_seconds=0.01)
+        self.assertTrue(external, "页面内拿不到票时必须回退到外挂铸币")

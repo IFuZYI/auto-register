@@ -1139,6 +1139,20 @@ def _default_mint(sitekey: str, page_url: str, proxy: str, log: Callable | None,
     return mint_turnstile(sitekey, page_url, captcha=captcha, proxy=proxy, log=log, prefer=prefer)
 
 
+def _in_page_mint(page: Any, site_key: str, *, timeout: float, log: Callable | None = None) -> str:
+    """在已打开的页面里渲染 Turnstile 取票（实现见 `turnstile_mint`）。
+
+    单独包一层是为了延迟 import：`signup_pages` 顶层 import `turnstile_mint`
+    会把浏览器栈一起拉进来，而这些模块在测试里被大量 patch。
+    """
+    try:
+        from platforms.grok.turnstile_mint import mint_in_existing_page
+    except Exception as exc:  # noqa: BLE001 - 拿不到就按「没票」处理
+        logger.debug("页面内铸票模块不可用: %s", exc)
+        return ""
+    return mint_in_existing_page(page, site_key, timeout=timeout, log=log)
+
+
 def ensure_turnstile_token(
     page: Any,
     *,
@@ -1169,7 +1183,26 @@ def ensure_turnstile_token(
             break
         _sleep(poll_seconds)
     if log:
-        log("Turnstile widget 超时未出票，转外挂铸币")
+        log("Turnstile widget 超时未出票，先尝试在当前页面内渲染；不行再转外挂铸币")
+    # **先在当前页面里补票**（2026-11-02，用户提问「不考虑用 camoufox 吗」）：
+    # 这一页本来就是 camoufox 打开的、已经过了 x.ai 的 CF 并且停在 accounts.x.ai 上，
+    # 在它里面渲染 Turnstile 比另起一个 Chromium 更可能成、且零额外进程
+    # （本机 2GB 内存，铸币再起浏览器曾直接把服务 OOM 掉）。
+    try:
+        # 预算与调用方一致（只封顶）：**不加下限** —— 调用方给 0.05s 就只花 0.05s，
+        # 否则「别把调用方挂死」这条既有约束会被打破（实测：加 5s 下限就把
+        # `test_ensure_respects_the_timeout` 拖到 5 秒）。
+        in_page = _in_page_mint(
+            page, sitekey, timeout=min(30.0, max(0.0, float(timeout))), log=log
+        )
+    except Exception as exc:  # 兜底：页面内铸票失败不该炸掉整条链路
+        logger.debug("页面内铸票异常: %s", exc)
+        in_page = ""
+    if in_page:
+        if log:
+            log(f"Turnstile 页面内铸票成功（len={len(in_page)}）")
+        inject_turnstile_token(page, in_page)
+        return in_page
     minter = mint or (lambda **kw: _default_mint(
         kw.get("site_key", ""), kw.get("page_url", ""), kw.get("proxy", ""), kw.get("log")
     ))

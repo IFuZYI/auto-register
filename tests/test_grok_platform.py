@@ -383,7 +383,10 @@ class TestTurnstileModes(unittest.TestCase):
         def fake_run(args, **kwargs):
             raise subprocess.TimeoutExpired(args, timeout=1)
 
-        with patch.object(tm.subprocess, "run", side_effect=fake_run), \
+        # 内存闸门单独有用例；这里必须放行，否则在内存紧张的机器上会先报
+        # 「内存不足」，测不到超时文案（实测：本机 MemAvailable 191MB）。
+        with patch.object(tm, "_available_mb", return_value=10**6), \
+             patch.object(tm.subprocess, "run", side_effect=fake_run), \
              patch.object(tm, "find_chrome", return_value="/usr/bin/fake-chrome"), \
              patch.object(tm.time, "sleep"):
             with self.assertRaises(RuntimeError) as ctx:
