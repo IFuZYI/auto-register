@@ -69,7 +69,7 @@ BASELINE: dict[str, int] = {
     "platforms/grok/oauth_browser.py": 10,
     "platforms/grok/oauth_device.py": 10,
     "platforms/grok/plugin.py": 4,
-    "platforms/grok/register_browser.py": 15,
+    "platforms/grok/register_browser.py": 14,
     "platforms/grok/token_refresh.py": 1,
     "platforms/grok/turnstile_mint.py": 3,
     "platforms/grok/upload.py": 3,

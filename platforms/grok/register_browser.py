@@ -432,7 +432,8 @@ def _send_code_stage(
     def _on_response(resp: Any) -> None:
         try:
             url = str(getattr(resp, "url", "") or "")
-        except Exception:
+        except Exception as exc:
+            logger.debug("读取响应 url 失败: %s", exc)
             url = ""
         if "send-verification-code" not in url:
             # 不是发码接口也记一笔：判定成 `no_confirmation` 时最需要知道的
@@ -444,7 +445,8 @@ def _send_code_stage(
         body = ""
         try:
             body = resp.text()
-        except Exception:
+        except Exception as exc:
+            logger.debug("读取响应正文失败: %s", exc)
             body = ""
         captured.append({"status": getattr(resp, "status", None), "body": body})
 
@@ -461,11 +463,13 @@ def _send_code_stage(
                 return
             try:
                 body = req.post_data or ""
-            except Exception:
+            except Exception as exc:
+                logger.debug("读取请求体失败: %s", exc)
                 body = ""
             try:
                 hdrs = req.headers or {}
-            except Exception:
+            except Exception as exc:
+                logger.debug("读取请求头失败: %s", exc)
                 hdrs = {}
             keys = sorted(k for k in hdrs if any(
                 s in k.lower() for s in ("castle", "turnstile", "cf-", "x-", "referer", "origin")

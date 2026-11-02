@@ -721,8 +721,8 @@ def wait_until_submittable(page: Any, *, timeout: float = 60.0, poll: float = 0.
             try:
                 waiter(int(poll * 1000))
                 continue
-            except Exception:
-                logger.debug("wait_for_timeout 失败，退回 sleep", exc_info=True)
+            except Exception as exc:
+                logger.debug("wait_for_timeout 失败，退回 sleep: %s", exc)
         time.sleep(poll)
     return state
 
@@ -797,8 +797,8 @@ def wait_for_castle(page: Any, *, timeout: float = 20.0, poll: float = 0.5) -> b
             try:
                 waiter(int(poll * 1000))
                 continue
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("等待 Castle 就绪时 wait_for_timeout 失败: %s", exc)
         time.sleep(poll)
     return False
 
