@@ -420,34 +420,39 @@ def mint_turnstile(
 #: 实测能出票，所以逻辑照搬，只是搬进 camoufox 的页面里执行。
 _IN_PAGE_RENDER_JS = """
 (siteKey) => {
-  if (window.turnstile) { window.__grokRender && window.__grokRender(); return "rendered"; }
-  var s = document.createElement('script');
-  s.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js';
-  s.onload = function () { window.__grokRender && window.__grokRender(); };
-  document.head.appendChild(s);
-  window.__grokRender = function () {
-    var d = document.querySelector('div.cf-turnstile[data-sitekey]');
-    if (!d) {
-      d = document.createElement('div');
-      d.className = 'cf-turnstile';
-      d.setAttribute('data-sitekey', siteKey);
-      d.style.cssText = 'position:fixed;top:10px;left:10px;z-index:99999';
-      document.body.appendChild(d);
+  // **必须立刻返回**：2026-11-03 实测，直接在 evaluate 里同步 render 会把
+  // 页面主线程卡死（Cloudflare 的挑战脚本正忙），`page.evaluate` 永不返回，
+  // 整个注册线程卡在「资料页填写：全部成功」后面 15+ 分钟，连停止请求都
+  // 处理不了。所以全部工作丢进 setTimeout，evaluate 只负责排队。
+  setTimeout(function () {
+    function render() {
+      var d = document.querySelector('div.cf-turnstile[data-sitekey]');
+      if (!d) {
+        d = document.createElement('div');
+        d.className = 'cf-turnstile';
+        d.setAttribute('data-sitekey', siteKey);
+        d.style.cssText = 'position:fixed;top:10px;left:10px;z-index:99999';
+        document.body.appendChild(d);
+      }
+      try {
+        window.turnstile.render(d, {
+          sitekey: siteKey,
+          callback: function (t) {
+            var i = document.querySelector('input[name="cf-turnstile-response"]');
+            if (!i) { i = document.createElement('input'); i.type = 'hidden';
+                      i.name = 'cf-turnstile-response'; document.body.appendChild(i); }
+            i.value = t;
+          },
+        });
+      } catch (e) { /* 已经渲染过，忽略 */ }
     }
-    try {
-      window.turnstile.render(d, {
-        sitekey: siteKey,
-        callback: function (t) {
-          var i = document.querySelector('input[name="cf-turnstile-response"]');
-          if (!i) { i = document.createElement('input'); i.type = 'hidden';
-                    i.name = 'cf-turnstile-response'; document.body.appendChild(i); }
-          i.value = t;
-        },
-      });
-    } catch (e) { /* 已渲染过，忽略 */ }
-  };
-  window.__grokRender();
-  return "injected";
+    if (window.turnstile) { render(); return; }
+    var s = document.createElement('script');
+    s.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js';
+    s.onload = function () { setTimeout(render, 300); };
+    document.head.appendChild(s);
+  }, 0);
+  return "scheduled";
 }
 """
 
@@ -510,7 +515,9 @@ def mint_in_existing_page(
                 page.mouse.up()
         except Exception as exc:
             logger.debug("点击页面内 Turnstile widget 失败: %s", exc)
-        page.wait_for_timeout(1200)
+        # 用固定 1.2s 的**本地 sleep** 节流：`page.wait_for_timeout` 在页面忙时
+        # 可能不按时返回（它本身要走一次 CDP），本地 sleep 让循环至少不会热转。
+        time.sleep(1.2)
     _log(log, "[Grok] 页面内铸票超时（未拿到令牌）")
     return ""
 

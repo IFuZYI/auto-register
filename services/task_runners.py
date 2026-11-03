@@ -63,6 +63,81 @@ def _truthy_extra(value: object, default: bool) -> bool:
     return str(value).strip().lower() not in ("0", "false", "no", "off", "")
 
 
+#: 域名 → 邮箱渠道（换域名时要知道「另一个域名在哪个渠道里」）。
+_DOMAIN_TO_MAIL_PROVIDER = {
+    "icloud.com": "icloud_remote",
+    "me.com": "icloud_remote",
+    "outlook.com": "outlook",
+    "outlook.kr": "outlook",
+    "outlook.de": "outlook",
+    "outlook.es": "outlook",
+    "outlook.jp": "outlook",
+    "hotmail.com": "outlook",
+    "live.com": "outlook",
+}
+
+
+def _should_try_domain_failover(
+    *, failed: bool, message: str, failover_used: bool, stop_requested: bool
+) -> bool:
+    """这一轮失败后该不该再试一次「换个邮箱域名」（纯函数，便于钉住行为）。
+
+    条件全部为真才试：
+    - 这轮确实失败了；且
+    - 失败原因是域名窗口配额用尽（`account:email-signup-unavailable`）——
+      这类失败**不消耗地址**，换个域名立刻能发码（2026-11-02 真机：同出口
+      换 outlook 秒成）；且
+    - 这次机会还没用过（每个账号只额外给一次，避免无限重试）；且
+    - 用户没有请求停止。
+    """
+    if not failed or failover_used or stop_requested:
+        return False
+    return "email-signup-unavailable" in str(message or "")
+
+
+def _mail_domain_of(email: str) -> str:
+    """取邮箱域名（小写）。`a@Outlook.COM` → `outlook.com`。"""
+    return str(email or "").rsplit("@", 1)[-1].strip().lower()
+
+
+def _pick_mail_provider_failover(
+    *, current_provider: str, blocked_domains: set[str], candidates: list[str]
+) -> str:
+    """域名窗口配额用尽后该换哪个邮箱渠道（纯函数，便于测试）。
+
+    实测（2026-11-02）：与 icloud.com 被拒**同一分钟、同一出口**，换
+    `outlook.kr` 立刻发码成功 —— 所以「一个域名窗口用尽」时正确的动作是
+    **换域名**，不是换出口。这里只负责选渠道：
+    - 当前渠道的域名已被标记阻塞 → 从候选里挑一个**域名不同**的；
+    - 当前渠道没有被阻塞 / 没有候选可用 → 返回空串（保持原样）。
+    """
+    current = str(current_provider or "").strip().lower()
+    current_domain_blocked = any(
+        _DOMAIN_TO_MAIL_PROVIDER.get(domain, "") == current for domain in blocked_domains
+    )
+    if not current_domain_blocked:
+        return ""
+    for candidate in candidates:
+        name = str(candidate or "").strip().lower()
+        if not name or name == current:
+            continue
+        if any(_DOMAIN_TO_MAIL_PROVIDER.get(d, "") == name for d in blocked_domains):
+            continue
+        return name
+    return ""
+
+
+def _outlook_pool_available() -> int:
+    """微软号池里还能领多少个（换域名前先确认那边真的有号）。"""
+    try:
+        from core.mailboxes.channels.outlook import OutlookMailbox
+
+        return int((OutlookMailbox.pool_status_summary() or {}).get("available") or 0)
+    except Exception as exc:  # noqa: BLE001 - 数不出来就当作没有，不阻断注册
+        logger.debug("读微软号池可用数失败: %s", exc)
+        return 0
+
+
 def _pick_usable_exit(
     proxy: str, *, task_id: str, extra: dict, log, get_next, report_bad, normalize
 ) -> str:
@@ -227,12 +302,15 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
 
             return _proxy_pool.get_next(tag=TAG_REGISTER)
 
-        def _build_mailbox(proxy: Optional[str]):
+        def _build_mailbox(proxy: Optional[str], provider: Optional[str] = None):
             # 不给兜底 provider：用户要求默认留空、必须显式选。空串会让
             # create_mailbox 抛「未知邮箱提供商」并列出可用渠道，比悄悄用某个
             # 号池更安全。
+            # `provider` 是**本轮**要用的渠道（域名窗口用尽时会被换成另一个），
+            # 所以不能写死读 `_base_extra` —— 否则换了 extra 却没换邮箱池，
+            # 「换域名」只体现在日志里。
             return create_mailbox(
-                provider=_base_extra.get("mail_provider", ""),
+                provider=provider if provider is not None else _base_extra.get("mail_provider", ""),
                 extra=_base_extra,
                 proxy=proxy,
             )
@@ -255,7 +333,8 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
             重开的是整条链（新代理、新邮箱/号码、新会话），不是接码层的换号 ——
             半路建出来的号已经被占了，拿它死磕只会一直撞同一堵墙。
             """
-            result = _do_one_round(i, 1, total_rounds)
+            blocked_domains: set[str] = set()
+            result = _do_one_round(i, 1, total_rounds, blocked_domains)
             dead_end_rounds = 1 if _is_dead_end(result) else 0
             for round_no in range(2, total_rounds + 1):
                 if result.outcome != AttemptOutcome.FAILED:
@@ -276,8 +355,25 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
                     f"[RETRY] 第 {i + 1} 个账号第 {round_no - 1}/{total_rounds} 轮失败，"
                     f"开始第 {round_no}/{total_rounds} 轮重试（全新会话）: {result.message}",
                 )
-                result = _do_one_round(i, round_no, total_rounds)
+                result = _do_one_round(i, round_no, total_rounds, blocked_domains)
                 dead_end_rounds = dead_end_rounds + 1 if _is_dead_end(result) else 0
+            # 域名窗口配额用尽**不占**重试轮数：地址没被消耗，换个域名立刻就能
+            # 发码（2026-11-02 真机：同出口换 outlook 秒成）。所以额外给一次机会，
+            # 否则 `retry_times=1` 时第一轮撞域名、第二轮才发现要换域名，已经没轮次了。
+            failover_used = False
+            while _should_try_domain_failover(
+                failed=result.outcome == AttemptOutcome.FAILED,
+                message=result.message,
+                failover_used=failover_used,
+                stop_requested=control.is_stop_requested(),
+            ):
+                failover_used = True
+                _api.log(
+                    task_id,
+                    f"[邮箱] 第 {i + 1} 个账号：域名窗口配额用尽 → 换邮箱域名再试一次"
+                    "（不占重试轮数）",
+                )
+                result = _do_one_round(i, total_rounds, total_rounds, blocked_domains)
             if result.outcome == AttemptOutcome.FAILED:
                 # 注册记录按"一个序号一条结果"记，所以只有跑完所有轮次才落一条
                 # failed；否则重试成功了还会在统计里留下一条失败
@@ -289,7 +385,9 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
                 )
             return result
 
-        def _do_one_round(i: int, round_no: int, rounds: int):
+        def _do_one_round(
+            i: int, round_no: int, rounds: int, blocked_mail_domains: set[str]
+        ):
             nonlocal next_start_time
             _proxy = None
             current_email = req.email or ""
@@ -345,7 +443,25 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
                         next_start_time = time.time() + req.register_delay_seconds
                 control.checkpoint(attempt_id=attempt_id)
 
-                merged_extra = _base_extra
+                merged_extra = dict(_base_extra)
+                # 上一个域名窗口配额用尽 → 本轮换一个**别的邮箱域名**。
+                # 实测（2026-11-02）：与 icloud.com 被拒同一分钟、同一出口，
+                # 换 outlook 地址立刻发码成功，所以该换的是域名不是出口。
+                failover = _pick_mail_provider_failover(
+                    current_provider=str(merged_extra.get("mail_provider") or "").strip().lower(),
+                    blocked_domains=blocked_mail_domains,
+                    candidates=["outlook", "icloud_remote"],
+                )
+                if failover and _outlook_pool_available() > 0:
+                    _api.log(
+                        task_id,
+                        f"[邮箱] 上一个域名窗口配额已用尽，本轮改用其它邮箱渠道: "
+                        f"{merged_extra.get('mail_provider') or '(默认)'} → {failover}",
+                    )
+                    merged_extra["mail_provider"] = failover
+                else:
+                    failover = ""
+                round_mail_provider = str(merged_extra.get("mail_provider") or "") or None
 
                 _config = RegisterConfig(
                     executor_type=req.executor_type,
@@ -357,7 +473,7 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
                 # 用到，还会因为全局默认渠道（`mail_provider`，默认留空）报
                 # 「未配置邮箱服务」而直接失败。
                 if getattr(PlatformCls, "uses_mailbox", True):
-                    _mailbox = _build_mailbox(_proxy)
+                    _mailbox = _build_mailbox(_proxy, provider=round_mail_provider)
                 else:
                     _mailbox = None
                 _platform = PlatformCls(config=_config, mailbox=_mailbox)
@@ -445,6 +561,18 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
                 _api.log(task_id, f"[STOP] {e}")
                 return AttemptResult.stopped(str(e))
             except Exception as e:
+                # 域名窗口配额用尽：记下这个域名，下一轮换渠道（见上面的 failover）。
+                text = str(e or "")
+                if "email-signup-unavailable" in text:
+                    domain = _mail_domain_of(current_email)
+                    if domain:
+                        blocked_mail_domains.add(domain)
+                        _api.log(
+                            task_id,
+                            f"[邮箱] {domain} 这一窗口的注册配额已用尽"
+                            f"（同域名再试同结局）；下一轮换邮箱域名。"
+                            f"微软号池可领 {_outlook_pool_available()} 个",
+                        )
                 if _proxy:
                     from core.proxy_utils import looks_like_proxy_error
 

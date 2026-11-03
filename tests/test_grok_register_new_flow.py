@@ -1640,3 +1640,22 @@ class InPageTurnstileMintTests(unittest.TestCase):
         ), patch.object(pages, "_default_mint", side_effect=lambda *a, **k: external.append(1) or ""):
             pages.ensure_turnstile_token(page, sitekey="0xKEY", timeout=0.2, poll_seconds=0.01)
         self.assertTrue(external, "页面内拿不到票时必须回退到外挂铸币")
+
+
+class InPageMintJsMustNotBlockTests(unittest.TestCase):
+    """页面内铸票的注入脚本**必须立刻返回**。
+
+    2026-11-03 线上事故：直接在 evaluate 里同步 `turnstile.render()`，页面主线程
+    正被 Cloudflare 挑战脚本占着 → `page.evaluate` 永不返回，注册线程卡死在
+    「资料页填写：全部成功」后面 15+ 分钟，连「停止任务」都处理不了
+    （control.checkpoint 根本没机会跑）。
+    """
+
+    def test_injection_defers_work_and_returns_immediately(self):
+        from platforms.grok import turnstile_mint as tm
+
+        js = tm._IN_PAGE_RENDER_JS
+        self.assertIn("setTimeout(", js, "必须把渲染/加载丢进 setTimeout")
+        self.assertIn('return "scheduled"', js, "evaluate 必须立刻返回")
+        # 同步 render 不能出现在 setTimeout 之外（粗略但有效的形态检查）：
+        self.assertLess(js.index("setTimeout("), js.index("window.turnstile.render(d,"))
