@@ -27,30 +27,28 @@ class MailDomainOfTests(unittest.TestCase):
 class PickMailProviderFailoverTests(unittest.TestCase):
     CANDIDATES = ["outlook", "icloud_remote"]
 
-    def _pick(self, current, blocked):
+    def _pick(self, blocked):
         return task_runners._pick_mail_provider_failover(
-            current_provider=current, blocked_domains=set(blocked), candidates=list(self.CANDIDATES)
+            blocked_domains=set(blocked), candidates=list(self.CANDIDATES)
         )
 
-    def test_switches_when_current_domain_is_blocked(self):
-        self.assertEqual(self._pick("icloud_remote", {"icloud.com"}), "outlook")
+    def test_icloud_window_exhausted_switches_to_outlook(self):
+        """2026-11-03 线上 bug 的回归：默认 `mail_provider` 是空串，判定若依赖
+        「当前渠道名」就永远匹配不上 —— 日志打了「换邮箱域名」，下一轮还是
+        `@icloud.com`，白花 90 秒。所以判定必须只看**失败的域名**。"""
+        self.assertEqual(self._pick({"icloud.com"}), "outlook")
 
     def test_switches_back_when_outlook_domain_is_blocked(self):
-        self.assertEqual(self._pick("outlook", {"outlook.kr"}), "icloud_remote")
+        self.assertEqual(self._pick({"outlook.kr"}), "icloud_remote")
 
     def test_no_change_when_nothing_is_blocked(self):
-        self.assertEqual(self._pick("icloud_remote", set()), "")
-
-    def test_no_change_when_blocked_domain_belongs_to_another_provider(self):
-        """别人家的域名被阻塞，不该让我们换掉自己的渠道。"""
-        self.assertEqual(self._pick("icloud_remote", {"outlook.com"}), "")
+        self.assertEqual(self._pick(set()), "")
 
     def test_gives_up_when_every_candidate_is_blocked(self):
-        self.assertEqual(self._pick("icloud_remote", {"icloud.com", "outlook.com"}), "")
+        self.assertEqual(self._pick({"icloud.com", "outlook.com"}), "")
 
-    def test_unknown_provider_is_never_treated_as_blocked(self):
-        self.assertEqual(self._pick("", set()), "")
-        self.assertEqual(self._pick("tempmail", {"icloud.com"}), "")
+    def test_unknown_domain_does_not_block_anything(self):
+        self.assertEqual(self._pick({"example.invalid"}), "outlook")
 
 
 class OutlookPoolAvailableTests(unittest.TestCase):
@@ -94,9 +92,11 @@ class FailoverExtraAttemptTests(unittest.TestCase):
 
     def test_failover_is_not_charged_to_the_retry_budget(self):
         src = inspect.getsource(task_runners._run_register)
-        self.assertIn("域名窗口配额用尽 → 换邮箱域名再试一次", src)
+        self.assertIn("域名窗口配额用尽 → 换到", src)
         self.assertIn("failover_used", src)
         self.assertIn("_should_try_domain_failover(", src)
+        # 额外那次必须**强制指定渠道**，否则还是老域名
+        self.assertIn("forced_provider=failover_provider", src)
 
     def test_round_mailbox_uses_the_failover_provider(self):
         src = inspect.getsource(task_runners._run_register)
@@ -105,20 +105,32 @@ class FailoverExtraAttemptTests(unittest.TestCase):
 
     def test_failover_requires_an_available_alternate_pool(self):
         src = inspect.getsource(task_runners._run_register)
-        self.assertIn("_outlook_pool_available() > 0", src)
+        self.assertIn("_mail_provider_available(failover)", src)
+        self.assertIn("_next_mail_provider_failover(blocked_domains)", src)
 
 
 class ShouldTryDomainFailoverTests(unittest.TestCase):
     """换域名机会的**判定**必须逐条钉住（否则「加了个变量但永远不生效」没人发现）。"""
 
-    def _call(self, *, failed=True, message="", failover_used=False, stop_requested=False):
+    def _call(self, *, failed=True, message="", failover_used=False, stop_requested=False,
+              failover_provider="outlook"):
         return task_runners._should_try_domain_failover(
             failed=failed, message=message, failover_used=failover_used,
-            stop_requested=stop_requested,
+            stop_requested=stop_requested, failover_provider=failover_provider,
         )
 
     def test_domain_window_failure_gets_one_extra_try(self):
-        self.assertTrue(self._call(message="x：x.ai 拒绝邮箱注册（account:email-signup-unavailable）…"))
+        self.assertTrue(self._call(
+            message="x：x.ai 拒绝邮箱注册（account:email-signup-unavailable）…",
+            failover_provider="outlook",
+        ))
+
+    def test_no_extra_try_without_an_available_alternate(self):
+        """没有可换的渠道就别白花一次 —— 线上就是「说了换、其实没换」。"""
+        self.assertFalse(self._call(
+            message="x.ai 拒绝邮箱注册（account:email-signup-unavailable）",
+            failover_provider="",
+        ))
 
     def test_other_failures_do_not(self):
         for message in ("打开注册页失败（打开超时）", "页面报错未发出验证码（something went wrong）", ""):
@@ -133,3 +145,31 @@ class ShouldTryDomainFailoverTests(unittest.TestCase):
 
     def test_respects_stop_request(self):
         self.assertFalse(self._call(message="account:email-signup-unavailable", stop_requested=True))
+
+
+class NextMailProviderFailoverTests(unittest.TestCase):
+    """换渠道前必须确认那边**真有号**（否则换到空池，等于换个地方失败）。"""
+
+    def test_prefers_outlook_when_it_has_accounts(self):
+        with patch.object(task_runners, "_mail_provider_available", side_effect=lambda p: p == "outlook"):
+            self.assertEqual(task_runners._next_mail_provider_failover({"icloud.com"}), "outlook")
+
+    def test_falls_back_to_icloud_when_outlook_is_empty(self):
+        with patch.object(task_runners, "_mail_provider_available", side_effect=lambda p: p == "icloud_remote"):
+            self.assertEqual(task_runners._next_mail_provider_failover({"outlook.com"}), "icloud_remote")
+
+    def test_empty_when_nothing_has_accounts(self):
+        with patch.object(task_runners, "_mail_provider_available", return_value=False):
+            self.assertEqual(task_runners._next_mail_provider_failover({"icloud.com"}), "")
+
+
+class ForcedProviderMustWinTests(unittest.TestCase):
+    """「换到 outlook」必须真的让本轮邮箱池变成 outlook（否则只是换了句日志）。"""
+
+    def test_round_honours_the_forced_provider(self):
+        src = inspect.getsource(task_runners._run_register)
+        self.assertIn(
+            'failover = str(forced_provider or "") or _pick_mail_provider_failover(', src
+        )
+        # 邮箱池要用「本轮渠道」，不是只改 extra
+        self.assertIn("_build_mailbox(_proxy, provider=round_mail_provider)", src)

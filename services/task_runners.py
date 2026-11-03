@@ -78,7 +78,8 @@ _DOMAIN_TO_MAIL_PROVIDER = {
 
 
 def _should_try_domain_failover(
-    *, failed: bool, message: str, failover_used: bool, stop_requested: bool
+    *, failed: bool, message: str, failover_used: bool, stop_requested: bool,
+    failover_provider: str = "",
 ) -> bool:
     """这一轮失败后该不该再试一次「换个邮箱域名」（纯函数，便于钉住行为）。
 
@@ -92,6 +93,9 @@ def _should_try_domain_failover(
     """
     if not failed or failover_used or stop_requested:
         return False
+    if not str(failover_provider or "").strip():
+        # 没有可换的渠道就别白花一次（2026-11-03 线上：日志说换了，实际没换）
+        return False
     return "email-signup-unavailable" in str(message or "")
 
 
@@ -100,30 +104,57 @@ def _mail_domain_of(email: str) -> str:
     return str(email or "").rsplit("@", 1)[-1].strip().lower()
 
 
-def _pick_mail_provider_failover(
-    *, current_provider: str, blocked_domains: set[str], candidates: list[str]
-) -> str:
+def _pick_mail_provider_failover(*, blocked_domains: set[str], candidates: list[str]) -> str:
     """域名窗口配额用尽后该换哪个邮箱渠道（纯函数，便于测试）。
 
     实测（2026-11-02）：与 icloud.com 被拒**同一分钟、同一出口**，换
     `outlook.kr` 立刻发码成功 —— 所以「一个域名窗口用尽」时正确的动作是
-    **换域名**，不是换出口。这里只负责选渠道：
-    - 当前渠道的域名已被标记阻塞 → 从候选里挑一个**域名不同**的；
-    - 当前渠道没有被阻塞 / 没有候选可用 → 返回空串（保持原样）。
+    **换域名**，不是换出口。
+
+    这里只看**被阻塞的域名属于哪个渠道**，然后挑一个不属于这些渠道的候选。
+    2026-11-03 线上 bug：原实现拿「当前渠道名」去比对，而默认 `mail_provider`
+    是空串 → 永远匹配不上 → 日志打了「换邮箱域名」，下一轮还是 `@icloud.com`，
+    白花 90 秒。所以判定必须从「实际失败的域名」出发。
     """
-    current = str(current_provider or "").strip().lower()
-    current_domain_blocked = any(
-        _DOMAIN_TO_MAIL_PROVIDER.get(domain, "") == current for domain in blocked_domains
-    )
-    if not current_domain_blocked:
+    if not blocked_domains:
         return ""
+    blocked_providers = {
+        _DOMAIN_TO_MAIL_PROVIDER.get(str(domain or "").strip().lower(), "")
+        for domain in blocked_domains
+    }
     for candidate in candidates:
         name = str(candidate or "").strip().lower()
-        if not name or name == current:
-            continue
-        if any(_DOMAIN_TO_MAIL_PROVIDER.get(d, "") == name for d in blocked_domains):
-            continue
-        return name
+        if name and name not in blocked_providers:
+            return name
+    return ""
+
+
+def _mail_provider_available(provider: str) -> bool:
+    """这个渠道现在还有号可领吗（换过去之前确认，别换到一个空池）。"""
+    name = str(provider or "").strip().lower()
+    if not name:
+        return False
+    if name == "outlook":
+        return _outlook_pool_available() > 0
+    if name == "icloud_remote":
+        try:
+            from services.icloud.remote import claimable_alias_total
+
+            return int(claimable_alias_total() or 0) > 0
+        except Exception as exc:  # noqa: BLE001 - 数不出来就别换过去
+            logger.debug("读远程 iCloud 可领别名数失败: %s", exc)
+            return False
+    return False
+
+
+def _next_mail_provider_failover(blocked_domains: set[str]) -> str:
+    """换域名时优先挑「有号」的候选；outlook 优先（域名多、窗口轮换快）。"""
+    for candidate in ("outlook", "icloud_remote"):
+        picked = _pick_mail_provider_failover(
+            blocked_domains=blocked_domains, candidates=[candidate]
+        )
+        if picked and _mail_provider_available(picked):
+            return picked
     return ""
 
 
@@ -361,19 +392,25 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
             # 发码（2026-11-02 真机：同出口换 outlook 秒成）。所以额外给一次机会，
             # 否则 `retry_times=1` 时第一轮撞域名、第二轮才发现要换域名，已经没轮次了。
             failover_used = False
+            failover_provider = _next_mail_provider_failover(blocked_domains)
             while _should_try_domain_failover(
                 failed=result.outcome == AttemptOutcome.FAILED,
                 message=result.message,
                 failover_used=failover_used,
                 stop_requested=control.is_stop_requested(),
+                failover_provider=failover_provider,
             ):
                 failover_used = True
                 _api.log(
                     task_id,
-                    f"[邮箱] 第 {i + 1} 个账号：域名窗口配额用尽 → 换邮箱域名再试一次"
-                    "（不占重试轮数）",
+                    f"[邮箱] 第 {i + 1} 个账号：域名窗口配额用尽 → 换到 {failover_provider}"
+                    " 再试一次（不占重试轮数）",
                 )
-                result = _do_one_round(i, total_rounds, total_rounds, blocked_domains)
+                result = _do_one_round(
+                    i, total_rounds, total_rounds, blocked_domains,
+                    forced_provider=failover_provider,
+                )
+                failover_provider = _next_mail_provider_failover(blocked_domains)
             if result.outcome == AttemptOutcome.FAILED:
                 # 注册记录按"一个序号一条结果"记，所以只有跑完所有轮次才落一条
                 # failed；否则重试成功了还会在统计里留下一条失败
@@ -386,7 +423,11 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
             return result
 
         def _do_one_round(
-            i: int, round_no: int, rounds: int, blocked_mail_domains: set[str]
+            i: int,
+            round_no: int,
+            rounds: int,
+            blocked_mail_domains: set[str],
+            forced_provider: str = "",
         ):
             nonlocal next_start_time
             _proxy = None
@@ -447,12 +488,11 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
                 # 上一个域名窗口配额用尽 → 本轮换一个**别的邮箱域名**。
                 # 实测（2026-11-02）：与 icloud.com 被拒同一分钟、同一出口，
                 # 换 outlook 地址立刻发码成功，所以该换的是域名不是出口。
-                failover = _pick_mail_provider_failover(
-                    current_provider=str(merged_extra.get("mail_provider") or "").strip().lower(),
+                failover = str(forced_provider or "") or _pick_mail_provider_failover(
                     blocked_domains=blocked_mail_domains,
                     candidates=["outlook", "icloud_remote"],
                 )
-                if failover and _outlook_pool_available() > 0:
+                if failover and _mail_provider_available(failover):
                     _api.log(
                         task_id,
                         f"[邮箱] 上一个域名窗口配额已用尽，本轮改用其它邮箱渠道: "
