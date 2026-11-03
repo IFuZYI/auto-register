@@ -56,6 +56,20 @@ def _curl_bin() -> str:
     return shutil.which("curl") or ""
 
 
+
+def _normalized(proxy: object) -> str:
+    """把代理串归一化成 `socks5h://`（DNS 走代理端解析）。
+
+    为什么必须在探针里做：库里存的是 `socks5://`，而 `socks5://` 是**本地解析**。
+    本机对某些域名解析不出来 / 很慢时，curl 会直接 `rc=28` 超时 —— 探针于是把
+    一条**完全健康**的出口判成「连不上」，`_pick_usable_exit` 还会据此把它
+    `report_proxy_error` **停用**掉。2026-11-03 实测：同一个 #6，
+    `socks5://` 探针 → `rc=28 000`，`socks5h://` → `HTTP 200 1.1s`。
+    """
+    from core.proxy_utils import normalize_proxy_url
+
+    return str(normalize_proxy_url(str(proxy or "").strip()) or "").strip()
+
 def probe_exit(
     proxy: str,
     *,
@@ -73,7 +87,7 @@ def probe_exit(
 
     `runner` 只为测试注入，签名与 `subprocess.run` 一致。
     """
-    proxy = str(proxy or "").strip()
+    proxy = _normalized(proxy)
     if not proxy:
         return {"ok": True, "code": "", "detail": "没有代理，跳过预检", "skipped": True}
     if runner is None and not _curl_bin():
@@ -164,7 +178,7 @@ def probe_reachable(
 
     返回 `{"ok": bool, "detail": str, "status": str, "skipped": bool}`。
     """
-    proxy = str(proxy or "").strip()
+    proxy = _normalized(proxy)
     if not proxy:
         return {"ok": True, "detail": "没有代理，跳过连通性检查", "status": "", "skipped": True}
     if runner is None and not _curl_bin():

@@ -299,3 +299,39 @@ class NoUsableExitGuardTests(unittest.TestCase):
         src = inspect.getsource(task_runners._run_register)
         self.assertIn("没有可用出口（连通性/延迟检查全部未通过），本轮放弃", src)
         self.assertIn("没有可用出口（连通性检查未通过）", src)
+
+
+class ProbeNormalizesProxySchemeTests(unittest.TestCase):
+    """探针必须自己把 `socks5://` 归一化成 `socks5h://`。
+
+    2026-11-03 实测假阴性：库里存 `socks5://`（**本地解析 DNS**），本机解析不出
+    某些域名时 curl 直接 `rc=28` 超时 —— 探针把一条健康出口判成「连不上」，
+    `_pick_usable_exit` 还会据此 `report_proxy_error` 把它**停用**。
+    同一个 #6：`socks5://` → rc=28/000；`socks5h://` → HTTP 200 / 1.1s。
+    """
+
+    def _run_with(self, url):
+        captured = {}
+
+        class _Proc:
+            returncode = 0
+            stdout = "200 0.9"
+
+        def _runner(cmd, **kwargs):
+            captured["cmd"] = cmd
+            return _Proc()
+
+        from platforms.grok.exit_probe import probe_reachable
+
+        probe_reachable(url, runner=_runner)
+        return captured["cmd"]
+
+    def test_socks5_is_upgraded_to_socks5h_in_the_curl_command(self):
+        cmd = self._run_with("socks5://user:pass@10.0.0.1:1080")
+        idx = cmd.index("-x")
+        self.assertEqual(cmd[idx + 1], "socks5h://user:pass@10.0.0.1:1080")
+
+    def test_socks5h_is_left_alone(self):
+        cmd = self._run_with("socks5h://user:pass@10.0.0.1:1080")
+        idx = cmd.index("-x")
+        self.assertEqual(cmd[idx + 1], "socks5h://user:pass@10.0.0.1:1080")
