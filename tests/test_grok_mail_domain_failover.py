@@ -173,3 +173,59 @@ class ForcedProviderMustWinTests(unittest.TestCase):
         )
         # 邮箱池要用「本轮渠道」，不是只改 extra
         self.assertIn("_build_mailbox(_proxy, provider=round_mail_provider)", src)
+
+
+class PrefetchMustRespectRemovalTests(unittest.TestCase):
+    """预取快照不能绕过「摘除」。
+
+    2026-11-03 线上 bug：日志说「代理异常，已摘除 X」，下一轮 `_get_proxy()`
+    又从预取快照里随机挑回同一个 X —— 摘除等于没摘，白烧一个别名加一轮时间。
+    """
+
+    def test_get_proxy_filters_out_inactive_prefetched_entries(self):
+        src = inspect.getsource(task_runners._run_register)
+        self.assertIn("_proxy_pool.is_available(candidate)", src)
+        self.assertIn("_prefetched_proxies.remove(candidate)", src)
+
+    def test_get_proxy_falls_back_to_pool_when_snapshot_is_exhausted(self):
+        src = inspect.getsource(task_runners._run_register)
+        self.assertIn("while True:", src)
+        self.assertIn("_proxy_pool.get_next(tag=TAG_REGISTER)", src)
+
+
+class ProxyCredentialMustNotReachLogsTests(unittest.TestCase):
+    """代理串带账号密码，`/api/tasks/{id}/logs` 会原样回吐（安全审查同类问题）。"""
+
+    def test_removal_log_is_redacted(self):
+        src = inspect.getsource(task_runners._run_register)
+        self.assertIn("已摘除 {_redact_proxy(_proxy)}", src)
+        self.assertNotIn("已摘除 {_proxy}", src)
+
+
+class FailedAttemptStillKnowsTheDomainTests(unittest.TestCase):
+    """失败路径也必须知道「刚才是哪个域名被拒」。
+
+    2026-11-03 线上 bug：`current_email` 只在 `register()` 成功返回后才赋值，
+    发码被拒时它还是空串 → `blocked_domains` 永远空 → 换域名 failover 从不触发，
+    icloud.com 连撞两轮。这里从错误文本里兜底提取。
+    """
+
+    def test_extracts_first_email_from_error_text(self):
+        text = "83.plugins_rabbles@icloud.com：x.ai 拒绝邮箱注册（account:email-signup-unavailable）"
+        self.assertEqual(task_runners._first_email_in(text), "83.plugins_rabbles@icloud.com")
+
+    def test_returns_empty_when_no_email(self):
+        self.assertEqual(task_runners._first_email_in("打开注册页失败（打开超时）"), "")
+        self.assertEqual(task_runners._first_email_in(None), "")
+
+    def test_domain_falls_back_to_error_text_email(self):
+        """这是线上那两轮的原文：只有文本里有邮箱，也必须认出 icloud.com。"""
+        text = "again.ibex.6q@icloud.com：x.ai 拒绝邮箱注册（account:email-signup-unavailable）"
+        self.assertEqual(
+            task_runners._mail_domain_of(task_runners._first_email_in(text)),
+            "icloud.com",
+        )
+
+    def test_flow_uses_the_fallback(self):
+        src = inspect.getsource(task_runners._run_register)
+        self.assertIn("_first_email_in(text)", src)

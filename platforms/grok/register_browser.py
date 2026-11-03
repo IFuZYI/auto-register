@@ -182,6 +182,60 @@ def _resolve_exit_ip(proxy: str, *, timeout: float = 12.0) -> str:
     return ""
 
 
+
+#: 收尾等 close 的墙钟上限（秒）。正常 close 是毫秒级；等这么久还没回来说明
+#: driver 已经死了，再等下去只会把整批任务一起拖死（见 `_close_browser` 注释）。
+BROWSER_CLOSE_TIMEOUT = 12.0
+
+
+def _close_browser(browser: Any, *, log: LogFn = None, timeout: float = BROWSER_CLOSE_TIMEOUT) -> None:
+    """关浏览器，**保证在有限时间内返回**。
+
+    2026-11-03 线上事故：浏览器进程已被 OOM 杀掉，`Browser.close()` 等一个
+    永远不来的 driver 回应，在 playwright 的 greenlet 调度里 100% CPU 空转，
+    把 worker 线程永久卡死（py-spy 抓到的栈就是 `SyncBase._sync →
+    Browser.close → Camoufox.__exit__`）。整批任务静默停摆 20 分钟。
+
+    两道保险：
+    1. `is_connected()` 已 False → **根本不调 close**（零成本、最可靠）；
+    2. 仍连接 → 放到独立线程里关，`join(timeout)` 到点就放弃。泄漏一个死进程
+       远比卡死整批任务划算。
+    """
+    if browser is None:
+        return
+    try:
+        if not bool(browser.is_connected()):
+            _log(log, "[Grok] 浏览器已断开，跳过关闭（避免 close 空转卡死）")
+            return
+    except Exception as exc:
+        # is_connected 自己都可能卡（同一个 driver 通道）—— 但它只是读一个
+        # 布尔字段，实测不会；真抛了就按「已断开」处理，直接不关。
+        logger.debug("is_connected 探测失败，跳过关闭: %s", exc)
+        return
+
+    import threading
+
+    done = threading.Event()
+
+    def _closer() -> None:
+        try:
+            browser.close()
+        except Exception as exc:  # noqa: BLE001 - 收尾失败不该制造新失败
+            logger.debug("关闭浏览器失败（忽略）: %s", exc)
+        finally:
+            done.set()
+
+    worker = threading.Thread(target=_closer, name="camoufox-close", daemon=True)
+    worker.start()
+    if not done.wait(max(0.0, float(timeout))):
+        _log(
+            log,
+            f"[Grok] 关闭浏览器超时（{timeout:g}s 未返回，driver 可能已死），放弃等待并继续",
+        )
+        return
+    _log(log, "[Grok] 浏览器已关闭")
+
+
 def _log(fn: LogFn, msg: str) -> None:
     if fn:
         try:
@@ -976,152 +1030,158 @@ def register_grok_via_browser(
             # 拿不到就退化成 False 保住启动可靠性。
             kwargs["geoip"] = _resolve_exit_ip(proxy) or False
 
+    browser: Any = None
+    camoufox_cm: Any = None
     try:
-        with Camoufox(**kwargs) as browser:
-            page = browser.new_page()
-            _log(log, "[Grok] 打开注册页…")
-            # 先落一次 grok.com 再进注册页（best-effort，失败继续）。
-            #
-            # 用户问「为什么不在 grok.com 注册」—— 注册确实在 accounts.x.ai
-            # （grok.com 的「Sign up」就是跳到这里，`?redirect=grok-com` 正是
-            # 把这次注册标记成 Grok 而不是通用 xAI 账号）。但先访问一次
-            # grok.com 会拿到它的会话 cookie / 让 CF 把这一串请求看成「从应用
-            # 点进来的人」，而不是「直接打开注册页的脚本」。参考实现的出口体检
-            # 也是**两个域名都探**（`proxy_pool_v3.py:884` 同时打
-            # accounts.x.ai 和 grok.com），说明这两个域名的信誉是分开算的。
-            #
-            # 失败不管：拿不到 cookie 只是少了这点加成，不该因此整轮失败。
-            try:
-                page.goto("https://grok.com/", wait_until="domcontentloaded", timeout=20000)
-                page.wait_for_timeout(1200)
-                _dismiss_cookie_banner(page)
-            except Exception as exc:
-                logger.debug("预热 grok.com 失败（不影响注册）: %s", exc)
-            try:
-                page.goto(SIGNUP_URL, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
-            except Exception as exc:
-                # 导航失败（出口不通 / 代理连不上 / 被 CF 断连）必须归类，不能裸抛：
-                # 线上实测（2026-11-01 批量第 2 轮）结果里只留下 `kind=None` 和一坨
-                # Playwright 调用日志，上层判不出「该换出口」还是「流程坏了」。
-                result["error"] = (
-                    f"打开注册页失败（{_nav_error_text(exc)}）—— 出口不通或太慢，"
-                    "换一个出口 IP 重试，地址仍然可用"
-                )
-                result["retryable"] = True
-                result["consumes_address"] = False
-                result["nav_failed"] = True
-                return result
-            page.wait_for_timeout(3000)
+        # 不用 `with Camoufox(...)`：它的 `__exit__` 会在 driver 已死时永久
+        # 空转（2026-11-03 线上卡死事故，py-spy 栈见 `_close_browser` 注释）。
+        # 显式开启 + finally 里带超时收尾，一个号收尾失败拖不死整批任务。
+        camoufox_cm = Camoufox(**kwargs)
+        browser = camoufox_cm.__enter__()
+        page = browser.new_page()
+        _log(log, "[Grok] 打开注册页…")
+        # 先落一次 grok.com 再进注册页（best-effort，失败继续）。
+        #
+        # 用户问「为什么不在 grok.com 注册」—— 注册确实在 accounts.x.ai
+        # （grok.com 的「Sign up」就是跳到这里，`?redirect=grok-com` 正是
+        # 把这次注册标记成 Grok 而不是通用 xAI 账号）。但先访问一次
+        # grok.com 会拿到它的会话 cookie / 让 CF 把这一串请求看成「从应用
+        # 点进来的人」，而不是「直接打开注册页的脚本」。参考实现的出口体检
+        # 也是**两个域名都探**（`proxy_pool_v3.py:884` 同时打
+        # accounts.x.ai 和 grok.com），说明这两个域名的信誉是分开算的。
+        #
+        # 失败不管：拿不到 cookie 只是少了这点加成，不该因此整轮失败。
+        try:
+            page.goto("https://grok.com/", wait_until="domcontentloaded", timeout=20000)
+            page.wait_for_timeout(1200)
             _dismiss_cookie_banner(page)
-
-            # 先等入口页真的渲染出来（`Sign up with email` 等文案出现）。
-            # 等不到就直接收工：页面还是壳的时候按钮根本不存在，循环点 6 次只会
-            # 「未命中」刷满日志、白烧一分钟（线上实测 2026-11-01），而换一个出口
-            # 立刻就正常 —— 所以这里必须把它报成「出口问题」，让上层换出口重试。
-            entry_diag: dict = {}
-            if not _open_entry_page(page, log=log, diag=entry_diag):
-                page_head = (entry_diag.get("page_text") or "").strip().replace("\n", " ")[:160]
-                if entry_diag.get("cloudflare"):
-                    why = "入口页被 Cloudflare 挑战挡住（Just a moment / cf-chl-widget）"
-                else:
-                    why = "入口页只返回了外壳，注册按钮没渲染出来"
-                result["error"] = (
-                    f"{why} —— 换一个出口 IP 重试，地址仍然可用"
-                    + (f"；页面开头：{page_head}" if page_head else "")
-                )
-                result["entry_diag"] = entry_diag
-                result["retryable"] = True
-                result["consumes_address"] = False
-                result["entry_not_rendered"] = True
-                return result
-
-            # 进邮箱注册视图：新版入口页有 6 个按钮（X/email/Apple/Google/GitHub/Sign in），
-            # 必须按文案精确命中 “Sign up with email”，点一次还可能被 cookie 弹窗吃掉，
-            # 所以要循环等 `input#email` 真的出现。
-            if not signup_pages.open_email_form(page, log=log):
-                result["error"] = "找不到邮箱输入框（新版入口页未出现 Sign up with email）"
-                result["retryable"] = True
-                return result
-            _log(log, "[Grok] 已进入邮箱注册视图")
-
-            stage = _send_code_stage(page, email, log=log, proxy=proxy, captcha=captcha)
-            # `kind` 一起带上：上层（任务日志、重试决策）需要知道究竟落的是
-            # 限流 / 出口被拒 / 已有账号 —— 只给错误文本的话又得再做一次字符串匹配。
-            # 但 **`ok` 不能从这里带上来**：它在这里的含义是「信发出去了」，
-            # 而顶层 `ok` 的含义是「拿到 SSO 了」。混用会导致没 SSO 也报成功
-            # （线上实测 2026-11-01：资料页被 Turnstile 挡住却返回 ok=True）。
-            result.update({k: v for k, v in stage.items() if k != "ok"})
-            if not stage["ok"]:
-                return result
-            _log(log, "[Grok] 页面已发信，等验证码…")
-
-            code = _read_code(
-                alias_id, code_timeout, log,
-                mailbox=mailbox, mailbox_account=mailbox_account,
-                task_control=task_control,
-                # 只认这次发码之后到的信：邮箱里还躺着历史邮件和上一轮的旧码，
-                # 不设这条线就会读到别人的码（2026-11-01：读到营销信的 `for-ios`）。
-                after=stage.get("sent_at"),
+        except Exception as exc:
+            logger.debug("预热 grok.com 失败（不影响注册）: %s", exc)
+        try:
+            page.goto(SIGNUP_URL, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
+        except Exception as exc:
+            # 导航失败（出口不通 / 代理连不上 / 被 CF 断连）必须归类，不能裸抛：
+            # 线上实测（2026-11-01 批量第 2 轮）结果里只留下 `kind=None` 和一坨
+            # Playwright 调用日志，上层判不出「该换出口」还是「流程坏了」。
+            result["error"] = (
+                f"打开注册页失败（{_nav_error_text(exc)}）—— 出口不通或太慢，"
+                "换一个出口 IP 重试，地址仍然可用"
             )
-            if not code:
-                result["error"] = (
-                    "未收到验证码"
-                    if (alias_id is not None or mailbox is not None)
-                    else "未收到验证码（既没给 alias_id 也没给 mailbox，读不到任何收件箱）"
-                )
-                return result
-            _log(log, f"[Grok] 验证码 {code}")
-
-            # 等「验证码框」或「资料页」先出现 —— 2026-11-01 现场快照证明，
-            # 码进去之后页面**不换 URL**，只把 email 框隐藏、换成资料表单。
-            # 只等验证码框的话，等到超时就报「验证码输入框未出现」，而实际上
-            # 已经该填资料了（看着像失败，实际走到倒数第二步）。
-            arrived = signup_pages.wait_for_code_or_profile(page, timeout=60)
-            if not arrived:
-                result["error"] = "验证码页未出现｜" + _page_snapshot(page)
-                return result
-            if arrived == "profile":
-                _log(log, "[Grok] 页面已在资料页（验证码这步已过），直接填资料")
-                code_entered = True
-            else:
-                code_entered = False
-            # 新版是 `input[name=code]`、maxlength=6、满 6 位自动提交（码要去掉连字符）
-            if not code_entered and not signup_pages.enter_code(page, code, log=log):
-                txt = signup_pages.page_text(page)
-                if _looks_already_registered(txt):
-                    result["already_registered"] = True
-                    result["consumes_address"] = True
-                    result["error"] = "该邮箱已有 x.ai 账号（别名已消耗）"
-                    return result
-                result["error"] = f"验证码提交后未进入建号表单: {txt[:150]}"
-                return result
-
-            if not signup_pages.wait_for_profile_form(page, timeout=60):
-                result["error"] = "验证码通过后未出现建号资料表单"
-                return result
-
-            _log(log, "[Grok] 填建号资料…")
-            prof = _profile_stage(
-                page, result["password"], proxy=proxy, log=log, captcha=captcha,
-            )
-            for key in ("error", "retryable", "consumes_address", "turnstile_blocked"):
-                result[key] = prof[key]
-            if not prof["ok"]:
-                return result
-
-            # 提交后 x.ai 用 cookie-chain 跳链下发 sso（详见 `_wait_for_sso_cookie`）。
-            # 必须轮询等它落地，不能只等固定时长 —— 否则跳链没跑完就返回，
-            # 把成功的注册误判成失败。
-            sso = _wait_for_sso_cookie(page, timeout=35)
-
-            if sso:
-                result["ok"] = True
-                result["sso"] = sso
-                _log(log, f"[Grok] 注册成功，SSO len={len(sso)}")
-            else:
-                final = signup_pages.page_text(page)
-                result["error"] = f"未拿到 SSO（等 35 秒）: {final[:150]}"
+            result["retryable"] = True
+            result["consumes_address"] = False
+            result["nav_failed"] = True
             return result
+        page.wait_for_timeout(3000)
+        _dismiss_cookie_banner(page)
+
+        # 先等入口页真的渲染出来（`Sign up with email` 等文案出现）。
+        # 等不到就直接收工：页面还是壳的时候按钮根本不存在，循环点 6 次只会
+        # 「未命中」刷满日志、白烧一分钟（线上实测 2026-11-01），而换一个出口
+        # 立刻就正常 —— 所以这里必须把它报成「出口问题」，让上层换出口重试。
+        entry_diag: dict = {}
+        if not _open_entry_page(page, log=log, diag=entry_diag):
+            page_head = (entry_diag.get("page_text") or "").strip().replace("\n", " ")[:160]
+            if entry_diag.get("cloudflare"):
+                why = "入口页被 Cloudflare 挑战挡住（Just a moment / cf-chl-widget）"
+            else:
+                why = "入口页只返回了外壳，注册按钮没渲染出来"
+            result["error"] = (
+                f"{why} —— 换一个出口 IP 重试，地址仍然可用"
+                + (f"；页面开头：{page_head}" if page_head else "")
+            )
+            result["entry_diag"] = entry_diag
+            result["retryable"] = True
+            result["consumes_address"] = False
+            result["entry_not_rendered"] = True
+            return result
+
+        # 进邮箱注册视图：新版入口页有 6 个按钮（X/email/Apple/Google/GitHub/Sign in），
+        # 必须按文案精确命中 “Sign up with email”，点一次还可能被 cookie 弹窗吃掉，
+        # 所以要循环等 `input#email` 真的出现。
+        if not signup_pages.open_email_form(page, log=log):
+            result["error"] = "找不到邮箱输入框（新版入口页未出现 Sign up with email）"
+            result["retryable"] = True
+            return result
+        _log(log, "[Grok] 已进入邮箱注册视图")
+
+        stage = _send_code_stage(page, email, log=log, proxy=proxy, captcha=captcha)
+        # `kind` 一起带上：上层（任务日志、重试决策）需要知道究竟落的是
+        # 限流 / 出口被拒 / 已有账号 —— 只给错误文本的话又得再做一次字符串匹配。
+        # 但 **`ok` 不能从这里带上来**：它在这里的含义是「信发出去了」，
+        # 而顶层 `ok` 的含义是「拿到 SSO 了」。混用会导致没 SSO 也报成功
+        # （线上实测 2026-11-01：资料页被 Turnstile 挡住却返回 ok=True）。
+        result.update({k: v for k, v in stage.items() if k != "ok"})
+        if not stage["ok"]:
+            return result
+        _log(log, "[Grok] 页面已发信，等验证码…")
+
+        code = _read_code(
+            alias_id, code_timeout, log,
+            mailbox=mailbox, mailbox_account=mailbox_account,
+            task_control=task_control,
+            # 只认这次发码之后到的信：邮箱里还躺着历史邮件和上一轮的旧码，
+            # 不设这条线就会读到别人的码（2026-11-01：读到营销信的 `for-ios`）。
+            after=stage.get("sent_at"),
+        )
+        if not code:
+            result["error"] = (
+                "未收到验证码"
+                if (alias_id is not None or mailbox is not None)
+                else "未收到验证码（既没给 alias_id 也没给 mailbox，读不到任何收件箱）"
+            )
+            return result
+        _log(log, f"[Grok] 验证码 {code}")
+
+        # 等「验证码框」或「资料页」先出现 —— 2026-11-01 现场快照证明，
+        # 码进去之后页面**不换 URL**，只把 email 框隐藏、换成资料表单。
+        # 只等验证码框的话，等到超时就报「验证码输入框未出现」，而实际上
+        # 已经该填资料了（看着像失败，实际走到倒数第二步）。
+        arrived = signup_pages.wait_for_code_or_profile(page, timeout=60)
+        if not arrived:
+            result["error"] = "验证码页未出现｜" + _page_snapshot(page)
+            return result
+        if arrived == "profile":
+            _log(log, "[Grok] 页面已在资料页（验证码这步已过），直接填资料")
+            code_entered = True
+        else:
+            code_entered = False
+        # 新版是 `input[name=code]`、maxlength=6、满 6 位自动提交（码要去掉连字符）
+        if not code_entered and not signup_pages.enter_code(page, code, log=log):
+            txt = signup_pages.page_text(page)
+            if _looks_already_registered(txt):
+                result["already_registered"] = True
+                result["consumes_address"] = True
+                result["error"] = "该邮箱已有 x.ai 账号（别名已消耗）"
+                return result
+            result["error"] = f"验证码提交后未进入建号表单: {txt[:150]}"
+            return result
+
+        if not signup_pages.wait_for_profile_form(page, timeout=60):
+            result["error"] = "验证码通过后未出现建号资料表单"
+            return result
+
+        _log(log, "[Grok] 填建号资料…")
+        prof = _profile_stage(
+            page, result["password"], proxy=proxy, log=log, captcha=captcha,
+        )
+        for key in ("error", "retryable", "consumes_address", "turnstile_blocked"):
+            result[key] = prof[key]
+        if not prof["ok"]:
+            return result
+
+        # 提交后 x.ai 用 cookie-chain 跳链下发 sso（详见 `_wait_for_sso_cookie`）。
+        # 必须轮询等它落地，不能只等固定时长 —— 否则跳链没跑完就返回，
+        # 把成功的注册误判成失败。
+        sso = _wait_for_sso_cookie(page, timeout=35)
+
+        if sso:
+            result["ok"] = True
+            result["sso"] = sso
+            _log(log, f"[Grok] 注册成功，SSO len={len(sso)}")
+        else:
+            final = signup_pages.page_text(page)
+            result["error"] = f"未拿到 SSO（等 35 秒）: {final[:150]}"
+        return result
     except TaskInterruption:
         # 「停止/跳过」是控制流，不是失败：必须原样抛给上层（审计 R-07）。
         # 之前这里被 catch-all 吞掉，用户点了停止却看到「注册失败」。
@@ -1129,6 +1189,19 @@ def register_grok_via_browser(
     except Exception as exc:
         result["error"] = f"{type(exc).__name__}: {str(exc)[:150]}"
         return result
+    finally:
+        # 收尾必须有超时：driver 已死时 `browser.close()` 会永久空转，
+        # 一个号收尾卡住就会拖死整批任务（2026-11-03 线上事故）。
+        _close_browser(browser, log=log)
+        try:
+            # Camoufox.__exit__ 内部还会再 `self.browser.close()` 一次 ——
+            # 必须先把引用摘掉，否则上面刚做完的超时收尾白做，又卡在同一帧
+            # （2026-11-03 09:53 实测二次踩到，py-spy 栈仍是 Browser.close）。
+            if camoufox_cm is not None:
+                camoufox_cm.browser = None
+                camoufox_cm.__exit__(None, None, None)
+        except Exception as exc:  # noqa: BLE001 - 收尾失败不制造新失败
+            logger.debug("Camoufox 上下文收尾失败（忽略）: %s", exc)
 
 
 #: 验证码**只认大写**：x.ai 的码固定是 `ABC-123` 形式。

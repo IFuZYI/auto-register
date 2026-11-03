@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 
 from services.task_store_io import persist_task_snapshot
 
+import re
 import threading
 import time
 from typing import TYPE_CHECKING, Callable, Optional
@@ -97,6 +98,21 @@ def _should_try_domain_failover(
         # 没有可换的渠道就别白花一次（2026-11-03 线上：日志说换了，实际没换）
         return False
     return "email-signup-unavailable" in str(message or "")
+
+
+_EMAIL_IN_TEXT_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
+
+
+def _first_email_in(text: object) -> str:
+    """从错误文本里摸出第一个邮箱（失败路径拿不到 `account.email` 时的兜底）。
+
+    2026-11-03 线上 bug：`current_email` 只在 `register()` **成功返回后**才被赋值，
+    所以「发码被拒」这种失败发生时它还是空串 → `_mail_domain_of("")` 是空 →
+    `blocked_domains` 一直是空集 → 换域名 failover **永远不会触发**，同一个
+    icloud.com 域名连撞两轮（日志里两次 `account:email-signup-unavailable`）。
+    """
+    match = _EMAIL_IN_TEXT_RE.search(str(text or ""))
+    return match.group(0) if match else ""
 
 
 def _mail_domain_of(email: str) -> str:
@@ -299,7 +315,14 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
         )
         _base_extra = registration_context.settings
 
-        # 批量预取代理（无固定代理时），减少每线程单独查 DB
+        # 批量预取代理（无固定代理时），减少每线程单独查 DB。
+        #
+        # **注意：预取只是「少查库」，不是「出口名单的真相」**。2026-11-03 线上
+        # bug：某轮报「代理异常，已摘除 X」，下一轮 `_get_proxy()` 又从这份
+        # 快照里随机挑回了同一个 X —— 摘除等于没摘，白烧一个别名加一轮时间。
+        # 所以快照里的每一条在用之前都要过 `is_available()`（它读库里的
+        # `is_active`），被摘掉的当场剔除；快照空了就回落到 `get_next()`
+        # （它本来只返回 active 的）。
         from core.proxy_pool import proxy_pool as _proxy_pool
         _prefetched_proxies: list[str] = []
         _prefetch_lock = threading.Lock()
@@ -324,11 +347,18 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
         def _get_proxy() -> Optional[str]:
             if req.proxy:
                 return req.proxy
-            if _prefetched_proxies:
+            import random
+
+            while True:
                 with _prefetch_lock:
-                    if _prefetched_proxies:
-                        import random
-                        return random.choice(_prefetched_proxies)
+                    if not _prefetched_proxies:
+                        break
+                    candidate = random.choice(_prefetched_proxies)
+                    if _proxy_pool.is_available(candidate):
+                        return candidate
+                    # 已被摘除（别的线程报了错 / 探活失败）→ 从快照里剔掉，
+                    # 立刻换一个，别让它再被选中。
+                    _prefetched_proxies.remove(candidate)
             from core.models.proxy import TAG_REGISTER
 
             return _proxy_pool.get_next(tag=TAG_REGISTER)
@@ -604,7 +634,9 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
                 # 域名窗口配额用尽：记下这个域名，下一轮换渠道（见上面的 failover）。
                 text = str(e or "")
                 if "email-signup-unavailable" in text:
-                    domain = _mail_domain_of(current_email)
+                    domain = _mail_domain_of(current_email) or _mail_domain_of(
+                        _first_email_in(text)
+                    )
                     if domain:
                         blocked_mail_domains.add(domain)
                         _api.log(
@@ -620,9 +652,12 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
                         # 注册用的是**注册标签**的出口，这里摘掉它，下一轮
                         # `_get_proxy()` 会从剩下的里重新挑一个。
                         _proxy_pool.report_proxy_error(_proxy)
+                        # 代理串里带账号密码，`/api/tasks/{id}/logs` 会原样回吐
+                        # （安全审查 2026-10-30 F4 同类问题）。这里必须打码，
+                        # 主机:端口足够定位问题。
                         _api.log(
                             task_id,
-                            f"代理异常，已摘除 {_proxy}，下一轮换出口",
+                            f"代理异常，已摘除 {_redact_proxy(_proxy)}，下一轮换出口",
                         )
                     else:
                         _proxy_pool.report_fail(_proxy)
