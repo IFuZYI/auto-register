@@ -92,6 +92,33 @@ def _throttle_send_code(min_interval: float, log) -> None:
         _SEND_CODE_LAST_TS = now
 
 
+#: 平台侧**瞬时**拒绝：地址没被 x.ai 消耗，只是这一轮撞上了出口 IP 限流 /
+#: 域名窗口（2026-11-03 实测：同出口换域名无效、约 1 小时后自行恢复）。
+_TRANSIENT_REJECTION_KEYS = ("email_unavailable", "rate_limited")
+
+
+def _mailbox_status_for_failure(result: dict) -> str:
+    """注册失败时该把这个邮箱地址记成什么状态（纯函数，便于钉住）。
+
+    三种状态的含义（渠道侧解释见 `_record_mailbox_status`）：
+
+    - `used`：地址**已被消耗**（如「该邮箱在 x.ai 已有账号」）→ 不能再用；
+    - `available`：地址没被消耗，只是撞上**平台侧瞬时拒绝** → 放回池子，
+      等窗口恢复 / 换出口后再用；
+    - `failed`：其它失败，按渠道自身语义处理。
+
+    2026-11-03 线上实测：一小时的出口限流窗口把微软号池从 6 个可用**烧到 0 个**
+    —— Outlook 渠道里 `failed` 等于「永久移出池子」，而几分钟后同一个地址其实
+    完全可用（那批 7 个 `failed` 全是这么来的）。地址是稀缺资源，不该因为一个
+    跟它无关的瞬时拒绝就丢掉。
+    """
+    if result.get("already_registered") or result.get("consumes_address"):
+        return "used"
+    if any(result.get(key) for key in _TRANSIENT_REJECTION_KEYS):
+        return "available"
+    return "failed"
+
+
 @register
 class GrokPlatform(BasePlatform):
     name = "grok"
@@ -774,7 +801,10 @@ class GrokPlatform(BasePlatform):
             consumed = bool(
                 result.get("already_registered") or result.get("consumes_address")
             )
-            self._record_mailbox_status(mailbox, mailbox_account, "used" if consumed else "failed", log)
+            # 地址状态见 `_mailbox_status_for_failure`：瞬时拒绝不能烧号。
+            self._record_mailbox_status(
+                mailbox, mailbox_account, _mailbox_status_for_failure(result), log
+            )
             message = result.get("error") or "浏览器注册失败"
             # 默认按「不可重试」处理：`consumes_address` 为真说明地址已用掉，
             # 重开一轮拿到的是**同一个**地址（池子就那几个），必然同样结局。
