@@ -78,15 +78,28 @@ def test_missing_api_key_is_a_client_error(client):
     assert "API Key" in response.json()["detail"]
 
 
-def test_upstream_failure_is_reported_as_bad_gateway(client):
+def test_upstream_failure_is_a_bad_gateway_without_echoing_the_upstream(client):
+    """上游失败 → 502，但**不把上游原文回给前端**。
+
+    2026-11-04 行为变更（独立审查切片 E）：这条测试原先叫
+    `test_upstream_failure_is_reported_as_bad_gateway`，断言的是
+    `"BAD_KEY" in detail` —— 钉的正是「把上游错误原文拼进 detail」这个行为。
+    该行为已**刻意改掉**：上游是第三方短信服务，错误体里可能带 key/账号信息，
+    而 detail 是给用户看的文案。
+
+    按 TDD 的规矩，钉住旧规则的测试要**改写**成钉新规则、并改名，不能删：
+    状态码语义（502）原样保留，只把「回显原文」这一半反过来断言。
+    """
     provider = mock.Mock()
-    provider.get_balance.side_effect = RuntimeError("BAD_KEY")
+    provider.get_balance.side_effect = RuntimeError('{"error": "BAD_KEY"}')
 
     with mock.patch("api.sms.create_sms_provider", return_value=provider):
         response = client.post("/api/sms/balance", json={"api_key": "k"})
 
     assert response.status_code == 502
-    assert "BAD_KEY" in response.json()["detail"]
+    detail = response.json()["detail"]
+    assert "BAD_KEY" not in detail, "上游原文不许回显给前端"
+    assert "{" not in detail, "detail 里不许出现上游原始 JSON"
 
 
 def test_country_ranking_is_annotated_and_truncated(client):
