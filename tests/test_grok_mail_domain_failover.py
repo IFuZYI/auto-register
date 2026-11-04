@@ -229,3 +229,29 @@ class FailedAttemptStillKnowsTheDomainTests(unittest.TestCase):
     def test_flow_uses_the_fallback(self):
         src = inspect.getsource(task_runners._run_register)
         self.assertIn("_first_email_in(text)", src)
+
+
+class RemoteMailProviderCounterTests(unittest.TestCase):
+    """`icloud_remote` 渠道的「有没有号」必须真的读远程计数。
+
+    2026-11-04 独立审查：`_mail_provider_available` 引的
+    `services.icloud.remote.claimable_alias_total` **根本不存在**，ImportError
+    被宽捕获吞掉 → 该渠道永远「没号」→ 域名窗口用尽时的邮箱渠道切换从未生效。
+
+    这条测试用**两个方向**钉住接线：计数为 0 → False，计数 >0 → True。
+    只断言其中一边的话，把函数换成 `return False` 常量仍然会绿。
+    """
+
+    def _call(self, count):
+        from unittest.mock import patch
+
+        from services.task_runners import _mail_provider_available
+
+        with patch("services.icloud.remote.claimable_alias_total", lambda: count):
+            return _mail_provider_available("icloud_remote")
+
+    def test_positive_count_means_available(self):
+        self.assertTrue(self._call(5))
+
+    def test_zero_count_means_unavailable(self):
+        self.assertFalse(self._call(0))

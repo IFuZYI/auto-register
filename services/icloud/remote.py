@@ -10,6 +10,10 @@
 """
 from __future__ import annotations
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -190,6 +194,35 @@ def add_remote_account(
     return _account_public_dict(
         _record_to_model(created) if created else ICloudAccountModel()
     )
+
+
+def claimable_alias_total() -> int:
+    """**远程**账号名下当前可领取的别名总数（跨所有远程服务）。
+
+    2026-11-04 独立审查发现：`services/task_runners.py::_mail_provider_available`
+    引的是 `claimable_alias_total`，而这个函数**从来不存在** —— ImportError 被
+    宽捕获吞掉，于是 `icloud_remote` 永远被判定「没有可领的号」，域名窗口用尽时
+    的邮箱渠道切换**一次都没生效过**（正是它本该救场的那种场景）。
+
+    这里补上真实现：只统计 `source == remote` 的账号，按账号分别取池子里的
+    `available`（可领取）计数 —— 本地 iCloud 账号的别名不能算进「远程渠道可用」，
+    否则会切到一个其实没号的渠道上去。
+    """
+    from core.db.icloud_account_repository import icloud_account_repository
+    from services.icloud.aliases import pool_summary
+
+    total = 0
+    for row in icloud_account_repository.list_all():
+        if str(row.get("source") or "") != SOURCE_REMOTE:
+            continue
+        account_id = row.get("id")
+        if account_id is None:
+            continue
+        try:
+            total += int(pool_summary(int(account_id)).get("available", 0) or 0)
+        except Exception as exc:  # noqa: BLE001 - 单个账号数不出来不该拖垮整体
+            logger.debug("读远程账号 %s 可领别名数失败: %s", account_id, exc)
+    return total
 
 
 def _account_public_dict(row: ICloudAccountModel) -> dict[str, Any]:

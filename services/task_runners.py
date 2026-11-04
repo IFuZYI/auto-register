@@ -153,9 +153,13 @@ def _mail_provider_available(provider: str) -> bool:
     if name == "outlook":
         return _outlook_pool_available() > 0
     if name == "icloud_remote":
-        try:
-            from services.icloud.remote import claimable_alias_total
+        # import **放在 try 外面**：符号消失必须立刻炸出来。
+        # 2026-11-04 独立审查：这里原本 `from ... import claimable_alias_total`
+        # 写在一个宽 try 里，而那个函数**根本不存在** —— ImportError 被吞成
+        # 「没号」，于是域名窗口用尽时的邮箱渠道切换一次都没生效过，且毫无痕迹。
+        from services.icloud.remote import claimable_alias_total
 
+        try:
             return int(claimable_alias_total() or 0) > 0
         except Exception as exc:  # noqa: BLE001 - 数不出来就别换过去
             logger.debug("读远程 iCloud 可领别名数失败: %s", exc)
