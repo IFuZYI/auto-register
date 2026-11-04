@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { App, Alert, Button, Card, Form, Grid, Input, InputNumber, Popconfirm, Select, Space, Switch, Table, Tag, Tooltip, Typography } from 'antd'
 import type { FormInstance } from 'antd'
 
@@ -198,6 +198,13 @@ export default function MailImportPanel({ form, lockToProvider }: MailImportPane
   const [loadingProviders, setLoadingProviders] = useState(false)
   const [loadingSnapshot, setLoadingSnapshot] = useState(false)
   const [rawSnapshot, setRawSnapshot] = useState<MailImportSnapshot | null>(null)
+  /**
+   * 预览**请求**失败的原因（区别于「确实没有可导入账号」这个合法空态）。
+   *
+   * `rawSnapshot` 为 null 有两层意思：真的没有数据，或者请求挂了 —— 只有这里的
+   * `snapshotError` 能分清，预览区据此换文案。
+   */
+  const [snapshotError, setSnapshotError] = useState<string | null>(null)
   const [result, setResult] = useState<MailImportResult | null>(null)
   // 平台筛选：选中后预览表只留「在这个平台注册过」的地址。空 = 显示全部。
   const [filterPlatform, setFilterPlatform] = useState<string>('')
@@ -270,18 +277,37 @@ export default function MailImportPanel({ form, lockToProvider }: MailImportPane
     }
   }
 
-  const loadSnapshot = async () => {
+  /**
+   * 收到新 snapshot 的统一入口：顺手清掉上一次的加载错误。
+   *
+   * 不这么做的话，「预览加载失败」那行字会在之后某次成功（但结果为空）的
+   * 导入/删除之后残留下来，又把空态说成错误 —— 反过来同样糟。
+   */
+  const applySnapshot = (next: MailImportSnapshot) => {
+    setRawSnapshot(next)
+    setSnapshotError(null)
+  }
+
+  const loadSnapshot = useCallback(async () => {
     setLoadingSnapshot(true)
     try {
       const params = new URLSearchParams({ type: IMPORT_API_TYPE })
       const nextSnapshot = await apiFetch(`/mail-imports/snapshot?${params.toString()}`) as MailImportSnapshot
-      setRawSnapshot(nextSnapshot)
-    } catch {
+      applySnapshot(nextSnapshot)
+    } catch (error) {
+      // 原来只有 `setRawSnapshot(null)`：预览区于是落到 else 分支，显示 provider 的
+      // 「当前还没有可预览的 Outlook 已导入账号」—— 把「接口挂了/后端报错」说成了
+      // 「你确实没导入过账号」。这里保留 null（预览确实没有可用数据），但要说清原因。
+      const detail = error instanceof Error ? error.message : String(error)
       setRawSnapshot(null)
+      setSnapshotError(detail)
+      message.error(`导入预览加载失败：${detail}`)
     } finally {
       setLoadingSnapshot(false)
     }
-  }
+    // `message` 来自 antd App（memo 化实例，身份稳定）：进依赖是为了满足
+    // exhaustive-deps，否则下面的 effect 会把 loadSnapshot 判为不稳定。
+  }, [message])
 
   useEffect(() => {
     void loadProviders()
@@ -297,7 +323,7 @@ export default function MailImportPanel({ form, lockToProvider }: MailImportPane
   useEffect(() => {
     if (!selectedProvider) return
     void loadSnapshot()
-  }, [selectedProvider, selectedType])
+  }, [selectedProvider, selectedType, loadSnapshot])
 
   useEffect(() => {
     setSelectedRowKeys([])
@@ -329,7 +355,7 @@ export default function MailImportPanel({ form, lockToProvider }: MailImportPane
       }) as MailImportResult
 
       setResult(response)
-      setRawSnapshot(response.snapshot)
+      applySnapshot(response.snapshot)
       setContent('')
 
       form.setFieldsValue({
@@ -425,7 +451,7 @@ export default function MailImportPanel({ form, lockToProvider }: MailImportPane
       }) as MailImportResult
 
       setResult(response)
-      setRawSnapshot(response.snapshot)
+      applySnapshot(response.snapshot)
       setSelectedRowKeys([])
       message.success(`已删除 ${email}`)
     } catch (error) {
@@ -465,7 +491,7 @@ export default function MailImportPanel({ form, lockToProvider }: MailImportPane
       }) as MailImportResult
 
       setResult(response)
-      setRawSnapshot(response.snapshot)
+      applySnapshot(response.snapshot)
       setSelectedRowKeys([])
       message.success(`批量删除完成：成功 ${response.summary.success} / 失败 ${response.summary.failed}`)
     } catch (error) {
@@ -494,7 +520,7 @@ export default function MailImportPanel({ form, lockToProvider }: MailImportPane
           }) as MailImportResult
 
           setResult(response)
-          setRawSnapshot(response.snapshot)
+          applySnapshot(response.snapshot)
           success += 1
         } catch (singleError) {
           failed += 1
@@ -818,8 +844,10 @@ export default function MailImportPanel({ form, lockToProvider }: MailImportPane
               alignItems: 'center',
             }}
           >
-            <Typography.Text type="secondary">
-              {selectedProvider?.preview_empty_text || '当前还没有可预览的导入内容。'}
+            <Typography.Text type={snapshotError ? 'danger' : 'secondary'}>
+              {snapshotError
+                ? `预览加载失败：${snapshotError}。不是没有可导入账号，点上面的「刷新预览」重试。`
+                : (selectedProvider?.preview_empty_text || '当前还没有可预览的导入内容。')}
             </Typography.Text>
           </div>
         )}

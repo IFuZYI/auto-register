@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react'
-import { Card, Row, Col, Tag, Button, Spin, Empty } from 'antd'
+import { useCallback, useEffect, useState } from 'react'
+import { Card, Row, Col, Tag, Button, Spin, Empty, App } from 'antd'
 import {
   UserOutlined,
   CheckCircleOutlined,
@@ -22,7 +22,8 @@ const PLATFORM_BAR_COLORS: Record<string, string> = {
 
 interface StatCardProps {
   title: string
-  value: number
+  /** 加载失败时传 '—'：0 会被读成「真的一个都没有」。 */
+  value: number | string
   icon: React.ReactNode
   color: string
   index: number
@@ -87,35 +88,74 @@ function StatCard({ title, value, icon, color, index, hint }: StatCardProps) {
   )
 }
 
+/**
+ * 请求失败时占位：**不能**复用「暂无账号数据」那套文案。
+ *
+ * `/accounts/stats` 挂掉时 `stats` 是 null，所有 `?? 0` 都落到 0，分布区也走
+ * 空分支 —— 屏幕上写着「暂无账号数据」，用户读到的是「我的账号没了」，而事实
+ * 只是「这一次没拉到」。两件事必须分开说。
+ */
+function LoadFailed({ what }: { what: string }) {
+  return (
+    <Empty
+      image={Empty.PRESENTED_IMAGE_SIMPLE}
+      description={
+        <span style={{ fontSize: 13 }}>
+          {what}加载失败
+          <br />
+          <span style={{ color: 'var(--text-muted)' }}>
+            不是没有数据，是这次没拉到；点右上角「刷新」重试
+          </span>
+        </span>
+      }
+      style={{ margin: '8px 0' }}
+    />
+  )
+}
+
 export default function Dashboard() {
+  const { message } = App.useApp()
   const [stats, setStats] = useState<any>(null)
   const [loading, setLoading] = useState(false)
+  /** 本次加载是否抛错。只由 catch 置位，成功路径永远清掉 —— 空数组 ≠ 出错。 */
+  const [loadFailed, setLoadFailed] = useState(false)
 
-  const load = async () => {
+  const load = useCallback(async () => {
     setLoading(true)
     try {
       const data = await apiFetch('/accounts/stats')
       setStats(data)
+      setLoadFailed(false)
+    } catch (error) {
+      // 原来这里只有 try/finally，没有 catch：异常静默冒泡，四张卡全显 0。
+      const detail = error instanceof Error ? error.message : String(error)
+      setLoadFailed(true)
+      message.error(`总览数据加载失败：${detail}，下方数字不代表真实账号数`)
     } finally {
       setLoading(false)
     }
-  }
+    // `message` 是 antd App 的 memo 化实例，身份稳定；进依赖是为了满足
+    // exhaustive-deps，同时保证「刷新」按钮与 effect 用同一个 load。
+  }, [message])
 
   useEffect(() => {
     load()
-  }, [])
+  }, [load])
 
   const total = stats?.total ?? 0
+  // 出错时四张卡显示 '—' 而不是 0：0 是「账号数为零」这个合法值，用它表示错误
+  // 等于把两种情况混成一个。
+  const num = (v: number | undefined) => (loadFailed ? '—' : (v ?? 0))
   const statCards = [
     {
       title: '总账号数',
-      value: total,
+      value: num(total),
       icon: <UserOutlined />,
       color: 'var(--accent)',
     },
     {
       title: '正常',
-      value: stats?.by_status?.registered ?? 0,
+      value: num(stats?.by_status?.registered),
       icon: <CheckCircleOutlined />,
       color: 'var(--success)',
     },
@@ -126,8 +166,9 @@ export default function Dashboard() {
       // 改叫「待恢复」（这两类都能靠刷新/重登救回来），构成写进 ⓘ。
       title: '待恢复',
       hint: `过期 ${stats?.by_status?.expired ?? 0} + 失效 ${stats?.by_status?.invalid ?? 0}。这两类都能靠刷新 Token 或重登救回来，所以合成一档看量；下方的状态分布里仍分开列。`,
-      value: (stats?.by_status?.expired ?? 0)
-        + (stats?.by_status?.invalid ?? 0),
+      value: loadFailed
+        ? '—'
+        : (stats?.by_status?.expired ?? 0) + (stats?.by_status?.invalid ?? 0),
       icon: <CloseCircleOutlined />,
       color: 'var(--danger)',
     },
@@ -136,7 +177,7 @@ export default function Dashboard() {
       // 被封的账号（deleted or deactivated）—— 强判断，不因一次可用探测
       // 复活；与「失效」分开看量：处置方式不同（这号该弃，不重试）。
       // 紫色：红已归「失效」，橙的轻重感与「禁用更严重」倒挂。
-      value: stats?.by_status?.banned ?? 0,
+      value: num(stats?.by_status?.banned),
       icon: <StopOutlined />,
       color: 'var(--purple)',
     },
@@ -172,6 +213,8 @@ export default function Dashboard() {
               <div style={{ textAlign: 'center', padding: 48 }}>
                 <Spin />
               </div>
+            ) : loadFailed ? (
+              <LoadFailed what="平台分布" />
             ) : platformEntries.length ? (
               platformEntries.map(([platform, count], i) => {
                 const pct = total ? Math.round((count / total) * 100) : 0
@@ -254,6 +297,8 @@ export default function Dashboard() {
               <div style={{ textAlign: 'center', padding: 48 }}>
                 <Spin />
               </div>
+            ) : loadFailed ? (
+              <LoadFailed what="状态分布" />
             ) : statusEntries.length ? (
               statusEntries.map(([status, count], i) => {
                 const meta = accountStatusMeta(status)

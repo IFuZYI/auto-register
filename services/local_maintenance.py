@@ -295,14 +295,6 @@ def _config_text(key: str) -> str:
         return ""
 
 
-#: 默认**开**的布尔键。升级时不能改掉既有部署的行为：
-#: 「检测出封禁就标注为禁用」在加这个开关之前是**无条件**做的，
-#: 默认关等于静默取消了一个一直在生效的动作。
-BOOLEAN_DEFAULTS_TRUE: frozenset[str] = frozenset(
-    f"{p}_refresh_disable_banned" for p in ("chatgpt", "grok")
-)
-
-
 def _config_bool(key: str, default: bool = False) -> bool:
     raw = _config_text(key).lower()
     if not raw:
@@ -530,6 +522,9 @@ def run_auto_refresh(platform: str, *, rng: Optional[random.Random] = None) -> d
         targets,
         source=f"auto_refresh_{platform}",
         label="刷新 Token",
+        # `default=True`：升级时不能改掉既有部署的行为 —— 「检测出封禁就标注为
+        # 禁用」在加这个开关之前是**无条件**做的，默认关等于静默取消一个一直在
+        # 生效的动作。
         revert_banned_mark=not _config_bool(f"{platform}_refresh_disable_banned", True),
     )
 

@@ -144,6 +144,40 @@ curl -s -o /dev/null -w '%{http_code}\n' \
      http://127.0.0.1:8000/api/config                # 设了密码时应当是 401
 ```
 
+### 1.6 部署约束：**必须单进程**（iCloud 取号的互斥是进程内锁）
+
+**症状**：两个注册任务（几乎同时启动）领到**同一个隐私邮箱**，两边都失败 —— 一边撞
+「邮箱已被占用 / 这个地址已经在 `accounts` 里」，另一边注册到一半报错。日志里看不出
+原因，因为两个任务各自都以为自己是唯一领到这个号的。
+
+**根因**：iCloud 取号的互斥是 `services/icloud/_locks.py` 里的
+`_ACCOUNT_LOCKS: dict[int, threading.RLock]` —— 一把 **进程内** 的 `threading.RLock`。
+`claim_alias`（`services/icloud/aliases.py`）用
+`with _facade._account_lock(account_id):` 把「查池 → 标记 `in_use` → 写回」这段
+读-改-写整段包在锁里。但 `threading.RLock` **只在一个进程内互斥**：同一份 SQLite
+数据库上有两个进程时，两个进程各持自己那把锁，谁也挡不住谁，于是都会从池里挑中
+同一个 `available` 别名。
+
+**约束**：同一份数据（同一个 `DATA_DIR` / 同一个 SQLite 库）**只允许起一个后端进程**：
+
+- 不要给 `main.py` 加 `--workers N`，也不要 `uvicorn main:app --workers N`；
+- 不要在 `docker-compose.yml` 里 `--scale app=2` 或加 `deploy.replicas`
+  （当前 compose 是单容器，没有 `command` 覆盖）；
+- 不要手动起第二个 `python main.py` 指向同一个 `DATA_DIR`（哪怕端口不同）。
+
+**当前部署天然满足**：
+
+- `main.py` 的 `__main__` 只有一行 `uvicorn.run("main:app", host=host, port=port, reload=reload_enabled)`
+  —— **没有 `workers=`**，uvicorn 默认单进程；
+- `deploy/account-manager.service` 是 `Type=simple` + 单条
+  `ExecStart=/usr/bin/xvfb-run … /home/Register/.venv/bin/python main.py`；
+- `docker/entrypoint.sh` 最后是 `exec xvfb-run … python main.py`（`exec` 只有这一个
+  `main.py`，没有 fork 出第二个）。
+
+**守卫**：`tests/test_icloud_claim_holds_the_lock.py` 钉住「取号的读-改-写全程在锁内」，
+但它守的是**单进程内**的互斥。真要横向扩进程，必须先把这把锁换成跨进程原语（例如
+仓储层的条件更新 `update_where` / 文件锁），**只加 worker 数量会静默地把互斥取消掉**。
+
 ---
 
 ## 2. 改完之后要同步哪些文件（接线清单）
@@ -514,6 +548,7 @@ git diff --stat
 | Grok 注册报 `no_confirmation: 未确认发信（页面未给出理由）` | 页面文案还是那一屏邮箱表单、**没有任何报错**，说明请求根本没发出去（按钮当时是禁用态 / React 还没挂上事件处理） | 看提示尾巴：`已用 X 触发提交` 说明用的是哪一档（按钮 / `form.requestSubmit()` / 输入框 Enter）；`没抓到任何 /auth/ 请求` = 三档都试了还是没发出去；`只见到其它 auth 请求` = 发码接口改名了；`页面按钮[…] 输入框[…]` 是当时的快照 |
 | Grok 账号没有 AT / RT | **不是故障**：2026-10-23 起注册只产 SSO（device flow 每次都 `授权未确认`，白烧 4 分钟/号），且 SSO 是 HS256 JWT、载荷只有 `session_id`、没有 `exp` | 刷新走 SSO → 登录协议；列表看「2API 接入 / 探测」，不看「AT 到期」（那一列只给 ChatGPT） |
 | 窄屏表格「内容被裁、也没有滚动条」 | 只把 `tr` 设成 `block`，`table` 还是 `display: table` —— 浏览器把 block 级 tbody 包进匿名 table-cell，宽度仍按列算 | `table` / `tbody` 都设 `display: block`，并 `col { width: auto }`（见 §5.1） |
+| 两个注册任务领到**同一个隐私邮箱**、两边都失败（日志里看不出原因） | 同一份 SQLite 库上起了**多个**后端进程：iCloud 取号的互斥是进程内 `RLock`，跨进程不互斥（§1.6） | 保证单进程（不加 `--workers` / 不 scale、不跑第二个 `main.py`）；真要扩进程先把锁换成跨进程原语（§1.6） |
 
 ### 5.1 窄屏（< 768px）的表格折叠
 

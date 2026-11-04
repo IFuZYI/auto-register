@@ -133,18 +133,24 @@ class ProxyPool:
 
         配置读失败一律按默认（开 + 不限）—— 代理挑选不该因为读配置炸掉。
         """
-        try:
-            from core.config_store import config_store
+        # import **放在 try 外面**：符号消失（`core.config_store` 里没有
+        # `config_store`）必须立刻抛 ImportError，而不是被降级成默认值 ——
+        # 否则「配置根本没接上」会伪装成「按默认走」，与仓库其它位置
+        # 「数据源函数不存在却被宽 except 吞掉」是同一形状的静默故障。
+        # 与 `services/task_runners.py` 的写法一致。
+        from core.config_store import config_store
 
+        try:
             raw_enabled = str(config_store.get("proxy_balance_enabled", "1") or "1")
             enabled = raw_enabled.strip().lower() not in {"0", "false", "off", "no"}
             raw_cap = str(config_store.get("proxy_balance_max_per_proxy", "0") or "0")
             cap = max(0, int(raw_cap.strip() or 0))
             return enabled, cap
-        except (ImportError, ValueError, TypeError, SQLAlchemyError):
-            # 读配置失败不该挡住绑定：按默认（开 + 不限）走。
-            # 收窄到具体类型而不是 `except Exception` —— 这个仓库有
-            # `test_exception_handlers_not_too_wide` 守着，宽捕获会把栈吞掉。
+        except (ValueError, TypeError, SQLAlchemyError):
+            # 只有**真正的配置解析失败**才降级：读配置失败不该挡住绑定，
+            # 按默认（开 + 不限）走。收窄到具体类型而不是 `except Exception`
+            # —— 这个仓库有 `test_exception_handlers_not_too_wide` 守着，
+            # 宽捕获会把栈吞掉。
             return True, 0
 
     def pick_bindable(self, *, exclude: str = "") -> Optional[str]:

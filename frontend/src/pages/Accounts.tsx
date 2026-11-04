@@ -231,6 +231,13 @@ export default function Accounts() {
   const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = useState(50)
   const [loading, setLoading] = useState(false)
+  /**
+   * 上一次列表请求的错误文案。
+   *
+   * 只由 catch 写入、成功即清空：`items` 真的为空是合法数据（空态就该是空态），
+   * 不能因为列表空就报错 —— 判据只能是「请求抛错」。
+   */
+  const [listError, setListError] = useState<string | null>(null)
   const [search, setSearch] = useState('')
   const [filterStatus, setFilterStatus] = useState('')
   const [filterPlusStatus, setFilterPlusStatus] = useState('')
@@ -350,6 +357,14 @@ export default function Accounts() {
       const data = await apiFetch(`/accounts?${params}`)
       setAccounts((data.items || []).map(normalizeAccount))
       setTotal(data.total)
+      setListError(null)
+    } catch (error) {
+      // 原来只有 try/finally：后端 500 时异常静默冒泡，列表保持空/上一页，
+      // 用户看到的是「没有账号」。这里出声，并且**不清空已有列表** ——
+      // 空数组是合法数据，把它当成错误同样是错的。
+      const detail = error instanceof Error ? error.message : String(error)
+      setListError(detail)
+      message.error(`账号列表加载失败：${detail}`)
     } finally {
       setLoading(false)
     }
@@ -362,7 +377,14 @@ export default function Accounts() {
   useEffect(() => {
     apiFetch(`/actions/${currentPlatform}`)
       .then((data) => setPlatformActions(data.actions || []))
-      .catch(() => setPlatformActions([]))
+      .catch((error) => {
+        // 动作下拉原来静默清空：用户看到一个没有选项的菜单，只会以为
+        // 「这个平台没有可执行动作」。清空仍然是对的（旧平台的动作不能拿来用），
+        // 但要说清是加载失败。
+        const detail = error instanceof Error ? error.message : String(error)
+        setPlatformActions([])
+        message.error(`可执行动作加载失败：${detail}，下拉里暂时没有选项`)
+      })
   }, [currentPlatform])
 
   const copyText = (text: string) => {
@@ -1545,6 +1567,18 @@ export default function Accounts() {
           </Button>
         ) : null}
       </div>
+
+      {/* 列表请求失败：必须留下一块**常驻**说明。message.error 是 toast，划过就没了，
+          用户回来只看得到一张空表。 */}
+      {listError ? (
+        <Alert
+          type="error"
+          showIcon
+          style={{ marginBottom: 12 }}
+          message={`账号列表加载失败：${listError}`}
+          description="下方列表可能仍是上一次成功加载的内容（或为空），不代表账号真的没了。点右上角「刷新」重试。"
+        />
+      ) : null}
 
       <Table
         rowKey="id"

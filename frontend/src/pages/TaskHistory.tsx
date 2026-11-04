@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { App, Card, Table, Select, Button, Dropdown, Tag, Popconfirm, Typography } from 'antd'
+import { App, Alert, Card, Table, Select, Button, Dropdown, Tag, Popconfirm, Typography } from 'antd'
 import type { TableColumnsType } from 'antd'
 import { ReloadOutlined, DeleteOutlined, ClearOutlined, DownOutlined } from '@ant-design/icons'
 import {
@@ -44,6 +44,13 @@ export default function TaskHistory() {
   const { modal, message: msg } = App.useApp()
   const [logs, setLogs] = useState<TaskLogItem[]>([])
   const [total, setTotal] = useState(0)
+  /**
+   * 列表请求的错误文案，仅由 catch 写入、成功即清空。
+   *
+   * `items` 为空数组是合法响应（该平台确实没有记录）→ 空表是对的；只有请求
+   * 本身抛错才该报错。
+   */
+  const [loadError, setLoadError] = useState<string | null>(null)
   const [platform, setPlatform] = useState('')
   const [loading, setLoading] = useState(false)
   const [selectedRowKeys, setSelectedRowKeys] = useState<number[]>([])
@@ -62,10 +69,17 @@ export default function TaskHistory() {
       setLogs(data.items || [])
       setTotal(data.total || 0)
       setSelectedRowKeys((prev) => prev.filter((key) => data.items.some((item) => item.id === key)))
+      setLoadError(null)
+    } catch (error) {
+      // 原来只有 try/finally：`/tasks/logs` 报错时异常静默冒泡，表格停在
+      // 上一次的内容（或空表），副标题还写着「共 0 条」—— 看不出是请求挂了。
+      const detail = error instanceof Error ? error.message : String(error)
+      setLoadError(detail)
+      msg.error(`任务历史加载失败：${detail}`)
     } finally {
       setLoading(false)
     }
-  }, [platform, page, pageSize])
+  }, [platform, page, pageSize, msg])
 
   useEffect(() => {
     load()
@@ -229,6 +243,16 @@ export default function TaskHistory() {
           </>
         }
       />
+
+      {/* 请求失败常驻提示：toast 会消失，只剩一张空表和「共 0 条」。 */}
+      {loadError ? (
+        <Alert
+          type="error"
+          showIcon
+          message={`任务历史加载失败：${loadError}`}
+          description="表格里可能是上一次成功加载的记录（或为空），不代表真的没有任务历史。点右上角刷新重试。"
+        />
+      ) : null}
 
       <Card className="app-card">
         <Table

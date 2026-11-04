@@ -102,6 +102,21 @@ def _should_try_domain_failover(
 
 _EMAIL_IN_TEXT_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
 
+#: 明确的**代理**形状 —— 在跑邮箱正则之前先把它们抹掉。
+#: 独立审查（2026-11-04）实测：`_first_email_in` 会把代理凭据里的 `pass@host`
+#: 当成邮箱 —— `socks5h://user:s3cret@proxy.example.com:8080` → 域名
+#: `proxy.example.com`。这类幽灵域名会进 `blocked_domains`，而
+#: `_pick_mail_provider_failover` 是**按域名判渠道**的，于是换域名决策被带偏。
+#: 抹掉两种形状：
+#:   1. 带 scheme 的 URL（`scheme://…`，一直到空白为止）—— 覆盖绝大多数代理串；
+#:   2. 裸的 `user:pass@host:port` —— 要求**前一个字符不是词字符 + 带数字端口**，
+#:      这样「邮箱:user@x.com」这种没有端口的正常写法不会被误伤。
+#: 判据刻意保守：宁可漏抹（退回旧的误报）也绝不误删真邮箱。
+_PROXY_SHAPED_RE = re.compile(
+    r"[A-Za-z][A-Za-z0-9+.\-]*://[^\s\"'<>]+"
+    r"|(?<![A-Za-z0-9._%+\-])[^\s/@:]+:[^\s/@]+@[A-Za-z0-9.\-]+:\d{2,5}"
+)
+
 
 def _first_email_in(text: object) -> str:
     """从错误文本里摸出第一个邮箱（失败路径拿不到 `account.email` 时的兜底）。
@@ -110,14 +125,38 @@ def _first_email_in(text: object) -> str:
     所以「发码被拒」这种失败发生时它还是空串 → `_mail_domain_of("")` 是空 →
     `blocked_domains` 一直是空集 → 换域名 failover **永远不会触发**，同一个
     icloud.com 域名连撞两轮（日志里两次 `account:email-signup-unavailable`）。
+
+    独立审查（2026-11-04）补的坑：正则会把**代理凭据**里的 `pass@proxy.example.com`
+    当成邮箱。所以先抹掉明确的代理形状（见 `_PROXY_SHAPED_RE`），再在剩下的文本里
+    找邮箱 —— 只有文案里**真的提到邮箱地址**时才会回退到这条路。
     """
-    match = _EMAIL_IN_TEXT_RE.search(str(text or ""))
+    cleaned = _PROXY_SHAPED_RE.sub(" ", str(text or ""))
+    match = _EMAIL_IN_TEXT_RE.search(cleaned)
     return match.group(0) if match else ""
 
 
 def _mail_domain_of(email: str) -> str:
     """取邮箱域名（小写）。`a@Outlook.COM` → `outlook.com`。"""
     return str(email or "").rsplit("@", 1)[-1].strip().lower()
+
+
+#: 失败切换轮（邮箱域名窗口用尽 → 换渠道，不占重试轮数）的日志标签。
+#: 旧实现把它当成 `_do_one_round(i, total_rounds, total_rounds, …)`，于是
+#: `round_no == rounds == total_rounds` —— 日志把**最后一轮**的编号又打了一遍
+#: （「第 2/2 轮」出现两次），看到的人会以为轮次算错了 / 在原地打转。
+#: 这一次不在 1..total_rounds 的编号体系里，所以给它一个专用标签。
+_FAILOVER_ROUND_LABEL = "邮箱域名切换轮，不占重试轮数"
+
+
+def _round_log_suffix(*, round_no: int, rounds: int, label: str = "") -> str:
+    """轮次日志后缀（`label` 优先于编号）。
+
+    换域名那一轮没有「第 N/M 轮」这样的编号（它不占重试轮数），传 `label`
+    就只打标签，避免与最后一轮的编号重复（独立审查 2026-11-04）。
+    """
+    if label:
+        return f"（{label}）"
+    return f"（第 {round_no}/{rounds} 轮）" if rounds > 1 else ""
 
 
 def _pick_mail_provider_failover(*, blocked_domains: set[str], candidates: list[str]) -> str:
@@ -434,19 +473,6 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
 
             return _proxy_pool.get_next(tag=TAG_REGISTER)
 
-        def _build_mailbox(proxy: Optional[str], provider: Optional[str] = None):
-            # 不给兜底 provider：用户要求默认留空、必须显式选。空串会让
-            # create_mailbox 抛「未知邮箱提供商」并列出可用渠道，比悄悄用某个
-            # 号池更安全。
-            # `provider` 是**本轮**要用的渠道（域名窗口用尽时会被换成另一个），
-            # 所以不能写死读 `_base_extra` —— 否则换了 extra 却没换邮箱池，
-            # 「换域名」只体现在日志里。
-            return create_mailbox(
-                provider=provider if provider is not None else _base_extra.get("mail_provider", ""),
-                extra=_base_extra,
-                proxy=proxy,
-            )
-
         retry_times = _api.normalize_register_retry_times(req.register_retry_times)
         total_rounds = 1 + retry_times
         if total_rounds > 1:
@@ -508,8 +534,14 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
                     " 再试一次（不占重试轮数）",
                 )
                 result = _do_one_round(
-                    i, total_rounds, total_rounds, blocked_domains,
+                    i,
+                    round_no=total_rounds,
+                    rounds=total_rounds,
+                    blocked_mail_domains=blocked_domains,
                     forced_provider=failover_provider,
+                    # 换域名这一轮不占重试轮数、也没有 1..total_rounds 的编号，
+                    # 传专用标签，别让日志把最后一轮的编号再打一遍（第 N/N 轮）。
+                    label=_FAILOVER_ROUND_LABEL,
                 )
                 failover_provider = _next_mail_provider_failover(blocked_domains)
             if result.outcome == AttemptOutcome.FAILED:
@@ -529,12 +561,13 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
             rounds: int,
             blocked_mail_domains: set[str],
             forced_provider: str = "",
+            label: str = "",
         ):
             nonlocal next_start_time
             _proxy = None
             current_email = req.email or ""
             attempt_id: int | None = None
-            round_suffix = f"（第 {round_no}/{rounds} 轮）" if rounds > 1 else ""
+            round_suffix = _round_log_suffix(round_no=round_no, rounds=rounds, label=label)
             try:
                 control.checkpoint()
                 attempt_id = control.start_attempt()
@@ -598,6 +631,25 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
                     log=lambda msg: _api.log(task_id, msg),
                 )
                 round_mail_provider = str(merged_extra.get("mail_provider") or "") or None
+
+                # 建池必须吃**本轮**的 extra。本轮渠道覆盖写在 `merged_extra`
+                # 里，而旧实现传的是共享的 `_base_extra` —— 今天没出 bug 只是
+                # 因为 `create_mailbox` 会拷贝，属于「靠巧合正确」（独立审查
+                # 2026-11-04）。所以把建池收敛成**每轮闭包**，直接捕获本轮
+                # `merged_extra`；调用点保持 `_build_mailbox(_proxy,
+                # provider=round_mail_provider)` 不变。
+                def _build_mailbox(proxy: Optional[str], provider: Optional[str] = None):
+                    # 不给兜底 provider：用户要求默认留空、必须显式选。空串会让
+                    # create_mailbox 抛「未知邮箱提供商」并列出可用渠道，比悄悄
+                    # 用某个号池更安全。
+                    return create_mailbox(
+                        provider=(
+                            provider if provider is not None
+                            else merged_extra.get("mail_provider", "")
+                        ),
+                        extra=merged_extra,
+                        proxy=proxy,
+                    )
 
                 _config = RegisterConfig(
                     executor_type=req.executor_type,

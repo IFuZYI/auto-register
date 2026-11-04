@@ -292,11 +292,66 @@ class JobRegistrationTests(unittest.TestCase):
 class BannedSwitchDefaultTests(unittest.TestCase):
     """「封禁账号标记为禁用」默认开 —— 不能靠改默认值改掉既有行为。"""
 
-    def test_key_is_listed_as_default_true(self):
-        from services.local_maintenance import BOOLEAN_DEFAULTS_TRUE
+    def test_no_ineffective_defaults_constant(self):
+        """默认值由一个**显式调用**决定，不是一个常量集合。
 
-        self.assertIn("chatgpt_refresh_disable_banned", BOOLEAN_DEFAULTS_TRUE)
-        self.assertIn("grok_refresh_disable_banned", BOOLEAN_DEFAULTS_TRUE)
+        `BOOLEAN_DEFAULTS_TRUE` 曾在源码里零引用 —— 真正生效的是
+        `_config_bool(f"{platform}_refresh_disable_banned", True)`。留着它
+        会让下一个人以为改这个集合就能改默认值：死代码，删掉。
+        这条断言守着它别再回来。
+        """
+        from services import local_maintenance
+
+        self.assertFalse(
+            hasattr(local_maintenance, "BOOLEAN_DEFAULTS_TRUE"),
+            "死常量又回来了：改它不改变任何行为，默认值请改 _config_bool 的 default",
+        )
+
+    def test_both_platforms_read_true_when_unset(self):
+        """库里没配过（空串）时，两个平台的开关都按「开」处理。
+
+        直接测真正生效的那次调用（`_config_bool(key, True)`），而不是一个
+        不生效的常量集合。
+        """
+        from core.config_store import config_store
+        from services.local_maintenance import _config_bool
+
+        for platform in ("chatgpt", "grok"):
+            key = f"{platform}_refresh_disable_banned"
+            config_store.set(key, "")
+            self.assertTrue(_config_bool(key, True), f"{key} 未配置时应按默认开")
+
+    def test_refresh_link_defaults_to_marking_banned(self):
+        """真链路上：开关没配过 → 检测出封禁仍要标注为禁用（`revert=False`）。
+
+        影子改了调用点的 `default=True` → 这里立刻转红，而不是只在纯函数上
+        自说自话。
+        """
+        from unittest import mock
+
+        from core.config_store import config_store
+        import services.local_maintenance as lm
+
+        for platform in ("chatgpt", "grok"):
+            config_store.set(f"{platform}_refresh_disable_banned", "")
+            seen: dict = {}
+
+            def _fake_run_actions(platform, action, targets, **kwargs):
+                seen.update(kwargs)
+                return {"total": 0, "ok": 0, "failed": 0, "skipped": 0, "errors": []}
+
+            with (
+                mock.patch.object(lm, "_run_actions", _fake_run_actions),
+                mock.patch.object(lm, "_iter_picks", lambda _p: []),
+                mock.patch.object(lm, "_enabled_panels", lambda _p: []),
+            ):
+                lm.run_auto_refresh(platform)
+
+            self.assertIs(
+                seen.get("revert_banned_mark"),
+                False,
+                f"{platform}：未配置时不应撤回封禁标注",
+            )
 
     def test_backend_reads_true_when_unset(self):
         """库里是空串（没配过）时按「开」处理，撤回逻辑才不会误触发。"""
