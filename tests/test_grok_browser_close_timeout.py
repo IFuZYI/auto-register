@@ -153,9 +153,45 @@ class RegisterUsesGuardedCloseTests(unittest.TestCase):
         self.assertIn("camoufox_cm.__enter__()", src)
         self.assertIn("_close_browser(", src)
 
-    def test_close_browser_is_called_in_a_finally_block(self):
-        src = inspect.getsource(rb.register_grok_via_browser)
-        self.assertIn("finally:", src)
+    def test_close_browser_runs_even_when_the_flow_raises(self):
+        """**行为级**：主链中途抛异常时收尾也必须跑。
+
+        2026-11-04 独立审查（切片 A2）：这条测试原本只做
+        `assertIn("finally:", inspect.getsource(...))` —— 把 `_close_browser(browser, log=log)`
+        从 `finally:` 里挪到成功路径上（于是**每条异常路径都泄漏一个浏览器进程**，
+        正是 2026-11-03 那次卡死）之后，整个文件 8 条测试**全绿**。源码 grep
+        钉不住控制流，只有真的让主链抛一次才算数。
+
+        这里在 `browser.new_page()` 上炸 —— 浏览器已经打开了，收尾就必须发生。
+        """
+
+        class _CM:
+            def __enter__(self):
+                return _Browser()
+
+            def __exit__(self, *exc):
+                return False
+
+        class _Browser:
+            def new_page(self):
+                raise RuntimeError("boom: 打开页面失败")
+
+        closed: list = []
+
+        # `Camoufox` 是在函数体里 import 的（`from camoufox.sync_api import Camoufox`），
+        # 所以要打在**来源模块**上。
+        with patch("camoufox.sync_api.Camoufox", lambda **_kw: _CM()), \
+                patch.object(rb, "_close_browser", lambda b, **_kw: closed.append(b)), \
+                patch.object(rb, "_open_entry_page", lambda *_a, **_k: None):
+            # 主链自己会把异常转成失败结果（不往外抛）—— 收尾该跑就得跑，
+            # 所以这里断言的是「收尾发生了」，而不是「抛没抛」。
+            result = rb.register_grok_via_browser("someone@example.com", proxy="", headless=True)
+
+        self.assertFalse(result.get("ok"), f"这条路径本来就是失败：{result}")
+        self.assertEqual(
+            len(closed), 1,
+            "失败路径上必须也调用 _close_browser —— 否则浏览器进程泄漏（2026-11-03 事故）",
+        )
 
 
 class CamoufoxExitMustNotRecloseTests(unittest.TestCase):
