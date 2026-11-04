@@ -548,3 +548,77 @@ class ImportUpdateKeepsCredentialsEncryptedTests(unittest.TestCase):
         extra = row.get_extra()
         self.assertEqual(extra.get("access_token"), self.AT)
         self.assertEqual(extra.get("refresh_token"), self.RT)
+
+
+class TextImportUpdateMustMergeNotReplaceTests(unittest.TestCase):
+    """文本导入的「更新」分支必须**合并** extra，不能整份替换。
+
+    2026-11-04 独立审查（切片 E）实测：`set_extra(payload)` 是**整体覆盖**。
+    而 `ImportRequest.source_format` 默认 `email_pw` —— 于是「把已有账号按默认
+    格式再粘一遍」会产生 `payload == {}`，`set_extra({})` 把
+    access_token / refresh_token / id_token / session_token / sso / totp_secret /
+    cookies **全部删掉**，接口还回 `updated: 1`。
+
+    这是我 2026-11-04 修「明文落盘」时引入的回归：那次把裸赋改成
+    `set_extra(payload)`（方向对，加密了），但没注意 `set_extra` 是**覆盖**语义
+    而不是合并语义；JSON 那条路本来就用 `target.get_extra()` 合并，所以没事。
+
+    只钉一件事：更新已有账号时，**这次没提到的键必须原样保留**。
+    """
+
+    EMAIL = "import-merge-keep@example.com"
+    AT = "eyJhbGciOiJSUzI1NiJ9.keep-me-access.signature"
+    RT = "eyJhbGciOiJSUzI1NiJ9.keep-me-refresh.signature"
+
+    @classmethod
+    def setUpClass(cls):
+        cls._ctx = _client()
+        cls.client = cls._ctx.__enter__()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._ctx.__exit__(None, None, None)
+
+    def tearDown(self):
+        row = account_repository.find_by_email("chatgpt", self.EMAIL)
+        if row is not None:
+            account_repository.delete(row.id, "chatgpt")
+
+    def _import(self, line, source_format):
+        return self.client.post("/api/accounts/import", json={
+            "platform": "chatgpt",
+            "lines": [line],
+            "format": "text",
+            "source_format": source_format,
+        })
+
+    def test_narrower_format_keeps_credentials_it_did_not_mention(self):
+        # 先按「邮箱----密码----2FA----AT----RT」种一份全量凭证
+        full = "----".join([self.EMAIL, "pw1", "JBSWY3DPEHPK3PXP", self.AT, self.RT])
+        self.assertEqual(self._import(full, "email_pw_2fa_at_rt").status_code, 200)
+        row = account_repository.find_by_email("chatgpt", self.EMAIL)
+        self.assertEqual(row.get_extra().get("access_token"), self.AT, "前置条件：AT 已写入")
+
+        # 再用**更窄**的格式更新同一个账号（默认格式 email_pw 就是这个形状）
+        self.assertEqual(self._import(f"{self.EMAIL}----pw2", "email_pw").status_code, 200)
+
+        row = account_repository.find_by_email("chatgpt", self.EMAIL)
+        extra = row.get_extra()
+        self.assertEqual(
+            extra.get("access_token"), self.AT,
+            "这次没提到的 AT 必须保留 —— 覆盖整份 extra 会把凭证全删掉",
+        )
+        self.assertEqual(extra.get("refresh_token"), self.RT, "RT 同样必须保留")
+        self.assertEqual(row.password, "pw2", "这次提到的密码照常更新")
+
+    def test_update_still_encrypts_what_it_writes(self):
+        """合并之后仍然必须是密文落盘（别为了修数据丢失把加密修回去）。"""
+        self._import(f"{self.EMAIL}----pw1", "email_pw")
+        self._import(
+            "----".join([self.EMAIL, "pw1", "JBSWY3DPEHPK3PXP", self.AT, self.RT]),
+            "email_pw_2fa_at_rt",
+        )
+        row = account_repository.find_by_email("chatgpt", self.EMAIL)
+        raw = row.extra_json or ""
+        self.assertIn("v1:", raw, "落盘必须是密文信封")
+        self.assertNotIn(self.AT, raw, "AT 不许明文落盘")

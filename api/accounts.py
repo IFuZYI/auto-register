@@ -618,7 +618,19 @@ def import_accounts(
                 payload = json.loads(extra) if extra else {}
             except (json.JSONDecodeError, TypeError, ValueError):
                 payload = {}
-            existing.set_extra(payload if isinstance(payload, dict) else {})
+            if not isinstance(payload, dict):
+                payload = {}
+            # **合并**，不是覆盖（2026-11-04 独立审查抓到的数据丢失回归）：
+            # `set_extra` 是整体替换语义，而导入格式可以比账号现有的更窄 ——
+            # `source_format` 默认 `email_pw`，于是「把已有账号按默认格式再粘一遍」
+            # 会得到 `payload == {}`，一句 `set_extra({})` 就把 AT / RT / IDT /
+            # ST / SSO / totp_secret / cookies **全部删掉**，接口还回 `updated: 1`。
+            # JSON 那条导入路径本来就用 `target.get_extra()` 合并，所以只有这里中招。
+            merged_extra = existing.get_extra()
+            if not isinstance(merged_extra, dict):
+                merged_extra = {}
+            merged_extra.update(payload)
+            existing.set_extra(merged_extra)
             account_repository.upsert(existing)
             updated += 1
         else:
