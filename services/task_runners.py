@@ -189,6 +189,49 @@ def _outlook_pool_available() -> int:
         return 0
 
 
+def _resolve_round_mail_provider(
+    *,
+    forced_provider: str,
+    blocked_domains: set[str],
+    merged_extra: dict,
+    log: Any = None,
+) -> str:
+    """这一轮该用哪个邮箱渠道；`""` = 沿用默认渠道。
+
+    2026-11-02 实测：与 icloud.com 被拒**同一分钟、同一出口**，换 outlook 地址
+    立刻发码成功 —— 该换的是**域名**，不是出口。
+
+    2026-11-04 独立审查（切片 A2）：这段接线原本以三条语句的形式内联在
+    `_run_register` 里，而它的测试全是 `inspect.getsource` 子串匹配 ——
+    把 `if failover and _mail_provider_available(failover):` 改成
+    `if False and ...`，功能整个死掉，31 条测试**全绿**。收敛成一个函数，
+    让「顺序」变成函数体本身，测试就能**执行**它而不是 grep 它。
+
+    注意门控：`_mail_provider_available` 必须**真跑**（它读远程/本地号池的
+    真实计数）。这里不提供「跳过检查」的开关 —— 那个开关就是审查员用来
+    让功能静默失效的入口。
+    """
+    failover = str(forced_provider or "") or _pick_mail_provider_failover(
+        blocked_domains=blocked_domains,
+        candidates=["outlook", "icloud_remote"],
+    )
+    if not failover:
+        return ""
+    if not _mail_provider_available(failover):
+        # 换过去也没号 —— 保持原渠道，至少不会「换到一个立刻失败的渠道」。
+        return ""
+    if callable(log):
+        try:
+            log(
+                f"[邮箱] 上一个域名窗口配额已用尽，本轮改用其它邮箱渠道: "
+                f"{merged_extra.get('mail_provider') or '(默认)'} → {failover}"
+            )
+        except Exception as exc:  # noqa: BLE001 - 记日志失败不该改变渠道决策
+            logger.debug("记录邮箱渠道切换日志失败: %s", exc)
+    merged_extra["mail_provider"] = failover
+    return failover
+
+
 def _pick_usable_exit(
     proxy: str, *, task_id: str, extra: dict, log, get_next, report_bad, normalize
 ) -> str:
@@ -546,19 +589,14 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
                 # 上一个域名窗口配额用尽 → 本轮换一个**别的邮箱域名**。
                 # 实测（2026-11-02）：与 icloud.com 被拒同一分钟、同一出口，
                 # 换 outlook 地址立刻发码成功，所以该换的是域名不是出口。
-                failover = str(forced_provider or "") or _pick_mail_provider_failover(
+                # 决策收敛在 `_resolve_round_mail_provider` 里：那段接线以前内联在
+                # 这儿，测试只能 grep 源码，把功能改死也照样绿（见函数 docstring）。
+                failover = _resolve_round_mail_provider(
+                    forced_provider=forced_provider,
                     blocked_domains=blocked_mail_domains,
-                    candidates=["outlook", "icloud_remote"],
+                    merged_extra=merged_extra,
+                    log=lambda msg: _api.log(task_id, msg),
                 )
-                if failover and _mail_provider_available(failover):
-                    _api.log(
-                        task_id,
-                        f"[邮箱] 上一个域名窗口配额已用尽，本轮改用其它邮箱渠道: "
-                        f"{merged_extra.get('mail_provider') or '(默认)'} → {failover}",
-                    )
-                    merged_extra["mail_provider"] = failover
-                else:
-                    failover = ""
                 round_mail_provider = str(merged_extra.get("mail_provider") or "") or None
 
                 _config = RegisterConfig(

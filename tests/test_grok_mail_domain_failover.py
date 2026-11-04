@@ -77,10 +77,9 @@ class FailoverWiringTests(unittest.TestCase):
         self.assertIn("blocked_mail_domains.add(domain)", src)
         self.assertIn("email-signup-unavailable", src)
 
-    def test_register_flow_switches_provider_for_the_next_round(self):
-        src = inspect.getsource(task_runners._run_register)
-        self.assertIn("_pick_mail_provider_failover(", src)
-        self.assertIn('merged_extra["mail_provider"] = failover', src)
+    # 2026-11-04：`test_register_flow_switches_provider_for_the_next_round`
+    # 原本只 grep `_run_register` 的源码，被
+    # `RoundProviderResolutionTests`（**执行**真决策函数 + 真门控）完全取代，已删。
 
 
 class FailoverExtraAttemptTests(unittest.TestCase):
@@ -103,10 +102,9 @@ class FailoverExtraAttemptTests(unittest.TestCase):
         self.assertIn("_build_mailbox(_proxy, provider=round_mail_provider)", src)
         self.assertIn("round_mail_provider", src)
 
-    def test_failover_requires_an_available_alternate_pool(self):
-        src = inspect.getsource(task_runners._run_register)
-        self.assertIn("_mail_provider_available(failover)", src)
-        self.assertIn("_next_mail_provider_failover(blocked_domains)", src)
+    # 2026-11-04：`test_failover_requires_an_available_alternate_pool` 同样是
+    # 源码 grep，被 `RoundProviderResolutionTests::test_provider_without_aliases_is_not_selected`
+    # 取代，已删。
 
 
 class ShouldTryDomainFailoverTests(unittest.TestCase):
@@ -166,13 +164,18 @@ class NextMailProviderFailoverTests(unittest.TestCase):
 class ForcedProviderMustWinTests(unittest.TestCase):
     """「换到 outlook」必须真的让本轮邮箱池变成 outlook（否则只是换了句日志）。"""
 
-    def test_round_honours_the_forced_provider(self):
+    def test_mailbox_is_built_with_the_round_provider(self):
+        """邮箱池必须用**本轮**渠道建（只改 extra 不改建池 = 只换了句日志）。
+
+        决策部分（选谁、有没有号）已由 `RoundProviderResolutionTests` **执行**验证；
+        这里只剩「`_run_register` 里建池那一行确实吃 `round_mail_provider`」——
+        这一段没有可调用的面（`_run_register` 太大，驱动它要搭整套假件），
+        所以按 TDD skill 的例外条款保留源码断言，并注明它守的是哪一行。
+        """
         src = inspect.getsource(task_runners._run_register)
-        self.assertIn(
-            'failover = str(forced_provider or "") or _pick_mail_provider_failover(', src
-        )
-        # 邮箱池要用「本轮渠道」，不是只改 extra
         self.assertIn("_build_mailbox(_proxy, provider=round_mail_provider)", src)
+        # 决策本身必须来自那个被测函数，不能再内联回三条语句
+        self.assertIn("_resolve_round_mail_provider(", src)
 
 
 class PrefetchMustRespectRemovalTests(unittest.TestCase):
@@ -255,3 +258,71 @@ class RemoteMailProviderCounterTests(unittest.TestCase):
 
     def test_zero_count_means_unavailable(self):
         self.assertFalse(self._call(0))
+
+
+class RoundProviderResolutionTests(unittest.TestCase):
+    """**执行**「这一轮该用哪个邮箱渠道」的那段接线，而不是 grep 它的源码。
+
+    2026-11-04 独立审查（切片 A2）实测：本文件原有 3 条 `inspect.getsource`
+    子串匹配。把 `if failover and _mail_provider_available(failover):` 改成
+    `if False and ...` —— 整个域名切换功能死掉，31 条**全绿**。
+
+    按 TDD skill 的规则，这里**不 patch `_mail_provider_available`**（那正是要
+    验证的接线），而是 patch 它读的**数据源**（outlook 号池计数 / 远程可领别名数），
+    让真实的门控函数跑起来，断言这一轮最终选中的渠道。
+
+    选候选的规则见 `_pick_mail_provider_failover`：先看**被阻塞的域名属于哪个
+    渠道**，再按 `["outlook", "icloud_remote"]` 的顺序挑第一个不属于它的 ——
+    所以「outlook.com 被拒」才会挑到 icloud_remote。
+    """
+
+    def _resolve(self, *, forced="", blocked=None, outlook_pool=0, remote_aliases=0):
+        from services import task_runners
+
+        merged: dict = {}
+        logs: list[str] = []
+        with patch.object(task_runners, "_outlook_pool_available", lambda: outlook_pool), \
+                patch("services.icloud.remote.claimable_alias_total", lambda: remote_aliases):
+            got = task_runners._resolve_round_mail_provider(
+                forced_provider=forced,
+                blocked_domains=set(blocked or ()),
+                merged_extra=merged,
+                log=logs.append,
+            )
+        return got, merged, logs
+
+    def test_blocked_domain_switches_to_a_provider_that_really_has_aliases(self):
+        """outlook.com 窗口用尽 + 远程确实有号 → 本轮改用 icloud_remote。"""
+        got, merged, logs = self._resolve(blocked={"outlook.com"}, remote_aliases=5)
+        self.assertEqual(got, "icloud_remote", f"应当切到 icloud_remote，实际 {got!r}")
+        self.assertEqual(merged.get("mail_provider"), "icloud_remote",
+                         "选中后必须写进 merged_extra，否则下游建邮箱还用老渠道")
+        self.assertTrue(logs, "切换要在日志里说清楚")
+
+    def test_provider_without_aliases_is_not_selected(self):
+        """远程一个号都没有 → **不许**切过去（切过去只会立刻失败）。
+
+        这条是「`if False`」那类变异的克星之一：功能被禁用时返回空串，
+        与「没号」的期望相同 —— 所以必须配上面那条正向用例才能钉死。
+        """
+        got, merged, logs = self._resolve(blocked={"outlook.com"}, remote_aliases=0)
+        self.assertEqual(got, "", "没有可领别名就不该切渠道")
+        self.assertNotIn("mail_provider", merged)
+
+    def test_no_blocked_domain_keeps_the_default_provider(self):
+        """没被拒过域名 → 不动渠道（常态路径，别把 failover 变成默认行为）。"""
+        got, merged, logs = self._resolve(blocked=set(), remote_aliases=5, outlook_pool=5)
+        self.assertEqual(got, "")
+        self.assertNotIn("mail_provider", merged)
+
+    def test_forced_provider_is_kept_when_it_still_has_addresses(self):
+        """上一轮已经定好的渠道，只要还有号就原样沿用（否则每轮都会漂移）。"""
+        got, merged, logs = self._resolve(forced="outlook", outlook_pool=3)
+        self.assertEqual(got, "outlook")
+        self.assertEqual(merged.get("mail_provider"), "outlook")
+
+    def test_forced_provider_with_an_empty_pool_is_not_kept(self):
+        """强制的渠道要是也没号了，就别再往里送 —— 返回空 = 沿用默认。"""
+        got, merged, logs = self._resolve(forced="outlook", outlook_pool=0)
+        self.assertEqual(got, "")
+        self.assertNotIn("mail_provider", merged)
