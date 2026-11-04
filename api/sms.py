@@ -6,6 +6,10 @@
 
 from __future__ import annotations
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
@@ -86,7 +90,15 @@ def get_sms_balance(body: SmsProbeRequest):
     try:
         balance = provider.get_balance()
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"查询余额失败: {exc}") from exc
+        # **不许把上游原始响应体回给前端**（2026-11-04 独立审查，切片 E）：
+        # 上游是第三方短信服务，它的错误体里可能带 key / 账号信息，而且
+        # detail 是给用户看的文案，不该出现原始 JSON。
+        # 判据：消息里不许出现 `{`。
+        logger.warning("查询短信余额失败（上游原文只进日志）: %s", exc)
+        raise HTTPException(
+            status_code=502,
+            detail="查询余额失败：短信服务返回了错误（详情见服务端日志）",
+        ) from exc
     return {"provider": settings.get("sms_provider"), "balance": balance}
 
 

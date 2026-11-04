@@ -1,6 +1,6 @@
 import json
 
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Response
 from fastapi.responses import StreamingResponse
 from sqlmodel import Session, select, func
 from pydantic import BaseModel
@@ -794,7 +794,7 @@ def check_all_accounts(platform: Optional[str] = None,
 
 
 @router.get("/{account_id}")
-def get_account(account_id: str, platform: str = ""):
+def get_account(account_id: str, platform: str = "", response: Response = None):
     from core.db import account_repository
 
     # 带上 platform 更准：账号 id 是每库自增的，不给平台时跨库扫到的可能是
@@ -815,6 +815,13 @@ def get_account(account_id: str, platform: str = ""):
     # 两种字符串是对外契约的静默变化（`test_list_keeps_iso_datetime_format`
     # 就是为这个 bug 写的，这次在详情端点上又踩了一遍）。
     # `model_copy` 保留模型类型，FastAPI 仍走模型自己的序列化器。
+    #
+    # 这个端点返回的是**解密后的明文**凭据（password + AT/SSO + 全部 extra），
+    # 所以必须显式禁止缓存 —— 否则浏览器/中间代理可以把「一整套凭据」落盘。
+    # export 端点早就加了同一个头，理由写在那边；这里是本仓库唯一一处返回明文
+    # 却没加头的端点（2026-11-04 独立审查，切片 E）。
+    if response is not None:
+        response.headers["Cache-Control"] = "no-store"
     return acc.model_copy(
         update={"extra_json": json.dumps(acc.get_extra(), ensure_ascii=False)}
     )
