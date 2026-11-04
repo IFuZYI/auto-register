@@ -92,6 +92,7 @@ def sync_panel_endpoint(panel_key: str, platform: str = "", account_ids: str = "
     只作用在前端，用户筛了 Grok 再点同步时，这里不按平台过滤就会把 ChatGPT
     的凭证也一起拉回 ——「看到的」与「被改的」对不上。空串 = 全部（老行为）。
     """
+    from services.panel_comparison import filter_rows_by_account_ids
     from services.panel_comparison_cache import fetch_panel_raw
     from services.panel_registry import resolve_panel_key
     from services.panel_sync import sync_local_from_remote
@@ -116,6 +117,11 @@ def sync_panel_endpoint(panel_key: str, platform: str = "", account_ids: str = "
             row for row in local_rows
             if str(row.get("platform") or "").strip().lower() == wanted
         ]
+    # 界面筛出来的行才动（2026-11-04 独立审查，切片 G）：`account_ids` 这个形参
+    # 此前**声明了却一次都没引用** —— 前端一直在传，接口照回 200，于是「筛出 3 行
+    # 点更新本地凭证」实际把该平台全部 remote_newer 行都拉了回来。
+    # 空串 = 不过滤（保持老行为）。
+    local_rows = filter_rows_by_account_ids(local_rows, account_ids)
     # 传 panel_key：只有**已登记到该面板**的账号参与拉回（ADR-0002）。
     summary = sync_local_from_remote(local_rows, remote_accounts, panel_key=key)
     summary["panel"] = key
@@ -161,16 +167,24 @@ def push_panel_endpoint(
     panel_key: str,
     platform: str = "",
     delete_old: bool = False,
+    account_ids: str = "",
 ):
     """把「本地较新 / 未上传」的凭证推到远端（「更新远程凭证」的动作面）。
 
     编排逻辑住在 `services/panel_push.push_local_rows`（服务层），这里只做
     参数透传与错误翻译：未知面板 → 404。
+
+    `account_ids`（逗号分隔）来自界面**当前筛选出的行**。2026-11-04 独立审查
+    （切片 G）：这个参数此前**不存在** —— 前端一直在传，FastAPI 静默忽略未声明
+    的 query 参数、接口照回 200，于是「筛出 3 行点更新远程凭证」实际推的是该
+    平台全部 local_newer 行。空串 = 不过滤（保持老行为）。
     """
     from services.panel_push import push_local_rows
 
     try:
-        return push_local_rows(panel_key, platform=platform, delete_old=delete_old)
+        return push_local_rows(
+            panel_key, platform=platform, delete_old=delete_old, account_ids=account_ids
+        )
     except ValueError as exc:
         raise HTTPException(404, str(exc)) from exc
 

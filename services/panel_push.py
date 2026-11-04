@@ -29,7 +29,7 @@ from typing import Any, Callable, Optional
 from sqlmodel import select
 
 from core.db import AccountModel, account_repository, platform_database_registry
-from services.panel_comparison import FETCHERS
+from services.panel_comparison import FETCHERS, filter_rows_by_account_ids
 from core.credential_fields import (
     first_present as _first_present,
     sync_aliases,
@@ -541,6 +541,7 @@ def push_local_rows(
     panel_key: str,
     platform: str = "",
     delete_old: bool = False,
+    account_ids: Any = "",
 ):
     """把「本地较新 / 未上传」的凭证推到远端（「更新远程凭证」的动作面）。
 
@@ -582,6 +583,12 @@ def push_local_rows(
             row for row in local_rows
             if str(row.get("platform") or "").strip().lower() == wanted
         ]
+
+    # 界面筛出来的行才动（2026-11-04 独立审查，切片 G）。前端一直在传
+    # `account_ids`，而这里此前根本没有这个形参 —— FastAPI 静默忽略未声明的
+    # query 参数、接口照回 200，于是「筛出 3 行点更新远程凭证」实际推的是
+    # 该平台全部 local_newer 行，正是前端注释里声称已修掉的「看到的 ≠ 被改的」。
+    local_rows = filter_rows_by_account_ids(local_rows, account_ids)
 
     kind = _PANEL_PUSH_KIND.get(key, "overwrite")
     deleter = _panel_remote_deleter(key) if (delete_old and kind == "append") else None

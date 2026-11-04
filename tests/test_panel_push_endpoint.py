@@ -256,3 +256,118 @@ class PushEndpointTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PushHonoursTheSelectedAccountIdsTests(unittest.TestCase):
+    """「更新远程凭证」必须只动**界面筛出来的那些行**。
+
+    2026-11-04 独立审查（切片 G）实测：前端 `PanelComparisonPanel.tsx:640` 把
+    当前筛选出的 id 拼进 `account_ids` 传给 `/push`，而**后端根本没有这个参数**
+    （签名是 `(panel_key, platform, delete_old)`），FastAPI 静默忽略未声明的
+    query 参数、照样回 200。于是用户筛出 3 行点「更新远程凭证」，实际被推的是
+    该平台**全部**「本地较新」的行 —— 正是前端注释里声称已修掉的
+    「看到的 ≠ 被改的」。
+
+    `/sync` 那边更隐蔽：签名**声明了** `account_ids`，函数体里一次都没引用。
+    """
+
+    def _client(self):
+        import main as main_mod
+        from fastapi.testclient import TestClient
+
+        return TestClient(main_mod.app)
+
+    def test_only_the_selected_rows_are_pushed(self):
+        from services.panel_comparison import RemoteAccount
+
+        local_rows = [_row(i, f"u{i}@x.com", "grok",
+                           datetime(2026, 10, 4, 12, tzinfo=timezone.utc),
+                           {"sso": f"sso-{i}"}) for i in (1, 2, 3)]
+        remote = [
+            RemoteAccount(email=f"u{i}@x.com", platform="grok", remote_id=f"r-{i}",
+                          updated_at=datetime(2026, 10, 4, 10, tzinfo=timezone.utc),
+                          credentials={"sso_token": f"old-{i}"})
+            for i in (1, 2, 3)
+        ]
+        client_obj = mock.Mock()
+        client_obj.configured = True
+        client_obj.ingest_sso.return_value = (True, "ok")
+
+        with mock.patch(
+            "services.panel_comparison_cache.fetch_panel_raw",
+            return_value=(local_rows, remote, ""),
+        ), mock.patch(
+            "platforms.grok.grok2api.Grok2ApiClient.from_config",
+            return_value=client_obj,
+        ):
+            with self._client() as client:
+                r = client.post(
+                    "/api/integrations/panels/grok2api/push?account_ids=2&delete_old=true"
+                )
+
+        self.assertEqual(r.status_code, 200, r.text[:300])
+        body = r.json()
+        self.assertEqual(
+            body["total"], 1,
+            f"只勾了 1 行就该只处理 1 行，实际 total={body['total']}（全部本地较新的行都被处理了）",
+        )
+        self.assertEqual(client_obj.ingest_sso.call_count, 1, "只该上传勾选的那一行")
+        # 结果条目里没有 `id`，用 email 断言「推的确实是勾中的那一行」
+        self.assertEqual([i["email"] for i in body["items"]], ["u2@x.com"])
+
+    def test_unknown_id_selects_nothing_instead_of_everything(self):
+        """勾了一个不存在的 id：应当什么都不做，**绝不能**退化成「全平台」。"""
+        from services.panel_comparison import RemoteAccount
+
+        local_rows = [_row(i, f"u{i}@x.com", "grok",
+                           datetime(2026, 10, 4, 12, tzinfo=timezone.utc),
+                           {"sso": f"sso-{i}"}) for i in (1, 2)]
+        remote = [RemoteAccount(email=f"u{i}@x.com", platform="grok", remote_id=f"r-{i}",
+                                updated_at=datetime(2026, 10, 4, 10, tzinfo=timezone.utc),
+                                credentials={"sso_token": f"old-{i}"}) for i in (1, 2)]
+        client_obj = mock.Mock()
+        client_obj.configured = True
+        client_obj.ingest_sso.return_value = (True, "ok")
+
+        with mock.patch(
+            "services.panel_comparison_cache.fetch_panel_raw",
+            return_value=(local_rows, remote, ""),
+        ), mock.patch(
+            "platforms.grok.grok2api.Grok2ApiClient.from_config",
+            return_value=client_obj,
+        ):
+            with self._client() as client:
+                r = client.post(
+                    "/api/integrations/panels/grok2api/push?account_ids=__nope__"
+                )
+
+        self.assertEqual(r.status_code, 200, r.text[:300])
+        self.assertEqual(r.json()["total"], 0, "不存在的 id 应当选不中任何行")
+        self.assertEqual(client_obj.ingest_sso.call_count, 0)
+
+    def test_no_account_ids_keeps_the_old_whole_platform_behaviour(self):
+        """对照组：不传 `account_ids` 时保持老行为（整平台），别把默认收紧成「什么都不做」。"""
+        from services.panel_comparison import RemoteAccount
+
+        local_rows = [_row(i, f"u{i}@x.com", "grok",
+                           datetime(2026, 10, 4, 12, tzinfo=timezone.utc),
+                           {"sso": f"sso-{i}"}) for i in (1, 2)]
+        remote = [RemoteAccount(email=f"u{i}@x.com", platform="grok", remote_id=f"r-{i}",
+                                updated_at=datetime(2026, 10, 4, 10, tzinfo=timezone.utc),
+                                credentials={"sso_token": f"old-{i}"}) for i in (1, 2)]
+        client_obj = mock.Mock()
+        client_obj.configured = True
+        client_obj.ingest_sso.return_value = (True, "ok")
+
+        with mock.patch(
+            "services.panel_comparison_cache.fetch_panel_raw",
+            return_value=(local_rows, remote, ""),
+        ), mock.patch(
+            "platforms.grok.grok2api.Grok2ApiClient.from_config",
+            return_value=client_obj,
+        ):
+            with self._client() as client:
+                r = client.post("/api/integrations/panels/grok2api/push")
+
+        self.assertEqual(r.status_code, 200, r.text[:300])
+        self.assertEqual(r.json()["total"], 2)

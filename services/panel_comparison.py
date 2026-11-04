@@ -1300,3 +1300,27 @@ __all__ = [
     "parse_timestamp",
     "summarize",
 ]
+
+def parse_account_ids(raw: Any) -> set[str]:
+    """把界面传来的 `account_ids=1,2,3` 解析成集合。
+
+    空串 / None / 空白 → **空集**，语义是「不过滤」（保持老行为：整平台）。
+    这一点必须与「筛了但一个都没选中」区分开：前端只在 `pushIds.length` 时才
+    传参，所以空集只可能来自手动调用。
+
+    2026-11-04 独立审查（切片 G）：`/push` 此前**没有这个参数**，FastAPI 静默
+    忽略未声明的 query 参数、照样回 200 ——「看到的 ≠ 被改的」。
+    """
+    return {part.strip() for part in str(raw or "").split(",") if part.strip()}
+
+
+def filter_rows_by_account_ids(rows: list[dict[str, Any]], account_ids: Any) -> list[dict[str, Any]]:
+    """只留下 id 被选中的行。`account_ids` 为空 = 不过滤。
+
+    id 统一按**字符串**比较：真实 id 是 UUID，而测试夹具与 JSON 后端的历史行
+    是自增 int，两边都能对上。
+    """
+    wanted = parse_account_ids(account_ids)
+    if not wanted:
+        return list(rows)
+    return [row for row in rows if str(row.get("id")) in wanted]

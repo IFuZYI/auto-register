@@ -242,3 +242,61 @@ class EmptyEnrollmentReasonTests(unittest.TestCase):
         body = r.json()
         self.assertEqual(body["enrolled"], 1)
         self.assertNotIn("reason", body)
+
+
+class SyncHonoursTheSelectedAccountIdsTests(unittest.TestCase):
+    """「更新本地凭证」也必须只动界面筛出来的行。
+
+    2026-11-04 独立审查（切片 G）：`sync_panel_endpoint` 的签名**声明了**
+    `account_ids: str = ""`，函数体里却一次都没引用 —— 这种「声明了但没用」
+    比「没声明」更隐蔽：`inspect.signature` 看起来是对的，定位问题时会被它骗过去。
+    """
+
+    def _fake(self):
+        from services.panel_comparison import RemoteAccount
+        from datetime import datetime, timezone
+
+        local_rows = [
+            {"id": i, "email": f"u{i}@x.com", "platform": "grok",
+             "updated_at": "2026-10-04T10:00:00+00:00", "extra": {"sso": f"sso-{i}"}}
+            for i in (1, 2, 3)
+        ]
+        remote = [
+            RemoteAccount(email=f"u{i}@x.com", platform="grok", remote_id=f"r-{i}",
+                          updated_at=datetime(2026, 10, 4, 12, tzinfo=timezone.utc),
+                          credentials={"sso_token": f"new-{i}"})
+            for i in (1, 2, 3)
+        ]
+        return local_rows, remote
+
+    def _call(self, query: str):
+        import main as main_mod
+        from fastapi.testclient import TestClient
+        from unittest import mock
+
+        local_rows, remote = self._fake()
+        with mock.patch(
+            "services.panel_comparison_cache.fetch_panel_raw",
+            return_value=(local_rows, remote, ""),
+        ), mock.patch(
+            "services.panel_sync.sync_local_from_remote",
+            side_effect=lambda rows, *a, **k: {"total": len(rows), "pulled": 0,
+                                               "skipped": len(rows), "items": []},
+        ) as spy:
+            with TestClient(main_mod.app) as client:
+                r = client.post(f"/api/integrations/panels/grok2api/sync{query}")
+        return r, spy
+
+    def test_only_the_selected_rows_are_considered(self):
+        r, spy = self._call("?account_ids=2")
+        self.assertEqual(r.status_code, 200, r.text[:300])
+        rows = spy.call_args[0][0]
+        self.assertEqual(
+            [str(row["id"]) for row in rows], ["2"],
+            f"只勾了 1 行就该只处理 1 行，实际交出去 {len(rows)} 行",
+        )
+
+    def test_no_account_ids_keeps_the_old_whole_platform_behaviour(self):
+        r, spy = self._call("")
+        self.assertEqual(r.status_code, 200, r.text[:300])
+        self.assertEqual(len(spy.call_args[0][0]), 3, "不传时保持整平台老行为")
