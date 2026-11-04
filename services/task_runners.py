@@ -217,9 +217,15 @@ def _pick_usable_exit(
 
     # ── 第一层：连通性（永远执行）────────────────────────────────────
     reachable = ""
+    #: 探过的 URL。**用户 pin 了代理时 `get_next()` 每次都返回同一个 URL** ——
+    #: 不去重就会把同一个死出口连探 5 次，`report_bad`（= `report_proxy_error`）
+    #: 也连报 5 次，渠道侧的错误阈值被一次瞬时超时打满，用户指定的代理当场被
+    #: 停用（2026-11-04 独立审查）。同一个 URL 只值得探一次。
+    tried: list[str] = []
     for attempt in range(_GROK_EXIT_PROBE_TRIES):
-        if not current:
+        if not current or current in tried:
             break
+        tried.append(current)
         reach = probe_reachable(current)
         if reach.get("ok"):
             if attempt:
@@ -231,19 +237,31 @@ def _pick_usable_exit(
             report_bad(current)
         except Exception as exc:
             logger.debug("摘除死出口 %s 失败: %s", _redact_proxy(current), exc)
-        current = normalize(get_next())
+        nxt = normalize(get_next())
+        if not nxt or nxt in tried:
+            # 池子给不出**新**出口（pin 的代理、或池子已空）：再探同一个 URL
+            # 只是重复报错，没有任何新信息。
+            break
+        current = nxt
     if not reachable:
-        # 连试 N 个出口都连不上：本轮放弃（别拿一个未验证的出口去烧别名）。
-        log(task_id, f"出口连通性检查：连试 {_GROK_EXIT_PROBE_TRIES} 个出口都连不上，本轮放弃")
+        # 本轮放弃（别拿一个未验证的出口去烧别名）。日志要说**实际**试了几个，
+        # 池子早空了还说「连试 5 个」会把排障引到错的方向。
+        if len(tried) >= _GROK_EXIT_PROBE_TRIES:
+            log(task_id, f"出口连通性检查：连试 {_GROK_EXIT_PROBE_TRIES} 个出口都连不上，本轮放弃")
+        else:
+            log(task_id, f"出口连通性检查：试了 {len(tried)} 个出口都连不上（没有更多可用出口），本轮放弃")
         return ""
     current = reachable
 
     # ── 第二层：可注册性（opt-in）──────────────────────────────────
     if not _truthy_extra(extra.get("grok_exit_preflight"), False):
         return current
+    # 同第一层：pin 的代理会让 `get_next()` 反复给同一个 URL，去重（理由见上面 `tried`）。
+    pre_tried: list[str] = []
     for attempt in range(_GROK_EXIT_PROBE_TRIES):
-        if not current:
-            return ""
+        if not current or current in pre_tried:
+            break
+        pre_tried.append(current)
         result = probe_exit(current)
         if result.get("ok"):
             if attempt:
@@ -255,8 +273,14 @@ def _pick_usable_exit(
         except Exception as exc:
             # 摘不掉也要继续换出口：记录是哪一条、什么错，别静默。
             logger.debug("预检摘除出口 %s 失败: %s", _redact_proxy(current), exc)
-        current = normalize(get_next())
-    log(task_id, f"出口预检：连试 {_GROK_EXIT_PROBE_TRIES} 个出口都不可注册，本轮放弃")
+        nxt = normalize(get_next())
+        if not nxt or nxt in pre_tried:
+            break
+        current = nxt
+    if len(pre_tried) >= _GROK_EXIT_PROBE_TRIES:
+        log(task_id, f"出口预检：连试 {_GROK_EXIT_PROBE_TRIES} 个出口都不可注册，本轮放弃")
+    else:
+        log(task_id, f"出口预检：试了 {len(pre_tried)} 个出口都不可注册（没有更多可用出口），本轮放弃")
     return ""
 
 

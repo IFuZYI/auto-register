@@ -84,8 +84,14 @@ class ProbeExitTests(unittest.TestCase):
         self.assertTrue(exit_probe.PROBE_ADDRESS.endswith(".invalid"))
 
 
-class PickUsableExitTests(unittest.TestCase):
-    """注册前的换出口循环。"""
+class PickUsableExitPreflightTests(unittest.TestCase):
+    """注册前的换出口循环 —— **opt-in 的可注册性层**（`grok_exit_preflight=1`）。
+
+    2026-11-04 独立审查发现：这个类原本与下面那个连通性层测试**同名**
+    （都叫 `PickUsableExitTests`），后定义的类在模块命名空间里把前者整个覆盖掉 ——
+    这 4 条测试**从来没有被执行过**（`--collect-only` 只列出 2 条）。已改名。
+    教训：同名类 = 静默丢测试，套件全绿也发现不了。
+    """
 
     def _pick(self, probes, nexts):
         from services.task_runners import _pick_usable_exit
@@ -96,7 +102,11 @@ class PickUsableExitTests(unittest.TestCase):
         def _probe(_proxy):
             return seq.pop(0) if len(seq) > 1 else seq[0]
 
-        with patch("platforms.grok.exit_probe.probe_exit", _probe):
+        # 连通性层（第一层，永远跑）也要打桩：`probe_reachable` 靠 curl 打真出口，
+        # 假出口 "p0" 必然连不上，于是提前 `return ""` —— 这三条测试之所以是红的，
+        # 是因为它们在**被同名类覆盖、从未执行**的那段时间里，生产代码新增了这一层。
+        with patch("platforms.grok.exit_probe.probe_exit", _probe), \
+                patch("platforms.grok.exit_probe.probe_reachable", lambda _p: {"ok": True}):
             out = _pick_usable_exit(
                 "p0",
                 task_id="t",
@@ -130,7 +140,8 @@ class PickUsableExitTests(unittest.TestCase):
         from services.task_runners import _pick_usable_exit
 
         called = []
-        with patch("platforms.grok.exit_probe.probe_exit", lambda p: called.append(p) or {"ok": False}):
+        with patch("platforms.grok.exit_probe.probe_exit", lambda p: called.append(p) or {"ok": False}), \
+                patch("platforms.grok.exit_probe.probe_reachable", lambda _p: {"ok": True}):
             out = _pick_usable_exit(
                 "p0", task_id="t", extra={"grok_exit_preflight": "0"}, log=lambda *a: None,
                 get_next=lambda: "p1", report_bad=lambda p: None, normalize=lambda v: v,
@@ -335,3 +346,102 @@ class ProbeNormalizesProxySchemeTests(unittest.TestCase):
         cmd = self._run_with("socks5h://user:pass@10.0.0.1:1080")
         idx = cmd.index("-x")
         self.assertEqual(cmd[idx + 1], "socks5h://user:pass@10.0.0.1:1080")
+
+
+class PinnedProxyMustNotBeReprobedTests(unittest.TestCase):
+    """用户**指定**的出口，不该被同一个 URL 连探 5 次、连报 5 次错误。
+
+    2026-11-04 独立审查（切片 C）发现：`_pick_usable_exit` 的循环无条件
+    `current = normalize(get_next())`。当用户在任务上 pin 了代理时，
+    `get_next()` 每次都返回**同一个 URL** —— 于是这一个出口被连探
+    `_GROK_EXIT_PROBE_TRIES`(5) 次，`report_proxy_error`（= `report_bad`）
+    也被调 5 次。渠道侧的计数阈值因此一次瞬时超时就被打满，
+    用户 pin 的代理当场 `is_active=False` —— 用户会看到「我指定的代理自己没了」，
+    而它其实只是抖了一下。
+
+    正确行为：同一个 URL 只探一次、只报一次；池子给不出**新**出口就收手。
+    """
+
+    def _run(self, *, next_urls, reach):
+        from services.task_runners import _pick_usable_exit
+
+        logs: list[str] = []
+        reported: list[str] = []
+        probed: list[str] = []
+        urls = list(next_urls)
+
+        def _reach(p):
+            probed.append(p)
+            return reach
+
+        with patch("platforms.grok.exit_probe.probe_reachable", _reach):
+            out = _pick_usable_exit(
+                "pinned",
+                task_id="t",
+                extra={},
+                log=lambda _tid, msg: logs.append(msg),
+                get_next=lambda: urls.pop(0) if urls else "pinned",
+                report_bad=reported.append,
+                normalize=lambda v: v,
+            )
+        return out, reported, probed, logs
+
+    def test_same_pinned_url_is_probed_and_reported_once(self):
+        out, reported, probed, logs = self._run(
+            next_urls=["pinned", "pinned", "pinned", "pinned"],
+            reach={"ok": False, "detail": "连不上"},
+        )
+        self.assertEqual(out, "", "唯一的出口是死的，本轮就该放弃")
+        self.assertEqual(probed, ["pinned"], f"同一个 URL 只该探一次，实际探了 {len(probed)} 次")
+        self.assertEqual(reported, ["pinned"], f"同一个 URL 只该报一次错，实际报了 {len(reported)} 次")
+        self.assertTrue(
+            any("1 个" in m or "没有新出口" in m for m in logs),
+            f"放弃时要如实说试了几个（不能说「连试 5 个」）：{logs}",
+        )
+
+    def test_a_genuinely_new_exit_is_still_tried(self):
+        """对照组：池子真的给出新出口时，得继续探 —— 别把这条规则收紧成「只探一个」。"""
+        out, reported, probed, logs = self._run(
+            next_urls=["p1", "p2"],
+            reach={"ok": False, "detail": "连不上"},
+        )
+        self.assertEqual(probed, ["pinned", "p1", "p2"])
+        self.assertEqual(reported, ["pinned", "p1", "p2"])
+        self.assertEqual(out, "")
+
+    def test_stops_at_the_budget_even_with_endless_new_exits(self):
+        """有上限：不能因为池子一直给新 URL 就无限换。"""
+        out, reported, probed, logs = self._run(
+            next_urls=["p1", "p2", "p3", "p4", "p5", "p6", "p7"],
+            reach={"ok": False, "detail": "连不上"},
+        )
+        self.assertEqual(len(probed), 5, f"最多试 5 个，实际 {len(probed)}")
+
+    def test_preflight_layer_also_does_not_reprobe_the_same_pinned_url(self):
+        """**预检层**（第二层）形状与连通层完全相同：pin 的代理也会被连打 5 次真上游。
+
+        预检层打的是真发码接口，连打 5 次不只是重复报错 —— 那 5 次本身就是
+        额外的可疑流量，而上游只看了同一个出口的第 5 次。
+        """
+        from services.task_runners import _pick_usable_exit
+
+        reported: list[str] = []
+        probed: list[str] = []
+        urls = ["pinned", "pinned", "pinned", "pinned"]
+
+        with patch("platforms.grok.exit_probe.probe_reachable", lambda _p: {"ok": True}), \
+                patch("platforms.grok.exit_probe.probe_exit",
+                      lambda p: probed.append(p) or {"ok": False, "detail": "不可注册"}):
+            out = _pick_usable_exit(
+                "pinned",
+                task_id="t",
+                extra={"grok_exit_preflight": "1"},
+                log=lambda *a: None,
+                get_next=lambda: urls.pop(0) if urls else "pinned",
+                report_bad=reported.append,
+                normalize=lambda v: v,
+            )
+
+        self.assertEqual(out, "")
+        self.assertEqual(probed, ["pinned"], f"同一个 URL 只该预检一次，实际 {len(probed)} 次")
+        self.assertEqual(reported, ["pinned"], f"同一个 URL 只该报一次，实际 {len(reported)} 次")

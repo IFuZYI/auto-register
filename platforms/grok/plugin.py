@@ -94,7 +94,15 @@ def _throttle_send_code(min_interval: float, log) -> None:
 
 #: 平台侧**瞬时**拒绝：地址没被 x.ai 消耗，只是这一轮撞上了出口 IP 限流 /
 #: 域名窗口（2026-11-03 实测：同出口换域名无效、约 1 小时后自行恢复）。
-_TRANSIENT_REJECTION_KEYS = ("email_unavailable", "rate_limited")
+#: 「地址没被消耗」的信号 —— 命中任一就把地址**放回池子**，而不是永久移出。
+#:
+#: `antibot_not_ready`（2026-11-04 独立审查补）：表单**根本没提交**，页面停在
+#: 邮箱那一步。地址连碰都没碰过，可它此前落到 `failed`，在 Outlook 渠道里
+#: `failed` = 永久移出池子 —— 与 2026-11-03 那次「一小时烧掉 6 个可用号」是
+#: 同一类损失，只是触发条件换成了「反机器人令牌没就绪」。
+#: 注册链路在 `_send_code_stage` 里给的就是 `consumes_address=False,
+#: antibot_not_ready=True, retryable=True`，没有一条指向「地址坏了」。
+_TRANSIENT_REJECTION_KEYS = ("email_unavailable", "rate_limited", "antibot_not_ready")
 
 
 def _mailbox_status_for_failure(result: dict) -> str:
@@ -103,7 +111,8 @@ def _mailbox_status_for_failure(result: dict) -> str:
     三种状态的含义（渠道侧解释见 `_record_mailbox_status`）：
 
     - `used`：地址**已被消耗**（如「该邮箱在 x.ai 已有账号」）→ 不能再用；
-    - `available`：地址没被消耗，只是撞上**平台侧瞬时拒绝** → 放回池子，
+    - `available`：地址没被消耗，只是撞上**平台侧瞬时拒绝**（域名窗口用尽、
+      限流）或**我们压根没提交**（`antibot_not_ready`）→ 放回池子，
       等窗口恢复 / 换出口后再用；
     - `failed`：其它失败，按渠道自身语义处理。
 
