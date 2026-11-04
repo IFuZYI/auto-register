@@ -68,7 +68,19 @@ def _normalized(proxy: object) -> str:
     """
     from core.proxy_utils import normalize_proxy_url
 
-    return str(normalize_proxy_url(str(proxy or "").strip()) or "").strip()
+    raw = str(proxy or "").strip()
+    if not raw:
+        return ""
+    try:
+        return str(normalize_proxy_url(raw) or "").strip()
+    except (ValueError, TypeError) as exc:
+        # 畸形代理只能让**这一次**探测跳过，不能把整轮注册打断。
+        # 代理是用户填的：`http://[::1` 这种输入会让 urllib 抛
+        # `ValueError: Invalid IPv6 URL`，而这两个探针的契约是 fail-open
+        # （探不了就当能用），不是「抛到任务层把这一轮炸掉」。
+        # 返回空串 = 未配置代理，两个调用方都会走 `skipped=True, ok=True`。
+        logger.debug("代理串无法归一化，按未配置处理: %r（%s）", raw, exc)
+        return ""
 
 def probe_exit(
     proxy: str,

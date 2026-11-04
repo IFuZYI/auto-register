@@ -445,3 +445,36 @@ class PinnedProxyMustNotBeReprobedTests(unittest.TestCase):
         self.assertEqual(out, "")
         self.assertEqual(probed, ["pinned"], f"同一个 URL 只该预检一次，实际 {len(probed)} 次")
         self.assertEqual(reported, ["pinned"], f"同一个 URL 只该报一次，实际 {len(reported)} 次")
+
+
+class MalformedProxyMustNotAbortTheRunTests(unittest.TestCase):
+    """畸形代理串只能让**这一次探测**跳过，不能把整轮注册打断。
+
+    2026-11-04 独立审查（切片 A1）：`_normalized()` 在两个探针里都在 try 之外，
+    而 `normalize_proxy_url` 对畸形输入会抛 `ValueError`（实测
+    `http://[::1` → `Invalid IPv6 URL`）。代理是用户填的，一条脏数据就能让
+    `_pick_usable_exit` 把异常抛到任务层 —— 而探针的契约是 **fail-open**
+    （探不了就当能用），不是「炸掉整轮」。
+    """
+
+    BAD = "http://[::1"
+
+    def test_reachable_probe_fails_open_on_malformed_proxy(self):
+        from platforms.grok.exit_probe import probe_reachable
+
+        out = probe_reachable(self.BAD)
+        self.assertTrue(out.get("ok"), f"探不了就当能用（fail-open），实际 {out}")
+        self.assertTrue(out.get("skipped"), f"要说清是「跳过」而不是「通了」，实际 {out}")
+
+    def test_exit_probe_fails_open_on_malformed_proxy(self):
+        from platforms.grok.exit_probe import probe_exit
+
+        out = probe_exit(self.BAD)
+        self.assertTrue(out.get("ok"), f"探不了就当能用（fail-open），实际 {out}")
+        self.assertTrue(out.get("skipped"), f"要说清是「跳过」，实际 {out}")
+
+    def test_a_normal_proxy_still_gets_normalised(self):
+        """对照组：好代理照旧被归一化成 socks5h（这条修复不能把归一化弄丢）。"""
+        from platforms.grok import exit_probe
+
+        self.assertEqual(exit_probe._normalized("socks5://u:p@h:1080"), "socks5h://u:p@h:1080")
