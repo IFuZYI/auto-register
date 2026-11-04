@@ -697,7 +697,12 @@ def antibot_state(page: Any) -> dict[str, Any]:
 
 
 def wait_until_submittable(page: Any, *, timeout: float = 60.0, poll: float = 0.5) -> dict[str, Any]:
-    """等「页面真的可以提交」：拿到 Turnstile 令牌**且**按钮不是禁用态。
+    """等「页面真的可以提交」：拿到 Turnstile 令牌**或**按钮不是禁用态。
+
+    （2026-11-04 独立审查指出：这句摘要原本写的是「**且**」，与下面的
+    `ready = token_len > 16 or not saw_disabled_button` 正好相反 —— 而下面几段
+    解释的也全是「令牌不是硬门槛」的道理。口径以代码为准：**按钮能点就算 ready**，
+    令牌只是额外的加速信号。）
 
     2026-11-02 线上日志：`反机器人令牌未出现（继续尝试提交）` 紧接着
     `发码已提交（form.requestSubmit()）｜⚠ 按钮是禁用态` —— 我们**绕过页面

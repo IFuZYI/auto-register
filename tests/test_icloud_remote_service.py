@@ -458,6 +458,21 @@ class TestCredentialFormat:
             service.remote_api_key(row)
         assert excinfo.value.code == "invalid_config"
 
+    def test_healthy_row_reports_credential_ok(self, service, remote):
+        """**正向**断言：正常的远程账号必须报「凭据可用」。
+
+        2026-11-04 独立审查（切片 B）实测：这里原本只有 `is False` 那一侧
+        （存量旧密码行），把 `credential_ok = bool(remote_api_key(row))` 换成
+        常量 `False` 之后 **79 条测试全绿** —— 也就是说「所有远程账号的凭据被
+        永久标记为坏」这种回归能无声上线，而界面上会是一片「凭据不可用」。
+        两个方向都钉住，常量才有意义。
+        """
+        service.add_remote_account(
+            base_url=remote.base_url, api_key=API_KEY, remote_account_id="acc_1"
+        )
+        listed = service.list_accounts()[0]
+        assert listed["credential_state"]["has_remote_api_key"] is True
+
     def test_legacy_password_row_reports_credential_not_ok(self, service):
         """存量旧密码行在列表里必须显示「凭据不可用」，不能骗用户说正常。"""
         cipher = service.secret_box.encrypt(b"admin-pass-123")
