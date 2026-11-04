@@ -30,6 +30,8 @@
 
 from __future__ import annotations
 
+import threading
+
 import logging
 from typing import Any, Optional
 from urllib.parse import unquote, urlsplit
@@ -38,6 +40,22 @@ logger = logging.getLogger(__name__)
 
 #: 面板协议名归一：`socks5` 与 `socks5h` 在 Sub2API 里只有前者是合法枚举值。
 _SUB2API_PROTOCOLS = {"http", "https", "socks5", "socks5h"}
+
+
+#: 「先查再建」的串行锁。
+#:
+#: 2026-11-04 独立审查（切片 F）：两个 ensure_* 都是「GET 列表 → 没找到就 POST
+#: 创建」的幂等写法，但**没有任何互斥** —— 两个并发调用方只要都在对方创建前完成
+#: GET，就会各建一条，于是「每推一个账号就在对端堆一条重复代理」，账号绑在哪一条
+#: 上完全不可预期（正是模块 docstring 说要避免的）。
+#: 可达路径：`services/task_service.auto_upload_integrations` 为**每个账号**起一个
+#: daemon 线程跑上传，而注册任务本身是线程池 —— 同一批账号共用同一条代理时，
+#: 两个上传线程会并发进入。
+#:
+#: 代价说明：这把锁把「同一进程内所有面板的 ensure」串起来（不是按代理分片）。
+#: 上传是几十毫秒级的网络调用、且本来就有连接池，串行的损失远小于堆重复记录的代价；
+#: 多进程部署下它不覆盖，所以幂等键仍是最后一道防线。
+_ENSURE_LOCK = threading.Lock()
 
 
 def parse_proxy_url(url: str) -> Optional[dict[str, Any]]:
@@ -101,6 +119,21 @@ def _dig_obj(payload: Any) -> dict:
 
 
 def ensure_sub2api_proxy(
+    api_url: str,
+    api_key: str,
+    proxy_url: str,
+    *,
+    timeout: int = 20,
+):
+    """确保 Sub2API 里有一条对应这条代理的记录，返回 `(proxy_id, 说明)`。
+
+    **串行**：整段「先查再建」在本模块的 `_ENSURE_LOCK` 之内（理由见那里）。
+    """
+    with _ENSURE_LOCK:
+        return _ensure_sub2api_proxy_unlocked(api_url, api_key, proxy_url, timeout=timeout)
+
+
+def _ensure_sub2api_proxy_unlocked(
     api_url: str,
     api_key: str,
     proxy_url: str,
@@ -192,6 +225,21 @@ def ensure_sub2api_proxy(
 
 
 def ensure_grok2api_egress(
+    api_url: str,
+    api_key: str,
+    proxy_url: str,
+    *,
+    timeout: int = 20,
+):
+    """确保 Grok2API 里有一条对应这条代理的出口节点，返回 `(node_id, 说明)`。
+
+    **串行**：整段「先查再建」在本模块的 `_ENSURE_LOCK` 之内（理由见那里）。
+    """
+    with _ENSURE_LOCK:
+        return _ensure_grok2api_egress_unlocked(api_url, api_key, proxy_url, timeout=timeout)
+
+
+def _ensure_grok2api_egress_unlocked(
     client,
     proxy_url: str,
     *,
