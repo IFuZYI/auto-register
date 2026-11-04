@@ -608,7 +608,17 @@ def import_accounts(
         existing = account_repository.find_by_email(body.platform, email)
         if existing is not None:
             existing.password = password or existing.password
-            existing.extra_json = extra
+            # **必须走 `set_extra`，不能裸赋 `extra_json`。**
+            # `AccountModel.__init__` 和 `set_extra` 都会过 `encrypt_extra`，
+            # 而直接 `existing.extra_json = extra` 把**明文**写进库 ——
+            # 导入是「更新已有账号」这条分支时，AT/RT/SSO/cookies 全部落明文
+            # （2026-11-04 全量检测实测：1227 个账号里 1370 个 extra 凭证值
+            # 是 `eyJhbG…` 明文，且 11-01/11-02 仍有新增，来源就是这里）。
+            try:
+                payload = json.loads(extra) if extra else {}
+            except (json.JSONDecodeError, TypeError, ValueError):
+                payload = {}
+            existing.set_extra(payload if isinstance(payload, dict) else {})
             account_repository.upsert(existing)
             updated += 1
         else:

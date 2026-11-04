@@ -490,3 +490,61 @@ class CashierUrlRoundTripTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ImportUpdateKeepsCredentialsEncryptedTests(unittest.TestCase):
+    """**文本导入的「更新已有账号」分支**也必须加密 extra 里的凭证。
+
+    2026-11-04 全量检测实测：真库 1227 个账号里有 **1370 个** extra 凭证值是
+    `eyJhbG…` 明文（AT/ST/cookies），且 11-01、11-02 仍在新增。根因是
+    `api/accounts.py` 文本导入的更新分支裸赋 `existing.extra_json = extra`，
+    绕过了 `AccountModel.__init__` 与 `set_extra()` 里的 `encrypt_extra`。
+    （JSON 导入那条路走的是 `set_extra`，没问题 —— 所以这条测试必须走
+    **text 格式**，否则测不到那个分支，变异也不会转红。）
+
+    只钉一件事：导两次（第一次建、第二次更新）之后，库里躺的仍是密文，
+    读出来仍是原文。
+    """
+
+    FORMAT = "email_pw_2fa_at_rt"
+    EMAIL = "import-update-enc@example.com"
+    AT = "eyJhbGciOiJSUzI1NiJ9.access-token-body.signature"
+    RT = "eyJhbGciOiJSUzI1NiJ9.refresh-token-body.signature"
+
+    @classmethod
+    def setUpClass(cls):
+        cls._ctx = _client()
+        cls.client = cls._ctx.__enter__()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._ctx.__exit__(None, None, None)
+
+    def tearDown(self):
+        row = account_repository.find_by_email("chatgpt", self.EMAIL)
+        if row is not None:
+            account_repository.delete(row.id, "chatgpt")
+
+    def _import(self):
+        line = "----".join([self.EMAIL, "pw-for-test", "JBSWY3DPEHPK3PXP", self.AT, self.RT])
+        return self.client.post("/api/accounts/import", json={
+            "platform": "chatgpt",
+            "lines": [line],
+            "format": "text",
+            "source_format": self.FORMAT,
+        })
+
+    def test_second_import_does_not_write_plaintext(self):
+        self.assertEqual(self._import().status_code, 200)
+        # 第二次：走「已有账号 → 更新」分支，这才是泄漏点
+        self.assertEqual(self._import().status_code, 200)
+
+        row = account_repository.find_by_email("chatgpt", self.EMAIL)
+        self.assertIsNotNone(row)
+        raw = row.extra_json or ""
+        self.assertIn("v1:", raw, "落盘必须是密文信封")
+        self.assertNotIn(self.AT, raw, "AT 不许明文落盘")
+        self.assertNotIn(self.RT, raw, "RT 不许明文落盘")
+        extra = row.get_extra()
+        self.assertEqual(extra.get("access_token"), self.AT)
+        self.assertEqual(extra.get("refresh_token"), self.RT)
