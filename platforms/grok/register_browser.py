@@ -188,6 +188,24 @@ def _resolve_exit_ip(proxy: str, *, timeout: float = 12.0) -> str:
 BROWSER_CLOSE_TIMEOUT = 12.0
 
 
+def _browser_pid(browser: Any) -> int | None:
+    """尽力从 playwright 内部拿到浏览器进程 pid（拿不到返回 None）。"""
+    for path in (
+        ("_impl_obj", "_connection", "_transport", "_proc", "pid"),
+        ("_impl_obj", "_browser_type", "_playwright", "_connection", "_transport", "_proc", "pid"),
+    ):
+        obj: Any = browser
+        try:
+            for attr in path:
+                obj = getattr(obj, attr)
+            pid = int(obj)
+            if pid > 0:
+                return pid
+        except Exception:  # noqa: BLE001 - 内部结构可能变，拿不到就算了
+            continue
+    return None
+
+
 def _close_browser(browser: Any, *, log: LogFn = None, timeout: float = BROWSER_CLOSE_TIMEOUT) -> None:
     """关浏览器，**保证在有限时间内返回**。
 
@@ -196,10 +214,16 @@ def _close_browser(browser: Any, *, log: LogFn = None, timeout: float = BROWSER_
     把 worker 线程永久卡死（py-spy 抓到的栈就是 `SyncBase._sync →
     Browser.close → Camoufox.__exit__`）。整批任务静默停摆 20 分钟。
 
-    两道保险：
-    1. `is_connected()` 已 False → **根本不调 close**（零成本、最可靠）；
-    2. 仍连接 → 放到独立线程里关，`join(timeout)` 到点就放弃。泄漏一个死进程
-       远比卡死整批任务划算。
+    2026-11-04 独立审查（切片 A1）抓到这里原本的写法是错的：把
+    `browser.close()` 丢进 `threading.Thread` 里执行。playwright 的**同步 API
+    是线程亲和的** —— 在别的线程调 `SyncBase._sync` 会直接抛
+    `greenlet.error: Cannot switch to a different thread`，被
+    `except Exception` 吞掉，`done.set()` 照样置位，于是**每次**都打印
+    「浏览器已关闭」，而浏览器进程一个都没真的关掉（泄漏，且日志说谎）。
+
+    正确做法：`close()` 必须在**拥有它的那个线程**上调用；超时保护交给
+    一个看门狗线程 —— 到点直接对浏览器进程发 SIGKILL。这样「正常情况真的关掉」
+    与「卡死情况有上限」两件事同时成立。
     """
     if browser is None:
         return
@@ -207,33 +231,42 @@ def _close_browser(browser: Any, *, log: LogFn = None, timeout: float = BROWSER_
         if not bool(browser.is_connected()):
             _log(log, "[Grok] 浏览器已断开，跳过关闭（避免 close 空转卡死）")
             return
-    except Exception as exc:
-        # is_connected 自己都可能卡（同一个 driver 通道）—— 但它只是读一个
-        # 布尔字段，实测不会；真抛了就按「已断开」处理，直接不关。
+    except Exception as exc:  # noqa: BLE001 - is_connected 自己卡住也按已断开处理
         logger.debug("is_connected 探测失败，跳过关闭: %s", exc)
         return
 
+    import signal
     import threading
 
-    done = threading.Event()
+    pid = _browser_pid(browser)
+    finished = threading.Event()
 
-    def _closer() -> None:
+    def _watchdog() -> None:
+        if finished.wait(max(0.0, float(timeout))):
+            return
+        if not pid:
+            logger.warning("关闭浏览器超时且拿不到 pid，只能继续等（可能泄漏一个进程）")
+            return
         try:
-            browser.close()
-        except Exception as exc:  # noqa: BLE001 - 收尾失败不该制造新失败
-            logger.debug("关闭浏览器失败（忽略）: %s", exc)
-        finally:
-            done.set()
+            import os
 
-    worker = threading.Thread(target=_closer, name="camoufox-close", daemon=True)
-    worker.start()
-    if not done.wait(max(0.0, float(timeout))):
-        _log(
-            log,
-            f"[Grok] 关闭浏览器超时（{timeout:g}s 未返回，driver 可能已死），放弃等待并继续",
-        )
-        return
-    _log(log, "[Grok] 浏览器已关闭")
+            os.kill(int(pid), signal.SIGKILL)
+            logger.warning("关闭浏览器超时，已强制结束 pid=%s", pid)
+            _log(log, f"[Grok] 关闭浏览器超时，已强制结束 pid={pid}")
+        except Exception as exc:  # noqa: BLE001 - 杀不掉也只能记账
+            logger.warning("关闭浏览器超时，强制结束 pid=%s 失败: %s", pid, exc)
+            _log(log, f"[Grok] 关闭浏览器超时，强制结束 pid={pid} 失败：{type(exc).__name__}")
+
+    watchdog = threading.Thread(target=_watchdog, name="camoufox-close-watchdog", daemon=True)
+    watchdog.start()
+    try:
+        browser.close()
+        _log(log, "[Grok] 浏览器已关闭")
+    except Exception as exc:  # noqa: BLE001 - 收尾失败不该制造新失败
+        logger.debug("关闭浏览器失败（忽略）: %s", exc)
+        _log(log, f"[Grok] 关闭浏览器失败（忽略）：{type(exc).__name__}")
+    finally:
+        finished.set()
 
 
 def _log(fn: LogFn, msg: str) -> None:

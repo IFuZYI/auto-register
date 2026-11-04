@@ -70,23 +70,52 @@ class CloseBrowserTimeoutTests(unittest.TestCase):
         rb._close_browser(_Browser(), log=lambda m: calls.append(m), timeout=0.05)
         self.assertIn("close", calls)
 
-    def test_hung_close_is_abandoned_instead_of_blocking_forever(self):
-        """核心回归：close 永不返回时，必须在 timeout 内返回并告警。"""
+    def test_hung_close_kills_the_browser_process(self):
+        """close 永不返回时：到点**杀掉浏览器进程**，而不是把调用丢到别的线程。
+
+        2026-11-04 独立审查（A1）实测：旧写法把 `browser.close()` 丢进
+        `threading.Thread` —— playwright 的同步 API 是线程亲和的，跨线程调用
+        必然抛 `greenlet.error`，被 `except` 吞掉后还谎报「已关闭」，
+        浏览器进程一个都没关掉。现在改成：close 在本线程调，看门狗到点发
+        SIGKILL，日志如实说「已强制结束 pid=…」。
+        """
         import time
+        from unittest.mock import patch
 
         class _Browser:
             def is_connected(self):
                 return True
 
             def close(self):
-                time.sleep(30)  # 模拟 driver 已死、回应永不到来
+                time.sleep(0.6)  # 模拟 driver 已死、回应永不到来（有界，便于测试）
 
-        started = time.monotonic()
+        killed = []
+
+        def _fake_kill(pid, sig):
+            killed.append((pid, sig))
+
+        logs = []
+        with patch.object(rb, "_browser_pid", lambda _b: 424242), \
+                patch("os.kill", _fake_kill):
+            rb._close_browser(_Browser(), log=logs.append, timeout=0.1)
+
+        self.assertEqual(killed, [(424242, 9)], f"应当对浏览器进程发 SIGKILL: {killed}")
+        self.assertTrue(any("强制结束" in str(m) for m in logs), f"应当记一条强制结束: {logs}")
+
+    def test_disconnected_browser_is_not_closed(self):
+        """已断开就根本不调 close（避免 driver 空转卡死）—— 这是第一道保险。"""
+        class _Browser:
+            called = 0
+
+            def is_connected(self):
+                return False
+
+            def close(self):
+                _Browser.called += 1
+
         logs = []
         rb._close_browser(_Browser(), log=logs.append, timeout=0.2)
-        elapsed = time.monotonic() - started
-        self.assertLess(elapsed, 5.0, f"close 卡了 {elapsed:.1f}s，应当已被放弃")
-        self.assertTrue(any("超时" in str(m) for m in logs), f"应当记一条超时告警: {logs}")
+        self.assertEqual(_Browser.called, 0, "已断开的浏览器不该再调 close")
 
     def test_close_failure_does_not_raise(self):
         class _Browser:
