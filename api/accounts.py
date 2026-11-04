@@ -14,6 +14,7 @@ from services.account_export import (
 from services.chatgpt_account_state import filter_accounts_by_plus_status
 from services.chatgpt_account_selection import normalize_account_ids
 from core.credential_fields import export_names as _export_names
+from core.credential_fields import sync_token_column
 from core.time_utils import UtcDatetime
 from typing import Optional
 from datetime import datetime, timezone
@@ -630,14 +631,25 @@ def import_accounts(
             if not isinstance(merged_extra, dict):
                 merged_extra = {}
             merged_extra.update(payload)
+            # 平台主凭据要**镜像进 `token` 列**（chatgpt → access_token、grok → sso）。
+            # 2026-11-04 实测确认的缺陷：导入建出的号 `token` 列是空串，而
+            # `platforms/chatgpt/plugin.py` 有 4 处 `token=account.token`、
+            # `services/task_runners.py:933` 与 `api/actions.py:227` 也在读它 ——
+            # 导入进来的号在探测/刷新/推送里读到空 token。
+            # 仓库本来就有 `sync_token_column`（没有对应值时不碰列），只是两条
+            # 导入路径都没调；注册路径调了，所以真库里 token 列 0 个空。
+            sync_token_column(existing, body.platform, merged_extra)
             existing.set_extra(merged_extra)
             account_repository.upsert(existing)
             updated += 1
         else:
-            account_repository.upsert(AccountModel(
+            _created = AccountModel(
                 platform=body.platform, email=email,
                 password=password, extra_json=extra,
-            ))
+            )
+            # 新建分支同样要镜像主凭据进 `token` 列（理由见上面更新分支的注释）。
+            sync_token_column(_created, body.platform, _created.get_extra())
+            account_repository.upsert(_created)
             created += 1
     return {"created": created, "updated": updated, "skipped": skipped}
 
@@ -721,6 +733,14 @@ def _import_json_accounts(body: ImportRequest, session: Session) -> dict:
                 continue
             if value not in (None, "", [], {}):
                 extra[key] = value
+            # 平台主凭据要**镜像进 `token` 列**（chatgpt → access_token、grok → sso）。
+            # 2026-11-04 实测确认的缺陷：导入建出的号 `token` 列是空串，而
+            # `platforms/chatgpt/plugin.py` 有 4 处 `token=account.token`、
+            # `services/task_runners.py:933` 与 `api/actions.py:227` 也在读它 ——
+            # 导入进来的号在探测/刷新/推送里读到空 token。
+            # 仓库本来就有 `sync_token_column`（没有对应值时不碰列），只是两条
+            # 导入路径都没调；注册路径调了，所以真库里 token 列 0 个空。
+        sync_token_column(target, str(entry.get("platform") or body.platform or ""), extra)
         target.set_extra(extra)
 
         # created_at 由导出带回来时保留原值（排序/筛选依赖它）
