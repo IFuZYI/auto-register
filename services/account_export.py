@@ -10,6 +10,10 @@
 
 from __future__ import annotations
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 import csv
 import io
 import json
@@ -21,11 +25,32 @@ SEPARATOR = "----"
 
 
 def _extra_of(account: Any) -> dict:
+    """账号的 extra；**解密失败必须炸出来**，不许静默变成空。
+
+    `get_extra()` 对脏 JSON 自己就返回 `{}`，所以能从这里抛出来的基本只有
+    `CredentialKeyError`（密钥文件被换过 / 丢了 / `CREDENTIAL_ENCRYPTION_KEY`
+    写错）。原来那句 `except Exception: return {}` 的注释写的是「脏 JSON 不该让
+    整次导出失败」—— 而那个场景根本不经过这里（2026-11-04 独立审查，切片 D）。
+
+    吞掉的后果：密钥坏掉时导出仍 200、格式合法，只是凭证列全空；用户据此做
+    迁移，到目标环境才发现拿到的是一批「有邮箱密码但没 AT/2FA」的号。
+    """
+    from core.secret_box import CredentialKeyError
+
     getter = getattr(account, "get_extra", None)
     if callable(getter):
         try:
             return getter() or {}
-        except Exception:  # noqa: BLE001 - 脏 JSON 不该让整次导出失败
+        except CredentialKeyError as exc:
+            who = str(
+                getattr(account, "email", "") or getattr(account, "id", "") or "?"
+            )
+            raise CredentialKeyError(
+                f"账号 {who} 的凭证无法解密"
+                f"（密钥文件或 CREDENTIAL_ENCRYPTION_KEY 是不是变过？）: {exc}"
+            ) from exc
+        except Exception as exc:  # noqa: BLE001 - 其它异常仍不让整次导出失败
+            logger.debug("读账号 extra 失败（按空处理）: %s", exc)
             return {}
     raw = getattr(account, "extra_json", None)
     if isinstance(raw, str):
