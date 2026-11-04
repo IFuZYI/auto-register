@@ -110,12 +110,31 @@ class ScopeTests(unittest.TestCase):
 
         self.assertIn("sso", export_names(), "导出字段缺 sso：grok 账号往返会丢 SSO")
 
-    def test_export_scope_is_all_credential_fields(self):
-        from core.credential_fields import export_names
+    def test_export_scope_is_all_credential_fields_plus_export_only_keys(self):
+        """导出范围 = 全部比对字段 **+ 只进导出的凭据键**。
 
+        2026-11-04 行为变更（独立审查切片 E）：这条测试原名
+        `test_export_scope_is_all_credential_fields`，钉的是「导出清单恰好等于
+        `CREDENTIAL_FIELDS` 的五个名字」。`cookies` 被加进
+        `EXPORT_ONLY_EXTRA_KEYS` 之后它转红 —— 那是**预期**：cookies 是会话凭据
+        （`SENSITIVE_EXTRA_KEYS` 里与 AT 同级），往返丢了就等于丢一个能免密续
+        会话的凭据；但它**不**进 `CREDENTIAL_FIELDS`，因为那张表同时驱动面板的
+        比对与推送，加字段会改变推送范围。
+
+        按 TDD 的规矩改写为钉新规则并改名，不删：五个比对字段仍在，额外的键
+        必须**恰好**是 `EXPORT_ONLY_EXTRA_KEYS`（多了少了都要红）。
+        """
+        from core.credential_fields import EXPORT_ONLY_EXTRA_KEYS, export_names
+
+        # 期望值写**字面量**，不用符号 —— 否则「往清单里加一个键」这种变异会让
+        # 断言跟着常量一起动，测试永远绿（TDD skill 里点名的
+        # 「asserting a constant against itself」）。
         self.assertEqual(
             set(export_names()),
-            {"access_token", "refresh_token", "id_token", "session_token", "sso"},
+            {
+                "access_token", "refresh_token", "id_token", "session_token", "sso",
+                "cookies",
+            },
         )
 
 
@@ -497,3 +516,10 @@ class TokenColumnMigrationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+    def test_export_only_keys_are_exactly_cookies(self):
+        """额外键的**清单本身**也要钉住 —— 上面那条断言的是字面量集合，
+        这条保证常量没被顺手扩成别的凭据（比如把 password 塞进导出）。"""
+        from core.credential_fields import EXPORT_ONLY_EXTRA_KEYS
+
+        self.assertEqual(EXPORT_ONLY_EXTRA_KEYS, ("cookies",))
