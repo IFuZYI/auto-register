@@ -92,9 +92,20 @@ def sync_aliases() -> tuple[tuple[str, ...], ...]:
     return tuple(item.aliases for item in CREDENTIAL_FIELDS)
 
 
+#: 只参与**导出/导入**、不参与面板比对/同步的凭据键。
+#:
+#: `cookies` 是会话凭据（`credential_crypto.SENSITIVE_EXTRA_KEYS` 的注释写得很
+#: 清楚：带着它就能免密续上已登录会话，与 AT 同级），但它不在 `CREDENTIAL_FIELDS`
+#: 里 —— 那张表同时驱动面板的比对与推送，往里加字段会改变推送范围。
+#: 而导出/导入只经 `export_names()`（`services/account_export` 与 `api/accounts.py`
+#: 两处），所以单独列在这里：**往返不丢，推送范围不变**。
+#: （2026-11-04 独立审查，切片 E：此前 `导出 → 导入` 会静默丢掉 cookies。）
+EXPORT_ONLY_EXTRA_KEYS: tuple[str, ...] = ("cookies",)
+
+
 def export_names() -> list[str]:
     """导出/导入覆盖的规范名清单（含 sso —— 整理前缺失导致往返丢 SSO）。"""
-    return [item.name for item in CREDENTIAL_FIELDS]
+    return [item.name for item in CREDENTIAL_FIELDS] + list(EXPORT_ONLY_EXTRA_KEYS)
 
 
 def first_present(extra: Mapping[str, Any], aliases: tuple[str, ...]) -> str:

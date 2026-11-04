@@ -182,7 +182,14 @@ def _render_json(accounts: Sequence[Any]) -> str:
         extra = _extra_of(account)
         rows.append(
             {
-                field_id: EXPORT_FIELDS[field_id].read(account, extra)
+                # `export_names()` 里可能含**只在 extra 里**的键（如 `cookies`，
+                # 见 `credential_fields.EXPORT_ONLY_EXTRA_KEYS`）—— 它们没有
+                # `EXPORT_FIELDS` 读取器，直接从 extra 取值。
+                field_id: (
+                    EXPORT_FIELDS[field_id].read(account, extra)
+                    if field_id in EXPORT_FIELDS
+                    else str(extra.get(field_id) or "")
+                )
                 for field_id in (
                     "platform",
                     "email",
