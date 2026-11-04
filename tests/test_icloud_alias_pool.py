@@ -648,3 +648,44 @@ def test_pool_summary_folds_unknown_status_into_available(icloud_db):
 
     assert summary[POOL_STATUS_AVAILABLE] == 2
     assert summary["total"] == 2
+
+
+def test_concurrent_claims_never_hand_out_the_same_alias(icloud_db):
+    """4 个线程同时抢同一个主号的号池：**不许双发**同一个地址。
+
+    2026-11-04 独立审查（切片 F）：把 `claim_alias` 的
+    `with _facade._account_lock(account_id):` 改成 `if True:`（等价删掉互斥），
+    61 条相关测试仍然全绿 —— 这条不变量此前没有任何守卫。
+
+    这条是**真实并发**的冒烟（靠调度窗口，不保证每次都能撞上竞态）；
+    确定性版本在 `tests/test_icloud_claim_holds_the_lock.py`
+    （断言「读池子时锁已被持有」）。两条互补：一条钉机制，一条钉结果。
+    """
+    import threading
+
+    from services import icloud_service
+
+    _seed_alias(icloud_db, address="race@icloud.com", pool_status=POOL_STATUS_AVAILABLE)
+
+    results: list[str] = []
+    errors: list[BaseException] = []
+    barrier = threading.Barrier(4)
+
+    def _worker():
+        try:
+            barrier.wait(timeout=10)
+            row = icloud_service.claim_alias(1)
+            results.append(str((row or {}).get("address") or ""))
+        except BaseException as exc:  # noqa: BLE001 - 收集后统一断言
+            errors.append(exc)
+
+    threads = [threading.Thread(target=_worker) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+
+    claimed = [a for a in results if a]
+    assert claimed, f"四个线程一个都没领到号（errors={errors!r}）"
+    assert len(claimed) == len(set(claimed)), f"同一个地址被发给了多个调用方: {claimed}"
+    assert claimed.count("race@icloud.com") == 1, "池里那个号只能被领走一次"
