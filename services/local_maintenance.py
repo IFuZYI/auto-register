@@ -21,6 +21,8 @@
 
 from __future__ import annotations
 
+import math
+
 import random
 import time
 from dataclasses import dataclass
@@ -119,7 +121,12 @@ def parse_interval(value: Any) -> int:
         amount = float(number)
     except (TypeError, ValueError):
         return 0
-    if amount <= 0:
+    # `nan` / `inf` / `infinity` / `1e999` 都能通过 `amount <= 0`（nan 的比较恒为
+    # False），然后在 `int()` 上炸 —— 而本函数的契约是「**返回 0 而不是抛异常**」
+    # （2026-11-04 独立审查，切片 D）。维护间隔是用户在文本框里随便填的，
+    # 填 `inf` 会让三个 interval getter 直接抛，只在调度器的宽 except 里被吞成
+    # 「本次不跑」→ 该定时任务**静默永久失效**，日志里只有一条 debug。
+    if amount <= 0 or not math.isfinite(amount):
         return 0
     seconds = int(amount * unit)
     return max(MIN_INTERVAL_SECONDS, min(MAX_INTERVAL_SECONDS, seconds))

@@ -45,6 +45,9 @@ def env_number(
         return default
     # 按默认值的类型收口：默认是 int 就取整，默认是 float 就转 float。
     try:
+        # `OverflowError` 必须一起捕（2026-11-04 独立审查，切片 D）：
+        # `type(default)(inf)` 会抛，而本模块存在的全部意义就是
+        # 「env 写错不许在 import 期炸掉整个平台」——漏掉它，这个契约就漏了一个角。
         return type(default)(value) if default is not None else value
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return default

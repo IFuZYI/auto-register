@@ -598,3 +598,41 @@ class MaintenancePanelFrontendTests(unittest.TestCase):
         src = self._src()
         for default in ("'6h'", "'24h'"):
             self.assertIn(default, src, f"缺少默认间隔 {default}")
+
+
+class ParseIntervalNeverRaisesTests(unittest.TestCase):
+    """`parse_interval` 的 docstring 承诺「非法值返回 0」，但对 nan/inf 会抛异常。
+
+    2026-11-04 独立审查（切片 D）实测：`nan` / `inf` / `infinity` / `1e999`
+    都能通过 `amount <= 0` 那道检查（nan 的比较恒为 False），然后在
+    `int(amount * unit)` 上炸（`ValueError: cannot convert float NaN to integer`
+    / `OverflowError: cannot convert float infinity to integer`）。
+
+    维护间隔是**用户可自由输入的配置串**（界面就是文本框）。填 `inf` 会让
+    `get_auto_probe_interval_seconds` / `get_auto_refresh_interval_seconds` /
+    `get_log_cleanup_interval_seconds` 直接抛，而它们只在 `core/scheduler.py`
+    的宽 except 里被吞成「本次不跑」→ **该定时任务静默永久失效**，日志里
+    只有一条 debug，排查时看不到任何报错。
+    """
+
+    def test_non_finite_values_return_zero_instead_of_raising(self):
+        from services.local_maintenance import parse_interval
+
+        for raw in ("nan", "NaN", "inf", "-inf", "infinity", "Infinity", "1e999", "1e-999"):
+            with self.subTest(raw=raw):
+                self.assertEqual(
+                    parse_interval(raw), 0,
+                    f"{raw!r} 必须按「非法值」返回 0，而不是抛异常",
+                )
+
+    def test_normal_values_still_work(self):
+        """对照组：正常值与既有钳制不能被这条修复弄坏。"""
+        from services.local_maintenance import parse_interval
+
+        self.assertEqual(parse_interval("5m"), 300)
+        # 单位只有 m/h/d（`INTERVAL_UNITS`），`"299s"` 不是合法格式 → 0。
+        # 审查报告里写的「299s=300」不成立，这里按真实设计钉。
+        self.assertEqual(parse_interval("1m"), 300, "低于下限抬到 300")
+        self.assertEqual(parse_interval("60d"), 2592000, "高于上限压到 30 天")
+        self.assertEqual(parse_interval("abc"), 0)
+        self.assertEqual(parse_interval("299s"), 0, "s 不是合法单位")
