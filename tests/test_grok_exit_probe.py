@@ -478,3 +478,48 @@ class MalformedProxyMustNotAbortTheRunTests(unittest.TestCase):
         from platforms.grok import exit_probe
 
         self.assertEqual(exit_probe._normalized("socks5://u:p@h:1080"), "socks5h://u:p@h:1080")
+
+
+class BadEnvMustNotBreakImportTests(unittest.TestCase):
+    """一个写错的 env 值不能让**整个平台 import 不了**。
+
+    2026-11-04 独立审查（切片 A1）：`REACH_MAX_SECONDS` / `MIN_FREE_MB_FOR_MINT`
+    都是在**模块顶层**用 `float()`/`int()` 解析 env 的。运维在 `.env` 里写
+    `GROK_REACH_MAX_SECONDS=8s`（很自然的笔误）→ `ValueError` 发生在 import 期
+    → `platforms.grok` 整个加载失败，注册入口直接消失，而且报错位置跟「代理/注册」
+    毫无关系，极难定位。
+    """
+
+    def _value_after_reload(self, module_name, attr, env):
+        """在 env 生效**期间**读值并返回。
+
+        注意 `importlib.reload` 是**原地改写**模块对象 —— 先 reload 拿到模块、
+        退出 with 再还原、然后才读属性，读到的是还原后的值（这个夹具第一版
+        就栽在这儿：`8.0 != 5.0`，看着像生产代码不认 env，其实是测试自己读晚了）。
+        """
+        import importlib
+        import os
+        from unittest.mock import patch
+
+        mod = importlib.import_module(module_name)
+        try:
+            with patch.dict(os.environ, env):
+                return getattr(importlib.reload(mod), attr)
+        finally:
+            importlib.reload(mod)  # 还原成正常 env 下的模块状态
+
+    def test_bad_reach_max_seconds_falls_back_to_default(self):
+        got = self._value_after_reload("platforms.grok.exit_probe", "REACH_MAX_SECONDS",
+                                      {"GROK_REACH_MAX_SECONDS": "8s"})
+        self.assertEqual(got, 8.0, "解析不了就退回默认值，而不是 import 失败")
+
+    def test_bad_mint_min_free_mb_falls_back_to_default(self):
+        got = self._value_after_reload("platforms.grok.turnstile_mint", "MIN_FREE_MB_FOR_MINT",
+                                      {"GROK_MINT_MIN_FREE_MB": "200MB"})
+        self.assertEqual(got, 200)
+
+    def test_good_env_value_is_honoured(self):
+        """对照组：合法的值必须生效 —— 别把这条修复做成「永远用默认值」。"""
+        got = self._value_after_reload("platforms.grok.exit_probe", "REACH_MAX_SECONDS",
+                                      {"GROK_REACH_MAX_SECONDS": "5"})
+        self.assertEqual(got, 5.0)

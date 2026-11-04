@@ -28,6 +28,8 @@ curl 缺失、DNS 挂了，都按「不知道 → 放行」处理。
 """
 from __future__ import annotations
 
+from core.env_utils import env_number
+
 import json
 import logging
 import os
@@ -165,7 +167,9 @@ REACH_TIMEOUT = 12
 #: 单次探测的**延迟门槛**（秒）。超过它就算「太慢」：浏览器要拉全量 JS 过
 #: Cloudflare 挑战，curl 都慢到 8 秒的出口一定会以 `Page.goto: Timeout 70000ms`
 #: 收场（2026-11-02 实测：curl 探通的出口在浏览器里两轮都打开超时）。
-REACH_MAX_SECONDS = float(os.getenv("GROK_REACH_MAX_SECONDS", "8") or 8)
+#: 用 `env_number` 而不是裸 `float(os.getenv(...))`：写错的值不许在 import 期
+#: 把整个 `platforms.grok` 弄挂（见 `core/env_utils` 的模块 docstring）。
+REACH_MAX_SECONDS = env_number("GROK_REACH_MAX_SECONDS", 8.0)
 
 
 def probe_reachable(

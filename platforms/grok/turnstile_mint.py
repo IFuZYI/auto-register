@@ -11,6 +11,8 @@
 """
 from __future__ import annotations
 
+from core.env_utils import env_number
+
 import logging
 
 logger = logging.getLogger(__name__)
@@ -221,7 +223,7 @@ _MINT_LOCK = threading.Lock()
 #: 也不要为了补一张票把整个服务搞崩。默认 200MB：本机（2GB RAM）空载时
 #: MemAvailable 也只有 ~300MB，阈值定太高会等于永久关掉内建铸币。
 #: 可用 `GROK_MINT_MIN_FREE_MB` 覆盖（调小=更激进，调大=更保守）。
-MIN_FREE_MB_FOR_MINT = int(os.getenv("GROK_MINT_MIN_FREE_MB", "200") or 200)
+MIN_FREE_MB_FOR_MINT = env_number("GROK_MINT_MIN_FREE_MB", 200, cast=int)
 
 
 def _available_mb() -> int:
