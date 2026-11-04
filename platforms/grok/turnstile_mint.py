@@ -253,17 +253,22 @@ def mint_via_offscreen_chrome(
     if not _SCRIPT_PATH.exists():
         raise RuntimeError(f"未找到 mint 脚本: {_SCRIPT_PATH}")
 
-    free_mb = _available_mb()
-    if free_mb < MIN_FREE_MB_FOR_MINT:
-        # 内存不够就别起 Chromium：宁可这一轮没票，也不要 OOM 掉整个服务
-        # （2026-11-02 实测：3 个并发注册 + 铸币把 2GB 的机器打爆）。
-        raise RuntimeError(
-            f"可用内存不足（{free_mb}MB < {MIN_FREE_MB_FOR_MINT}MB），跳过屏外铸币"
-        )
-
-    chrome = find_chrome()
-    last_err = ""
+    # 内存闸门必须**在锁内**判定（2026-11-04 独立审查）：
+    # 闸门保护的是「同时有几个 Chromium 在跑」，而锁才是那个「同时」的定义。
+    # 放在锁外时，N 个并发注册会**同时**看到「内存够」全部通过，然后排队进锁
+    # 逐个起浏览器 —— 闸门等于没判定（2026-11-02 18:25 那次 2GB 机器被 3 个
+    # 并发铸币打爆，就是这个形状）。
     with _MINT_LOCK:
+        free_mb = _available_mb()
+        if free_mb < MIN_FREE_MB_FOR_MINT:
+            # 内存不够就别起 Chromium：宁可这一轮没票，也不要 OOM 掉整个服务。
+            # 在锁内抛异常是安全的：`with` 会先放锁再往外抛。
+            raise RuntimeError(
+                f"可用内存不足（{free_mb}MB < {MIN_FREE_MB_FOR_MINT}MB），跳过屏外铸币"
+            )
+        # 找浏览器是廉价本地查找，但放在闸门**之后**：内存都不够时连找都不用找
+        # （既有测试 `test_low_memory_skips_without_spawning_chrome` 钉的就是这条）。
+        chrome = find_chrome()
         return _mint_offscreen_locked(site_key, page_url, proxy, timeout, retries, log, chrome)
 
 

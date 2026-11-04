@@ -281,3 +281,71 @@ class OffscreenMintResourceGuardTests(unittest.TestCase):
                 th.join()
 
         self.assertEqual(active["max"], 1, "铸币必须串行（同时起多个 Chromium 会 OOM）")
+
+
+class MemoryGateMustRunInsideTheMintLockTests(unittest.TestCase):
+    """内存闸门必须在**持锁之后**判定。
+
+    2026-11-04 独立审查（切片 A1）：`mint_via_offscreen_chrome` 先读
+    `_available_mb()` 判断「内存够不够」，**然后**才 `with _MINT_LOCK`。于是 N 个
+    并发注册在锁外**同时**看到「内存够」全部通过闸门，接着排队进锁逐个起
+    Chromium —— 闸门保护的正是「同时起几个 Chromium」，锁外判定等于没判定
+    （2026-11-02 18:25 那次 2GB 机器被 3 个并发铸币打爆，就是这个形状）。
+
+    这里不靠线程调度（那要靠运气），而是用一个记录「何时被持有」的假锁 +
+    一个记录「调用时锁是否被持有」的假内存探针，**确定性地**断言顺序。
+    """
+
+    class _Lock:
+        def __init__(self):
+            self.held = False
+
+        def __enter__(self):
+            self.held = True
+            return self
+
+        def __exit__(self, *exc):
+            self.held = False
+            return False
+
+    class _ScriptPath:
+        def exists(self):
+            return True
+
+    def test_memory_is_probed_while_the_lock_is_held(self):
+        from platforms.grok import turnstile_mint as tm
+
+        lock = self._Lock()
+        probes: list[bool] = []
+
+        def _probe():
+            probes.append(lock.held)
+            return 10**6  # 内存充足，放行到下一关
+
+        def _stop(*_a, **_k):
+            raise RuntimeError("到这里就够了（只想看顺序）")
+
+        with patch.object(tm, "_MINT_LOCK", lock), \
+                patch.object(tm, "_SCRIPT_PATH", self._ScriptPath()), \
+                patch.object(tm, "_available_mb", _probe), \
+                patch.object(tm, "find_chrome", lambda: "/usr/bin/chrome"), \
+                patch.object(tm, "_mint_offscreen_locked", _stop):
+            with self.assertRaises(RuntimeError):
+                tm.mint_via_offscreen_chrome("site-key", "https://example.com/page")
+
+        self.assertEqual(probes, [True], "内存闸门必须在**持锁之后**判定，否则并发全都能过")
+
+    def test_low_memory_still_refuses_inside_the_lock(self):
+        """对照组：闸门本身还在 —— 内存不足时照样拒绝，且拒绝时已经放锁。"""
+        from platforms.grok import turnstile_mint as tm
+
+        lock = self._Lock()
+        with patch.object(tm, "_MINT_LOCK", lock), \
+                patch.object(tm, "_SCRIPT_PATH", self._ScriptPath()), \
+                patch.object(tm, "_available_mb", lambda: 1), \
+                patch.object(tm, "find_chrome", lambda: "/usr/bin/chrome"):
+            with self.assertRaises(RuntimeError) as ctx:
+                tm.mint_via_offscreen_chrome("site-key", "https://example.com/page")
+
+        self.assertIn("内存不足", str(ctx.exception))
+        self.assertFalse(lock.held, "抛异常时锁必须已经放掉，否则后续铸币全被卡死")
