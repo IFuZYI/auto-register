@@ -196,6 +196,15 @@ def _render_json(accounts: Sequence[Any]) -> str:
                     "password",
                     "totp_secret",
                     *export_names(),
+                    # 2026-11-04 独立审查（切片 E，L3）：这三个字段此前**不导出**，
+                    # 而 `api/accounts.py` 的 JSON 导入端专门有
+                    # `for column in ("user_id", "region", "status", "cashier_url")`
+                    # 的分支 —— 导入端准备接收、导出端从来不写，那些分支对本仓库
+                    # 自己的格式是**死的**。结果：往返后 user_id/region/cashier_url
+                    # 全变空串，`created: 1` 且无任何提示。
+                    "user_id",
+                    "region",
+                    "cashier_url",
                     "status",
                     "created_at",
                 )
