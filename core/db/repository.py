@@ -457,11 +457,21 @@ class AccountRepository:
         import json as _json
         from datetime import datetime, timezone
 
+        from core.credential_crypto import encrypt_extra
+
         account_id_text = str(account_id or "").strip()
         platform_text = str(platform or "").strip()
         if not account_id_text:
             return False
-        payload = _json.dumps(extra or {}, ensure_ascii=False)
+        # **写库前必须加密**（2026-11-04 独立审查，切片 D）。
+        #
+        # 调用方交进来的是 `row.get_extra()` —— 一份**已解密的明文视图**
+        # （见 proxy_pool.rebind/rebalance、chatgpt_two_factor 的 journal 恢复、
+        # task_runners 回写 register_proxy）。这里直接 `json.dumps` 就把它原样
+        # 写回 `extra_json`，等于每「只改一个键」就把 AT/RT/IDT/ST/SSO/totp/cookies
+        # 全部还原成明文 —— 与之前修过的「导入更新分支裸赋 extra_json」同型，
+        # 只是换到了仓储层。`encrypt_extra` 对已加密值幂等，重复调用安全。
+        payload = _json.dumps(encrypt_extra(extra or {}), ensure_ascii=False)
 
         store = AccountRepository._json_store()
         if store is not None:
@@ -553,7 +563,14 @@ class AccountRepository:
             ),
             "user_id": str(getattr(model, "user_id", "") or ""),
             "region": str(getattr(model, "region", "") or ""),
-            "token": str(getattr(model, "token", "") or ""),
+            # 与 password 同理（2026-11-04 独立审查，切片 D）：`token` 是**透明
+            # 解密**的 property，取它等于把 AT/SSO 明文写进 accounts.json ——
+            # 隔壁 password 早就用了 `password_cipher`，这里漏了。
+            "token": str(
+                getattr(model, "token_cipher", None)
+                or getattr(model, "token", "")
+                or ""
+            ),
             "status": str(getattr(model, "status", "") or ""),
             "extra_json": str(getattr(model, "extra_json", "") or "{}"),
             "cashier_url": str(getattr(model, "cashier_url", "") or ""),
