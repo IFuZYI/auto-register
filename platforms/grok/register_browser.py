@@ -201,7 +201,11 @@ def _browser_pid(browser: Any) -> int | None:
             pid = int(obj)
             if pid > 0:
                 return pid
-        except Exception:  # noqa: BLE001 - 内部结构可能变，拿不到就算了
+        except Exception as exc:  # noqa: BLE001 - 内部结构可能变，拿不到就算了
+            # 必须**绑定并记录**：裸 `except Exception:` 会把「拿不到 pid」这件事
+            # 完全吞掉，而看门狗正是靠这个 pid 才能强制结束卡死的浏览器 ——
+            # 静默失败等于超时保护失效（质量门禁 `test_no_new_unbound_broad_except` 拦住）。
+            logger.debug("从浏览器对象上取 pid 失败（%s）: %s", ".".join(path), exc)
             continue
     return None
 
