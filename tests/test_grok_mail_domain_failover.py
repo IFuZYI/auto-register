@@ -99,7 +99,13 @@ class FailoverExtraAttemptTests(unittest.TestCase):
 
     def test_round_mailbox_uses_the_failover_provider(self):
         src = inspect.getsource(task_runners._run_register)
-        self.assertIn("_build_mailbox(_proxy, provider=round_mail_provider)", src)
+        # **不钉调用点的字面形状**（2026-11-04）：原来这里断言的是
+        # `"_build_mailbox(_proxy, provider=round_mail_provider)"` 整串 ——
+        # 连 `)` 的位置都被钉住，于是任何「再加一个 kwarg」的自然写法都会红。
+        # 实测代价：为了让这一条保持绿，上一轮把 `_build_mailbox` 做成了
+        # 循环内闭包来绕开它。这里只断言**语义**：建池要拿本轮的渠道。
+        self.assertIn("_build_mailbox(", src)
+        self.assertIn("provider=round_mail_provider", src)
         self.assertIn("round_mail_provider", src)
 
     # 2026-11-04：`test_failover_requires_an_available_alternate_pool` 同样是
@@ -173,7 +179,13 @@ class ForcedProviderMustWinTests(unittest.TestCase):
         所以按 TDD skill 的例外条款保留源码断言，并注明它守的是哪一行。
         """
         src = inspect.getsource(task_runners._run_register)
-        self.assertIn("_build_mailbox(_proxy, provider=round_mail_provider)", src)
+        # **不钉调用点的字面形状**（2026-11-04）：原来这里断言的是
+        # `"_build_mailbox(_proxy, provider=round_mail_provider)"` 整串 ——
+        # 连 `)` 的位置都被钉住，于是任何「再加一个 kwarg」的自然写法都会红。
+        # 实测代价：为了让这一条保持绿，上一轮把 `_build_mailbox` 做成了
+        # 循环内闭包来绕开它。这里只断言**语义**：建池要拿本轮的渠道。
+        self.assertIn("_build_mailbox(", src)
+        self.assertIn("provider=round_mail_provider", src)
         # 决策本身必须来自那个被测函数，不能再内联回三条语句
         self.assertIn("_resolve_round_mail_provider(", src)
 

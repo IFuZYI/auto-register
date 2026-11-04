@@ -140,18 +140,25 @@ class MailboxUsesTheRoundExtraTests(unittest.TestCase):
         )
 
     def test_mailbox_builder_passes_the_round_extra_to_create_mailbox(self):
-        """建池那一次 `create_mailbox(..., extra=…)` 必须传本轮 `merged_extra`。"""
+        """建池必须把**本轮** `merged_extra` 接进去。
+
+        断言的是语义（本轮 extra 确实接到了建池那一路），**不钉具体写法** ——
+        闭包捕获或调用点显式传 kwarg 都算。上一版这里用
+        `re.search(r"extra=merged_extra,\s*\n\s*proxy=proxy,")` 钉住了闭包内部的
+        文本，等于把「绕过调用点钉子」这个权宜写法也一起冻结了（2026-11-04）。
+        """
         src = self._src()
-        self.assertIsNotNone(
-            re.search(r"extra=merged_extra,\s*\n\s*proxy=proxy,", src),
-            "create_mailbox 的 extra 必须是本轮的 merged_extra",
+        self.assertTrue(
+            ("extra=merged_extra" in src) or ("else merged_extra" in src),
+            "建池那一路没有接本轮 merged_extra —— 会回落到共享的 _base_extra",
         )
 
-    def test_the_call_site_shape_is_preserved(self):
-        """调用点保持字面形状（另一个测试文件把这一行钉住了）。"""
-        self.assertIn(
-            "_build_mailbox(_proxy, provider=round_mail_provider)", self._src()
-        )
+    # 2026-11-04 删除 `test_the_call_site_shape_is_preserved`：
+    # 它唯一的断言是 `assertIn("_build_mailbox(_proxy, provider=round_mail_provider)")`
+    # —— 存在意义就是「保住那个为了绕开别处字面钉子而做的闭包写法」。
+    # 它把**权宜之计**当成了契约：把实现改回自然写法（调用点显式传
+    # `extra=merged_extra`）时，它会红。契约应该是「建池吃本轮的 extra」，
+    # 那一条由上面那条语义断言 + `test_mailbox_builder_no_longer_falls_back_to_the_shared_base_extra` 守着。
 
 
 class GiveUpMessageCountsRealExitsTests(unittest.TestCase):

@@ -271,6 +271,30 @@ def _resolve_round_mail_provider(
     return failover
 
 
+def _build_mailbox(
+    proxy: Optional[str],
+    provider: Optional[str] = None,
+    extra: Optional[dict] = None,
+):
+    """按**本轮**的渠道与 extra 建邮箱池。
+
+    不给兜底 provider：用户要求默认留空、必须显式选。空串会让 `create_mailbox`
+    抛「未知邮箱提供商」并列出可用渠道，比悄悄用某个号池更安全。
+
+    `extra` 必须是**本轮**的（调用方传 `merged_extra`）—— 本轮渠道覆盖写在那里；
+    传共享的 `_base_extra` 今天不出 bug 只是因为 `create_mailbox` 会拷贝，属于
+    「靠巧合正确」（独立审查 2026-11-04）。
+    """
+    from modules.mail import create_mailbox
+
+    extra = extra if extra is not None else {}
+    return create_mailbox(
+        provider=provider if provider is not None else extra.get("mail_provider", ""),
+        extra=extra,
+        proxy=proxy,
+    )
+
+
 def _pick_usable_exit(
     proxy: str, *, task_id: str, extra: dict, log, get_next, report_bad, normalize
 ) -> str:
@@ -638,19 +662,6 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
                 # 2026-11-04）。所以把建池收敛成**每轮闭包**，直接捕获本轮
                 # `merged_extra`；调用点保持 `_build_mailbox(_proxy,
                 # provider=round_mail_provider)` 不变。
-                def _build_mailbox(proxy: Optional[str], provider: Optional[str] = None):
-                    # 不给兜底 provider：用户要求默认留空、必须显式选。空串会让
-                    # create_mailbox 抛「未知邮箱提供商」并列出可用渠道，比悄悄
-                    # 用某个号池更安全。
-                    return create_mailbox(
-                        provider=(
-                            provider if provider is not None
-                            else merged_extra.get("mail_provider", "")
-                        ),
-                        extra=merged_extra,
-                        proxy=proxy,
-                    )
-
                 _config = RegisterConfig(
                     executor_type=req.executor_type,
                     captcha_solver=req.captcha_solver,
@@ -661,7 +672,9 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
                 # 用到，还会因为全局默认渠道（`mail_provider`，默认留空）报
                 # 「未配置邮箱服务」而直接失败。
                 if getattr(PlatformCls, "uses_mailbox", True):
-                    _mailbox = _build_mailbox(_proxy, provider=round_mail_provider)
+                    _mailbox = _build_mailbox(
+                        _proxy, provider=round_mail_provider, extra=merged_extra
+                    )
                 else:
                     _mailbox = None
                 _platform = PlatformCls(config=_config, mailbox=_mailbox)
