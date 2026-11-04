@@ -1651,11 +1651,61 @@ class InPageMintJsMustNotBlockTests(unittest.TestCase):
     （control.checkpoint 根本没机会跑）。
     """
 
-    def test_injection_defers_work_and_returns_immediately(self):
+    @staticmethod
+    def _set_timeout_spans(js: str) -> list[tuple[int, int]]:
+        """所有 `setTimeout(...)` 调用的区间（含括号配对）。"""
+        spans = []
+        start = 0
+        while True:
+            at = js.find("setTimeout(", start)
+            if at < 0:
+                return spans
+            depth, i = 0, at + len("setTimeout")
+            while i < len(js):
+                if js[i] == "(":
+                    depth += 1
+                elif js[i] == ")":
+                    depth -= 1
+                    if depth == 0:
+                        spans.append((at, i))
+                        break
+                i += 1
+            start = at + 1
+
+    def test_every_render_call_is_inside_a_set_timeout(self):
+        """**每一个** `turnstile.render(` 都必须落在某个 `setTimeout(...)` 里。
+
+        2026-11-04 独立审查（切片 A2）：原来这条只比较
+        `js.index("setTimeout(") < js.index("window.turnstile.render(d,")` ——
+        两个都取**首次出现**。在 setTimeout 块之后同步加一句
+        `window.turnstile.render(d, {sitekey: siteKey});`（正是测试 docstring 说
+        必须禁止的「页面主线程被挑战脚本占着 → evaluate 永不返回」那种写法），
+        首次出现的位置关系不变，测试照样绿。
+
+        改成结构化判定：括号配对求出每个 setTimeout 的区间，断言**所有**
+        render 调用都在某个区间内，且至少存在一个（否则断言空洞）。
+        """
         from platforms.grok import turnstile_mint as tm
 
         js = tm._IN_PAGE_RENDER_JS
         self.assertIn("setTimeout(", js, "必须把渲染/加载丢进 setTimeout")
         self.assertIn('return "scheduled"', js, "evaluate 必须立刻返回")
-        # 同步 render 不能出现在 setTimeout 之外（粗略但有效的形态检查）：
-        self.assertLess(js.index("setTimeout("), js.index("window.turnstile.render(d,"))
+
+        spans = self._set_timeout_spans(js)
+        self.assertTrue(spans, "没解析出任何 setTimeout 区间，测试会变成空洞")
+
+        renders = []
+        start = 0
+        while True:
+            at = js.find("turnstile.render(", start)
+            if at < 0:
+                break
+            renders.append(at)
+            start = at + 1
+        self.assertTrue(renders, "脚本里应当至少有一次 render 调用")
+
+        outside = [at for at in renders if not any(lo <= at <= hi for lo, hi in spans)]
+        self.assertEqual(
+            outside, [],
+            f"这些 render 调用在 setTimeout 之外（会阻塞 evaluate）：位置 {outside}",
+        )
