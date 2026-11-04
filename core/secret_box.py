@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import logging
 import json
 import os
 import secrets
@@ -16,6 +17,8 @@ from pathlib import Path
 from typing import Any
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+logger = logging.getLogger(__name__)
 
 from core.paths import CREDENTIAL_KEY_FILE
 
@@ -80,6 +83,17 @@ def _load_or_create_key() -> bytes:
         return _decode_key(path.read_text(encoding="utf-8"))
 
     key = secrets.token_bytes(_KEY_BYTES)
+    # **必须留痕**（2026-11-04 独立审查建议）：DATA_DIR 没挂载 / 容器重建丢了卷 /
+    # 有人清了数据目录时，这里会静默新建一把密钥，重启后旧密文**全部解不开**，
+    # 而日志里一个字都没有 —— 用户看到的是「账号都在，但 AT 全失效、注册全报错」。
+    # 这类故障最难的不是「坏了」，而是「坏了却没有任何线索指向密钥」。
+    # 首次部署也会打这一条：可接受的噪声，换来故障时的唯一线索。
+    logger.warning(
+        "凭据加密密钥文件不存在，已新建一把：%s —— 如果这个数据目录里已有旧数据，"
+        "那些密文将无法解密（账号的 AT/RT/SSO/cookies 会全部失效）。"
+        "请确认 DATA_DIR 挂载正确，或从备份恢复该密钥文件。",
+        path,
+    )
     path.parent.mkdir(parents=True, exist_ok=True)
     # 先以 0600 创建再写入，避免密钥短暂地对其他用户可读。
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
