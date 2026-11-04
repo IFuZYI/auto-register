@@ -1265,17 +1265,6 @@ def wait_for_code_or_profile(page: Any, *, timeout: float = 60.0, poll: float = 
         time.sleep(poll)
 
 
-def wait_for_code_input(page: Any, *, timeout: float = 60.0, poll: float = 0.5) -> bool:
-    """等验证码框出现（多选择器兜底，见 `CODE_INPUT_CANDIDATES`）。"""
-    deadline = time.monotonic() + max(0.0, float(timeout))
-    while True:
-        if find_code_input(page):
-            return True
-        if time.monotonic() >= deadline:
-            return False
-        time.sleep(poll)
-
-
 def find_code_input(page: Any) -> str:
     """返回**当前页面上真的存在**的验证码框选择器（都没有则空串）。
 
@@ -1373,9 +1362,6 @@ def enter_code(
     return False
 
 
-def wait_for_code_input(page: Any, *, timeout: float = 90.0, poll: float = 1.0,
-                        sleep: Callable | None = None) -> bool:
-    return wait_for_selector(page, CODE_INPUT, timeout=timeout, poll=poll, sleep=sleep)
 
 
 def wait_for_profile_form(page: Any, *, timeout: float = 60.0, poll: float = 1.0,

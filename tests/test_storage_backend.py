@@ -308,12 +308,14 @@ class ConfigStoreSwitchesBackendTests(unittest.TestCase):
         # （实测：12 个无关测试因此红）。
         #
         # 这里只替换两个方法：JSON 文件路径、SQLite 存在性。
-        with mock.patch.object(
-            type(ConfigStore), "_json_file", lambda self: self.json_path
-        ), mock.patch(
-            "core.paths.DATA_DIR", self.root
-        ):
-            store = ConfigStore()
+        # 夹具按**当前契约**改：`ConfigStore.__init__(json_path=...)` 就是
+        # 官方留的测试入口（docstring：「`backend` / `json_path` 只给测试用」）。
+        # 原来 patch 的 `type(ConfigStore)._json_file` 现在是 property，
+        # `mock.patch.object` 打不上 —— 这条测试在被同名类覆盖、从未执行的那段
+        # 时间里腐烂了（2026-11-04 恢复时实测 `AttributeError: ... _json_file`）。
+        # 断言意图不变：写入前后后端判定必须一致。
+        with mock.patch("core.paths.DATA_DIR", self.root):
+            store = ConfigStore(json_path=self.json_path)
             first = store._backend_name()
             store.set("k", "v")
             second = store._backend_name()
@@ -326,7 +328,7 @@ if __name__ == "__main__":
     unittest.main()
 
 
-class ConfigStoreWorksOnBothBackendsTests(unittest.TestCase):
+class ConfigStoreWorksOnBothBackendsAfterSwitchTests(unittest.TestCase):
     """配置存储必须两种后端都能跑 —— 这是业务层接线的第一个领域。
 
     配置是最小、最独立的领域（只有 get/set/get_all/delete 四个操作），
@@ -409,7 +411,7 @@ class ConfigStoreWorksOnBothBackendsTests(unittest.TestCase):
             self.assertEqual(stored, expected)
 
 
-class ConfigStoreSwitchesBackendTests(unittest.TestCase):
+class ConfigStoreSwitchIsolationTests(unittest.TestCase):
     """`ConfigStore` 要能按后端切换，且**业务逻辑不受影响**。
 
     `core/config_store.py` 的 `get_all()` 里挂着三件与存储无关的事：
