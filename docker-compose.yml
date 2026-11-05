@@ -1,3 +1,14 @@
+# ── 部署硬约束：**必须单进程** ────────────────────────────────────────────────
+#
+# 不要给本服务加 `deploy.replicas` / `scale`，也不要在同一份 SQLite 数据目录上
+# 起第二个容器。iCloud 取号的互斥是 `services/icloud/_locks.py` 里的
+# **进程内** `threading.RLock` —— 两个进程各持自己那把锁，谁也挡不住谁，
+# 于是会领到**同一个隐私邮箱**，两边注册都失败且日志里看不出原因。
+#
+# 详见 docs/MAINTENANCE.md §1.6「部署约束：必须单进程」。
+# 要扩进程，先把取号换成跨进程原语（`icloud_alias_repository.update_where`
+# 的条件更新），再考虑多副本。
+#
 services:
   app:
     build:

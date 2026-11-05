@@ -1,495 +1,169 @@
 # 账号管理台
 
-多平台账号自动注册与管理系统：插件化平台层、Web 管理台、批量注册、邮箱号池、
-面板对比上传、数据一键迁移，并随后端自动拉起本地 Turnstile Solver。
+多平台账号自动注册与管理系统：插件化平台层、Web 管理台、邮箱号池、面板对比上传、
+数据一键迁移，并随后端自动拉起本地 Turnstile Solver。
 
-- **平台**：ChatGPT（纯协议，无需浏览器）、Grok（camoufox 浏览器路径）
-- **邮箱来源**：iCloud 隐私邮箱（本地）、Outlook / Hotmail（本地号池）
-- **面板对接**：CPA（CLIProxyAPI）、Sub2API、grok2api、chatgpt2api
+| 维度 | 支持 |
+| --- | --- |
+| **平台** | ChatGPT（纯协议，无需浏览器）· Grok（camoufox 浏览器路径） |
+| **邮箱来源** | iCloud 隐私邮箱（本地 / 远程仓库）· Outlook / Hotmail（本地号池） |
+| **面板对接** | CPA（CLIProxyAPI）· Sub2API · grok2api · chatgpt2api |
+| **验证码** | 本地 Turnstile Solver（Camoufox）· YesCaptcha · 手动 |
+| **手机接码** | SmsBower · HeroSMS（ChatGPT 命中 add-phone 时无人值守） |
+| **凭据加密** | AES-256-GCM，password / AT / RT / IDT / ST / SSO / 2FA / cookies 落盘即密文 |
 
-> ⚠️ 免责声明：本项目仅供学习与研究使用，不得用于任何商业用途。使用本项目所产生的一切后果由使用者自行承担。
+> ⚠️ 本项目仅供学习与研究，不得用于商业用途。使用产生的一切后果由使用者自负。
 
-## 目录
+---
 
-- [核心功能](#核心功能)
-- [部署方式](#部署方式)
-- [使用教程](#使用教程)
-- [界面导览](#界面导览)
-- [安全模型](#安全模型)
-- [常见问题排查](#常见问题排查)
-- [项目结构](#项目结构)
-- [文档索引](#文档索引)
-- [界面预览](#界面预览)
+## 快速开始
 
-## 核心功能
-
-- **多平台账号注册与管理**：统一的账号列表、详情、导入（文本 / JSON 全字段）、多格式导出、删除、批量操作
-- **批量注册**：注册数量、并发数、每个账号启动延迟、失败重试轮数；支持邮箱 / 手机 / 手机 + 邮箱三种流程
-- **邮箱号池**：iCloud 隐私邮箱（本地）与 Outlook / Hotmail（本地号池），邮箱按平台消耗；界面三态（未入池 / 已入池 / 使用中），iCloud 侧「使用中」是带续约的租约
-- **Token 生命周期**：刷新 Token、补 RT、绑定 TOTP 2FA、探测状态、检测 Plus 试用，全部跑成可停止的后台任务
-- **Token 自动维护**：定期自动刷新临期 / 过期 / 失效账号的 Token，并自动同步 chatgpt2api 凭证；检测出封禁即标注并移出队列
-- **账号状态**：正常 / 过期 / 失效 / 禁用四档，封禁靠登录链发掘（详见[功能详解](docs/FEATURES.md)）
-- **代理能力**：代理池轮询与健康检查；账号保留注册代理，复用时优先走同一个出口
-- **面板对比**：本地 ↔ 远程账号逐项比对（凭证是否一致），并在对比页直接上传 / 同步
-- **验证码支持**：YesCaptcha、本地 Turnstile Solver（Camoufox）、手动
-- **手机接码**：SmsBower / HeroSMS 自动租号收码，ChatGPT 命中 add-phone 时全程无人值守
-- **实时日志**：注册任务与批量任务的前端实时日志流（SSE），支持停止 / 跳过
-- **数据迁移**：数据与配置一键导出 / 导入（服务迁移用）
-
-平台专项能力（ChatGPT 注册协议与 Token 方案、Grok 浏览器路径、面板对接细节、
-导出格式清单）见 [功能详解](docs/FEATURES.md)。
-
-## 部署方式
-
-提供四种部署方式，按场景选择：
-
-| 方式 | 适合场景 | 需要 |
-| --- | --- | --- |
-| [Docker Compose（推荐）](#方式一docker-compose推荐) | 服务器长期运行、要持久化与自动重启 | Docker + Compose |
-| [Docker 单容器](#方式二docker-单容器) | 已有编排（1Panel / Portainer / 宝塔），或想手动控制参数 | Docker |
-| [裸机部署](#方式三裸机部署) | 本机开发、无 Docker 环境、需要改代码即跑 | Python 3.12+ / Node |
-| [开发模式](#方式四开发模式前端热更新) | 改前端代码要热更新 | 上述 + Node 18+ |
-
-> 无论哪种方式，**对外暴露前先设登录密码**（见[使用教程](#1-设置登录密码对外暴露前必做)）。
-> 完整环境变量、数据目录、反向代理要点见 [部署与配置](docs/DEPLOYMENT.md)。
-
-### 方式一：Docker Compose（推荐）
+### Docker Compose（推荐）
 
 ```bash
 git clone https://github.com/IFuZYI/auto-register.git Register && cd Register
-cp .env.example .env              # 可选：按需改端口 / 数据目录 / 镜像源
-docker compose up -d --build      # 首次构建较慢（下载依赖 + 浏览器）
-docker compose logs -f app        # 看启动日志
+cp .env.example .env          # 可选：改端口 / 数据目录 / 内存上限 / 镜像源
+docker compose up -d --build
 ```
 
-启动后访问 <http://localhost:8000>。常用管理命令：
-
-```bash
-docker compose ps                 # 状态（含 healthcheck）
-docker compose restart            # 重启
-docker compose down               # 停止（数据保留在 ./data）
-docker compose up -d --build      # 更新代码后重建
-```
-
-> ⚠️ **`restart` / `up -d --build` 会中断正在跑的注册任务**（进程被替换，任务直接
-> 报废）。操作前先到「任务运行」页确认没有进行中的任务，或用命令行检查（设了登录
-> 密码时 `/api/tasks` 需要 `Authorization` 头，检查命令见
-> [部署与配置](docs/DEPLOYMENT.md)）。任务被中断后只留启动兜底：
-> 标「任务因服务重启中断」；iCloud 别名池里持有的号由超时回收放回。
-
-要点：
-
-- **数据持久化**：所有运行数据（库 / 密钥 / 日志）在宿主机的 `./data`（由
-  `APP_RUNTIME_BIND` 可改）—— 备份/迁移就是拷这一个目录，或直接用界面里的
-  「全局配置 → 数据迁移」。
-- **端口**：`APP_PORT_BIND`（默认 `8000`）与 `SOLVER_PORT_BIND`（默认只绑本机
-  `127.0.0.1:8889`）可在 `.env` 里改，例 `APP_PORT_BIND=127.0.0.1:8000`
-  只绑本机交给反向代理。
-- **受限网络**：Docker Hub 不可达时在 `.env` 里把 `NODE_IMAGE` / `PYTHON_IMAGE`
-  换成可达镜像源再构建（模板里有示例）。
-- 面板（CPA / Sub2API / grok2api / chatgpt2api）需**自行部署在别处**，
-  本应用不安装、不启动它们。
-
-### 方式二：Docker 单容器
-
-不用 Compose、由其他编排工具管理时，直接 `docker run`：
-
-```bash
-# 1) 构建（在仓库根执行）
-docker build -t account-manager:latest .
-
-# 2) 运行
-docker run -d \
-  --name account-manager \
-  --init \
-  --restart unless-stopped \
-  -p 8000:8000 \
-  -v "$(pwd)/data:/runtime" \
-  -e DATA_DIR=/runtime \
-  -e CREDENTIAL_ENCRYPTION_KEY_FILE=/runtime/secrets/credential_key \
-  -e APP_ENABLE_SOLVER=1 \
-  -e SOLVER_BIND_HOST=0.0.0.0 \
-  -e LOCAL_SOLVER_URL=http://127.0.0.1:8889 \
-  account-manager:latest
-```
-
-- **`--init`**：容器 PID 1 需要 init 转发信号 —— 镜像 ENTRYPOINT 已用 `tini`
-  包裹，`--init` 只是双保险（compose 对应 `init: true`）。
-- **`-v ...:/runtime` 必须加**：不挂卷则每次重建容器数据全丢，且凭据加密密钥
-  重新生成会让库里已加密的凭据全部解不开。
-- 需要应用变量（`OPENAI_*` 等）时加 `--env-file .env`（文件格式与 compose 通用）。
-
-### 方式三：裸机部署
-
-#### 1. 创建并激活 Python 环境
-
-```bash
-python -m venv .venv && . .venv/bin/activate
-# 或 conda create -n account-manager python=3.12 -y && conda activate account-manager
-```
-
-#### 2. 安装后端依赖
-
-```bash
-pip install -r requirements.txt
-```
-
-#### 3. 安装浏览器相关依赖
-
-```bash
-python -m playwright install chromium
-python -m camoufox fetch
-```
-
-> 升级过 camoufox 包（pip 装新版）之后**必须重跑一次 `python -m camoufox fetch`** ——
-> 每个 camoufox 包版本钉死配套的浏览器 build。
-
-#### 4. 安装并构建前端
-
-```bash
-cd frontend
-npm install
-npm run build
-cd ..
-```
-
-构建完成后，静态资源输出到 `./static`。
-
-#### 5. 启动
-
-```bash
-python main.py
-```
-
-启动后默认访问 <http://localhost:8000>（前端由 FastAPI 直接托管，不是 `5173`）。
-
-后台长跑建议用 systemd 单元（参考 [维护手册](docs/MAINTENANCE.md) 的
-「本机部署」一节，含完整单元示例与 venv 重建步骤；手工 `nohup` 也可以，但
-**不要**用 `pkill -f main.py` 停服）：
-
-```bash
-mkdir -p data/logs   # 首次运行前建好日志目录（data/ 不进版本控制）
-nohup python main.py > data/logs/server.log 2>&1 &
-```
-
-> ⚠️ **不要用宿主工具链（如 `/root/.hermes/tools/python-*`）的解释器长期运行本
-> 服务**：工具链升级会删除旧解释器，进程持有的 CA 证书路径随之失效（症状：所有
-> 请求报 `curl: (77) error adding trust anchors`，而面板看起来一切正常）。用
-> 仓库内 `.venv` 或容器内解释器。
-
-### 方式四：开发模式（前端热更新）
-
-终端 1 启动后端（`python main.py`），终端 2：
-
-```bash
-cd frontend
-npm run dev
-```
-
-访问 <http://localhost:5173>。Vite 会把 `/api` 请求代理到本地后端 `http://localhost:8000`。
-
-Docker 部署细节、环境变量清单与 Turnstile Solver 说明见 [部署与配置](docs/DEPLOYMENT.md)。
-
-
-## 使用教程
-
-### 1. 设置登录密码（对外暴露前必做）
-
-「全局配置 → 安全」设置密码。这个面板管着账号、Token、接码 API Key、邮箱和
-代理凭据，密码是唯一的门。
-
-**没设密码时只允许本机访问**（`127.0.0.1`）：来自其他地址的 `/api/` 请求一律
-返回 503 并提示先设密码。这样「装好先在本机配」和「公网不裸奔」两件事同时成立
-—— 在此之前的行为是**直接放行**，等于把整个凭据库敞开。
-
-密码用 PBKDF2-HMAC-SHA256（600k 轮 + 每密码独立盐）存储，连续登录失败会按
-客户端退避。开了 2FA 后，TOTP 连续错 5 次会作废当次临时令牌，不能无限试码。
-
-> 老版本存的密码是无盐 SHA-256 哈希 —— **仍可正常登录**，登录成功后自动升级为
-> 新格式，不需要手动改密码。
-
-### 2. 配置邮箱来源
-
-在「邮箱服务」里维护收件来源，注册时从号池取地址：
-
-- **iCloud 隐私邮箱（本地）**：添加 Apple ID 主号（账号密码或 Cookie 导入），再批量生成隐私邮箱别名
-- **iCloud 隐私邮箱（远程）**：接入独立部署的 icloud-hme 服务（服务地址 + API 秘钥），
-  别名由该服务生成、收件也走它 —— 主号凭据不进本机库
-- **Outlook（本地）**：导入微软号池（Outlook / Hotmail / MailAPI URL 三类）
-
-> iCloud 主号与别名都带**来源标签**（本地 / 远程），列表可按来源筛选。远程同步
-> **本地优先去重**：同一个地址本地已有就保留本地那份。详见
-> [功能详解](docs/FEATURES.md#远程-icloud-仓库)。
-
-> ⚠️ **粘贴邮箱只是存进号池，不会自动可用。** 在预览表里勾选要用的邮箱、点
-> 「导入邮箱池」（状态从「未入池」转为「已入池」）之后，注册任务才能取到它们。
-
-### 3. 配置代理（可选）
-
-「代理管理」里增删代理、跑健康检查。账号会**保留注册代理**，复用时优先走同一个出口；
-无绑定或绑定失效时会在后续操作中自动补上。
-
-### 4. 注册账号
-
-「平台管理 → 选平台 → 注册」打开注册弹窗（或直连 `/register` 使用完整表单）：
-
-1. 选平台与注册方式（ChatGPT 可切「有 RT / 无 RT」、绑定 2FA、注册流程）
-2. 填数量、并发数、每个账号延迟、失败重试轮数
-3. 提交后弹出实时日志窗口，可随时停止 / 跳过当前账号
-
-### 5. 账号管理与批量操作
-
-账号列表支持搜索、状态 / Plus 试用 / 时间筛选、双击查看详情。操作菜单（单账号）
-与「更多」菜单（批量，按「所选」或「当前筛选范围」）包括：
-
-- **刷新 Token**：session → OAuth → 登录链拿 AT，真校验后才写库；只返还原 AT（未换发）会走登录流程换发，如实区分「已换发 / 无需换发」
-- **补 RT**：会话复用换 `refresh_token`，失效再走登录链
-- **绑定 2FA**：绑定后密钥可在列表标签、操作菜单、详情页三处复制
-- **探测本地状态 / 检测 Plus 试用**：写回状态与订阅结论
-- **导出 / 导入**：文本或 JSON 全字段
-
-### 6. 上传到面板
-
-在「面板管理」里配置面板地址后，用**本地 ↔ 远程对比**查看哪些号没上传、
-凭证是否一致，并在对比页直接上传 / 同步（方向严格分开，绝不拿旧凭证覆盖新的）。
-
-上传有两个入口，走同一套后端：
-
-| 入口 | 位置 | 适合 |
-| --- | --- | --- |
-| **按筛选批量上传** | 账号页「更多 → 上传到面板」 | 按状态 / 平台 / 日期挑一批号推上去 |
-| **对比页补传** | 面板页 → 状态筛选「未上传」→「上传未上传」 | 看着差异结果补 |
-
-两个入口的范围规则一致：**勾了就传勾选的，没勾传当前筛选结果**，确认弹窗会
-显示确切数量。
-
-**上传成功即「登记」**（`extra.panel_uploads[<面板>]`）：只有登记过的账号参与
-该面板的凭证同步。登记按面板独立 —— 同一个号传给 chatgpt2api 与 CPA 是两次
-独立登记，其中一个在远端被删不影响另一个（远端删号会自动撤销登记）。
-
-面板页的状态筛选同时决定**同步范围**与**可用按钮**：
-
-| 筛选 | 给的按钮 |
+| 端点 | 说明 |
 | --- | --- |
-| 未上传 | 只有「上传未上传」 |
-| 已同步 | 只有「同步远端状态」 |
-| 凭证不同 / 无法比对 / 全部 | 上传 + 更新远程 + 更新本地 + 状态同步 |
-| 仅远端 | 无（本地没有账号行） |
+| <http://localhost:8000> | 管理台（启动后先到「全局配置 → 安全」**设登录密码**） |
+| `127.0.0.1:8889` | Turnstile Solver，**无鉴权**，compose 默认只绑本机 |
 
-> 「更新远程凭证」= 推送（本地 → 远端），「更新本地凭证」= 拉回（远端 → 本地）。
-> 方向术语见 [GLOSSARY.md](GLOSSARY.md)。
+运行数据全在宿主机 `./data`（库 / 密钥 / 日志）—— 备份与迁移就是拷这一个目录。
 
-### 7. Token 自动维护
+> ⚠️ `docker compose restart` / `up -d --build` 会**中断正在跑的注册任务**。操作前先在
+> 「任务运行」页确认没有进行中的任务。
 
-「全局配置 → 面板配置」里有两个开关（默认关闭）：
+### 裸机部署
 
-- **ChatGPT Token 自动维护 → 自动刷新临期/过期/失效 Token**（`chatgpt_auto_refresh_enabled`）：
-  定期扫描 ChatGPT 账号，AT 临期（剩余 ≤ 24h）在到期前随机时刻刷新；已过期 / 已失效的
-  尽快重试；检测出封禁即标注为「禁用」并移出重试队列（封禁账号不参与凭据同步与对比）。
-- **chatgpt2api → 凭证自动维护**（`chatgpt2api_auto_sync_enabled`）：定期对比本地与
-  chatgpt2api 远端凭证，本地较新时自动推送。
+```bash
+python3 -m venv .venv && . .venv/bin/activate
+pip install -r requirements.txt
+python -m playwright install chromium && python -m camoufox fetch   # 浏览器
+cd frontend && npm install && npm run build && cd ..                # 前端 → ./static
+HOST=127.0.0.1 PORT=8000 python main.py
+```
 
-两趟维护在**有实际动作**时才创建任务记录（出现在「任务运行」页，日志逐账号可回看），
-空轮不建记录；自动刷新趟支持停止 / 跳过（在账号间隙生效），凭证同步趟是单次推送、
-不支持中途停止。
+> 不带 `HOST` 会退回 `0.0.0.0`（对外监听），本机自用请显式写 `127.0.0.1`。
+> 升级过 camoufox 包之后**必须重跑** `python -m camoufox fetch`（每个包版本钉死浏览器 build）。
 
-### 8. 备份与迁移
+开发模式（前端热更新）：后端 `python main.py`，另开终端 `cd frontend && npm run dev`，
+访问 <http://localhost:5173>（Vite 已把 `/api` 代理到 8000）。
 
-「全局配置 → 数据迁移」把数据库与凭据密钥打包成 ZIP，在另一台机器导入即完成迁移。
-细节见 [部署与配置](docs/DEPLOYMENT.md#数据目录与一键迁移)。
+---
 
-## 界面导览
+## 部署硬约束：必须单进程
 
-侧栏一级菜单（共 8 项），二级项由后端接口下发，注册表加一项前端自动多一项：
+**不要**加 `deploy.replicas` / `scale`，也不要让两个进程共用同一份 SQLite 数据目录。
 
-| 一级菜单 | 二级 | 用途 |
-| --- | --- | --- |
-| **仪表盘** | — | 账号总览与分布（总账号数 / 正常 / 失效（含过期）/ 禁用四卡） |
-| **任务运行** | — | 进行中与已完成的任务，实时日志流，可按保留期清理日志 |
-| **平台管理** | ChatGPT / Grok | 按平台的账号列表、详情、导入导出、批量操作、注册弹窗 |
-| **邮箱服务** | iCloud 隐私邮箱（本地）/ Outlook（本地） | 各邮箱来源的号池维护（iCloud 页含远程仓库接入与来源标签） |
-| **面板管理** | CPA 面板 / Sub2API / grok2api / chatgpt2api | 面板入口卡片 + 本地 ↔ 远程账号对比 |
-| **代理管理** | — | 代理池增删与健康检查 |
-| **任务历史** | — | 注册任务执行记录，支持批量删除与按保留期清理（1 天 / 1 周 / 1 月前） |
-| **全局配置** | 注册设置 / 验证码 / 手机接码 / 邮箱 / 面板配置 / 安全 / 数据迁移 | 全局默认值与集成配置 |
+iCloud 取号的互斥是**进程内** `threading.RLock`；两个进程各持各的锁，谁也挡不住谁，
+结果是**领到同一个隐私邮箱**，两边注册都失败，而日志里看不出原因。
+要扩进程，先把取号换成跨进程原语。详见 [MAINTENANCE §1.6](docs/MAINTENANCE.md)。
 
-**日常注册**从「平台管理 → 注册」按钮走弹窗即可；`/register` 是一个独立的注册任务页
-（可直连 URL 打开，表单更完整），不是侧栏入口。
-
-> 旧路径 `/platform-config`、`/icloud` 等做了重定向，老书签不会 404。
+---
 
 ## 安全模型
 
-这个面板管着一整个账号池的凭据，所以边界要说清楚。
+| 面 | 现状 |
+| --- | --- |
+| 凭据落盘 | 全部 `v1:` 密文；`scripts/encrypt_existing_credentials.py --verify` 可复核 |
+| 列表接口 | 只回 `has_password` / `has_token` 等布尔，**不回明文** |
+| 详情接口 | 回明文（面板要显示），带 `Cache-Control: no-store` |
+| 面板密码 | **未设密码时拒绝一切非本机请求**（503），不是放行 |
+| Solver `:8889` | 无鉴权 —— 靠绑定地址，不靠认证；对外必须自行加反代与鉴权 |
+| `/docs` `/openapi.json` | 默认关闭（否则未认证者可拿完整路由表） |
+| 面板 TLS | 默认**校验**（自签面板请配 CA，别关校验） |
 
-### 信任边界
+密码用 PBKDF2-HMAC-SHA256（600k 轮 + 每密码独立盐）；鉴权走 `Authorization` 头，
+无 Cookie，因此**没有 CSRF 面**。
 
-| 面 | 谁能访问 | 保护方式 |
-| --- | --- | --- |
-| `/api/*` | 已登录的浏览器 | Bearer Token（`Authorization` 头，存 localStorage） |
-| `/api/auth/*` | 任何人 | 登录入口本身；`/status` 用来判断「要不要设密码」 |
-| `/m/{share_token}` | 拿到链接的人 | 128 位随机 token（capability URL，不是自增 id） |
-| Solver `:8889` | **仅本机** | 无鉴权 —— 靠绑定地址，不靠认证 |
+**密钥文件**（`CREDENTIAL_ENCRYPTION_KEY_FILE`，默认 `data/secrets/credential_key`）
+丢失 = 库里凭据全部不可恢复。备份时必须与库一起拷；缺失时启动会打 WARNING。
+备份 ZIP 含密钥文件本身，等同于明文凭据库 —— 请当密码对待。
 
-**没有 CSRF 面**：鉴权走 `Authorization` 头而不是 Cookie，跨站页面无法自动附带。
+---
 
-### 默认值都是「安全那个」
+## 使用流程
 
-| 配置 | 默认 | 为什么 |
-| --- | --- | --- |
-| 未设密码时的远程访问 | **拒绝**（503） | 否则整个凭据库对公网敞开 |
-| `SOLVER_BIND_HOST` | `127.0.0.1` | solver 接口无鉴权，绑 0.0.0.0 等于送一个匿名浏览器代理 |
-| 面板 TLS 校验 | **校验** | 否则中间人可截获面板 Key 与推送的全部凭据 |
-| `/docs`、`/openapi.json` | **关闭** | 否则未认证访问者能拿到完整路由清单 |
-| 备份导入 | 必须带 `Content-Length` | 否则 chunked 请求可 OOM 掉单进程应用 |
+1. **设密码**（对外暴露前必做）
+2. **配邮箱**：iCloud 主号生成隐私邮箱，或导入 Outlook 号池。
+   ⚠️ 粘贴只是存进号池（「未入池」）—— 要在预览表里勾选并点「导入邮箱池」后才可被领取
+3. **配代理**（可选）：账号会保留注册代理，复用时优先走同一出口
+4. **注册**：「平台管理 → 注册」弹窗，填数量 / 并发 / 延迟 / 重试轮数，实时日志可停止 / 跳过
+5. **维护**：刷新 Token、补 RT、绑 2FA、探测状态、检测 Plus 试用（都是可停止的后台任务）
+6. **上传面板**：面板页「本地 ↔ 远程对比」看差异后推送 / 拉回（方向严格分开，绝不拿旧凭证覆盖新的）
+7. **迁移**：「全局配置 → 数据迁移」打包库 + 密钥，另一台导入即完成
 
-### 凭据存储
-
-- 加密：AES-256-GCM（`core/secret_box.py`）。密钥优先取环境变量
-  `CREDENTIAL_ENCRYPTION_KEY`，否则读 `CREDENTIAL_ENCRYPTION_KEY_FILE`
-  （默认 `data/secrets/credential_key`，首次启动生成，权限 `0600`）。
-  **没有硬编码密钥，没有明文回退。**
-- 面板密码：PBKDF2-HMAC-SHA256，600k 轮，每密码独立盐。
-- 日志：不打印凭据内容（连前缀也不打）—— stdout 会进日志文件。
-- 备份 ZIP 含**密钥文件本身**，等同于明文凭据库。导出的包请当密码对待。
-
-### 自签名面板
-
-内网自建面板用自签证书时，**推荐**配 CA 而不是关校验：
-
-```ini
-# 全局配置 → 面板配置
-panel_tls_ca_bundle = /etc/ssl/my-panel-ca.pem   # 仍然校验证书
-# panel_tls_insecure = 1                          # 只在临时排障时用
-```
-
-### 容器
-
-镜像默认以 **root** 运行（浏览器栈需要），但：
-
-- 数据卷只挂 `/runtime` 一个目录；
-- `mem_limit` 与 `pids_limit` 限制浏览器泄漏的影响面（`APP_MEMORY_LIMIT`）；
-- 只有 `8000` 对外，`8889`（solver）默认只映射到 `127.0.0.1`。
-
-## 常见问题排查
-
-### 1. 前端里 Turnstile Solver 显示「未运行」
-
-先检查后端是否正常启动：
-
-```bash
-curl http://localhost:8000/api/solver/status
-```
-
-正常返回 `{"running":true}`。若 `8000` 端口都访问不到，问题在后端而不是 Solver 本身。
-
-### 1b. Solver 显示「未运行」但其实刚跑过任务 / 内存被浏览器吃满
-
-浏览器池是**按需启停**的：空闲超过 `SOLVER_IDLE_TTL`（默认 300 秒）后整池
-会被关掉，`GET :8889/` 仍然通（服务本身常驻），但那一刻池里没有浏览器。
-下一个解题请求会自动重建（约 30 秒预热），日志里是：
-
-```
-[INFO] -> Browser pool reaped after 312s idle (ttl=300s); next request will rebuild it
-[INFO] -> Browser pool is short by 4; initializing on demand
-```
-
-这是预期行为，不是故障。池按 `--thread`（默认 4）预热，每个 camoufox 约
-250 MiB，常驻不动实测占 1.0 GiB（RSS+Swap）—— 2 GiB 的机器上会把 swap 吃满，
-所以默认开启回收。要在内存充裕的机器上换回常驻行为，设 `SOLVER_IDLE_TTL=0`。
-
-### 2. 如何确认当前 Python 是否正确
-
-```bash
-python -c "import sys; print(sys.executable)"
-```
-
-输出的解释器应当就是安装依赖时用的那个；不是就说明环境没激活对。
-
-### 3. 端口被占用
-
-后端启动报 `address already in use` 时，先找到占用端口的进程停掉，再重新启动：
-
-```bash
-ss -tlnp | grep :8000      # Linux
-netstat -ano | findstr :8000   # Windows
-```
-
-### 4. ChatGPT 注册收不到验证码
-
-先确认 `node` 可执行（`node --version`）。Sentinel PoW 求解器要在 Node 沙箱里跑 OpenAI 的
-`sdk.js`，没有 Node 时算出来的 token 过不了服务端复核，**验证码邮件会被静默丢弃** ——
-日志上看不到明显报错，但码永远收不到。若 `node` 不在 `PATH` 里，用
-`OPENAI_SENTINEL_NODE_PATH` 指定绝对路径。
-
-### 5. 注册报「账号池为空」或「已导入但未入池」
-
-邮箱导入后**还要勾选入池**。粘贴只是把它们存进号池（状态「未入池」），
-在预览表里勾选要用的邮箱、点「导入邮箱池」之后才可被领取。
-
-### 6. Grok 注册发码失败
-
-Grok 只有 camoufox 浏览器路径。确认 Solver/browser 依赖已装
-（`python -m camoufox fetch`），并检查发码节流（`grok_send_code_min_interval`）——
-x.ai 对同一 IP 的取码有频率限制，太密会把出口打进长冷却。
-
-> **升级过 camoufox 包（pip 装新版）之后必须重跑一次 `python -m camoufox fetch`**：
-> 每个 camoufox 包版本钉死配套的浏览器 build，包升级后旧浏览器会立刻不被认。
-> 注册任务现在会**在分配邮箱之前**做环境预检，直接以这条修复指引失败，
-> 不会再让每个账号白跑一轮、重试轮全烧在同一个环境错误上。
+---
 
 ## 项目结构
 
 ```text
-Register/
-├── api/                  FastAPI 路由层（config / accounts / tasks / actions / backup / auth…）
-├── core/                 抽象基类、注册表、任务运行时、DB 层、代理、执行器、邮箱池
-├── platforms/            平台插件（chatgpt / grok）+ 邮箱客户端（icloud）
-├── services/             跨平台服务：邮箱池、面板注册表与对比、外部同步、数据迁移
-├── modules/              面向复用的轻量业务模块层
-├── frontend/             React + TypeScript + Vite 管理台（构建产物进 static/）
-├── scripts/              运行时脚本（camoufox 安装、Turnstile 铸造等）
-├── tests/                pytest 测试
-├── docs/                 主题专文（功能、部署、接口、扩展、维护、分库、目录规范）
-│   └── adr/              架构决策记录（记录「为什么这样定」）
-├── data/                 运行时数据（见部署文档，不进版本控制）
-├── docker/               容器启动脚本
-├── main.py               应用入口
-├── requirements.txt
-├── Dockerfile
-├── docker-compose.yml
-└── GLOSSARY.md           凭据流转术语（登记 / 推送 / 拉回）
+main.py                 FastAPI 入口（面板 + 静态资源 + 调度器 + Solver 拉起）
+api/                    路由层：config / accounts / tasks / actions / backup / auth / integrations
+core/                   注册表、凭据加密、配置 schema、调度器、DB 层、代理与执行器
+platforms/              平台插件：chatgpt（纯协议）· grok（camoufox）· icloud 邮箱客户端
+services/               业务层：注册编排、邮箱号池、面板同步、自动维护、导入导出
+modules/                可复用模块：邮箱渠道工厂、配置上下文
+frontend/               React + TypeScript + Vite 管理台（构建产物进 static/）
+tests/                  pytest 全量套件
+scripts/                camoufox 安装、Turnstile 铸造、凭据加密迁移等
+docker/                 容器 entrypoint（xvfb + tini）
+docs/                   设计与运维文档
 ```
 
-技术栈：后端 FastAPI + SQLite（SQLModel）；前端 React + TypeScript + Vite；
-HTTP 用 curl_cffi；浏览器自动化用 Playwright / Camoufox；ChatGPT 注册协议纯协议实现，
-Sentinel PoW 走 Node 沙箱。
+技术栈：FastAPI + SQLite（SQLModel）/ React + TypeScript + Vite / curl_cffi /
+Playwright + Camoufox / ChatGPT Sentinel PoW 走 Node 沙箱。
+
+---
+
+## 测试与质量门禁
+
+```bash
+.venv/bin/python -m pytest -q tests/       # 3500+ 条，约 5 分钟
+cd frontend && npx tsc -b && npx eslint .  # 类型 + 风格
+```
+
+`pytest.ini` 已设 `testpaths = tests` —— 裸跑 `pytest` 与 `pytest tests/` 收集一致。
+（不设它会把 `.worktrees/`、`reference/` 下的同名测试一起收进来，报几百个
+`import file mismatch`，看起来像项目坏了。）
+
+---
+
+## 常见问题
+
+| 现象 | 原因与处理 |
+| --- | --- |
+| 注册报「邮箱域名配额用尽」 | 同一邮箱域名一个窗口约 3–4 个，几小时后恢复。**换域名，不是换出口** |
+| Grok 发码成功但收不到码 | 确认邮箱渠道真收到信；验证码框可能在**子 frame**（代码已遍历 `page.frames`） |
+| ChatGPT 收不到验证码 | 确认 `node` 可执行（Sentinel PoW 要跑 OpenAI 的 `sdk.js`，缺 Node 时 token 过不了复核，邮件**被静默丢弃**） |
+| 提示「凭据无法解密」 | `credential_key` 被换或丢了 —— 检查 `DATA_DIR` 挂载、从备份恢复。**不要**重新生成 |
+| Solver 显示「未运行」 | 浏览器池空闲 `SOLVER_IDLE_TTL`（默认 300s）会整池回收，`GET :8889/` 仍通；下个请求自动重建（约 30s）。要常驻设 `SOLVER_IDLE_TTL=0` |
+| 端口被占用 | `ss -tlnp \| grep :8000` 找到进程停掉再启 |
+
+---
 
 ## 文档索引
 
 | 文档 | 回答的问题 |
 | --- | --- |
-| [docs/FEATURES.md](docs/FEATURES.md) | 平台能力、邮箱服务、面板对接、导出格式的完整说明 |
-| [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | Docker Compose / 单容器部署、环境变量、数据目录与一键迁移 |
-| [docs/MAINTENANCE.md](docs/MAINTENANCE.md) | 改完代码要同步动哪些文件、升级步骤、验证门禁 |
-| [docs/EXTENDING.md](docs/EXTENDING.md) | 新增平台 / 注册流程 / 邮箱渠道怎么写 |
-| [docs/API_REFERENCE.md](docs/API_REFERENCE.md) | 每个接口的请求 / 响应形状 |
-| [docs/DATABASE_MODULARITY.md](docs/DATABASE_MODULARITY.md) | 分库、邮箱唯一键、跨库查询 |
-| [docs/DATA_DIRECTORY.md](docs/DATA_DIRECTORY.md) | 数据目录布局与路径规则 |
-| [docs/GLOSSARY.md](docs/GLOSSARY.md) | 项目特有术语（主号 / 隐私邮箱 / 号池…） |
-| [GLOSSARY.md](GLOSSARY.md) | 本地 ↔ 远端凭据流转术语（登记 / 推送 / 拉回） |
-| [docs/adr/](docs/adr/) | 架构决策记录（ADR） |
+| [FEATURES](docs/FEATURES.md) | 平台能力、邮箱服务、面板对接、导出格式 |
+| [DEPLOYMENT](docs/DEPLOYMENT.md) | 部署方式、环境变量、数据目录与一键迁移 |
+| [MAINTENANCE](docs/MAINTENANCE.md) | 故障速查、定时任务、**部署约束 §1.6** |
+| [API_REFERENCE](docs/API_REFERENCE.md) | 每个接口的请求 / 响应形状 |
+| [EXTENDING](docs/EXTENDING.md) | 新增平台 / 注册流程 / 邮箱渠道 |
+| [DATABASE_MODULARITY](docs/DATABASE_MODULARITY.md) | 分库、邮箱唯一键、跨库查询 |
+| [DATA_DIRECTORY](docs/DATA_DIRECTORY.md) | 数据目录布局与路径规则 |
+| [GLOSSARY](docs/GLOSSARY.md) · [ADR](docs/adr/) | 术语表 · 架构决策记录 |
 
 ## 界面预览
 
-### 仪表盘
+| 仪表盘 | 注册任务 | 全局配置 |
+| --- | --- | --- |
+| ![仪表盘](docs/images/dashboard.png) | ![注册任务](docs/images/register-task.png) | ![全局配置](docs/images/settings.png) |
 
-![仪表盘](docs/images/dashboard.png)
+---
 
-### 注册任务
-
-![注册任务](docs/images/register-task.png)
-
-### 全局配置
-
-![全局配置](docs/images/settings.png)
+当前版本：**v0.1.0**（首个公开版本）
