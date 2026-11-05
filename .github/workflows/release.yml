@@ -65,15 +65,27 @@ jobs:
           echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
           echo "标签：$TAG"
 
-      - name: 用 tag 消息作为 Release 说明
+      - name: 取 Release 说明
         env:
           # 来自上一步的**白名单校验过**的输出，不是原始输入。
           TAG: ${{ steps.ver.outputs.tag }}
         run: |
           set -euo pipefail
-          git tag -l --format='%(contents)' "$TAG" > /tmp/notes.md || true
-          if [ ! -s /tmp/notes.md ]; then
-            echo "（无 tag 消息，使用自动生成的 release notes）" > /tmp/notes.md
+          # 优先用版本库里的 notes 文件：它是版本控制的、可 review 的、也是
+          # 确定性的。**不依赖 tag 对象** —— `actions/checkout` 在 CI 里拿到的是
+          # 轻量 tag，`git tag --format='%(contents)'` 会静默回退成**提交信息**
+          # （v0.1.0 首次发布实测踩到：Release 正文变成了 CI 那条提交的标题）。
+          NOTES_FILE="docs/releases/${TAG}.md"
+          if [ -f "$NOTES_FILE" ]; then
+            cp "$NOTES_FILE" /tmp/notes.md
+            echo "用 $NOTES_FILE 作为 release notes"
+          elif git tag -l --format='%(contents)' "$TAG" 2>/dev/null | grep -q .; then
+            git tag -l --format='%(contents)' "$TAG" > /tmp/notes.md
+            echo "用 tag 消息作为 release notes"
+          else
+            # 都没有就交给 gh 自动生成（按提交生成 changelog）
+            : > /tmp/notes.md
+            echo "没有 notes 来源，交给 --generate-notes"
           fi
 
       - name: 创建 Release（已存在则更新 notes）
@@ -83,12 +95,17 @@ jobs:
         run: |
           set -euo pipefail
           if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release edit "$TAG" --notes-file /tmp/notes.md
+            if [ -s /tmp/notes.md ]; then
+              gh release edit "$TAG" --notes-file /tmp/notes.md
+            else
+              gh release edit "$TAG" --generate-notes
+            fi
           else
-            gh release create "$TAG" \
-              --title "$TAG" \
-              --notes-file /tmp/notes.md \
-              --verify-tag
+            if [ -s /tmp/notes.md ]; then
+              gh release create "$TAG" --title "$TAG" --notes-file /tmp/notes.md --verify-tag
+            else
+              gh release create "$TAG" --title "$TAG" --generate-notes --verify-tag
+            fi
           fi
 
   image:
