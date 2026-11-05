@@ -108,19 +108,29 @@ jobs:
             gh api "repos/${GITHUB_REPOSITORY}/releases" --jq '.[] | "\(.tag_name) draft=\(.draft)"' 2>&1 || true
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            if [ -s /tmp/notes.md ]; then
-              gh release edit "$TAG" --notes-file /tmp/notes.md
-            else
-              gh release edit "$TAG" --generate-notes
-            fi
+          API="https://api.github.com/repos/${GITHUB_REPOSITORY}"
+          AUTH="Authorization: Bearer ${GH_TOKEN}"
+          code=$(curl -sS -o /tmp/rel.json -w '%{http_code}' -H "$AUTH" "$API/releases/tags/$TAG" || echo 000)
+          echo "查已有 release：HTTP $code"
+          if [ "$code" = "200" ]; then
+            rc=$(curl -sS -o /tmp/resp.json -w '%{http_code}' -X PATCH -H "$AUTH" \
+                 -H 'Accept: application/vnd.github+json' \
+                 -d "$(python3 -c 'import json,sys;print(json.dumps({"body":open("/tmp/notes.md").read()}))')" \
+                 "$API/releases/tags/$TAG" || echo 000)
           else
-            if [ -s /tmp/notes.md ]; then
-              gh release create "$TAG" --title "$TAG" --notes-file /tmp/notes.md --verify-tag
-            else
-              gh release create "$TAG" --title "$TAG" --generate-notes --verify-tag
-            fi
+            rc=$(curl -sS -o /tmp/resp.json -w '%{http_code}' -X POST -H "$AUTH" \
+                 -H 'Accept: application/vnd.github+json' \
+                 -d "$(python3 -c 'import json,os;print(json.dumps({"tag_name":os.environ["TAG"],"name":os.environ["TAG"],"body":open("/tmp/notes.md").read(),"draft":False,"prerelease":False}))')" \
+                 "$API/releases" || echo 000)
           fi
+          echo "创建/更新 release：HTTP $rc"
+          if [ "$rc" != "201" ] && [ "$rc" != "200" ]; then
+            # ::error:: 会出现在 run 的 Annotations 里 —— 公开仓库匿名可见，
+            # 而日志与 step summary 都要登录。这样没有 API token 也能看到真实原因。
+            echo "::error::release API 返回 HTTP $rc：$(head -c 500 /tmp/resp.json)"
+            exit 1
+          fi
+          head -c 300 /tmp/resp.json
           {
             echo "创建/更新后的 API 查询:"
             echo '```'
