@@ -11,6 +11,11 @@
 #
 services:
   app:
+    # 默认从 GHCR 拉已发布镜像（公开包，匿名可拉）：
+    #   docker compose pull && docker compose up -d
+    # 想自己构建就 `docker compose up -d --build`（会忽略 image，直接用下面的 build）。
+    # 换版本用 APP_IMAGE=ghcr.io/ifuzyi/auto-register:0.1 docker compose up -d
+    image: ${APP_IMAGE:-ghcr.io/ifuzyi/auto-register:0.1.0}
     build:
       context: .
       dockerfile: Dockerfile

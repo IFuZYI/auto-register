@@ -20,11 +20,22 @@
 
 ### Docker Compose（推荐）
 
+拉已发布的镜像（免构建，最快）：
+
 ```bash
 git clone https://github.com/IFuZYI/auto-register.git Register && cd Register
 cp .env.example .env          # 可选：改端口 / 数据目录 / 内存上限 / 镜像源
+docker compose pull && docker compose up -d
+```
+
+想自己从源码构建（约十几分钟，大头是浏览器下载）：
+
+```bash
 docker compose up -d --build
 ```
+
+镜像：`ghcr.io/ifuzyi/auto-register`（公开包，匿名可拉），可用 tag `0.1.0` / `0.1` / `latest`。
+换版本：`APP_IMAGE=ghcr.io/ifuzyi/auto-register:latest docker compose up -d`
 
 | 端点 | 说明 |
 | --- | --- |
@@ -166,4 +177,27 @@ cd frontend && npx tsc -b && npx eslint .  # 类型 + 风格
 
 ---
 
-当前版本：**v0.1.0**（首个公开版本）
+## 发布与镜像
+
+推一个 `v*` tag 即触发 [`.github/workflows/release.yml`](.github/workflows/release.yml)：
+
+```bash
+git tag -a v0.1.1 -F docs/releases/v0.1.1.md && git push origin v0.1.1
+```
+
+两个 job 依次跑：
+
+1. **建 Release** —— 用 `docs/releases/<tag>.md` 作为 release notes（该文件是**版本内**的，
+   可 review、可 diff；不依赖 tag 对象 —— `actions/checkout` 在 CI 里拿到的是轻量 tag，
+   `git tag --format='%(contents)'` 会静默回退成提交信息）
+2. **构建并推送镜像** —— 推到 `ghcr.io/<owner>/<repo>`，tag 由 semver 规则生成
+   （`1.2.3` / `1.2` / `latest`），带 GHA 层缓存（浏览器下载是构建里最慢的一步）
+
+两条都不需要人工凭据：workflow 里的 `GITHUB_TOKEN` 由 Actions 自动注入，
+权限在文件顶部的 `permissions:` 里声明（`contents: write` + `packages: write`）。
+
+发布新版本时记得**先写 `docs/releases/v<新版本>.md`**，否则 Release 正文会退回自动生成的 changelog。
+
+---
+
+当前版本：**v0.1.0**（首个公开版本）· [发布记录](https://github.com/IFuZYI/auto-register/releases)
