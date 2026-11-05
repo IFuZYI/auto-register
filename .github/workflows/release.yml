@@ -94,6 +94,20 @@ jobs:
           TAG: ${{ steps.ver.outputs.tag }}
         run: |
           set -euo pipefail
+          # 诊断写进 job summary：公开仓库里 Summary 匿名可见，而日志要登录 ——
+          # 这样没有 API token 也能拿到「到底发生了什么」。
+          {
+            echo "### Release 诊断"
+            echo '```'
+            echo "TAG=$TAG"
+            echo "GITHUB_REPOSITORY=$GITHUB_REPOSITORY"
+            echo "gh: $(gh --version 2>&1 | head -1)"
+            echo "已有 releases:"
+            gh release list --limit 10 2>&1 || true
+            echo "API 查询（创建前）:"
+            gh api "repos/${GITHUB_REPOSITORY}/releases" --jq '.[] | "\(.tag_name) draft=\(.draft)"' 2>&1 || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
           if gh release view "$TAG" >/dev/null 2>&1; then
             if [ -s /tmp/notes.md ]; then
               gh release edit "$TAG" --notes-file /tmp/notes.md
@@ -107,6 +121,12 @@ jobs:
               gh release create "$TAG" --title "$TAG" --generate-notes --verify-tag
             fi
           fi
+          {
+            echo "创建/更新后的 API 查询:"
+            echo '```'
+            gh api "repos/${GITHUB_REPOSITORY}/releases" --jq '.[] | "\(.tag_name) draft=\(.draft) notes=\(.body|length)"' 2>&1 || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
   image:
     name: 构建并推送镜像到 GHCR
