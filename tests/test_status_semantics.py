@@ -400,6 +400,20 @@ class ActionWiringContractTests(unittest.TestCase):
         )
         self.assertEqual(model.status, "registered")
 
+    def test_chatgpt_plus_check_banned_marks_status(self):
+        """Plus 检测判出封号时也要落 banned（结果在 `plus_check` 里）。"""
+        from unittest import mock
+
+        from api.actions import _apply_action_result
+
+        model = self._model("chatgpt", status="invalid")
+        _apply_action_result(
+            "chatgpt", "check_plus_trial", model,
+            {"ok": True, "data": {"plus_check": {"status": "banned", "message": DEACTIVATED_TEXT}}},
+            mock.Mock(),
+        )
+        self.assertEqual(model.status, "banned")
+
 
 class RemoteRecoveryTests(unittest.TestCase):
     """CPA 远端同步确认可用（remote_state=usable）→ 恢复「正常」。"""

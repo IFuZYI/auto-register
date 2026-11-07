@@ -13,9 +13,10 @@ import logging
 import secrets
 import time
 import uuid
-from typing import Optional
+from typing import Any, Optional
 from urllib.parse import parse_qs, parse_qsl, urlencode, urljoin, urlparse, urlunparse
 
+from platforms.chatgpt.protocol.banned_signals import looks_like_banned
 from platforms.chatgpt.protocol.mail_provider import MailProvider
 from platforms.chatgpt.protocol.response_summary import describe_error
 from platforms.chatgpt.protocol.totp import totp_now as _totp_now
@@ -24,6 +25,9 @@ logger = logging.getLogger(__name__)
 
 
 class CodexMixin:
+    #: 由 AuthFlow 混入时提供（AuthResult）。显式声明只为类型检查。
+    result: Any
+
     @staticmethod
     def _b64url_no_pad(raw: bytes) -> str:
         return base64.urlsafe_b64encode(raw).decode("utf-8").rstrip("=")
@@ -429,6 +433,14 @@ class CodexMixin:
                 try:
                     continue_url = self._codex_drive_login_from_log_in(mail_provider=mail_provider)
                 except Exception as e:
+                    if looks_like_banned(str(e)):
+                        # 封禁是终局结论：不能继续走 no-prompt 兜底，否则
+                        # 真正原因会被后面的通用失败（如「未拿到有效
+                        # session/access token」）盖掉，账号被误标「失效」。
+                        # 实测：curls-placebo.8p@icloud.com 2026-11-05。
+                        self.result.banned = True
+                        logger.warning(f"Codex 登录推进撞上封禁措辞，直接终止: {e}")
+                        return False
                     logger.warning(f"Codex 登录推进失败，改走 no-prompt 兜底: {e}")
                 if continue_url:
                     # 命中 add-phone 时，支持“刷新重试”策略（不立刻放弃）
@@ -500,5 +512,10 @@ class CodexMixin:
                 client_id=client_id,
             )
         except Exception as e:
+            if looks_like_banned(str(e)):
+                # 同上：把封禁结论留在 AuthResult 上，供登录刷新链读取。
+                self.result.banned = True
+                logger.warning(f"Codex OAuth 交换撞上封禁措辞，直接终止: {e}")
+                return False
             logger.warning(f"Codex OAuth 交换异常: {e}")
             return False

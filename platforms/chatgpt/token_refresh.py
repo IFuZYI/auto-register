@@ -450,6 +450,10 @@ class TokenRefreshManager:
         ok, reason = self.verify_access_token(result.access_token)
         result.verified = ok
         result.verify_message = reason
+        if not ok and looks_like_banned(reason):
+            # 校验端点也可能直接回「deleted or deactivated」。此前这里只报
+            # 「新 AT 被服务端拒绝（HTTP 403）」，封禁结论丢失，账号被标失效。
+            result.banned = True
         if not ok:
             logger.warning("刷新拿到的 AT 未通过校验: %s", reason or "未知原因")
 
@@ -481,6 +485,11 @@ class TokenRefreshManager:
         if response.status_code == 200:
             return True, ""
         if response.status_code in (401, 403):
+            # 401/403 的响应体里可能写着「deleted or deactivated」—— 只报
+            # HTTP 状态码会把「号没了」和「AT 过期」混成同一种失败。
+            body_text = str(getattr(response, "text", "") or "")
+            if looks_like_banned(body_text):
+                return False, f"账号已封禁（校验端点 HTTP {response.status_code}）: {body_text[:200]}"
             return False, f"新 AT 被服务端拒绝（HTTP {response.status_code}）"
         return False, f"校验返回意外状态码 HTTP {response.status_code}"
 

@@ -463,7 +463,24 @@ def probe_local_chatgpt_status(account: Any, proxy: Optional[str] = None) -> dic
     )
 
     if me_result.status_code == 200 and me_result.body_json:
-        body = me_result.body_json
+        body = me_result.body_json or {}
+        account_obj = body.get("account") if isinstance(body.get("account"), dict) else {}
+        if bool(body.get("is_deactivated")) or bool(account_obj.get("is_deactivated")):
+            # /backend-api/me 也可能在 200 响应里直接给出 is_deactivated。
+            # 此前只认 401/403 的措辞，这种响应会被当成正常账号。
+            result["auth"].update(
+                {
+                    "state": "account_deactivated",
+                    "message": "账号已停用（is_deactivated）",
+                }
+            )
+            result["codex"].update(
+                {
+                    "state": "skipped_auth_invalid",
+                    "message": "账号已停用，跳过 Codex 探测",
+                }
+            )
+            return result
         plan_type = str(body.get("plan_type") or "").strip()
         workspace_plan_type = ""
         orgs = ((body.get("orgs") or {}).get("data") if isinstance(body.get("orgs"), dict) else []) or []

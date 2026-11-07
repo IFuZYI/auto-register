@@ -170,7 +170,14 @@ def _apply_chatgpt_status(acc_model, action_id, result, session) -> None:
     # 钉住了这一点，包括「禁用不被无信号的同步洗掉」）。
     capability = capability_of(action_id)
     if capability is Capability.PROBE:
-        status_reason = apply_chatgpt_status_policy(acc_model, local_probe=data.get("probe"))
+        # `check_plus_trial` 的结论在 `plus_check` 里（不是 `probe`）。
+        # 它判出 `banned` 时同样是上游明确「号没了」，必须落状态 ——
+        # 此前只读 `probe`，Plus 检测显示「封号」而账号状态仍是失效。
+        plus_check = data.get("plus_check")
+        if isinstance(plus_check, dict) and str(plus_check.get("status") or "").strip().lower() == "banned":
+            status_reason = apply_chatgpt_status_policy(acc_model, banned=True)
+        else:
+            status_reason = apply_chatgpt_status_policy(acc_model, local_probe=data.get("probe"))
     elif capability is Capability.SYNC_STATUS:
         status_reason = apply_chatgpt_status_policy(acc_model, remote_sync=data.get("sync"))
     elif capability is Capability.REFRESH:

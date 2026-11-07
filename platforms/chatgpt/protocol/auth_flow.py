@@ -65,6 +65,9 @@ class AuthResult:
         #: 来源：服务端 `client_auth_session` dump 的 `openai_client_id`
         #: （`mixins/trace.py:301` 同步到 `flow._oauth_client_id`）。
         self.client_id: str = ""
+        #: 登录/Codex 子链是否已明确认出「号没了」（deleted or deactivated）。
+        #: 子链的异常可能被局部兜底吞掉，这个标记让外层登录刷新链仍能落 banned。
+        self.banned: bool = False
 
     def is_valid(self) -> bool:
         return bool(self.session_token and self.access_token)

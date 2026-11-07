@@ -118,7 +118,11 @@ def classify_local_probe_state(probe: dict[str, Any] | None) -> str:
         return "auth_401"
     if is_account_deactivated_message(auth_error_code, auth_message):
         return "auth_deactivated"
-    if auth_status == 403 and auth_state in {"account_deactivated", "banned_like"}:
+    if auth_state == "account_deactivated":
+        # 状态本身就是「账号已停用」——即使 message 没带措辞，也不能降级成
+        # 普通 403（否则状态会停在 invalid）。
+        return "auth_deactivated"
+    if auth_status == 403 and auth_state == "banned_like":
         return "auth_403"
 
     codex_state = _lower_text(codex.get("state"))
@@ -132,7 +136,9 @@ def classify_local_probe_state(probe: dict[str, Any] | None) -> str:
         return "codex_401"
     if is_account_deactivated_message(codex_error_code, codex_message):
         return "codex_deactivated"
-    if codex_status == 403 and codex_state == "account_deactivated":
+    if codex_state == "account_deactivated":
+        return "codex_deactivated"
+    if codex_status == 403 and codex_state == "banned_like":
         return "codex_403"
 
     return ""

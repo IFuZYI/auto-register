@@ -135,11 +135,18 @@ class LoginAccessTokenRefresher:
                 self.log(f"[登录刷新] 失败: {message}")
 
         self._absorb(result)
-        if result.access_token and not result.success:
+        # 封禁是终局结论：即使子链后来吸收到了某个 AT，也不能把结果算成功。
+        if result.banned:
+            result.success = False
+        elif result.access_token and not result.success:
             result.success = True
             result.error_message = ""
         if not result.success and not result.error_message:
-            result.error_message = "登录流程跑完但没拿到 access_token"
+            result.error_message = (
+                "账号已封禁（上游明确 deleted or deactivated）"
+                if result.banned
+                else "登录流程跑完但没拿到 access_token"
+            )
         return result
 
     def _run_login(self, provider: MailProvider, result: LoginRefreshResult) -> None:
@@ -199,6 +206,10 @@ class LoginAccessTokenRefresher:
         if flow is None:
             return
         auth = flow.result
+        # 子链（Codex / 登录）可能把封禁结论留在 AuthResult 上而不是抛异常，
+        # 这里必须带出来，否则外层只会看到「没拿到有效 token」。
+        if bool(getattr(auth, "banned", False)):
+            result.banned = True
         for attr in ("access_token", "session_token", "refresh_token", "id_token", "cookie_header", "device_id"):
             value = str(getattr(auth, attr, "") or "").strip()
             if value:
