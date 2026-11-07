@@ -176,24 +176,36 @@ def compare_by_hour(local_time: Optional[datetime], remote_time: Optional[dateti
 
 
 def _latest_issuance(extra: dict[str, Any]) -> Optional[datetime]:
-    """一组凭证里**最新**的签发时间（JWT `iat`），取不出返回 None。
+    """AT 的签发时间（JWT `iat`），AT 解不出时回落到其它凭证的最新 iat。
 
-    每侧取最新的一个字段：`id_token` 是登录时签的（旧），`access_token`
-    是每次刷新后重签的（新）—— 谁最后刷新，谁的那侧就更新。
+    用户口径：面板管理判断「信息时间」以 **AT** 为准。此前取所有凭证里最新
+    的 iat —— 登录链的 `id_token` 常比 AT 晚几十秒，实测 239 个 ChatGPT 号
+    因此显示的是 ID token 时间，而不是 AT 时间。
     """
     from services.chatgpt_token_lifecycle import decode_jwt_claims
 
+    def _issued_at(value: str) -> Optional[datetime]:
+        claims = decode_jwt_claims(value)
+        iat = claims.get("iat")
+        try:
+            return _from_epoch(int(iat)) if iat is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    at_value = _first_present(extra, field_aliases("access_token"))
+    if at_value:
+        at_issued = _issued_at(at_value)
+        if at_issued is not None:
+            return at_issued
+
+    # 没有可解析的 AT（Grok 的 SSO、或历史行没有 AT）才回落到其它凭证里
+    # 最新的签发时间。
     newest: Optional[datetime] = None
     for aliases in CREDENTIAL_FIELDS:
         value = _first_present(extra, aliases)
         if not value:
             continue
-        claims = decode_jwt_claims(value)
-        iat = claims.get("iat")
-        try:
-            issued = _from_epoch(int(iat)) if iat is not None else None
-        except (TypeError, ValueError):
-            issued = None
+        issued = _issued_at(value)
         if issued is not None and (newest is None or issued > newest):
             newest = issued
     return newest
@@ -350,9 +362,8 @@ class ComparisonRow:
     time_relation: str = ""
     #: time_relation 的依据：`credential`（凭证签发时间）/ `record`（记录时间）/ ""
     time_basis: str = ""
-    #: 两侧 AT 的**生成时间**（JWT `iat`，每侧取最新签发的一个字段）。
-    #: 「本地/远端更新时间」两列显示的就是它（用户口径：AT 生成的时间）；
-    #: 解不出 iat 时为空 —— 前端回落记录更新时间。
+    #: 两侧 **AT** 的生成时间（JWT `iat`）；AT 解不出时回落该侧其它凭证的
+    #: 最新 iat。「本地/远端更新时间」两列显示的就是它（用户口径：按 AT 判断）。
     local_credential_issued_at: Optional[datetime] = None
     remote_credential_issued_at: Optional[datetime] = None
 

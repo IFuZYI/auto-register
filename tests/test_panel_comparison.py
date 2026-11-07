@@ -877,6 +877,16 @@ class CredentialTimeRelationTests(unittest.TestCase):
         remote = {"access_token": _jwt_with_iat(_epoch(2026, 10, 5, 1, 0))}
         self.assertEqual(compare_credential_time(local, remote), "local_newer")
 
+    def test_at_wins_over_a_newer_id_token(self):
+        """用户口径：判断信息时间按 AT。登录链的 id_token 可能比 AT 晚几十秒，
+        不能因此把方向判反。"""
+        local = {
+            "access_token": _jwt_with_iat(_epoch(2026, 10, 5, 1, 0)),
+            "id_token": _jwt_with_iat(_epoch(2026, 10, 5, 3, 5)),
+        }
+        remote = {"access_token": _jwt_with_iat(_epoch(2026, 10, 5, 2, 0))}
+        self.assertEqual(compare_credential_time(local, remote), "remote_newer")
+
 
 class BuildComparisonCredentialTimeTests(unittest.TestCase):
     """行上的 `time_relation` / `time_basis`：凭证签发时间优先、记录时间兜底。"""
@@ -985,6 +995,20 @@ class CredentialIssuedAtPayloadTests(unittest.TestCase):
         )]
         payload = build_comparison(local, remote)[0].to_dict()
         self.assertIn("2026-10-05T03:00", payload["local_credential_issued_at"])
+
+    def test_at_time_wins_over_a_newer_id_token(self):
+        """显示时间也必须按 AT：id_token 比 AT 晚时不能显示 id_token 的时间。"""
+        local = [{
+            "id": 1, "email": "a@example.com", "status": "registered",
+            "updated_at": "2026-10-05T03:37:00+00:00",
+            "extra": {
+                "access_token": _jwt_with_iat(_epoch(2026, 10, 5, 3, 0)),
+                "id_token": _jwt_with_iat(_epoch(2026, 10, 5, 3, 5)),
+            },
+        }]
+        payload = build_comparison(local, [])[0].to_dict()
+        self.assertIn("2026-10-05T03:00:00", payload["local_credential_issued_at"])
+        self.assertNotIn("2026-10-05T03:05:00", payload["local_credential_issued_at"])
 
     def test_local_only_rows_have_no_remote_credential_time(self):
         local = [{
