@@ -275,7 +275,7 @@ def parse_entry(entry: Mapping[str, Any]) -> dict[str, Any]:
     """单条 kiro.json 账号 → 规范 `extra` 字典。"""
     secret = entry.get("pluginSecret") if isinstance(entry.get("pluginSecret"), dict) else {}
     public = entry.get("pluginPublic") if isinstance(entry.get("pluginPublic"), dict) else {}
-    auth_method = _clean(secret.get("method")) or (
+    auth_method = _clean(secret.get("method")).lower() or (
         AUTH_METHOD_SOCIAL if _clean(secret.get("loginProvider")).lower() in {"github", "google"} else AUTH_METHOD_IDC
     )
     login_provider = _clean(secret.get("loginProvider")) or "BuilderId"
@@ -284,11 +284,12 @@ def parse_entry(entry: Mapping[str, Any]) -> dict[str, Any]:
     raw_source = _clean(entry.get("source"))
     # 管理器导出的 `plugin` 对 idc（Builder ID）账号等价于我们的 `source=aws`；
     # social 账号保留原值（它们的来源是 GitHub/Google，不是 AWS）。
-    source = (
-        SOURCE_AWS
-        if raw_source == EXPORT_SOURCE and auth_method == AUTH_METHOD_IDC
-        else (raw_source or SOURCE_AWS)
-    )
+    # idc（Builder ID）默认/plugin → aws；social 账号没有 source 时默认 plugin，
+    # 不能把 GitHub/Google 号标成 AWS 来源。
+    if auth_method == AUTH_METHOD_IDC:
+        source = SOURCE_AWS if raw_source in ("", EXPORT_SOURCE) else raw_source
+    else:
+        source = raw_source or EXPORT_SOURCE
     record = build_extra(
         access_token=_clean(secret.get("access")) or _clean(entry.get("accessToken")),
         refresh_token=_clean(secret.get("refresh")) or _clean(entry.get("refreshToken")),

@@ -507,7 +507,11 @@ def get_export_formats():
 
 
 @router.post("/export-text")
-def export_accounts_text(body: ExportTextRequest, session: Session = Depends(get_session)):
+def export_accounts_text(
+    body: ExportTextRequest,
+    session: Session = Depends(get_session),
+    response: Response = None,
+):
     if body.account_ids:
         from core.db import account_repository
 
@@ -531,6 +535,9 @@ def export_accounts_text(body: ExportTextRequest, session: Session = Depends(get
         content = render_accounts(accounts, body.format)
     except KeyError:
         raise HTTPException(400, f"未知的导出格式: {body.format}")
+    if response is not None:
+        # 导出内容含明文凭据：不缓存
+        response.headers["Cache-Control"] = "no-store"
 
     return {
         "format": body.format,
@@ -940,9 +947,11 @@ def _do_check(account_id: str):
                         # 403=封禁 / 400=失效 / 网络错误=不改）。这里再写一份
                         # 就会与动作链路分叉（审计 2026-11-13：aws/kiro 403
                         # 曾被写成 invalid 而不是 banned）。
-                        plugin.apply_probe_status_policy(
-                            fresh, detail=getattr(plugin, "last_probe_detail", {}) or {}
-                        )
+                        detail = getattr(plugin, "last_probe_detail", {}) or {}
+                        plugin.apply_probe_status_policy(fresh, detail=detail)
+                        from services.action_execution import persist_probe_credentials
+
+                        persist_probe_credentials(fresh, detail)
                     else:
                         fresh.status = "invalid"
                 fresh.updated_at = datetime.now(timezone.utc)

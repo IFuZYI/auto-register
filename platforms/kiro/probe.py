@@ -108,9 +108,12 @@ def probe_kiro(
     )
     if not refreshed.get("ok"):
         code = refreshed.get("code")
+        indeterminate = code is None
         return {
             "code": code,
-            "usable": False,
+            # 网络错误/缺凭据 = 测不了（None），不是失效（False）
+            "usable": None if indeterminate else False,
+            "indeterminate": indeterminate,
             "summary": str(refreshed.get("error") or "刷新失败")[:200],
             "banned": code == 403,
         }

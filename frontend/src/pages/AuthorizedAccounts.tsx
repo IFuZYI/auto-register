@@ -61,7 +61,6 @@ interface Derived {
   email: string
   status: string
   plan: string
-  expiresAt: number
 }
 
 interface AccountList {
@@ -95,7 +94,6 @@ function buildDerived(items: AccountRow[]): Record<string, Derived[]> {
       email: item.email,
       status: item.status,
       plan: String(extra.plan || ''),
-      expiresAt: Number(extra.expires_at || 0),
     }
     map[source] = [...(map[source] || []), entry]
   }
@@ -118,9 +116,9 @@ function ChainCell({ count }: { count: number }) {
 function DerivedList({ items }: { items: Derived[] }) {
   if (!items.length) return null
   return (
-    <div className="auth-lineage">
+    <div className="auth-lineage" role="list" aria-label="派生 Kiro 账号">
       {items.map((item) => (
-        <div className="auth-lineage__row" key={item.id}>
+        <div className="auth-lineage__row" role="listitem" key={item.id}>
           <span className="auth-lineage__node" />
           <div className="auth-lineage__body">
             <span className="auth-lineage__email">{item.email}</span>
@@ -180,7 +178,9 @@ export default function AuthorizedAccounts() {
   const [total, setTotal] = useState(0)
   const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = useState(20)
-  const [loading, setLoading] = useState(false)
+  const [loading, setLoading] = useState(true)
+  const [loadFailed, setLoadFailed] = useState(false)
+  const [detailLoading, setDetailLoading] = useState(false)
   const [email, setEmail] = useState('')
   const [status, setStatus] = useState('')
   const [derivedMap, setDerivedMap] = useState<Record<string, Derived[]>>({})
@@ -219,17 +219,28 @@ export default function AuthorizedAccounts() {
       })
       if (email.trim()) params.set('email', email.trim())
       if (status) params.set('status', status)
-      const [list, kiroList] = await Promise.all([
+      // Kiro 派生数据失败不该让整页变空：分开 settle，AWS 列表照常显示。
+      const [awsResult, kiroResult] = await Promise.allSettled([
         apiFetch(`/accounts?${params.toString()}`) as Promise<AccountList>,
         apiFetch('/accounts?platform=kiro&page=1&page_size=200') as Promise<AccountList>,
       ])
       // 过期响应守卫：快速翻页/改筛选时，先发的慢响应不能覆盖后发的
       if (seq !== loadSeq.current) return
-      setRows(list.items || [])
-      setTotal(list.total || 0)
-      setDerivedMap(buildDerived(kiroList.items || []))
+      if (awsResult.status === 'rejected') throw awsResult.reason
+      setRows(awsResult.value.items || [])
+      setTotal(awsResult.value.total || 0)
+      setLoadFailed(false)
+      if (kiroResult.status === 'fulfilled') {
+        setDerivedMap(buildDerived(kiroResult.value.items || []))
+      } else {
+        setDerivedMap({})
+        message.warning('Kiro 派生数据加载失败，授权链暂不可用（可点刷新重试）')
+      }
     } catch (error) {
-      if (seq === loadSeq.current) message.error(`读取授权账号失败：${errMessage(error)}`)
+      if (seq === loadSeq.current) {
+        setLoadFailed(true)
+        message.error(`读取授权账号失败：${errMessage(error)}`)
+      }
     } finally {
       if (seq === loadSeq.current) setLoading(false)
     }
@@ -240,15 +251,12 @@ export default function AuthorizedAccounts() {
   }, [load])
 
   const derivedTotal = useMemo(() => Object.keys(derivedMap).length, [derivedMap])
-  const pendingCount = useMemo(
-    () => rows.filter((row) => Boolean(parseExtra(row.extra_json).needs_sso)).length,
-    [rows],
-  )
 
   const openDetail = async (row: AccountRow) => {
     detailId.current = row.id
     setDetail(row)
     setDetailOpen(true)
+    setDetailLoading(true)
     try {
       const full = (await apiFetch(
         `/accounts/${row.id}?platform=aws`,
@@ -259,6 +267,8 @@ export default function AuthorizedAccounts() {
       if (detailId.current === row.id) {
         message.error(`读取详情失败：${errMessage(error)}（先显示列表里的字段）`)
       }
+    } finally {
+      if (detailId.current === row.id) setDetailLoading(false)
     }
   }
 
@@ -384,7 +394,10 @@ export default function AuthorizedAccounts() {
     }
   }
 
-  const exportJson = async () => {
+  const [exporting, setExporting] = useState(false)
+
+  const doExport = async () => {
+    setExporting(true)
     try {
       const result = (await apiFetch('/accounts/export-text', {
         method: 'POST',
@@ -396,10 +409,24 @@ export default function AuthorizedAccounts() {
       link.href = url
       link.download = result.filename || 'aws_accounts.json'
       link.click()
-      URL.revokeObjectURL(url)
+      // Safari/旧 Firefox 在 click 后立刻 revoke 会取消下载
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+      message.success(`已导出 ${total} 个账号（含明文凭据，请妥善保管）`)
     } catch (error) {
       message.error(`导出失败：${errMessage(error)}`)
+    } finally {
+      setExporting(false)
     }
+  }
+
+  const exportJson = () => {
+    Modal.confirm({
+      title: '导出授权账号？',
+      content: '文件包含明文密码与 refresh_token，下载后请妥善保管，不要放进仓库或聊天记录。',
+      okText: '导出',
+      cancelText: '取消',
+      onOk: () => doExport(),
+    })
   }
 
   const actionMenu = (row: AccountRow): MenuProps['items'] => {
@@ -536,14 +563,13 @@ export default function AuthorizedAccounts() {
         title="AWS"
         subtitle={
           <span className="auth-summary">
-            AWS Builder ID 是 Kiro 的授权根。<strong>{total}</strong> 个账号，
-            <strong>{derivedTotal}</strong> 个已换取 Kiro 凭据
-            {pendingCount ? <>，<strong>{pendingCount}</strong> 个待补凭据</> : null}。
+            AWS Builder ID 是 Kiro 的授权根。<strong>{total}</strong> 个账号；Kiro 侧{' '}
+            <strong>{derivedTotal}</strong> 个来源邮箱已换取凭据（按前 200 条 Kiro 记录统计）。
           </span>
         }
         actions={
           <Space wrap>
-            <Button icon={<DownloadOutlined />} onClick={() => void exportJson()}>
+            <Button icon={<DownloadOutlined />} loading={exporting} onClick={exportJson}>
               导出
             </Button>
             <Button icon={<ImportOutlined />} onClick={() => setImportOpen(true)}>
@@ -563,9 +589,14 @@ export default function AuthorizedAccounts() {
       <div className="auth-toolbar">
         <Input.Search
           allowClear
+          value={email}
           placeholder="按邮箱筛选"
           aria-label="按邮箱筛选授权账号"
           style={{ width: 240 }}
+          onChange={(event) => {
+            setPage(1)
+            setEmail(event.target.value)
+          }}
           onSearch={(value) => {
             setPage(1)
             setEmail(value)
@@ -614,18 +645,24 @@ export default function AuthorizedAccounts() {
                 expandRowByClick: false,
               }
         }
-        scroll={{ x: 1000 }}
+        scroll={narrow ? undefined : { x: 1000 }}
         locale={{
           emptyText: (
             <Empty
               image={Empty.PRESENTED_IMAGE_SIMPLE}
               description={
-                email || status
-                  ? '没有匹配的授权账号。换个筛选条件，或清除筛选看全部。'
-                  : '还没有授权账号。注册一个 AWS Builder ID，或从 JSON 导入一批。'
+                loadFailed
+                  ? '加载失败，不是没有数据。点「重试」再拉一次。'
+                  : email || status
+                    ? '没有匹配的授权账号。换个筛选条件，或清除筛选看全部。'
+                    : '还没有授权账号。注册一个 AWS Builder ID，或从 JSON 导入一批。'
               }
             >
-              {email || status ? (
+              {loadFailed ? (
+                <Button icon={<ReloadOutlined />} onClick={() => void load()}>
+                  重试
+                </Button>
+              ) : email || status ? (
                 <Button
                   onClick={() => {
                     setEmail('')
@@ -683,7 +720,13 @@ export default function AuthorizedAccounts() {
               <DetailRow label="Refresh Token">
                 <SecretLine
                   value={String(detailExtra.refresh_token || '')}
-                  empty={detailExtra.has_refresh_token ? '已配置（正文未加载，刷新后可见）' : '无'}
+                  empty={
+                    detailLoading
+                      ? '加载中…'
+                      : detailExtra.has_refresh_token
+                        ? '已配置（详情未加载，重开抽屉可查看）'
+                        : '无'
+                  }
                 />
               </DetailRow>
               <DetailRow label="地区">

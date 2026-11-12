@@ -155,13 +155,15 @@ class AwsPlatform(BasePlatform):
             kwargs: dict[str, Any] = {
                 "keyword": "aws",
                 "timeout": timeout,
-                "otp_sent_at": time.time(),
+                "otp_sent_at": time.time() - 5,
             }
             if mailbox_account is not None:
                 try:
                     return mailbox.wait_for_code(mailbox_account, **kwargs)
                 except TypeError:
-                    return mailbox.wait_for_code(mailbox_account)
+                    return mailbox.wait_for_code(
+                        mailbox_account, keyword="aws", timeout=timeout
+                    )
             # 只有地址时渠道也能查（Outlook 等按地址检索）
             from core.mailboxes.base import MailboxAccount
 
@@ -180,14 +182,15 @@ class AwsPlatform(BasePlatform):
             self._record_mailbox_status(mailbox, mailbox_account, "used")
             raise RuntimeError(f"该邮箱已有 AWS Builder ID，跳过: {email}") from exc
         except AwsRegistrationError as exc:
-            if getattr(client, "password_set", False):
+            if getattr(client, "password_set", False) or getattr(client, "identity_created", False):
                 # 号已经真实创建（密码设过），只是 SSO/换 token 没走完。
                 # 不落库就白烧一个号 + 一个邮箱；落成「待补凭据」，之后可以用
                 # Kiro 的「指定 AWS 账号」或重试补回。
                 self._save_partial_account(client, email, final_password)
                 self._record_mailbox_status(mailbox, mailbox_account, "used")
+                state = "密码已设置" if getattr(client, "password_set", False) else "密码未确认"
                 raise RuntimeError(
-                    f"AWS 账号已创建（密码已设置），但拿凭据失败：{exc}。"
+                    f"AWS 账号已创建（{state}），但拿凭据失败：{exc}。"
                     "账号已保存到「授权账号」，可稍后重试补凭据。"
                 ) from exc
             self._record_mailbox_status(mailbox, mailbox_account, "failed")

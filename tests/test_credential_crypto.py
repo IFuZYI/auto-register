@@ -45,6 +45,14 @@ SECRETS = {
     "kiro_aws_sso": "aws-sso-plain",
     # 历史版本抄进 extra 的密码（审计 2026-11-13）：也必须按密文处理
     "password": "pw-plain-extra",
+    # camelCase 别名 / 设备码：JSON 导入的 catch-all 会带这些键
+    "accessToken": "AT-camel-plain",
+    "refreshToken": "RT-camel-plain",
+    "idToken": "IDT-camel-plain",
+    "sessionToken": "ST-camel-plain",
+    "clientSecret": "CS-camel-plain",
+    "ssoToken": "SSO-camel-plain",
+    "device_code": "device-code-plain",
 }
 
 

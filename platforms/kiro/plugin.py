@@ -108,8 +108,9 @@ class KiroPlatform(BasePlatform):
         account = aws_platform.register(email=email, password=password)
         identity = dict(account.extra or {})
         identity["email"] = account.email
-        # 密码只进 `password` 列（加密存储），**不要**再塞进 extra：
-        # extra_json 是明文 JSON，列表接口会整段下发（审计 2026-11-13 实证泄漏）。
+        # 密码只在内存里传给 `_register_new_aws_and_kiro`（要落 Kiro 记录的
+        # password 列）；**不进** extra —— extra_json 会整段下发。
+        identity["password"] = account.password
 
         # 来源账号**立即落库**：Kiro 授权失败时 AWS 号已经真实存在（密码也设过），
         # 丢掉它就等于白烧一个号 + 一个邮箱。落进 `aws` 平台库，Kiro 记录用
@@ -125,7 +126,8 @@ class KiroPlatform(BasePlatform):
                 region=str(identity.get("region") or ""),
                 token=str(identity.get("refresh_token") or ""),
                 status=AccountStatus.REGISTERED,
-                extra=dict(identity),
+                # 内存里的 password 不进 extra（列上已经加密存了一份）
+                extra={key: value for key, value in identity.items() if key != "password"},
             )
             account_repository.upsert(source_record)
             self._log(f"[Kiro] 来源 AWS 账号已保存: {account.email}")

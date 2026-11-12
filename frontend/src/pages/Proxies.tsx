@@ -97,6 +97,7 @@ export default function Proxies() {
     orphan_accounts: 0,
   })
   const [balanceEnabled, setBalanceEnabled] = useState(true)
+  const [balanceLoaded, setBalanceLoaded] = useState(false)
   const [balanceMax, setBalanceMax] = useState(0)
   const [balancing, setBalancing] = useState(false)
 
@@ -123,6 +124,7 @@ export default function Proxies() {
       const enabledRaw = String(conf.proxy_balance_enabled ?? '1').toLowerCase()
       setBalanceEnabled(!['0', 'false', 'off', 'no'].includes(enabledRaw))
       setBalanceMax(Number(conf.proxy_balance_max_per_proxy || 0) || 0)
+      setBalanceLoaded(true)
     } finally {
       setLoading(false)
     }
@@ -447,7 +449,7 @@ export default function Proxies() {
 
       {/* 绑定策略只有两个控件：不再用一整张卡片装它，压成一条配置带，
           把「添加代理」和表格往上提。 */}
-      <div className="proxy-config">
+      <div className="proxy-config" role="group" aria-label="绑定策略">
         <span className="proxy-config__label">绑定策略</span>
         <Space size={24} wrap>
           <Space size={8}>
@@ -455,6 +457,7 @@ export default function Proxies() {
             <Tooltip title="开：给账号挑绑定代理时选当前挂得最少的；关：随机挑">
               <Switch
                 checked={balanceEnabled}
+                aria-label="按负载均衡"
                 onChange={(checked) => saveBalanceCfg(checked, balanceMax)}
               />
             </Tooltip>
@@ -465,6 +468,7 @@ export default function Proxies() {
               <InputNumber
                 min={0}
                 value={balanceMax}
+                aria-label="单代理上限（0 表示不限）"
                 onChange={(value) => saveBalanceCfg(balanceEnabled, Number(value) || 0)}
                 style={{ width: 90 }}
               />
@@ -472,9 +476,8 @@ export default function Proxies() {
           </Space>
         </Space>
       </div>
-      {!balanceInfo.bindable_count && (
+      {balanceLoaded && !balanceInfo.bindable_count && (
         <Alert
-          style={{ marginBottom: 16 }}
           type="warning"
           showIcon
           message="还没有「绑定」标签的代理"

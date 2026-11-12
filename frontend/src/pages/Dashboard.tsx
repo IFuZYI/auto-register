@@ -1,19 +1,11 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Button, Empty, Skeleton, App } from 'antd'
 import { ReloadOutlined } from '@ant-design/icons'
-import { getPlatformLabel } from '@/lib/platforms'
+import { getPlatformColor, getPlatformLabel } from '@/lib/platforms'
 import { accountStatusMeta } from '@/lib/accountFormat'
 import { apiFetch } from '@/lib/utils'
 import { PageHeader } from '@/components/PageHeader'
 import { HelpTip } from '@/components/settings/SettingsPrimitives'
-
-/** 平台分布条的配色：按平台名取稳定色相，没有映射时回落主题色。 */
-const PLATFORM_BAR_COLORS: Record<string, string> = {
-  chatgpt: '#10a37f',
-  grok: '#1d9bf0',
-  aws: '#ff9900',
-  kiro: '#6366f1',
-}
 
 /** 状态色：与表格里的 Tag 同一套语义，但这里用点 + 细条，不用药丸。 */
 function statusColor(status: string): string {
@@ -96,7 +88,8 @@ function DistributionRows({ items, total }: { items: RowItem[]; total: number })
 export default function Dashboard() {
   const { message } = App.useApp()
   const [stats, setStats] = useState<any>(null)
-  const [loading, setLoading] = useState(false)
+  // 初值就是 true：effect 要等 paint 之后才跑，false 会让首帧先亮一个 0。
+  const [loading, setLoading] = useState(true)
   /** 本次加载是否抛错。只由 catch 置位，成功路径永远清掉 —— 空数组 ≠ 出错。 */
   const [loadFailed, setLoadFailed] = useState(false)
 
@@ -137,9 +130,13 @@ export default function Dashboard() {
     {
       key: 'recover',
       label: '待恢复',
-      value: (stats?.by_status?.expired ?? 0) + (stats?.by_status?.invalid ?? 0),
+      // 限流也是「等额度恢复/刷新」这一档，不能漏（漏了条带就加不出总数）
+      value:
+        (stats?.by_status?.expired ?? 0) +
+        (stats?.by_status?.invalid ?? 0) +
+        (stats?.by_status?.limited ?? 0),
       color: 'var(--warning)',
-      hint: `过期 ${stats?.by_status?.expired ?? 0} + 失效 ${stats?.by_status?.invalid ?? 0}。这两类都能靠刷新 Token 或重登救回来，所以合成一档看量；下方的状态分布里仍分开列。`,
+      hint: `过期 ${stats?.by_status?.expired ?? 0} + 失效 ${stats?.by_status?.invalid ?? 0} + 限流 ${stats?.by_status?.limited ?? 0}。这些都能靠刷新 Token 或等额度恢复救回来，所以合成一档看量；下方的状态分布里仍分开列。`,
     },
     {
       key: 'banned',
@@ -149,12 +146,20 @@ export default function Dashboard() {
     },
   ]
 
+  // 段和必须等于总数：出现没列进三档的状态时补一段「其他」，
+  // 否则 100% 宽的条带只代表部分账号（图例也加不出上面的总数）。
+  const covered = segments.reduce((sum, item) => sum + item.value, 0)
+  const remainder = Math.max(total - covered, 0)
+  const barSegments = remainder
+    ? [...segments, { key: 'other', label: '其他', value: remainder, color: 'var(--text-muted)' }]
+    : segments
+
   const platformItems: RowItem[] = Object.entries(stats?.by_platform || {})
     .map(([platform, count]) => ({
       key: platform,
       label: getPlatformLabel(platform),
       value: Number(count) || 0,
-      color: PLATFORM_BAR_COLORS[platform] || 'var(--accent)',
+      color: getPlatformColor(platform),
     }))
     .sort((a, b) => b.value - a.value)
 
@@ -186,7 +191,7 @@ export default function Dashboard() {
             <div className="inventory__value">{num(total)}</div>
           </div>
           <div className="inventory__legend">
-            {segments.map((item) => (
+            {barSegments.map((item) => (
               <span className="inventory__legend-item" key={item.key}>
                 <i className="dash-dot" style={{ background: item.color }} />
                 {item.label}
@@ -197,7 +202,7 @@ export default function Dashboard() {
           </div>
         </div>
         <div className="inventory__bar" aria-hidden>
-          {segments.map((item) => (
+          {barSegments.map((item) => (
             <span
               key={item.key}
               style={{

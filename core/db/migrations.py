@@ -821,6 +821,50 @@ def _scrub_extra_passwords(engine: Engine | None = None) -> None:
         logger.debug("清理 extra 密码失败（忽略）: %s", exc)
 
 
+def _encrypt_plaintext_extras(engine: Engine | None = None) -> None:
+    """把存量 `extra_json` 里的明文凭据补加密（审计第二轮）。
+
+    `merge_account_fields` 修好后新写入都是密文；但历史行（尤其 Kiro 来源
+    账号）可能还是明文。这里只处理 `SENSITIVE_EXTRA_KEYS` 里、且不是 `v1:`
+    的值，幂等。
+    """
+    from sqlalchemy import text
+
+    from core.credential_crypto import SENSITIVE_EXTRA_KEYS, encrypt_text, is_ciphertext
+
+    target = engine
+    if target is None:
+        from .base import current_engine
+
+        target = current_engine()
+    try:
+        with target.begin() as conn:
+            rows = conn.execute(
+                text("SELECT id, extra_json FROM accounts WHERE extra_json LIKE '%:%'")
+            ).fetchall()
+            for row in rows:
+                try:
+                    data = json.loads(row[1] or "{}")
+                except Exception as exc:  # noqa: BLE001 - 脏行跳过
+                    logger.debug("extra_json 解析失败（跳过）: %s", exc)
+                    continue
+                if not isinstance(data, dict):
+                    continue
+                changed = False
+                for key in SENSITIVE_EXTRA_KEYS & data.keys():
+                    value = data[key]
+                    if isinstance(value, str) and value and not is_ciphertext(value):
+                        data[key] = encrypt_text(value)
+                        changed = True
+                if changed:
+                    conn.execute(
+                        text("UPDATE accounts SET extra_json = :extra WHERE id = :id"),
+                        {"extra": json.dumps(data, ensure_ascii=False), "id": row[0]},
+                    )
+    except Exception as exc:  # noqa: BLE001 - 迁移失败不该阻断启动
+        logger.debug("补加密存量 extra 失败（忽略）: %s", exc)
+
+
 def run_migrations(engine: Engine | None = None) -> None:
     """在指定库跑全部迁移；不传则跑「默认库 + 所有平台库」。"""
     if engine is not None:
@@ -857,6 +901,8 @@ def _run_one(engine: Engine) -> None:
     _normalize_grok_token_column(engine)
     # 历史遗留：extra_json 里的明文密码（Kiro 来源账号落库时误抄）
     _scrub_extra_passwords(engine)
+    # 历史遗留：extra_json 里的明文凭据（upsert 曾绕过 encrypt_extra）
+    _encrypt_plaintext_extras(engine)
 
 
 __all__ = [
@@ -873,4 +919,5 @@ __all__ = [
     "_normalize_grok_token_column",
     "_normalize_removed_account_statuses",
     "_scrub_extra_passwords",
+    "_encrypt_plaintext_extras",
 ]

@@ -310,27 +310,36 @@ class FrontendStatusLabelContractTests(unittest.TestCase):
         for stale in ("'已注册'", "'已封禁'"):
             self.assertNotIn(stale, src, f"仪表盘还留着旧文案 {stale}")
 
-    def test_dashboard_has_a_dedicated_banned_segment(self):
-        """「禁用」在总览里必须单独可见（不与「待恢复」合并）。
+    def _segments(self, src: str) -> dict[str, str]:
+        """把 `const segments: RowItem[] = [...]` 拆成 {key: 片段}。
 
-        2026-11-13 仪表盘从四张统计卡改成「库存带」：总账号数 + 三档状态
-        （正常/待恢复/禁用）+ 一条状态条。断言锚点跟着改，意图不变：
-        「禁用」是强判断（不因探测复活），必须单独看到量。
+        按 `{ key: '…'` 切，不做「文本窗口」断言 —— 窗口断言在把合计提成
+        变量后恒真（审计第二轮变异 C/D 实证）。
         """
+        block = src.split("const segments: RowItem[] = [", 1)[1].split("\n  ]", 1)[0]
+        parts = block.split("key: '")
+        return {part.split("'", 1)[0]: part for part in parts[1:]}
+
+    def test_dashboard_has_a_dedicated_banned_segment(self):
+        """「禁用」在总览里必须单独成段，且「待恢复」不含 banned。"""
         src = self._src("pages/Dashboard.tsx")
-        self.assertIn("label: '禁用'", src, "仪表盘缺「禁用」档")
-        self.assertIn("by_status?.banned", src, "「禁用」必须读 by_status.banned")
-        recover_block = src.split("label: '待恢复'", 1)[1].split("},", 1)[0]
+        segments = self._segments(src)
+        self.assertIn("banned", segments, "仪表盘缺「禁用」段")
+        self.assertIn("label: '禁用'", segments["banned"])
+        self.assertIn("by_status?.banned", segments["banned"])
+        self.assertIn("recover", segments, "仪表盘缺「待恢复」段")
+        self.assertIn("label: '待恢复'", segments["recover"])
         self.assertNotIn(
-            "banned", recover_block,
-            "「待恢复」仍把 banned 并进合计 —— 会和「禁用」双记",
+            "banned", segments["recover"],
+            "「待恢复」把 banned 并进合计 —— 会和「禁用」双记",
         )
+        self.assertIn("registered", segments)
+        self.assertIn("label: '正常'", segments["registered"])
 
     def test_dashboard_banned_segment_uses_theme_token(self):
         """禁用的点/条走现有 token（不引新色板）。"""
         src = self._src("pages/Dashboard.tsx")
-        banned_block = src.split("label: '禁用'", 1)[1].split("},", 1)[0]
-        self.assertIn("var(--purple)", banned_block, "禁用档颜色应引用主题 CSS 变量")
+        self.assertIn("var(--purple)", self._segments(src)["banned"])
 
 
 class ActionWiringContractTests(unittest.TestCase):

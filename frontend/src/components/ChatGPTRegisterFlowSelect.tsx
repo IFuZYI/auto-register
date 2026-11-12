@@ -25,6 +25,7 @@ export function ChatGPTRegisterFlowSelect({
   return (
     <Space align="center" wrap size={8}>
       <Select
+        aria-label="注册方式"
         value={flow}
         style={{ minWidth: 200 }}
         onChange={(value) => onChange(normalizeChatGPTRegisterFlow(value))}

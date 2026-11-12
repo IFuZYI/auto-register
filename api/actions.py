@@ -60,7 +60,11 @@ from services.action_execution import (
 
 
 #: 动作响应里**永不回吐正文**的凭据键（状态已落库，前端不需要这些值）。
-_ACTION_SECRET_KEYS = {"access_token", "refresh_token", "sso", "password", "client_secret"}
+#: 从密文集派生，新增键自动覆盖；`totp_secret` 例外 —— `bind_2fa` 需要
+#: 一次性下发密钥，不能全局删。
+from core.credential_crypto import SENSITIVE_EXTRA_KEYS as _SENSITIVE
+
+_ACTION_SECRET_KEYS = set(_SENSITIVE) - {"totp_secret"} | {"password"}
 
 
 def _redact_action_payload(value):

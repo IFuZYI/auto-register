@@ -63,6 +63,15 @@ SENSITIVE_EXTRA_KEYS: frozenset[str] = frozenset(
         "kiro_aws_refresh_token",
         "kiro_aws_client_secret",
         "kiro_aws_sso",
+        # JSON 导入的 catch-all 会把 camelCase 键原样塞进 extra；不纳入密文集
+        # 就是「换一种拼写绕过加密」（审计第二轮实证）。
+        "accessToken",
+        "refreshToken",
+        "idToken",
+        "sessionToken",
+        "clientSecret",
+        "ssoToken",
+        "device_code",
     }
 )
 

@@ -188,9 +188,10 @@ class AwsBuilderIdClient:
         #: `aws-ubid-main`：服务端下发的主 ubid，指纹里的 `lsUbid` 用它
         self.aws_ubid_main = ""
         self.ubid = ""
-        #: 密码是否已提交成功 —— SSO/换 token 失败时据此判断「号已经建好」，
-        #: 供插件把半成品账号落库（不然一次 SSO 失败就白烧一个号）
+        #: 密码是否已被服务端确认 —— SSO/换 token 失败时据此判断「号已经建好」
         self.password_set = False
+        #: create-identity 成功（号已存在，密码可能还没设）
+        self.identity_created = False
         self.client_id = ""
         self.client_secret = ""
         self.device_code = ""
@@ -1076,11 +1077,9 @@ class AwsBuilderIdClient:
             referer=signup_url,
         )
         data = _json_of(response)
-        # 密码 POST 已被服务端接受（后面即使解析 redirect 失败，号也已经建好）。
-        # 在这里置位，插件才能在 SSO 失败时把半成品落库（审计 2026-11-13）。
-        self.password_set = True
         redirect = str((data.get("redirect") or {}).get("url") or "")
         if data.get("stepId") == "end-of-user-registration-success":
+            self.password_set = True
             return {
                 "completed": True,
                 "workflow_state_handle": "",
@@ -1092,6 +1091,7 @@ class AwsBuilderIdClient:
                 "set_password",
                 f"密码设置未返回 redirect（stepId={data.get('stepId')!r}）",
             )
+        self.password_set = True
         return {
             "completed": False,
             "workflow_state_handle": _query(redirect, "workflowStateHandle"),
@@ -1373,6 +1373,8 @@ class AwsBuilderIdClient:
             raise AwsRegistrationError("otp", "未取到验证码")
 
         registration_code, sign_in_state = self.create_identity(email, full_name, otp)
+        # 号已经真实创建（密码还没确认）：半成品落库的另一个触发点
+        self.identity_created = True
         password_result = self.set_password(
             email, password, registration_code, sign_in_state
         )

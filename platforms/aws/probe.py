@@ -112,9 +112,12 @@ def probe_builder_id(
             "expires_in": result["expires_in"],
         }
     code: Optional[int] = result.get("code")
+    indeterminate = code is None
     return {
         "code": code,
-        "usable": False,
+        # 网络错误/超时 = 测不了（None），不是失效（False）—— 状态策略会跳过
+        "usable": None if indeterminate else False,
+        "indeterminate": indeterminate,
         "summary": str(result.get("error") or "刷新失败")[:200],
         "banned": code == 403,
     }

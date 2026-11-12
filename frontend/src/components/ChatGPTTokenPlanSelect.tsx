@@ -30,6 +30,7 @@ export function ChatGPTTokenPlanSelect({
   return (
     <Space align="center" wrap size={8}>
       <Select
+        aria-label="ChatGPT Token 方案"
         value={plan}
         onChange={onChange}
         style={{ minWidth: 220 }}

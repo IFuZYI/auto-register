@@ -465,6 +465,9 @@ def build_captcha_chain(
             model=str(values.get("ai_captcha_model") or "gpt-4o-mini").strip() or "gpt-4o-mini",
             session=session_factory(),
         )
+    unknown = [name for name in order if name not in {"capmonster", "yescaptcha", "ai"}]
+    if unknown:
+        logger.warning("captcha_provider_order 含未知 provider（已忽略）: %s", unknown)
     return CaptchaChain([built[name] for name in order if name in built])
 
 

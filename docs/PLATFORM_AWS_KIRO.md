@@ -3,7 +3,7 @@
 两个平台共用一条 **AWS Builder ID 注册链路**：
 
 ```
-platforms/aws/client.py          16 步协议状态机（含条件执行的 `complete_signup`）（OIDC → device → portal → workflow
+platforms/aws/client.py          16 步固定流程 + 1 步条件（`complete_signup`）（OIDC → device → portal → workflow
                                  → 提交邮箱 → 注册 → 资料页 → 发码 → 建身份 → 设密码
                                  → SSO 工作流 → SSO token → device token）
 platforms/aws/crypto.py          XXTEA 指纹信封 · 密码 JWE（RSA-OAEP-256 + A256GCM）
@@ -247,13 +247,14 @@ portal login → "" → start → get-identity-user（username + 指纹）
 > 历史记录：本节早期版本写「当前出口被 AWS 判 BLOCKED」「没有接码/打码」——
 > 那是 6.2 修复前的状态，已被 6.1 的 3 个成功账号推翻。现在保留的是**仍然成立**的边界。
 
-- **AWS 风控**：协议链路已真机跑到设置密码，但当前出口被 AWS 判 `BLOCKED`
-  （见上一节）。换住宅 IP 前不要期待端到端成功。
-- **没有接码/打码**：AWS 目前对 Builder ID 注册只发邮箱验证码；若上游开始
-  要求手机号或人机验证，链路会以 `AwsRegistrationError` 明确失败（不是静默卡住）。
+- **AWS 风控**：同一出口连续注册会被限流（`400 Please try signing in again`），
+  换出口或等窗口即可；`BLOCKED` 的根因（指纹自相矛盾）已在 6.2 修复。
+- **验证码**：Builder ID 注册只发邮箱验证码；AWS WAF 需要 token 时走
+  CapMonster → YesCaptcha → AI 的降级链，链上没有可用 provider 时
+  `AwsCaptchaRequired` 明确失败（不是静默卡住）。
 - **自动维护**：`PLATFORM_ACTIONS` 已登记 aws / kiro 的探测与刷新动作，
   但周期任务仍只为 chatgpt / grok 注册（配置键与界面还没做）—— 目前用
   「账号页 → 测活 / 刷新 Token」手动触发，或批量动作。
 - **打码需要预付余额**：CapMonster 的 `AmazonTask` 与 YesCaptcha 的
-  `AwsClassification` 都按次计费；余额不足时 `AwsCaptchaRequired` 的 detail
-  里会带 provider 的原始报错。
+  `AwsClassification` 都按次计费；余额不足时 `AwsCaptchaRequired` 的 message
+  里会带 provider 的原始报错（便于排查余额/网络）。

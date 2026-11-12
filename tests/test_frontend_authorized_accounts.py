@@ -30,8 +30,17 @@ class AuthorizedAccountsWiringTests(unittest.TestCase):
         self.assertIn("key: '/authorized-accounts/aws'", source)
         self.assertIn("label: 'AWS'", source)
         self.assertIn('path="/authorized-accounts/aws"', source)
-        self.assertIn('to="/authorized-accounts/aws"', source, "/authorized-accounts 应重定向到子项")
-        self.assertIn('to="/authorized-accounts/aws"', source, "/accounts/aws 应重定向")
+        # 两条旧入口各自重定向；分开断言，删掉任一条都会红
+        self.assertIn(
+            '<Route path="/authorized-accounts" element={<Navigate to="/authorized-accounts/aws"',
+            source,
+            "/authorized-accounts 应重定向到子项",
+        )
+        self.assertIn(
+            '<Route path="/accounts/aws" element={<Navigate to="/authorized-accounts/aws"',
+            source,
+            "/accounts/aws 应重定向到子项",
+        )
 
     def test_platform_menu_excludes_aws(self):
         source = self._read("App.tsx")
@@ -60,6 +69,20 @@ class AuthorizedAccountsWiringTests(unittest.TestCase):
         self.assertIn("指定 AWS 账号", source)
         self.assertIn("新建 AWS + Kiro", source)
         self.assertIn("没有可用 AWS 时自动注册", source)
+
+    def test_selected_key_handles_authorized_subpaths(self):
+        """侧栏选中态：/authorized-accounts/* 要同时选父项与子项。"""
+        source = self._read("App.tsx")
+        block = source.split("function getSelectedKey")[1].split("return ['/']")[0]
+        self.assertIn("key.startsWith('/authorized-accounts/')", block)
+
+    def test_kiro_export_credentials_ui(self):
+        """Kiro 的「导出凭据」：格式、下载名、仅 kiro 可见。"""
+        source = self._read("pages/Accounts.tsx")
+        self.assertIn("kiro_export", source)
+        self.assertIn("format: 'kiro_json'", source)
+        self.assertIn("link.download = 'kiro.json'", source)
+        self.assertIn("currentPlatform === 'kiro'", source)
 
     def test_page_registers_aws_and_shows_the_derivation_chain(self):
         source = self._read("pages/AuthorizedAccounts.tsx")

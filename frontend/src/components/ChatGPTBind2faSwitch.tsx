@@ -19,6 +19,7 @@ export function ChatGPTBind2faSwitch({
   return (
     <Space align="center" wrap size={8}>
       <Switch
+        aria-label="绑定 2FA"
         checked={enabled}
         checkedChildren="绑定"
         unCheckedChildren="不绑"

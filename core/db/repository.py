@@ -161,7 +161,13 @@ def merge_account_fields(
         extra = incoming.get_extra()
     else:
         extra = getattr(incoming, "extra", None) or {}
-        extra_json = json.dumps(extra, ensure_ascii=False)
+        # **落库前封口**：AccountRecord/Account 的 extra 是明文视图，
+        # 直接 json.dumps 会把 AT/RT/client_secret 以明文写进 extra_json
+        # （审计第二轮实证：Kiro 来源账号的 extra 全是明文）。encrypt_extra
+        # 对已加密值幂等，JSON 后端再封一次也不会双重加密。
+        from core.credential_crypto import encrypt_extra
+
+        extra_json = json.dumps(encrypt_extra(extra), ensure_ascii=False)
 
     status = getattr(incoming, "status", None)
     status_value = getattr(status, "value", None) or str(status or "registered")

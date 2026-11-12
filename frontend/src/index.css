@@ -2245,55 +2245,17 @@ body {
   transition: width 0.5s var(--ease-out);
 }
 
-/* ── 质量地板：焦点环 / 减少动效 / 滚动条 ───────────────────────── */
-:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
-  border-radius: 4px;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  *,
-  *::before,
-  *::after {
-    animation-duration: 0.01ms !important;
-    animation-iteration-count: 1 !important;
-    transition-duration: 0.01ms !important;
-    scroll-behavior: auto !important;
-  }
-}
-
-/* 细滚动条：默认的宽灰条在深色底上比内容还抢眼 */
-* {
-  scrollbar-width: thin;
-  scrollbar-color: var(--border-strong) transparent;
-}
-
-::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
-}
-
-::-webkit-scrollbar-thumb {
-  background: var(--border-strong);
-  border-radius: 4px;
-}
-
-::-webkit-scrollbar-track {
-  background: transparent;
-}
-
 /* 搜索框的按钮不该和主操作抢蓝色：主按钮只有一个（注册/保存），
    搜索是辅助动作，用中性描边即可。 */
 .ant-input-search .ant-input-search-button {
-  background: var(--bg-subtle);
+  background: var(--bg-elevated);
   color: var(--text-secondary);
   border-color: var(--border);
   box-shadow: none;
 }
 
 .ant-input-search .ant-input-search-button:not(:disabled):hover {
-  background: var(--bg-subtle);
+  background: var(--bg-elevated);
   color: var(--text);
   border-color: var(--border-strong);
 }
@@ -2305,7 +2267,6 @@ body {
   gap: 20px;
   flex-wrap: wrap;
   padding: 2px 2px 16px;
-  margin-bottom: 16px;
   border-bottom: 1px solid var(--border);
 }
 
