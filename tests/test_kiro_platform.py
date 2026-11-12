@@ -145,7 +145,9 @@ class KiroCredentialFormatTests(unittest.TestCase):
                     "source", "uid", "updatedAt"):
             self.assertIn(key, entry, f"顶层缺少 {key}")
         self.assertEqual(entry["provider"], "kiro")
-        self.assertEqual(entry["source"], "aws", "来源要落成 aws（不是参考文件里的 plugin）")
+        # 导出写 `plugin`：这是账号管理器 `kiro.json` 的取值（样例文件就是
+        # plugin），写 `aws` 管理器不认；我们的来源 `aws` 留在库里，导入时映射回来。
+        self.assertEqual(entry["source"], "plugin")
         self.assertTrue(entry["id"].startswith("kiro-account-"))
         self.assertFalse(entry["desktop"])
 
@@ -587,9 +589,34 @@ class KiroExportImportTests(unittest.TestCase):
         self.assertEqual(len(payload["accounts"]), 1)
         entry = payload["accounts"][0]
         self.assertEqual(entry["provider"], "kiro")
-        self.assertEqual(entry["source"], "aws")
+        self.assertEqual(entry["source"], "plugin")
         self.assertEqual(entry["pluginSecret"]["access"], "at-1")
         self.assertEqual(entry["pluginSecret"]["refresh"], "rt-1")
+
+    def test_export_document_shape_matches_the_fixture(self):
+        """导出的键集必须与样例文件逐层一致（顶层/entry/public/secret）。"""
+        from services.account_export import render_accounts
+
+        fixture = json.loads(FIXTURE.read_text(encoding="utf-8"))
+        document = json.loads(render_accounts([self._account()], "kiro_json"))
+        self.assertEqual(set(document), set(fixture))
+        entry = document["accounts"][0]
+        sample = fixture["accounts"][0]
+        self.assertEqual(set(entry), set(sample))
+        self.assertEqual(set(entry["pluginPublic"]), set(sample["pluginPublic"]))
+        self.assertEqual(set(entry["pluginSecret"]), set(sample["pluginSecret"]))
+        self.assertEqual(document["version"], fixture["version"])
+        self.assertEqual(document["customProviders"], fixture["customProviders"])
+
+    def test_idc_export_round_trips_source_back_to_aws(self):
+        """导出写 plugin，导回来必须还是 aws（idc 账号）。"""
+        from platforms.kiro.credentials import parse_entry, to_account_entry
+        from services.account_export import render_accounts
+
+        entry = json.loads(render_accounts([self._account()], "kiro_json"))["accounts"][0]
+        parsed = parse_entry(entry)
+        self.assertEqual(parsed["source"], "aws")
+        self.assertEqual(parsed["auth_method"], "idc")
 
     def test_kiro_json_format_skips_other_platforms(self):
         from core.models.account import AccountRecord

@@ -891,6 +891,46 @@ export default function Accounts() {
   }
 
   /**
+   * 「导出凭据」：把 Kiro 账号导出成账号管理器的 `kiro.json`（v2）。
+   *
+   * 与通用「导出」的区别：不弹格式选择，直接给这个格式 —— 这个文件的用途
+   * 就是喂给 Kiro 账号管理器，选错格式等于白导。
+   * 勾选了就导勾选的，没勾选就导当前筛选结果。
+   */
+  const exportKiroCredentials = async () => {
+    try {
+      const body: Record<string, unknown> = { format: 'kiro_json', platform: 'kiro' }
+      if (selectedRowKeys.length > 0) {
+        body.account_ids = selectedRowKeys
+      } else {
+        if (search) body.email = search
+        if (filterStatus) body.status = filterStatus
+        if (filterPlusStatus) body.plus_status = filterPlusStatus
+        if (createdAtStart) body.created_at_start = createdAtStart
+        if (createdAtEnd) body.created_at_end = createdAtEnd
+      }
+      const result = (await apiFetch('/accounts/export-text', {
+        method: 'POST',
+        body: JSON.stringify(body),
+      })) as { content: string }
+      const blob = new Blob([result.content], { type: 'application/json;charset=utf-8' })
+      const url = URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = url
+      link.download = 'kiro.json'
+      link.click()
+      URL.revokeObjectURL(url)
+      message.success(
+        selectedRowKeys.length > 0
+          ? `已导出 ${selectedRowKeys.length} 个账号的凭据`
+          : '已导出当前筛选的 Kiro 凭据',
+      )
+    } catch (e) {
+      message.error(`导出凭据失败: ${e instanceof Error ? e.message : String(e)}`)
+    }
+  }
+
+  /**
    * 「恢复异常账号」：不用先勾选 —— 按状态自动挑 invalid/expired/limited，
    * 逐个试一次恢复链，救不回来的累计到退避计数，达上限自动落「禁用」。
    * 先拉预览让用户看清会动哪些号，再执行（不可逆的批量动作都要先预览）。
@@ -1461,6 +1501,14 @@ export default function Accounts() {
                     disabled: total === 0,
                   }] : []),
                   { key: 'export', icon: <DownloadOutlined />, label: selectedRowKeys.length > 0 ? `导出 (${selectedRowKeys.length})` : '导出', disabled: total === 0 },
+                  ...(currentPlatform === 'kiro' ? [{
+                    key: 'kiro_export',
+                    icon: <KeyOutlined />,
+                    label: selectedRowKeys.length > 0
+                      ? `导出凭据 (${selectedRowKeys.length})`
+                      : '导出凭据',
+                    disabled: total === 0,
+                  }] : []),
                   { type: 'divider' as const },
                   // 「手工新增」= 手动录一条，与「注册」（自动跑流程）不是一回事，
                   // 换个图标避免和「注册」的 + 混淆。
@@ -1479,6 +1527,7 @@ export default function Accounts() {
                   else if (key === 'import') setImportModalOpen(true)
                   else if (key === 'panel_upload') setPanelUploadOpen(true)
                   else if (key === 'export') setExportModalOpen(true)
+                  else if (key === 'kiro_export') void exportKiroCredentials()
                   else if (key === 'add') setAddModalOpen(true)
                   else if (key === 'delete') { void handleBatchDelete() }
                 },

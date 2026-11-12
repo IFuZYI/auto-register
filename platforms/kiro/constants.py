@@ -38,6 +38,12 @@ KIRO_USER_AGENT = (
 #: 来源平台名 —— Kiro 账号的 `extra.source`。
 SOURCE_AWS = "aws"
 
+#: `kiro.json` 里 `source` 的取值。样例文件（账号管理器导出）是 `plugin`：
+#: 这个字段表达的是「账号由插件导入/管理」，不是我们的来源平台。导出必须写
+#: `plugin` 才能被管理器接受；本项目的 `source=aws` 留在库里，导入时对 idc
+#: 账号映射回 `aws`（见 `credentials.parse_entry`）。
+EXPORT_SOURCE = "plugin"
+
 #: 默认套餐名（与 kiro.json 的 `plan` 字段同值）。
 DEFAULT_PLAN = "Kiro FREE"
 

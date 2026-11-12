@@ -50,6 +50,7 @@ from typing import Any, Iterable, Mapping
 
 from .constants import (
     AUTH_METHOD_IDC,
+    EXPORT_SOURCE,
     AUTH_METHOD_SOCIAL,
     DEFAULT_PLAN,
     DEFAULT_PROFILE_ARN,
@@ -251,7 +252,8 @@ def to_account_entry(account: Any) -> dict[str, Any]:
         "provider": "kiro",
         "proxy": {"source": "direct"},
         "refreshToken": "",
-        "source": _clean(extra.get("source")) or SOURCE_AWS,
+        # 导出写 `plugin`（与账号管理器样例一致），不是我们的 `source=aws`
+        "source": EXPORT_SOURCE,
         "uid": uid,
         "updatedAt": updated_ms,
     }
@@ -279,6 +281,14 @@ def parse_entry(entry: Mapping[str, Any]) -> dict[str, Any]:
     login_provider = _clean(secret.get("loginProvider")) or "BuilderId"
     account_id = _clean(secret.get("accountId")) or _clean(public.get("accountId")) or _clean(entry.get("name"))
     email = account_id if "@" in account_id else _clean(public.get("accountId"))
+    raw_source = _clean(entry.get("source"))
+    # 管理器导出的 `plugin` 对 idc（Builder ID）账号等价于我们的 `source=aws`；
+    # social 账号保留原值（它们的来源是 GitHub/Google，不是 AWS）。
+    source = (
+        SOURCE_AWS
+        if raw_source == EXPORT_SOURCE and auth_method == AUTH_METHOD_IDC
+        else (raw_source or SOURCE_AWS)
+    )
     record = build_extra(
         access_token=_clean(secret.get("access")) or _clean(entry.get("accessToken")),
         refresh_token=_clean(secret.get("refresh")) or _clean(entry.get("refreshToken")),
@@ -294,7 +304,7 @@ def parse_entry(entry: Mapping[str, Any]) -> dict[str, Any]:
         uid=_clean(secret.get("uid")) or _clean(entry.get("uid")),
         email=email or account_id,
         name=_clean(entry.get("name")) or _clean(secret.get("name")),
-        source=_clean(entry.get("source")),
+        source=source,
         source_email=_clean(public.get("accountId")) or email or account_id,
     )
     record["email"] = email or account_id

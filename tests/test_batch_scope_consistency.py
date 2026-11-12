@@ -223,14 +223,16 @@ class FrontendDateForwardingTests(unittest.TestCase):
         occurrences = src.count("body.all_filtered = true")
         self.assertEqual(occurrences, 4, f"all_filtered 分支数变了: {occurrences}")
 
+        # 另有 1 个「导出凭据」的筛选分支：导出不是批量任务（没有 all_filtered），
+        # 但同样按当前筛选导，日期必须一起转发，否则导出的范围比看到的大。
         forwarded = src.count("if (createdAtStart) body.created_at_start = createdAtStart")
         self.assertEqual(
-            forwarded, occurrences,
-            "有 all_filtered 分支没带 created_at_start —— "
+            forwarded, occurrences + 1,
+            "有筛选分支没带 created_at_start —— "
             "显示的计数包含日期筛选、请求不带，处理数会大于显示数",
         )
         forwarded_end = src.count("if (createdAtEnd) body.created_at_end = createdAtEnd")
-        self.assertEqual(forwarded_end, occurrences, "有分支没带 created_at_end")
+        self.assertEqual(forwarded_end, occurrences + 1, "有分支没带 created_at_end")
 
 
 class NaiveDatetimeNormalizationTests(unittest.TestCase):

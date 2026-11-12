@@ -1,5 +1,6 @@
 """导出接口：格式清单、勾选导出、按筛选导出。"""
 
+import json
 import unittest
 
 from fastapi import FastAPI
@@ -95,6 +96,44 @@ class ExportEndpointTests(unittest.TestCase):
         ).json()
 
         self.assertTrue(body["filename"].endswith(".csv"))
+
+    def test_kiro_json_export_is_a_manager_document(self):
+        with Session(engine) as session:
+            model = _account(
+                "kiro-export@example.com",
+                platform="kiro",
+                extra={
+                    "access_token": "at-1",
+                    "refresh_token": "rt-1",
+                    "client_id": "cid-1",
+                    "client_secret": "cs-1",
+                    "profile_arn": "arn:aws:codewhisperer:us-east-1:1:profile/X",
+                    "region": "us-east-1",
+                    "auth_method": "idc",
+                    "login_provider": "BuilderId",
+                    "plan": "Kiro FREE",
+                    "account_id": "kiro-export@example.com",
+                    "uid": "builderid",
+                    "source": "aws",
+                    "source_email": "kiro-export@example.com",
+                    "expires_at": 1794478346773,
+                },
+            )
+            session.add(model)
+            session.commit()
+
+        response = self.client.post(
+            "/accounts/export-text",
+            json={"format": "kiro_json", "platform": "kiro"},
+        )
+        self.assertEqual(response.status_code, 200)
+        document = json.loads(response.json()["content"])
+        self.assertEqual(document["version"], 2)
+        self.assertEqual(document["customProviders"], [])
+        entry = document["accounts"][0]
+        self.assertEqual(entry["source"], "plugin", "管理器只认 plugin")
+        self.assertEqual(entry["pluginSecret"]["clientId"], "cid-1")
+        self.assertEqual(entry["pluginSecret"]["refresh"], "rt-1")
 
     def test_unknown_format_is_a_400(self):
         response = self.client.post(

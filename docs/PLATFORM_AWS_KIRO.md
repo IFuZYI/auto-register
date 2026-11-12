@@ -65,7 +65,8 @@ AWS 不再是「平台管理」里的一个平台（2026-11-13 调整）：它�
 ## 3. 凭据格式：`kiro.json`（v2）
 
 `services/account_export.py` 注册了 `kiro_json` 导出格式，产物与 Kiro 账号管理器
-的导出文件同构：
+的导出文件同构。入口：**平台管理 → Kiro → 更多 → 导出凭据**（勾选了就只导
+勾选的，没勾选就导当前筛选；直接下载 `kiro.json`，不弹格式选择）：
 
 ```json
 {
@@ -80,7 +81,7 @@ AWS 不再是「平台管理」里的一个平台（2026-11-13 调整）：它�
       "region": "us-east-1", "method": "idc", "loginProvider": "BuilderId",
       "plan": "Kiro FREE", "accountId": "a@b.com", "uid": "builderid"
     },
-    "provider": "kiro", "source": "aws", "uid": "builderid"
+    "provider": "kiro", "source": "plugin", "uid": "builderid"
   }],
   "customProviders": [],
   "exportedAt": 1794474836094,
@@ -90,11 +91,15 @@ AWS 不再是「平台管理」里的一个平台（2026-11-13 调整）：它�
 
 **导入**：`POST /api/accounts/import`（`format=json`）能直接吃这份文件 ——
 `api/accounts.py` 认出 `pluginSecret` 后调用
-`platforms.kiro.credentials.parse_entry()` 拍平，凭据落进 `extra`（`source`
-保留文件里的值：从管理器导入的号是 `plugin`，本项目注册的是 `aws`）。
+`platforms.kiro.credentials.parse_entry()` 拍平，凭据落进 `extra`。
 
-> `client_secret` / `kiro_aws_*` 都在 `credential_crypto.SENSITIVE_EXTRA_KEYS`
-> 里 —— 落盘即密文。它们与 RT 同级：有这三件套就能无限续期 AT。
+`source` 的口径：**导出写 `plugin`**（账号管理器 `kiro.json` 的取值，样例文件就是
+`plugin`；写 `aws` 管理器不认），**导入时**对 `auth_method=idc` 的账号映射回
+`aws` —— 本项目注册的号来源是 AWS，这条链不能因为一次导出/导入就断。
+
+> `client_secret` 与 `kiro_aws_{access_token,refresh_token,client_secret,sso}`
+> 在 `credential_crypto.SENSITIVE_EXTRA_KEYS` 里 —— 落盘即密文。它们与 RT
+> 同级：有这三件套就能无限续期 AT。
 
 ## 4. 刷新与测活
 
