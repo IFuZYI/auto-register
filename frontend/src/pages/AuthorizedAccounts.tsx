@@ -28,7 +28,6 @@ import {
   MoreOutlined,
   PlusOutlined,
   ReloadOutlined,
-  SafetyCertificateOutlined,
 } from '@ant-design/icons'
 import { PageHeader } from '@/components/PageHeader'
 import { TaskLogPanel } from '@/components/TaskLogPanel'
@@ -115,17 +114,39 @@ function ChainCell({ count }: { count: number }) {
   )
 }
 
+/** 表格内展开的派生行：与抽屉里的授权树同一套「脊柱」语言。 */
+function DerivedList({ items }: { items: Derived[] }) {
+  if (!items.length) return null
+  return (
+    <div className="auth-lineage">
+      {items.map((item) => (
+        <div className="auth-lineage__row" key={item.id}>
+          <span className="auth-lineage__node" />
+          <div className="auth-lineage__body">
+            <span className="auth-lineage__email">{item.email}</span>
+            <span className="auth-lineage__meta">
+              {item.plan || 'Kiro'}
+              {item.status ? `，${accountStatusMeta(item.status).label}` : ''}
+            </span>
+          </div>
+        </div>
+      ))}
+    </div>
+  )
+}
+
 /** 授权树：抽屉里的纵向链（根在上，Kiro 派生在下）。 */
-function AuthTree({ email, status, derived }: { email: string; status: string; derived: Derived[] }) {
+function AuthTree({ status, derived }: { status: string; derived: Derived[] }) {
   const meta = accountStatusMeta(status)
   return (
     <div className="auth-tree">
       <div className="auth-tree__root">
         <span className="auth-tree__node auth-tree__node--root" />
         <div className="auth-tree__body">
-          <div className="auth-tree__email">{email}</div>
+          {/* 邮箱在抽屉标题里，这里只标身份类型，避免同一屏重复两遍 */}
+          <div className="auth-tree__email">AWS Builder ID</div>
           <div className="auth-tree__meta">
-            AWS Builder ID
+            授权根
             <Tag color={meta.color} style={{ marginInlineStart: 8 }}>{meta.label}</Tag>
           </div>
         </div>
@@ -142,9 +163,8 @@ function AuthTree({ email, status, derived }: { email: string; status: string; d
               <div className="auth-tree__body">
                 <div className="auth-tree__email">{item.email}</div>
                 <div className="auth-tree__meta">
-                  Kiro
-                  {item.plan ? ` · ${item.plan}` : ''}
-                  {item.status ? ` · ${accountStatusMeta(item.status).label}` : ''}
+                  {item.plan || 'Kiro'}
+                  {item.status ? `，${accountStatusMeta(item.status).label}` : ''}
                 </div>
               </div>
             </div>
@@ -220,6 +240,10 @@ export default function AuthorizedAccounts() {
   }, [load])
 
   const derivedTotal = useMemo(() => Object.keys(derivedMap).length, [derivedMap])
+  const pendingCount = useMemo(
+    () => rows.filter((row) => Boolean(parseExtra(row.extra_json).needs_sso)).length,
+    [rows],
+  )
 
   const openDetail = async (row: AccountRow) => {
     detailId.current = row.id
@@ -511,7 +535,11 @@ export default function AuthorizedAccounts() {
       <PageHeader
         title="AWS"
         subtitle={
-          <>AWS Builder ID 是 Kiro 的授权根：共 {total} 个账号；Kiro 侧已换取凭据的来源邮箱 {derivedTotal} 个（按前 200 条 Kiro 记录统计）。</>
+          <span className="auth-summary">
+            AWS Builder ID 是 Kiro 的授权根。<strong>{total}</strong> 个账号，
+            <strong>{derivedTotal}</strong> 个已换取 Kiro 凭据
+            {pendingCount ? <>，<strong>{pendingCount}</strong> 个待补凭据</> : null}。
+          </span>
         }
         actions={
           <Space wrap>
@@ -531,14 +559,6 @@ export default function AuthorizedAccounts() {
           </Space>
         }
       />
-
-      <div className="auth-note">
-        <SafetyCertificateOutlined aria-hidden />
-        <span>
-          这里只存授权用的账号本身，Kiro 凭据在「平台管理 → Kiro」。删除本地记录不会注销 AWS 号；
-          测活与刷新凭据都走后台任务，日志在弹窗里。
-        </span>
-      </div>
 
       <div className="auth-toolbar">
         <Input.Search
@@ -579,6 +599,21 @@ export default function AuthorizedAccounts() {
         columns={withDataLabels(columns)}
         dataSource={rows}
         loading={loading}
+        expandable={
+          // 授权链在行内展开：这页的组织原则是「根 → 派生」，不是一张扁平的
+          // 账号表。窄屏走卡片模式，展开行会被 AntD 渲染成跨列块、撑破卡片，
+          // 所以窄屏不提供行内展开 —— 抽屉里的授权树仍在。
+          narrow
+            ? undefined
+            : {
+                rowExpandable: (row) =>
+                  (derivedMap[row.email.trim().toLowerCase()] || []).length > 0,
+                expandedRowRender: (row) => (
+                  <DerivedList items={derivedMap[row.email.trim().toLowerCase()] || []} />
+                ),
+                expandRowByClick: false,
+              }
+        }
         scroll={{ x: 1000 }}
         locale={{
           emptyText: (
@@ -626,6 +661,10 @@ export default function AuthorizedAccounts() {
         }}
       />
 
+      <p className="auth-footnote">
+        Kiro 凭据在「平台管理 → Kiro」。删除本地记录不会注销 AWS 号；测活与刷新凭据走后台任务，日志在弹窗里。
+      </p>
+
       <Drawer
         open={detailOpen}
         onClose={() => setDetailOpen(false)}
@@ -634,7 +673,7 @@ export default function AuthorizedAccounts() {
       >
         {detail ? (
           <Space direction="vertical" size={18} style={{ width: '100%' }}>
-            <AuthTree email={detail.email} status={detail.status} derived={detailDerived} />
+            <AuthTree status={detail.status} derived={detailDerived} />
             <DetailGroup title="凭据" hint="这些是 AWS Builder ID 的 OIDC 凭据，Kiro 靠它换授权。">
               <DetailRow label="Client ID">
                 <Text style={{ fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace' }}>
