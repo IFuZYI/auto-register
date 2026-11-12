@@ -589,6 +589,90 @@ class SsoPasswordStepTests(unittest.TestCase):
         self.assertEqual(claims["password"], "Pw-1!")
 
 
+class LoginOtpStepTests(unittest.TestCase):
+    """已有账号登录会要求邮箱验证码（`get-email-otp-login-credential`）。
+
+    SPA 契约：只发一个 `EmailOTPLoginRequestInput`，字段名
+    `emailOTPLoginResponseCode`（不带指纹）。
+    """
+
+    def test_login_otp_is_submitted(self):
+        from platforms.aws.client import AwsBuilderIdClient
+
+        seen_codes: list[str] = []
+
+        def router(method, url, kwargs):
+            payload = kwargs.get("json") or {}
+            if "portal.sso.us-east-1.amazonaws.com/login" in url:
+                return Response(
+                    body={
+                        "redirectUrl": "https://us-east-1.signin.aws/platform/d-9067642ac7/login?workflowStateHandle=sso-1",
+                        "csrfToken": "csrf-1",
+                    }
+                )
+            if "vs.aws.amazon.com/token" in url:
+                return Response(body={"token": "d2c-1"})
+            if url.endswith("/api/execute"):
+                kinds = {
+                    str(node.get("input_type"))
+                    for node in (payload.get("inputs") or [])
+                    if isinstance(node, dict)
+                }
+                if "EmailOTPLoginRequestInput" in kinds:
+                    node = next(
+                        item for item in payload["inputs"]
+                        if item.get("input_type") == "EmailOTPLoginRequestInput"
+                    )
+                    seen_codes.append(node["emailOTPLoginResponseCode"])
+                    return Response(
+                        body={
+                            "stepId": "end-of-workflow-success",
+                            "redirect": {
+                                "url": "https://view.awsapps.com/start/?workflowResultHandle=auth-9&state=st-9"
+                            },
+                        }
+                    )
+                if payload.get("stepId") == "get-email-otp-login-credential":
+                    return Response(body={"stepId": "end-of-workflow-success"})
+                if payload.get("stepId") == "start":
+                    return Response(body={"stepId": "get-email-otp-login-credential"})
+                return Response(body={"stepId": "start", "workflowStateHandle": "sso-1"})
+            if url.startswith("https://view.awsapps.com/start/"):
+                return Response(text="<html>start</html>")
+            raise AssertionError(f"未预设响应: {method} {url}")
+
+        client = AwsBuilderIdClient(session=ScriptedSession(router), log=lambda _m: None)
+        result = client.sso_workflow(
+            email="a@x.ai", password="Pw-1!", otp_provider=lambda: "654321"
+        )
+        self.assertEqual(seen_codes, ["654321"])
+        self.assertEqual(result["auth_code"], "auth-9")
+
+    def test_missing_otp_provider_raises(self):
+        from platforms.aws.client import AwsBuilderIdClient, AwsRegistrationError
+
+        def router(method, url, kwargs):
+            if "portal.sso.us-east-1.amazonaws.com/login" in url:
+                return Response(
+                    body={
+                        "redirectUrl": "https://us-east-1.signin.aws/platform/d-9067642ac7/login?workflowStateHandle=sso-1",
+                        "csrfToken": "csrf-1",
+                    }
+                )
+            if "vs.aws.amazon.com/token" in url:
+                return Response(body={"token": "d2c-1"})
+            if url.endswith("/api/execute"):
+                payload = kwargs.get("json") or {}
+                if payload.get("stepId") == "start":
+                    return Response(body={"stepId": "get-email-otp-login-credential"})
+                return Response(body={"stepId": "start", "workflowStateHandle": "sso-1"})
+            raise AssertionError(url)
+
+        client = AwsBuilderIdClient(session=ScriptedSession(router), log=lambda _m: None)
+        with self.assertRaises(AwsRegistrationError):
+            client.sso_workflow(email="a@x.ai", password="Pw-1!")
+
+
 class SignupPageSequenceTests(unittest.TestCase):
     """设置密码前必须先建立 signup 页面会话（HAR 实测）。
 

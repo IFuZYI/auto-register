@@ -1134,7 +1134,12 @@ class AwsBuilderIdClient:
         }
 
     # ---------------------------------------------------------------- 13-14
-    def sso_workflow(self, email: str = "", password: str = "") -> dict[str, str]:
+    def sso_workflow(
+        self,
+        email: str = "",
+        password: str = "",
+        otp_provider: Optional[Callable[[], str]] = None,
+    ) -> dict[str, str]:
         """在 view 目录上走 SSO 工作流，拿 authCode / state / csrf。
 
         真机（2026-11-13）：
@@ -1183,6 +1188,22 @@ class AwsBuilderIdClient:
                     fingerprint,
                 ]
                 data = _execute(step_id, inputs, action_id="SUBMIT")
+            elif step_id == "get-email-otp-login-credential":
+                # 已有账号登录会要求邮箱验证码（真机 2026-11-13：密码通过后
+                # 返回 get-email-otp-login-credential）。SPA 只发一个
+                # EmailOTPLoginRequestInput，不带指纹。
+                if otp_provider is None:
+                    raise AwsRegistrationError(
+                        "sso_workflow", "登录需要邮箱验证码，但调用方没有提供取码器"
+                    )
+                code = str(otp_provider() or "").strip()
+                if not code:
+                    raise AwsRegistrationError("sso_workflow", "未取到登录验证码")
+                data = _execute(
+                    step_id,
+                    [{"input_type": "EmailOTPLoginRequestInput", "emailOTPLoginResponseCode": code}],
+                    action_id="SUBMIT",
+                )
             elif step_id == "get-password" and password:
                 context = (
                     (data.get("workflowResponseData") or {}).get("encryptionContextResponse") or {}

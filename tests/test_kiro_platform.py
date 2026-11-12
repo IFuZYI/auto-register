@@ -344,6 +344,138 @@ class _StubMailbox:
         return self.code
 
 
+class KiroSourceSelectionTests(unittest.TestCase):
+    """Kiro 注册的 AWS 来源：优先复用未注册 Kiro 的号，不足时按开关自动新建。"""
+
+    def _cleanup(self, platform: str, email: str):
+        from core.db import account_repository
+
+        row = account_repository.find_by_email(platform, email)
+        if row is not None:
+            account_repository.delete(row.id, platform)
+
+    def _add_aws(self, email: str, password: str = "Pw-1!"):
+        from core.base_platform import AccountStatus
+        from core.db import account_repository
+        from core.models.account import AccountRecord
+
+        account_repository.upsert(
+            AccountRecord(
+                platform="aws",
+                email=email,
+                password=password,
+                status=AccountStatus.REGISTERED,
+                extra={"client_id": "cid", "refresh_token": "rt"},
+            )
+        )
+
+    def _add_kiro(self, email: str, source_email: str):
+        from core.base_platform import AccountStatus
+        from core.db import account_repository
+        from core.models.account import AccountRecord
+
+        account_repository.upsert(
+            AccountRecord(
+                platform="kiro",
+                email=email,
+                password="Pw-1!",
+                status=AccountStatus.REGISTERED,
+                extra={"source": "aws", "source_email": source_email},
+            )
+        )
+
+    def test_reuse_prefers_an_aws_not_yet_used_by_kiro(self):
+        from core.base_platform import RegisterConfig
+        from platforms.kiro import plugin as kiro_plugin
+
+        used_aws = "used-aws@x.ai"
+        free_aws = "free-aws@x.ai"
+        try:
+            self._add_aws(used_aws)
+            self._add_aws(free_aws)
+            self._add_kiro("used-kiro@x.ai", used_aws)
+            platform = kiro_plugin.KiroPlatform(
+                config=RegisterConfig(extra={"kiro_source": "reuse"}),
+                mailbox=_StubMailbox(),
+            )
+            seen: list[str] = []
+
+            def _fake_reuse(row, **kwargs):
+                seen.append(row.email)
+                return "reused"
+
+            with mock.patch.object(platform, "_reuse_aws_account", _fake_reuse):
+                result = platform.register()
+            self.assertEqual(result, "reused")
+            self.assertEqual(seen, [free_aws], "应优先选没被 Kiro 用过的 AWS")
+        finally:
+            for platform_name, email in (
+                ("aws", used_aws), ("aws", free_aws), ("kiro", "used-kiro@x.ai")
+            ):
+                self._cleanup(platform_name, email)
+
+    def test_no_free_aws_falls_back_to_auto_register(self):
+        from core.base_platform import RegisterConfig
+        from platforms.kiro import plugin as kiro_plugin
+
+        platform = kiro_plugin.KiroPlatform(
+            config=RegisterConfig(extra={"kiro_source": "reuse", "kiro_auto_register": "1"}),
+            mailbox=_StubMailbox(),
+        )
+        with mock.patch.object(
+            platform, "_pick_unused_aws", lambda: None
+        ), mock.patch.object(
+            platform, "_register_new_aws_and_kiro", lambda **kwargs: "auto"
+        ):
+            self.assertEqual(platform.register(), "auto")
+
+    def test_no_free_aws_without_auto_register_raises(self):
+        from core.base_platform import RegisterConfig
+        from platforms.kiro import plugin as kiro_plugin
+
+        platform = kiro_plugin.KiroPlatform(
+            config=RegisterConfig(extra={"kiro_source": "reuse", "kiro_auto_register": "0"}),
+            mailbox=_StubMailbox(),
+        )
+        with mock.patch.object(platform, "_pick_unused_aws", lambda: None):
+            with self.assertRaises(RuntimeError):
+                platform.register()
+
+    def test_explicit_aws_email_is_used(self):
+        from core.base_platform import RegisterConfig
+        from platforms.kiro import plugin as kiro_plugin
+
+        email = "chosen-aws@x.ai"
+        try:
+            self._add_aws(email)
+            platform = kiro_plugin.KiroPlatform(
+                config=RegisterConfig(extra={"kiro_aws_email": email}),
+                mailbox=_StubMailbox(),
+            )
+            seen: list[str] = []
+
+            def _fake_reuse(row, **kwargs):
+                seen.append(row.email)
+                return "chosen"
+
+            with mock.patch.object(platform, "_reuse_aws_account", _fake_reuse):
+                self.assertEqual(platform.register(), "chosen")
+            self.assertEqual(seen, [email])
+        finally:
+            self._cleanup("aws", email)
+
+    def test_explicit_aws_email_must_exist(self):
+        from core.base_platform import RegisterConfig
+        from platforms.kiro import plugin as kiro_plugin
+
+        platform = kiro_plugin.KiroPlatform(
+            config=RegisterConfig(extra={"kiro_aws_email": "missing-aws@x.ai"}),
+            mailbox=_StubMailbox(),
+        )
+        with self.assertRaises(RuntimeError):
+            platform.register()
+
+
 class KiroExportImportTests(unittest.TestCase):
     """导出/导入：既要能吐 kiro.json，也要能把 kiro.json 收进来。"""
 

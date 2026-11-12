@@ -387,6 +387,20 @@ export default function AuthorizedAccounts() {
       },
     },
     {
+      title: '已注册平台',
+      key: 'registered_platforms',
+      width: 140,
+      render: (_value, row) => {
+        const derived = derivedMap[row.email.trim().toLowerCase()] || []
+        if (!derived.length) return <Text type="secondary">—</Text>
+        return (
+          <Tag color="geekblue">
+            Kiro{derived.length > 1 ? ` ×${derived.length}` : ''}
+          </Tag>
+        )
+      },
+    },
+    {
       title: '授权链',
       key: 'chain',
       width: 150,
@@ -509,7 +523,7 @@ export default function AuthorizedAccounts() {
         columns={withDataLabels(columns)}
         dataSource={rows}
         loading={loading}
-        scroll={{ x: 860 }}
+        scroll={{ x: 1000 }}
         locale={{
           emptyText: (
             <Empty

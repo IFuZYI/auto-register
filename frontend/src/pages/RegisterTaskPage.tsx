@@ -11,6 +11,8 @@ import {
   Typography,
   Descriptions,
   Tooltip,
+  Radio,
+  Checkbox,
 } from 'antd'
 import {
   PlayCircleOutlined,
@@ -191,6 +193,16 @@ export default function RegisterTaskPage() {
       icloud_remote_account_id: values.icloud_remote_account_id,
       icloud_remote_label: values.icloud_remote_label,
       icloud_remote_note: values.icloud_remote_note,
+      // Kiro：AWS 来源（复用未注册 Kiro 的号 / 指定 / 新建），以及
+      // 「没有可用 AWS 时自动注册」开关。后端按 `kiro_source` 分派。
+      ...(values.platform === 'kiro'
+        ? {
+            kiro_source: values.kiro_source || 'reuse',
+            kiro_aws_email:
+              values.kiro_source === 'manual' ? values.kiro_aws_email || '' : '',
+            kiro_auto_register: values.kiro_auto_register ? '1' : '0',
+          }
+        : {}),
     }
     const chatgptRegistrationRequestAdapter =
       buildChatGPTRegistrationRequestAdapter(
@@ -243,6 +255,9 @@ export default function RegisterTaskPage() {
   const mailProvider = resolveEffectiveMailProvider(String(mailProviderRaw || ''), String(mailImportSource || 'microsoft'))
   const captchaSolver = Form.useWatch('captcha_solver', form)
   const platform = Form.useWatch('platform', form)
+  // Kiro 的 AWS 来源：reuse（复用未注册 Kiro 的 AWS）/ manual（指定）/ auto（新建）
+  const kiroSource = Form.useWatch('kiro_source', form)
+  const [awsAccounts, setAwsAccounts] = useState<{ email: string; usedByKiro: boolean }[]>([])
   const executorOptions = getExecutorOptions(platform)
   const platformMeta = getPlatformMeta(platform)
   // 现存两个平台（ChatGPT / Grok）都消耗邮箱池，所以这张卡片恒定显示。
@@ -257,6 +272,40 @@ export default function RegisterTaskPage() {
   // 踩过：切到 Grok 时沿用 ChatGPT 的值（'protocol'）—— 归一后落到 Grok 的
   // 合法取值，于是「看起来没问题」，但用户给 Grok 保存的 browser 被丢掉了。
   // 每个平台的执行器是独立配置（`<platform>_executor`），切换时要读它。
+  // Kiro 页的「指定 AWS 账号」需要知道哪些号已经被 Kiro 用掉（source_email）。
+  useEffect(() => {
+    let alive = true
+    Promise.all([
+      apiFetch('/accounts?platform=aws&page=1&page_size=200') as Promise<{ items?: unknown[] }>,
+      apiFetch('/accounts?platform=kiro&page=1&page_size=200') as Promise<{ items?: unknown[] }>,
+    ])
+      .then(([aws, kiro]) => {
+        if (!alive) return
+        const used = new Set<string>()
+        for (const row of (kiro.items || []) as { extra_json?: string }[]) {
+          try {
+            const extra = JSON.parse(row.extra_json || '{}') as { source_email?: string }
+            const source = String(extra.source_email || '').trim().toLowerCase()
+            if (source) used.add(source)
+          } catch {
+            // 脏 extra 跳过
+          }
+        }
+        setAwsAccounts(
+          ((aws.items || []) as { email?: string }[])
+            .map((row) => String(row.email || '').trim())
+            .filter(Boolean)
+            .map((email) => ({ email, usedByKiro: used.has(email.toLowerCase()) })),
+        )
+      })
+      .catch(() => {
+        // 读不到就只保留手动输入（下拉为空）
+      })
+    return () => {
+      alive = false
+    }
+  }, [])
+
   useEffect(() => {
     let alive = true
     Promise.all([loadPlatformCapabilities(), apiFetch('/config')])
@@ -358,6 +407,51 @@ export default function RegisterTaskPage() {
           <Form.Item name="proxy" label="代理 (可选)" className="form-field--lg">
             <Input placeholder="http://user:pass@host:port" />
           </Form.Item>
+          {platform === 'kiro' && (
+            <>
+              <Form.Item
+                name="kiro_source"
+                label="AWS 来源"
+                initialValue="reuse"
+                tooltip="Kiro 的凭据由 AWS Builder ID 换出来：优先复用还没注册过 Kiro 的 AWS 账号；也可以指定账号或直接新建。"
+              >
+                <Radio.Group
+                  optionType="button"
+                  buttonStyle="solid"
+                  options={[
+                    { value: 'reuse', label: '复用未注册 Kiro 的 AWS' },
+                    { value: 'manual', label: '指定 AWS 账号' },
+                    { value: 'auto', label: '新建 AWS + Kiro' },
+                  ]}
+                />
+              </Form.Item>
+              {kiroSource === 'manual' ? (
+                <Form.Item
+                  name="kiro_aws_email"
+                  label="AWS 账号"
+                  rules={[{ required: true, message: '选一个 AWS 账号' }]}
+                  extra="只列还没注册过 Kiro 的号；已注册过的不会出现在这里。"
+                >
+                  <Select
+                    showSearch
+                    placeholder="选一个未注册 Kiro 的 AWS 账号"
+                    options={awsAccounts
+                      .filter((item) => !item.usedByKiro)
+                      .map((item) => ({ value: item.email, label: item.email }))}
+                  />
+                </Form.Item>
+              ) : null}
+              {kiroSource !== 'auto' ? (
+                <Form.Item
+                  name="kiro_auto_register"
+                  valuePropName="checked"
+                  initialValue
+                >
+                  <Checkbox>没有可用 AWS 时自动注册 AWS + Kiro</Checkbox>
+                </Form.Item>
+              ) : null}
+            </>
+          )}
           {platform === 'chatgpt' && (
             <>
               <Form.Item label="注册方式">

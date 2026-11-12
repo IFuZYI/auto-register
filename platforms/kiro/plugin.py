@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import logging
 import time
+from datetime import datetime
 from typing import Any
 
 from core.base_mailbox import BaseMailbox
@@ -131,12 +132,211 @@ class KiroPlatform(BasePlatform):
             logger.debug("来源 AWS 账号落库失败（继续）: %s", exc)
         return identity
 
+    # ------------------------------------------------------------------
+    # 来源选择：复用已有 AWS / 自动注册 AWS+Kiro
+    # ------------------------------------------------------------------
+    def _pick_unused_aws(self):
+        """挑一个「还没注册过 Kiro」的 AWS 账号（FIFO）。
+
+        判定依据是 Kiro 账号的 `extra.source_email`：Kiro 记录里指回哪个 AWS
+        邮箱，就说明那个 AWS 已经被用掉了。没有密码的（导入缺字段）跳过 ——
+        复用需要密码登录。
+        """
+        from core.db import account_repository
+
+        aws_rows = account_repository.list_all_accounts(platform="aws")
+        kiro_rows = account_repository.list_all_accounts(platform="kiro")
+        used = {
+            str((row.get_extra() or {}).get("source_email") or "").strip().lower()
+            for row in kiro_rows
+        }
+        candidates = [
+            row
+            for row in aws_rows
+            if str(row.password or "").strip()
+            and row.email.strip().lower() not in used
+            and str(row.status or "").strip().lower() not in ("banned", "invalid")
+        ]
+        candidates.sort(key=lambda row: row.created_at or datetime.min)
+        return candidates[0] if candidates else None
+
+    def _mailbox_account_for_reuse(self, mailbox, email: str):
+        """复用登录时读码用的邮箱账号对象。
+
+        iCloud 别名需要主号 id 才能走远程收件（`_resolve` 读
+        `extra.icloud_account_id`），所以先按地址查别名表；其它渠道退回裸地址
+        （渠道自己按地址检索，读不到会超时而不是拿到别人的信）。
+        """
+        from core.mailboxes.base import MailboxAccount
+
+        try:
+            from services import icloud_service
+
+            for item in icloud_service.list_aliases():
+                if str(item.get("address") or "").strip().lower() == email.lower():
+                    main_id = item.get("account_id")
+                    alias_id = item.get("id")
+                    return MailboxAccount(
+                        email=email,
+                        account_id=f"{main_id}:{alias_id}",
+                        extra={"icloud_account_id": main_id, "icloud_alias_id": alias_id},
+                    )
+        except Exception as exc:  # noqa: BLE001 - 查不到就按裸地址继续
+            logger.debug("iCloud 别名查找失败（按裸地址继续）: %s", exc)
+        return MailboxAccount(email=email)
+
+    def _build_kiro_extra(
+        self,
+        *,
+        email: str,
+        tokens: dict[str, Any],
+        plan: str,
+        snapshot: dict[str, Any],
+    ) -> dict[str, Any]:
+        kiro_extra = build_extra(
+            access_token=tokens.get("access_token", ""),
+            refresh_token=tokens.get("refresh_token", ""),
+            client_id=tokens.get("client_id", ""),
+            client_secret=tokens.get("client_secret", ""),
+            expires_in=tokens.get("expires_in", 0),
+            profile_arn=tokens.get("profile_arn", ""),
+            region=tokens.get("region", ""),
+            auth_method=AUTH_METHOD_IDC,
+            login_provider="BuilderId",
+            plan=plan,
+            account_id=email,
+            uid="builderid",
+            email=email,
+            name=f"{email} (BuilderId)",
+            source=SOURCE_AWS,
+            source_email=email,
+        )
+        kiro_extra.update(snapshot)
+        kiro_extra["register_mode"] = "protocol"
+        return kiro_extra
+
+    def _to_account(self, *, email: str, password: str, kiro_extra: dict[str, Any]) -> Account:
+        self.last_registration_meta = dict(kiro_extra)
+        return Account(
+            platform=self.name,
+            email=email,
+            password=password,
+            user_id=str(kiro_extra.get("account_id") or ""),
+            region=str(kiro_extra.get("region") or ""),
+            token=str(kiro_extra.get("refresh_token") or ""),
+            status=AccountStatus.REGISTERED,
+            extra=kiro_extra,
+        )
+
+    def _reuse_aws_account(self, row, *, extra: dict[str, Any], proxy, plan: str) -> Account:
+        """用已有 AWS 账号登录，换 Kiro 凭据（不新建 AWS）。"""
+        from core.captcha_providers import build_captcha_chain
+        from platforms.aws.client import AwsBuilderIdClient
+
+        email = str(row.email or "").strip()
+        password = str(row.password or "")
+        if not password:
+            raise RuntimeError(f"AWS 账号没有密码，无法复用登录: {email}")
+
+        mailbox = self.mailbox
+        if mailbox is None:
+            from modules.mail import create_mailbox
+
+            mailbox = create_mailbox(
+                str(extra.get("mail_provider") or ""),
+                extra=extra,
+                proxy=proxy,
+            )
+            mailbox._task_control = getattr(self, "_task_control", None)
+            mailbox._log_fn = self._log
+        mailbox._platform_name = SOURCE_AWS
+
+        client = AwsBuilderIdClient(
+            proxy=proxy or "",
+            log=self._log,
+            captcha=build_captcha_chain(),
+        )
+
+        def otp_provider() -> str:
+            account = self._mailbox_account_for_reuse(mailbox, email)
+            return mailbox.wait_for_code(
+                account,
+                keyword="aws",
+                timeout=self.get_mailbox_otp_timeout(default=300),
+                otp_sent_at=time.time(),
+            )
+
+        self._log(f"[Kiro] 复用 AWS 账号登录: {email}")
+        sso = client.sso_workflow(email=email, password=password, otp_provider=otp_provider)
+        sso_token = client.sso_token(sso["auth_code"], sso["state"])
+        tokens = authorize_kiro(sso_token=sso_token, proxy=proxy or "", log=self._log)
+
+        source_extra = dict(row.get_extra() or {})
+        source_extra.update({"email": email, "password": password})
+        snapshot = _source_snapshot(source_extra)
+        kiro_extra = self._build_kiro_extra(
+            email=email, tokens=tokens, plan=plan, snapshot=snapshot
+        )
+        self._log("[Kiro] 复用登录完成，Kiro 凭据已换取")
+        return self._to_account(email=email, password=password, kiro_extra=kiro_extra)
+
     def register(self, email: str = None, password: str = None) -> Account:
+        """注册 Kiro。
+
+        来源三选一（`extra.kiro_source`）：
+
+        * `reuse`（默认）—— 先挑「还没注册 Kiro」的 AWS 账号复用；
+          没有可用号时，按 `kiro_auto_register`（默认开）决定是否自动新建
+          AWS + Kiro；
+        * `auto` —— 直接新建 AWS + Kiro；
+        * `aws_email`（或显式 `extra.kiro_aws_email`）—— 指定某个 AWS 账号复用。
+        """
         extra = dict((self.config.extra or {}) if self.config else {})
         proxy = (self.config.proxy if self.config else None) or None
-        requested_email = str(email or "").strip()
+        plan = str(extra.get("kiro_plan") or DEFAULT_PLAN).strip() or DEFAULT_PLAN
+        source_mode = str(extra.get("kiro_source") or "reuse").strip().lower()
+        requested_aws = str(extra.get("kiro_aws_email") or "").strip()
+        auto_register = str(extra.get("kiro_auto_register", "1")).strip().lower() not in {
+            "0", "false", "no", "off", ""
+        }
 
-        # 判重：同邮箱在 kiro 上已注册就不再跑（会白烧一个 AWS 号）
+        if requested_aws:
+            from core.db import account_repository
+
+            row = account_repository.find_by_email("aws", requested_aws)
+            if row is None:
+                raise RuntimeError(f"指定的 AWS 账号不存在: {requested_aws}")
+            if self.is_email_registered(row.email):
+                raise RuntimeError(f"该 AWS 账号已注册 Kiro: {row.email}")
+            return self._reuse_aws_account(row, extra=extra, proxy=proxy, plan=plan)
+
+        if source_mode == "reuse":
+            row = self._pick_unused_aws()
+            if row is not None:
+                return self._reuse_aws_account(row, extra=extra, proxy=proxy, plan=plan)
+            if not auto_register:
+                raise RuntimeError(
+                    "没有未注册 Kiro 的 AWS 账号；如需自动新建 AWS + Kiro，"
+                    "请勾选「没有可用 AWS 时自动注册」"
+                )
+            self._log("[Kiro] 没有未注册 Kiro 的 AWS 账号 → 自动注册 AWS + Kiro")
+        elif source_mode != "auto":
+            raise RuntimeError(f"未知的 kiro_source: {source_mode}")
+
+        return self._register_new_aws_and_kiro(
+            extra=extra, proxy=proxy, email=email, password=password, plan=plan
+        )
+
+    def _register_new_aws_and_kiro(
+        self,
+        *,
+        extra: dict[str, Any],
+        proxy,
+        email: str = None,
+        password: str = None,
+        plan: str = DEFAULT_PLAN,
+    ) -> Account:
+        requested_email = str(email or "").strip()
         if requested_email and self.is_email_registered(requested_email):
             raise RuntimeError(f"该邮箱已注册 Kiro，跳过: {requested_email}")
 
@@ -151,7 +351,7 @@ class KiroPlatform(BasePlatform):
             )
             mailbox._task_control = getattr(self, "_task_control", None)
             mailbox._log_fn = self._log
-        mailbox._platform_name = SOURCE_AWS  # AWS 号先被消耗一次
+        mailbox._platform_name = SOURCE_AWS
 
         identity = self._register_aws_identity(
             mailbox=mailbox,
@@ -176,47 +376,22 @@ class KiroPlatform(BasePlatform):
                 log=self._log,
             )
         except KiroAuthorizeError as exc:
-            # AWS 号已经建好了 —— 抛出时带上「号还在」，让调用方知道别重复注册
             self._log(f"[Kiro] 授权失败（AWS 账号已创建）: {exc}")
             raise RuntimeError(
                 "Kiro 授权失败（AWS 账号已创建并保存到 aws 平台，密码见该账号记录）: "
                 f"{exc}"
             ) from exc
 
-        plan = str(extra.get("kiro_plan") or DEFAULT_PLAN).strip() or DEFAULT_PLAN
-        kiro_extra = build_extra(
-            access_token=tokens.get("access_token", ""),
-            refresh_token=tokens.get("refresh_token", ""),
-            client_id=tokens.get("client_id", ""),
-            client_secret=tokens.get("client_secret", ""),
-            expires_in=tokens.get("expires_in", 0),
-            profile_arn=tokens.get("profile_arn", ""),
-            region=tokens.get("region", ""),
-            auth_method=AUTH_METHOD_IDC,
-            login_provider="BuilderId",
-            plan=plan,
-            account_id=account_email,
-            uid="builderid",
+        kiro_extra = self._build_kiro_extra(
             email=account_email,
-            name=f"{account_email} (BuilderId)",
-            source=SOURCE_AWS,
-            source_email=account_email,
+            tokens=tokens,
+            plan=plan,
+            snapshot=_source_snapshot(identity),
         )
-        kiro_extra.update(_source_snapshot(identity))
-        kiro_extra["register_mode"] = "protocol"
         if identity.get("user_code"):
             kiro_extra["kiro_aws_user_code"] = str(identity["user_code"])
-
-        self.last_registration_meta = dict(kiro_extra)
-        return Account(
-            platform=self.name,
-            email=account_email,
-            password=aws_password,
-            user_id=str(kiro_extra.get("account_id") or ""),
-            region=str(kiro_extra.get("region") or ""),
-            token=str(kiro_extra.get("refresh_token") or ""),
-            status=AccountStatus.REGISTERED,
-            extra=kiro_extra,
+        return self._to_account(
+            email=account_email, password=aws_password, kiro_extra=kiro_extra
         )
 
     # ------------------------------------------------------------------

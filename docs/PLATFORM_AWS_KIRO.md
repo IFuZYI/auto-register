@@ -192,7 +192,31 @@ portal login → step "" → start → get-identity-user（只发 username + 指
 `ApplicationType`/`UserEvent` 会 400）；`get-password` 必须带
 `UserEventRequestInput`（与注册设密码同款）。
 
-### 6.4 出口
+### 6.4 Kiro 的 AWS 来源（复用 / 指定 / 新建）
+
+`KiroPlatform.register` 按 `extra.kiro_source` 分派：
+
+| 值 | 行为 |
+| --- | --- |
+| `reuse`（默认） | 先挑一个「没被 Kiro 用过」的 AWS 账号（按 `source_email` 判定，FIFO）复用登录；没有可用号时按 `kiro_auto_register` 决定是否新建 |
+| `manual`（前端「指定 AWS 账号」） | 用 `extra.kiro_aws_email` 指定的号；不存在 / 没密码 / 已注册 Kiro 都直接报错 |
+| `auto` | 直接新建 AWS + Kiro |
+
+`kiro_auto_register`（默认开）：没有未注册 Kiro 的 AWS 时，自动新建 AWS + Kiro。
+
+复用登录的完整路径（真机 2026-11-13）：
+
+```
+portal login → "" → start → get-identity-user（username + 指纹）
+  → get-password（JWE 密码）
+  → get-email-otp-login-credential（EmailOTPLoginRequestInput.emailOTPLoginResponseCode）
+  → end-of-workflow-success → authCode → SSO token → Kiro 授权
+```
+
+注意：登录 OTP 由 AWS 在到达该步时发到账号邮箱；同一出口短时间内多次登录会被
+限流（400「Please try signing in again」），真机验证时先换出口再重试。
+
+### 6.5 出口
 
 同一出口连续注册多次后会被限流（同一个 400）。实测 **SOCKS5 代理 + `socks5h://`**
 （远端 DNS）稳定；直连只在前几次成功。

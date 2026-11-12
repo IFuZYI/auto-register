@@ -44,6 +44,21 @@ class AuthorizedAccountsWiringTests(unittest.TestCase):
             "筛选清单不能跟着注册下拉一起排除 aws",
         )
 
+    def test_aws_list_shows_registered_platforms(self):
+        source = self._read("pages/AuthorizedAccounts.tsx")
+        self.assertIn("已注册平台", source)
+        self.assertIn("Kiro", source)
+
+    def test_kiro_registration_offers_aws_source_choices(self):
+        source = self._read("pages/RegisterTaskPage.tsx")
+        self.assertIn("kiro_source", source)
+        self.assertIn("kiro_aws_email", source)
+        self.assertIn("kiro_auto_register", source)
+        self.assertIn("复用未注册 Kiro 的 AWS", source)
+        self.assertIn("指定 AWS 账号", source)
+        self.assertIn("新建 AWS + Kiro", source)
+        self.assertIn("没有可用 AWS 时自动注册", source)
+
     def test_page_registers_aws_and_shows_the_derivation_chain(self):
         source = self._read("pages/AuthorizedAccounts.tsx")
         self.assertIn("platform: 'aws'", source)
