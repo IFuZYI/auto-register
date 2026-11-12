@@ -173,7 +173,17 @@ class AwsPlatform(BasePlatform):
         except AwsEmailAlreadyRegistered as exc:
             self._record_mailbox_status(mailbox, mailbox_account, "used")
             raise RuntimeError(f"该邮箱已有 AWS Builder ID，跳过: {email}") from exc
-        except AwsRegistrationError:
+        except AwsRegistrationError as exc:
+            if getattr(client, "password_set", False):
+                # 号已经真实创建（密码设过），只是 SSO/换 token 没走完。
+                # 不落库就白烧一个号 + 一个邮箱；落成「待补凭据」，之后可以用
+                # Kiro 的「指定 AWS 账号」或重试补回。
+                self._save_partial_account(client, email, final_password)
+                self._record_mailbox_status(mailbox, mailbox_account, "used")
+                raise RuntimeError(
+                    f"AWS 账号已创建（密码已设置），但拿凭据失败：{exc}。"
+                    "账号已保存到「授权账号」，可稍后重试补凭据。"
+                ) from exc
             self._record_mailbox_status(mailbox, mailbox_account, "failed")
             raise
         except Exception as exc:
@@ -197,6 +207,35 @@ class AwsPlatform(BasePlatform):
             status=AccountStatus.REGISTERED,
             extra=account_extra,
         )
+
+    def _save_partial_account(self, client, email: str, password: str) -> None:
+        """把「密码已设、凭据没拿到」的 AWS 号落库（带 `needs_sso` 标记）。"""
+        try:
+            from core.db import account_repository
+            from core.models.account import AccountRecord
+
+            extra = {
+                "client_id": str(getattr(client, "client_id", "") or ""),
+                "client_secret": str(getattr(client, "client_secret", "") or ""),
+                "region": str(getattr(client, "region", "") or "us-east-1"),
+                "provider": "BuilderId",
+                "needs_sso": True,
+                "register_mode": "protocol",
+            }
+            account_repository.upsert(
+                AccountRecord(
+                    platform="aws",
+                    email=email,
+                    password=password,
+                    region=extra["region"],
+                    token="",
+                    status=AccountStatus.REGISTERED,
+                    extra=extra,
+                )
+            )
+            self._log(f"[AWS] 半成品账号已保存（待补凭据）: {email}")
+        except Exception as exc:  # noqa: BLE001 - 落库失败不该掩盖原始错误
+            logger.debug("半成品账号落库失败（继续抛原始错误）: %s", exc)
 
     def get_mailbox_otp_timeout(self, default: int = 300) -> int:
         """AWS 的 OTP 等待默认 300s（覆盖基类的 180s）。

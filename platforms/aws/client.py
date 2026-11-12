@@ -188,6 +188,9 @@ class AwsBuilderIdClient:
         #: `aws-ubid-main`：服务端下发的主 ubid，指纹里的 `lsUbid` 用它
         self.aws_ubid_main = ""
         self.ubid = ""
+        #: 密码是否已提交成功 —— SSO/换 token 失败时据此判断「号已经建好」，
+        #: 供插件把半成品账号落库（不然一次 SSO 失败就白烧一个号）
+        self.password_set = False
         self.client_id = ""
         self.client_secret = ""
         self.device_code = ""
@@ -1370,6 +1373,7 @@ class AwsBuilderIdClient:
         password_result = self.set_password(
             email, password, registration_code, sign_in_state
         )
+        self.password_set = True
         self._log("[AWS] 密码已设置")
         if not password_result.get("completed"):
             self.complete_signup(

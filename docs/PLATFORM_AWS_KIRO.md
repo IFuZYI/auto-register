@@ -216,7 +216,20 @@ portal login → "" → start → get-identity-user（username + 指纹）
 注意：登录 OTP 由 AWS 在到达该步时发到账号邮箱；同一出口短时间内多次登录会被
 限流（400「Please try signing in again」），真机验证时先换出口再重试。
 
-### 6.5 出口
+### 6.5 失败恢复（半成品账号）
+
+密码已设置、但 SSO / 换 token 失败的账号不再丢：
+
+* `AwsBuilderIdClient.password_set` 在设密码成功后置位；
+* `AwsPlatform.register` 捕获到 `AwsRegistrationError` 且 `password_set=True` 时，
+  把账号落库为「待补凭据」（`extra.needs_sso=True`），并抛出
+  「AWS 账号已创建（密码已设置），但拿凭据失败…账号已保存」；
+* 「授权账号」页对这类号显示 `待补凭据` 标签，动作菜单里给
+  「补 Kiro（复用登录）」——用 Kiro 的 `kiro_source=manual` +
+  `kiro_aws_email` 起一个复用任务；
+* 复用登录走 `sso_workflow`（含邮箱验证码），成功即补回 Kiro 凭据。
+
+### 6.6 出口
 
 同一出口连续注册多次后会被限流（同一个 400）。实测 **SOCKS5 代理 + `socks5h://`**
 （远端 DNS）稳定；直连只在前几次成功。

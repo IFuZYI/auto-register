@@ -236,6 +236,46 @@ class FingerprintTests(unittest.TestCase):
         self.assertEqual(sum(data["canvas"]["histogramBins"]), 36_000)
         self.assertTrue(data["lsUbid"].startswith("X"))
 
+    def test_shape_matches_the_reference_gen_fwcim(self):
+        """指纹 JSON 的键集与关键值钉死（照 `gen_fwcim` 逐字段移植）。
+
+        这条是防回归：改字段/漏字段都会被这里抓到，而不是等到真机 BLOCKED。
+        """
+        from platforms.aws.crypto import FingerprintBuilder, xxtea_decrypt
+
+        builder = FingerprintBuilder()
+        envelope = builder.fingerprint(
+            page_type="signup",
+            event_type="PageSubmit",
+            location="https://us-east-1.signin.aws/platform/d-9067642ac7/signup?workflowStateHandle=w",
+            referrer="",
+            ubid_main="186-1-2",
+        )
+        _, _, encoded = envelope.partition(":")
+        padded = encoded + "=" * (-len(encoded) % 4)
+        _, _, payload = xxtea_decrypt(base64.b64decode(padded), builder.key).partition("#")
+        data = json.loads(payload)
+
+        self.assertEqual(
+            set(data),
+            {
+                "metrics", "start", "interaction", "scripts", "history", "battery",
+                "performance", "automation", "end", "timeZone", "flashVersion",
+                "plugins", "dupedPlugins", "screenInfo", "lsUbid", "referrer",
+                "userAgent", "location", "webDriver", "capabilities", "gpu", "dnt",
+                "math", "form", "canvas", "token", "auth", "errors", "version",
+            },
+        )
+        self.assertEqual(data["timeZone"], 8)
+        self.assertEqual(data["screenInfo"], "1440-900-900-30-*-*-*")
+        self.assertEqual(data["referrer"], "https://view.awsapps.com/")
+        self.assertEqual(data["token"], {"isCompatible": False, "pageHasCaptcha": 0})
+        self.assertEqual(data["gpu"]["model"].split(",")[0], "ANGLE (Apple")
+        self.assertEqual(data["canvas"]["hash"], builder.canvas_hash)
+        self.assertEqual(data["metrics"]["lsubid"], 1)
+        self.assertTrue(data["lsUbid"].startswith("X186-1-2:"))
+        self.assertEqual(data["form"], {})
+
     def test_page_load_has_no_form(self):
         from platforms.aws.crypto import FingerprintBuilder, xxtea_decrypt
 
@@ -1122,6 +1162,44 @@ class AwsPluginContractTests(unittest.TestCase):
         self.assertIsNotNone(row)
         self.assertEqual(row.password, "Pw-1!")
         self.assertEqual(row.get_extra()["refresh_token"], "rt-1")
+
+    def test_partial_account_is_saved_when_sso_fails(self):
+        """密码已设置、SSO 失败：号必须落库（`needs_sso`），不能白烧。"""
+        from core.base_platform import RegisterConfig
+        from core.db import account_repository
+        from platforms.aws import plugin as aws_plugin
+        from platforms.aws.client import AwsRegistrationError
+
+        class _SsoFailsClient:
+            password_set = True
+            client_id = "cid-partial"
+            client_secret = "csec-partial"
+            region = "us-east-1"
+
+            def register(self, **kwargs):
+                raise AwsRegistrationError("sso_workflow", "未返回授权码")
+
+        mailbox = _StubMailbox()
+        platform = aws_plugin.AwsPlatform(config=RegisterConfig(), mailbox=mailbox)
+        try:
+            with mock.patch.object(
+                aws_plugin.AwsPlatform,
+                "_make_client",
+                lambda self, proxy=None: _SsoFailsClient(),
+            ):
+                with self.assertRaises(RuntimeError) as ctx:
+                    platform.register(password="Pw-1!")
+            self.assertIn("已保存", str(ctx.exception))
+            row = account_repository.find_by_email("aws", "aws@x.ai")
+            self.assertIsNotNone(row, "半成品账号应已落库")
+            extra = row.get_extra()
+            self.assertTrue(extra.get("needs_sso"))
+            self.assertEqual(extra.get("client_id"), "cid-partial")
+            self.assertEqual(row.password, "Pw-1!")
+        finally:
+            row = account_repository.find_by_email("aws", "aws@x.ai")
+            if row is not None:
+                account_repository.delete(row.id, "aws")
 
     def test_make_client_wires_the_captcha_chain(self):
         from core.base_platform import RegisterConfig

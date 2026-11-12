@@ -172,7 +172,11 @@ export default function AuthorizedAccounts() {
   const [registerTaskId, setRegisterTaskId] = useState<string | null>(null)
   const [registering, setRegistering] = useState(false)
 
-  const [actionTask, setActionTask] = useState<{ id: string; title: string } | null>(null)
+  const [actionTask, setActionTask] = useState<{
+    id: string
+    title: string
+    kind: 'batch_action' | 'register'
+  } | null>(null)
 
   const [importOpen, setImportOpen] = useState(false)
   const [importFormat, setImportFormat] = useState<'json' | 'text'>('json')
@@ -235,9 +239,36 @@ export default function AuthorizedAccounts() {
         method: 'POST',
         body: JSON.stringify(payload),
       })) as { task_id: string }
-      setActionTask({ id: result.task_id, title: `${actionId === 'probe' ? '测活' : '刷新凭据'} · ${row.email}` })
+      setActionTask({ id: result.task_id, title: `${actionId === 'probe' ? '测活' : '刷新凭据'} · ${row.email}`, kind: 'batch_action' })
     } catch (error) {
       message.error(`任务启动失败：${errMessage(error)}`)
+    }
+  }
+
+  const runKiroReuse = async (row: AccountRow) => {
+    try {
+      const cfg = (await apiFetch('/config')) as Record<string, unknown>
+      const payload = {
+        platform: 'kiro',
+        count: 1,
+        concurrency: 1,
+        executor_type: 'protocol',
+        captcha_solver: String(cfg.default_captcha_solver || 'yescaptcha'),
+        extra: {
+          mail_provider: String(cfg.mail_provider || ''),
+          mail_import_source: String(cfg.mail_import_source || ''),
+          kiro_source: 'manual',
+          kiro_aws_email: row.email,
+          kiro_auto_register: '0',
+        },
+      }
+      const result = (await apiFetch('/tasks/register', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      })) as { task_id: string }
+      setActionTask({ id: result.task_id, title: `补 Kiro · ${row.email}`, kind: 'register' })
+    } catch (error) {
+      message.error(`补 Kiro 任务启动失败：${errMessage(error)}`)
     }
   }
 
@@ -335,18 +366,23 @@ export default function AuthorizedAccounts() {
     }
   }
 
-  const actionMenu = (): MenuProps['items'] => [
-    { key: 'detail', label: '详情' },
-    { key: 'probe', label: '测活' },
-    { key: 'refresh', label: '刷新凭据' },
-    { type: 'divider' },
-    { key: 'delete', label: '删除', danger: true, icon: <DeleteOutlined /> },
-  ]
+  const actionMenu = (row: AccountRow): MenuProps['items'] => {
+    const hasKiro = (derivedMap[row.email.trim().toLowerCase()] || []).length > 0
+    return [
+      { key: 'detail', label: '详情' },
+      { key: 'probe', label: '测活' },
+      { key: 'refresh', label: '刷新凭据' },
+      ...(hasKiro ? [] : [{ key: 'kiro', label: '补 Kiro（复用登录）' }]),
+      { type: 'divider' },
+      { key: 'delete', label: '删除', danger: true, icon: <DeleteOutlined /> },
+    ]
+  }
 
   const onActionClick = (row: AccountRow, key: string) => {
     if (key === 'detail') void openDetail(row)
     else if (key === 'probe') void runAction('probe', row)
     else if (key === 'refresh') void runAction('refresh_token', row)
+    else if (key === 'kiro') void runKiroReuse(row)
     else if (key === 'delete') {
       Modal.confirm({
         title: `删除 ${row.email}？`,
@@ -381,9 +417,15 @@ export default function AuthorizedAccounts() {
       title: '状态',
       dataIndex: 'status',
       width: 96,
-      render: (value: string) => {
+      render: (value: string, row) => {
         const meta = accountStatusMeta(value)
-        return <Tag color={meta.color}>{meta.label}</Tag>
+        const needsSso = Boolean(parseExtra(row.extra_json).needs_sso)
+        return (
+          <Space size={4} wrap>
+            <Tag color={meta.color}>{meta.label}</Tag>
+            {needsSso ? <Tag color="warning">待补凭据</Tag> : null}
+          </Space>
+        )
       },
     },
     {
@@ -441,7 +483,7 @@ export default function AuthorizedAccounts() {
       render: (_value, row) => (
         <Dropdown
           trigger={['click']}
-          menu={{ items: actionMenu(), onClick: ({ key }) => onActionClick(row, key) }}
+          menu={{ items: actionMenu(row), onClick: ({ key }) => onActionClick(row, key) }}
         >
           <Button type="text" icon={<MoreOutlined />} aria-label={`操作 ${row.email}`} />
         </Dropdown>
@@ -694,7 +736,7 @@ export default function AuthorizedAccounts() {
         {actionTask ? (
           <TaskLogPanel
             taskId={actionTask.id}
-            kind="batch_action"
+            kind={actionTask.kind}
             onDone={() => {
               void load()
             }}

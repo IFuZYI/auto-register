@@ -414,6 +414,11 @@ export default function RegisterTaskPage() {
                 label="AWS 来源"
                 initialValue="reuse"
                 tooltip="Kiro 的凭据由 AWS Builder ID 换出来：优先复用还没注册过 Kiro 的 AWS 账号；也可以指定账号或直接新建。"
+                extra={
+                  awsAccounts.length
+                    ? `可用 AWS：${awsAccounts.filter((item) => !item.usedByKiro).length} 个未注册 Kiro（共 ${awsAccounts.length} 个）`
+                    : undefined
+                }
               >
                 <Radio.Group
                   optionType="button"
