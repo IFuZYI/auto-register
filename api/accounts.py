@@ -13,6 +13,7 @@ from services.account_export import (
 )
 from services.chatgpt_account_state import filter_accounts_by_plus_status
 from services.chatgpt_account_selection import normalize_account_ids
+from core.credential_crypto import SENSITIVE_EXTRA_KEYS
 from core.credential_fields import export_names as _export_names
 from core.credential_fields import sync_token_column
 from core.time_utils import UtcDatetime
@@ -168,12 +169,18 @@ def _count_accounts(
 _LIST_HEAVY_EXTRA_KEYS = ("session_token", "id_token", "cookies", "cpa_record")
 #: 这几个不是删掉，而是换成 `has_xxx` 布尔。
 #:
-#: `sso` 必须在这里：grok 账号的 SSO 是**可直接冒用身份的 bearer 凭据**
-#: （与 AT 同级），而它既不在 `_LIST_HEAVY_EXTRA_KEYS` 也不在原有两个键里 ——
-#: `decrypt_extra` 解密之后原样下发，一页 `page_size=200` 就能拉走 390 个
-#: grok 号的 SSO（data-layer 审计本轮新增 P0）。`token` 列那一份已经加密封口，
-#: 这一份在 `extra_json` 里，同样的东西漏在同一张响应里。
-_LIST_TOKEN_EXTRA_KEYS = ("access_token", "refresh_token", "sso")
+#: **从 `SENSITIVE_EXTRA_KEYS` 派生**，而不是手写一份：手写清单漏一次就是
+#: 一次明文泄漏（2026-11-13 真机审计：新增的 `client_secret` 与
+#: `kiro_aws_*` 快照没跟上，列表接口把可冒用身份的凭据直接下发了）。
+#: 以后往密文集里加键，这里自动覆盖。
+#:
+#: 重型键（`cookies`/`id_token`/`session_token`）已经在
+#: `_LIST_HEAVY_EXTRA_KEYS` 里整段删掉，不在这里重复。
+_LIST_TOKEN_EXTRA_KEYS = tuple(
+    key
+    for key in sorted(SENSITIVE_EXTRA_KEYS)
+    if key != "totp_secret" and key not in _LIST_HEAVY_EXTRA_KEYS
+)
 
 
 def _at_claims_for_list(token: str) -> dict:
@@ -928,17 +935,13 @@ def _do_check(account_id: str):
                         # 正向确认可用 → 过期/失效恢复「正常」（禁用不动）
                         if fresh.status in ("expired", "invalid"):
                             fresh.status = "registered"
-                    elif fresh.platform == "grok":
-                        # grok 的探测细节带 SSO 三态 —— 用它区分 过期/失效/禁用
-                        # （对齐 grok2api：SSO 被拒 = 需要重新登录 = 失效）
-                        from services.grok_account_state import apply_grok_status_policy
-
-                        detail = getattr(plugin, "last_probe_detail", {}) or {}
-                        apply_grok_status_policy(
-                            fresh,
-                            probe_code=detail.get("code"),
-                            probe_summary=str(detail.get("summary") or ""),
-                            sso_rejected=(detail.get("sso_status") == "rejected"),
+                    elif callable(getattr(plugin, "apply_probe_status_policy", None)):
+                        # 状态语义归平台自己（grok 的 SSO 三态、aws/kiro 的
+                        # 403=封禁 / 400=失效 / 网络错误=不改）。这里再写一份
+                        # 就会与动作链路分叉（审计 2026-11-13：aws/kiro 403
+                        # 曾被写成 invalid 而不是 banned）。
+                        plugin.apply_probe_status_policy(
+                            fresh, detail=getattr(plugin, "last_probe_detail", {}) or {}
                         )
                     else:
                         fresh.status = "invalid"

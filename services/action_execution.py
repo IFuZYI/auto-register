@@ -377,7 +377,29 @@ def _apply_aws_kiro_status(acc_model, action_id, result, session) -> None:
             "summary": str(result.get("error") or ""),
         }
     reason = platform.apply_probe_status_policy(acc_model, detail=detail)
-    if reason:
+    changed = bool(reason)
+    # 探测/刷新会换回新的 AT（有时还有新 RT）——不写回的话库里的凭据永远是旧的，
+    # 下次测活还得再刷一次（审计 2026-11-13）。
+    if detail.get("usable") and (detail.get("access_token") or detail.get("refresh_token")):
+        try:
+            from datetime import datetime, timezone
+
+            extra = dict(acc_model.get_extra() or {})
+            if detail.get("access_token"):
+                extra["access_token"] = str(detail["access_token"])
+            if detail.get("refresh_token"):
+                extra["refresh_token"] = str(detail["refresh_token"])
+            if detail.get("expires_in"):
+                extra["expires_at"] = int(
+                    datetime.now(timezone.utc).timestamp() * 1000
+                ) + int(detail["expires_in"]) * 1000
+            acc_model.set_extra(extra)
+            if detail.get("refresh_token"):
+                acc_model.token = str(detail["refresh_token"])
+            changed = True
+        except Exception as exc:  # noqa: BLE001 - 写回失败不影响动作结论
+            logger.debug("探测凭据写回失败: %s", exc)
+    if changed:
         from datetime import datetime, timezone
 
         acc_model.updated_at = datetime.now(timezone.utc)

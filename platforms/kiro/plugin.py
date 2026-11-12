@@ -108,7 +108,8 @@ class KiroPlatform(BasePlatform):
         account = aws_platform.register(email=email, password=password)
         identity = dict(account.extra or {})
         identity["email"] = account.email
-        identity["password"] = account.password
+        # 密码只进 `password` 列（加密存储），**不要**再塞进 extra：
+        # extra_json 是明文 JSON，列表接口会整段下发（审计 2026-11-13 实证泄漏）。
 
         # 来源账号**立即落库**：Kiro 授权失败时 AWS 号已经真实存在（密码也设过），
         # 丢掉它就等于白烧一个号 + 一个邮箱。落进 `aws` 平台库，Kiro 记录用
@@ -288,8 +289,9 @@ class KiroPlatform(BasePlatform):
         * `reuse`（默认）—— 先挑「还没注册 Kiro」的 AWS 账号复用；
           没有可用号时，按 `kiro_auto_register`（默认开）决定是否自动新建
           AWS + Kiro；
-        * `auto` —— 直接新建 AWS + Kiro；
-        * `aws_email`（或显式 `extra.kiro_aws_email`）—— 指定某个 AWS 账号复用。
+        * `manual` —— 用 `extra.kiro_aws_email` 指定的 AWS 账号复用
+          （缺这个键时明确报错）；
+        * `auto` —— 直接新建 AWS + Kiro。
         """
         extra = dict((self.config.extra or {}) if self.config else {})
         proxy = (self.config.proxy if self.config else None) or None
@@ -300,6 +302,13 @@ class KiroPlatform(BasePlatform):
             "0", "false", "no", "off", ""
         }
 
+        # 用户点名要注册某个邮箱 → 必须为这个邮箱新建 AWS，不能拿别的号复用。
+        # （「补 Kiro」走的是 kiro_aws_email，不带 email；两者不会打架。）
+        if str(email or "").strip() and not requested_aws:
+            return self._register_new_aws_and_kiro(
+                extra=extra, proxy=proxy, email=email, password=password, plan=plan
+            )
+
         if requested_aws:
             from core.db import account_repository
 
@@ -309,6 +318,11 @@ class KiroPlatform(BasePlatform):
             if self.is_email_registered(row.email):
                 raise RuntimeError(f"该 AWS 账号已注册 Kiro: {row.email}")
             return self._reuse_aws_account(row, extra=extra, proxy=proxy, plan=plan)
+
+        if source_mode == "manual":
+            raise RuntimeError(
+                "kiro_source=manual 需要同时指定 kiro_aws_email（要复用哪个 AWS 账号）"
+            )
 
         if source_mode == "reuse":
             row = self._pick_unused_aws()
@@ -404,12 +418,14 @@ class KiroPlatform(BasePlatform):
             "client_secret": str(extra.get("client_secret") or ""),
             "refresh_token": str(extra.get("refresh_token") or account.refresh_token or ""),
         }
-        if not credentials["refresh_token"]:
+        if not credentials["refresh_token"] or not credentials["client_id"] or not credentials["client_secret"]:
             # 只有导入的 social 账号可能没有 client_secret（GitHub/Google 登录），
-            # 这类号无法用 IdC 刷新 —— 如实报告，别假装探测过。
+            # 这类号无法用 IdC 刷新。**usable=None 表示「测不了」**，不是「坏了」——
+            # 返回 False 会让状态策略把好号打成 invalid（审计 2026-11-13 实证）。
             return {
                 "code": None,
-                "usable": False,
+                "usable": None,
+                "indeterminate": True,
                 "summary": "缺少 Kiro refresh_token 或 IdC 客户端凭据（social 账号无法刷新）",
             }
         proxy = (self.config.proxy if self.config else None) or ""
@@ -424,6 +440,9 @@ class KiroPlatform(BasePlatform):
 
     def apply_probe_status_policy(self, account, *, detail: dict) -> str:
         detail = detail or {}
+        if detail.get("indeterminate") or detail.get("usable") is None:
+            # 测不了 ≠ 失效：social 号 / 网络错误不该改状态
+            return ""
         if detail.get("usable"):
             if str(getattr(account, "status", "") or "").lower() != AccountStatus.REGISTERED.value:
                 account.status = AccountStatus.REGISTERED

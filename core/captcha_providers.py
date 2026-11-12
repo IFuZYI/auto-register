@@ -434,15 +434,9 @@ def build_captcha_chain(
     """
     values = config
     if values is None:
-        from core.config_store import config_store
-
-        values = {
-            "capmonster_key": config_store.get("capmonster_key", ""),
-            "yescaptcha_key": config_store.get("yescaptcha_key", ""),
-            "ai_captcha_url": config_store.get("ai_captcha_url", ""),
-            "ai_captcha_key": config_store.get("ai_captcha_key", ""),
-            "ai_captcha_model": config_store.get("ai_captcha_model", ""),
-        }
+        # 统一走 `captcha_config_from_store()`：它包含 `captcha_provider_order`。
+        # 手写键清单漏过一次这个键，导致「自定义顺序」永远不生效（审计 2026-11-13）。
+        values = captcha_config_from_store()
     session_factory = session_factory or requests.Session
     provider_names = str(values.get("captcha_provider_order") or "").strip()
     order = [item.strip().lower() for item in provider_names.split(",") if item.strip()] or [

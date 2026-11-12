@@ -139,6 +139,10 @@ class ScopeTests(unittest.TestCase):
                 # 下游 kiro.rs 用不了；source 是用户要求保存的来源。
                 "client_id", "client_secret", "profile_arn", "auth_method",
                 "login_provider", "plan", "account_id", "source", "source_email",
+                # 备份完整性（审计 2026-11-13）：Kiro 的 uid 决定
+                # pluginIdentity（social 号 GitHub/Google 的区分维度）、
+                # expires_at 是导出给下游的到期时间、needs_sso 标记半成品。
+                "uid", "expires_at", "needs_sso",
             },
         )
 

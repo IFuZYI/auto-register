@@ -1076,6 +1076,9 @@ class AwsBuilderIdClient:
             referer=signup_url,
         )
         data = _json_of(response)
+        # 密码 POST 已被服务端接受（后面即使解析 redirect 失败，号也已经建好）。
+        # 在这里置位，插件才能在 SSO 失败时把半成品落库（审计 2026-11-13）。
+        self.password_set = True
         redirect = str((data.get("redirect") or {}).get("url") or "")
         if data.get("stepId") == "end-of-user-registration-success":
             return {

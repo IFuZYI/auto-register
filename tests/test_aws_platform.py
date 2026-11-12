@@ -1058,6 +1058,43 @@ class _StubMailbox:
         return self.code
 
 
+class AwsProbePolicyTests(unittest.TestCase):
+    """探测结论 → 状态：403 封禁、网络错误不改、通过恢复。"""
+
+    def _platform(self):
+        from core.base_platform import RegisterConfig
+        from platforms.aws.plugin import AwsPlatform
+
+        return AwsPlatform(config=RegisterConfig(), mailbox=None)
+
+    def test_403_marks_banned(self):
+        from core.base_platform import AccountStatus
+
+        row = type("_Row", (), {"status": AccountStatus.REGISTERED})()
+        platform = self._platform()
+        platform.apply_probe_status_policy(row, detail={"usable": False, "banned": True, "code": 403})
+        self.assertEqual(row.status, AccountStatus.BANNED)
+
+    def test_indeterminate_does_not_touch_status(self):
+        from core.base_platform import AccountStatus
+
+        row = type("_Row", (), {"status": AccountStatus.REGISTERED})()
+        platform = self._platform()
+        reason = platform.apply_probe_status_policy(
+            row, detail={"usable": None, "indeterminate": True, "code": None}
+        )
+        self.assertEqual(reason, "")
+        self.assertEqual(row.status, AccountStatus.REGISTERED)
+
+    def test_success_restores_invalid_to_registered(self):
+        from core.base_platform import AccountStatus
+
+        row = type("_Row", (), {"status": AccountStatus.INVALID})()
+        platform = self._platform()
+        platform.apply_probe_status_policy(row, detail={"usable": True, "code": 200})
+        self.assertEqual(row.status, AccountStatus.REGISTERED)
+
+
 class AwsCapabilityWiringTests(unittest.TestCase):
     """新增平台的**接线**：能力登记表、状态落库、维护任务。
 
@@ -1094,6 +1131,15 @@ class AwsCapabilityWiringTests(unittest.TestCase):
 
 
 class AwsPluginContractTests(unittest.TestCase):
+    def tearDown(self):
+        # 注册测试会往真库写 `aws@x.ai`；不清理会污染后续测试的
+        # 「有没有未注册 Kiro 的 AWS 号」判断（已实际踩到）。
+        from core.db import account_repository
+
+        row = account_repository.find_by_email("aws", "aws@x.ai")
+        if row is not None:
+            account_repository.delete(row.id, "aws")
+
     def test_registered_and_declares_protocol_only(self):
         from core.registry import get, load_all
 

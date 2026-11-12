@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import json
 import logging
 
 logger = logging.getLogger(__name__)
@@ -783,6 +784,43 @@ def _ensure_proxy_tags_column(engine: Engine | None = None) -> None:
             conn.exec_driver_sql("ALTER TABLE proxies ADD COLUMN tags TEXT DEFAULT ''")
 
 
+def _scrub_extra_passwords(engine: Engine | None = None) -> None:
+    """把历史版本抄进 `extra_json` 的密码删掉（审计 2026-11-13）。
+
+    密码的权威存储是 `password_cipher` 列；`extra.password` 是 Kiro 来源账号
+    落库时误抄的一份，`extra_json` 是明文 JSON，列表接口会整段下发。
+    这里只删键，不动列值。
+    """
+    from sqlalchemy import text
+
+    target = engine
+    if target is None:
+        from .base import current_engine
+
+        target = current_engine()
+    try:
+        with target.begin() as conn:
+            rows = conn.execute(
+                text("SELECT id, extra_json FROM accounts WHERE extra_json LIKE :needle"),
+                {"needle": '%"password"%'},
+            ).fetchall()
+            for row in rows:
+                try:
+                    data = json.loads(row[1] or "{}")
+                except Exception as exc:  # noqa: BLE001 - 脏行跳过
+                    logger.debug("extra_json 解析失败（跳过）: %s", exc)
+                    continue
+                if not isinstance(data, dict) or "password" not in data:
+                    continue
+                data.pop("password", None)
+                conn.execute(
+                    text("UPDATE accounts SET extra_json = :extra WHERE id = :id"),
+                    {"extra": json.dumps(data, ensure_ascii=False), "id": row[0]},
+                )
+    except Exception as exc:  # noqa: BLE001 - 迁移失败不该阻断启动
+        logger.debug("清理 extra 密码失败（忽略）: %s", exc)
+
+
 def run_migrations(engine: Engine | None = None) -> None:
     """在指定库跑全部迁移；不传则跑「默认库 + 所有平台库」。"""
     if engine is not None:
@@ -817,6 +855,8 @@ def _run_one(engine: Engine) -> None:
     _drop_trial_end_time_column(engine)
     # 凭证字段整理：grok 的 token 列修回 SSO 镜像（曾被 AT 刷新路径盖过）
     _normalize_grok_token_column(engine)
+    # 历史遗留：extra_json 里的明文密码（Kiro 来源账号落库时误抄）
+    _scrub_extra_passwords(engine)
 
 
 __all__ = [
@@ -832,4 +872,5 @@ __all__ = [
     "_migrate_used_platforms_columns",
     "_normalize_grok_token_column",
     "_normalize_removed_account_statuses",
+    "_scrub_extra_passwords",
 ]

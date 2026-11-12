@@ -2016,7 +2016,14 @@ export default function Accounts() {
                           : getAccessToken(currentAccount)) || ''
                       }
                       empty="无"
-                      onEdit={() => setEditingToken(true)}
+                      // AWS/Kiro 的 token 列镜像的是 **RT**，不是 AT；这里的
+                      // 「替换」写的是 `payload.token`，会把 RT 列覆盖成一个 AT。
+                      // 这两个平台的凭据走「刷新凭据」整组刷新，不给单值编辑。
+                      onEdit={
+                        currentPlatform === 'aws' || currentPlatform === 'kiro'
+                          ? undefined
+                          : () => setEditingToken(true)
+                      }
                       editLabel="替换"
                     />
                   )}
@@ -2030,7 +2037,9 @@ export default function Accounts() {
                           // Grok 就没有 RT 这条路：刷新走 SSO → 登录协议（device flow）。
                           // 写「补过 RT 才会有」会让人去找一个不存在的东西。
                           ? '无 —— Grok 用 SSO 走登录协议刷新，不需要 RT'
-                          : '无（补过 RT 才会有）'
+                          : currentPlatform === 'aws' || currentPlatform === 'kiro'
+                            ? '无 —— 该账号没有 refresh_token，需要重新授权/补凭据'
+                            : '无（补过 RT 才会有）'
                       }
                     />
                 </DetailRow>

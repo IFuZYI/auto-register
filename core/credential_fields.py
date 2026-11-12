@@ -121,6 +121,11 @@ EXPORT_ONLY_EXTRA_KEYS: tuple[str, ...] = (
     "account_id",
     "source",
     "source_email",
+    # Kiro 的身份维度（social 号靠 uid 区分 GitHub/Google）与到期时间；
+    # AWS 半成品标记。备份/恢复不丢这些，否则 uid 回落会改 pluginIdentity。
+    "uid",
+    "expires_at",
+    "needs_sso",
 )
 
 

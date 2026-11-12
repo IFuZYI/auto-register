@@ -440,11 +440,109 @@ class KiroSourceSelectionTests(unittest.TestCase):
             self.assertEqual(platform.register(), "chosen")
         self.assertEqual(seen, [email])
 
+    def test_manual_without_aws_email_raises(self):
+        platform = self._platform(kiro_source="manual")
+        with self.assertRaises(RuntimeError) as ctx:
+            platform.register()
+        self.assertIn("kiro_aws_email", str(ctx.exception))
+
+    def test_explicit_email_forces_a_new_aws_account(self):
+        """点名注册某邮箱时不能被「复用未用号」抢走。"""
+        platform = self._platform(kiro_source="reuse")
+        seen: list[str] = []
+
+        def _fake_new(**kwargs):
+            seen.append(str(kwargs.get("email") or ""))
+            return "new"
+
+        with mock.patch.object(platform, "_register_new_aws_and_kiro", _fake_new), mock.patch.object(
+            platform, "_pick_unused_aws", lambda: self._row("unused@x.ai")
+        ):
+            self.assertEqual(platform.register(email="named@x.ai"), "new")
+        self.assertEqual(seen, ["named@x.ai"])
+
     def test_explicit_aws_email_must_exist(self):
         platform = self._platform(kiro_aws_email="missing-aws@x.ai")
         with mock.patch("core.db.account_repository.find_by_email", return_value=None):
             with self.assertRaises(RuntimeError):
                 platform.register()
+
+
+class KiroReuseLoginTests(unittest.TestCase):
+    """复用登录主链路：SSO（含 OTP）→ Kiro 授权 → 来源快照。"""
+
+    def test_reuse_logs_in_with_otp_and_builds_source_snapshot(self):
+        from types import SimpleNamespace
+        from unittest import mock
+
+        from core.base_platform import RegisterConfig
+        from platforms.kiro.plugin import KiroPlatform
+
+        row = SimpleNamespace(
+            email="aws-reuse@x.ai",
+            password="Pw-1!",
+            get_extra=lambda: {
+                "client_id": "aws-cid",
+                "client_secret": "aws-cs",
+                "refresh_token": "aws-rt",
+                "access_token": "aws-at",
+                "sso": "aws-sso",
+                "region": "us-east-1",
+            },
+        )
+        mailbox = _StubMailbox(email="aws-reuse@x.ai", code="654321")
+        platform = KiroPlatform(
+            config=RegisterConfig(extra={"mail_provider": "icloud_remote"}),
+            mailbox=mailbox,
+        )
+
+        class _FakeClient:
+            client_id = "cid"
+            client_secret = "cs"
+
+            def __init__(self, **_kwargs) -> None:
+                self.otp = ""
+
+            def sso_workflow(self, *, email, password, otp_provider):
+                self.otp = otp_provider()
+                return {"auth_code": "code-1", "state": "st-1"}
+
+            def sso_token(self, code, state):
+                return "sso-token-1"
+
+        tokens = {
+            "access_token": "kiro-at",
+            "refresh_token": "kiro-rt",
+            "client_id": "kiro-cid",
+            "client_secret": "kiro-cs",
+            "expires_in": 3600,
+            "profile_arn": "arn:aws:codewhisperer:us-east-1:1:profile/X",
+            "region": "us-east-1",
+        }
+        with (
+            mock.patch("platforms.aws.client.AwsBuilderIdClient", _FakeClient),
+            mock.patch("platforms.kiro.plugin.authorize_kiro", lambda **_kw: dict(tokens)),
+            mock.patch.object(platform, "_mailbox_account_for_reuse", lambda _m, _e: object()),
+        ):
+            account = platform._reuse_aws_account(
+                row,
+                extra={"mail_provider": "icloud_remote"},
+                proxy="",
+                plan="Kiro FREE",
+            )
+
+        self.assertEqual(account.email, "aws-reuse@x.ai")
+        self.assertEqual(account.password, "Pw-1!")
+        self.assertEqual(mailbox.waited, 1, "登录 OTP 必须真的去邮箱取")
+        extra = account.extra
+        self.assertEqual(extra["source"], "aws")
+        self.assertEqual(extra["source_email"], "aws-reuse@x.ai")
+        self.assertEqual(extra["plan"], "Kiro FREE")
+        self.assertEqual(extra["refresh_token"], "kiro-rt")
+        # 来源快照（供审计/回滚），不是明文密码
+        self.assertEqual(extra["kiro_aws_sso"], "aws-sso")
+        self.assertEqual(extra["kiro_aws_refresh_token"], "aws-rt")
+        self.assertNotIn("password", extra)
 
 
 class KiroExportImportTests(unittest.TestCase):
@@ -547,6 +645,35 @@ class KiroExportImportTests(unittest.TestCase):
 
 
 class KiroPluginTests(unittest.TestCase):
+    def tearDown(self):
+        from core.db import account_repository
+
+        row = account_repository.find_by_email("kiro", "kiro@x.ai")
+        if row is not None:
+            account_repository.delete(row.id, "kiro")
+
+    def test_social_probe_is_indeterminate_and_keeps_status(self):
+        """social 号（有 RT、无 IdC 客户端）测活应「测不了」，不能打成 invalid。"""
+        from core.base_platform import Account, AccountStatus, RegisterConfig
+        from platforms.kiro.plugin import KiroPlatform
+
+        platform = KiroPlatform(config=RegisterConfig(), mailbox=None)
+        account = Account(
+            platform="kiro",
+            email="social@x.ai",
+            password="",
+            extra={"refresh_token": "aor-social"},
+        )
+        detail = platform.probe_account_detail(account)
+        self.assertIsNone(detail.get("usable"))
+        self.assertTrue(detail.get("indeterminate"))
+
+        class _Row:
+            status = AccountStatus.REGISTERED
+
+        self.assertEqual(platform.apply_probe_status_policy(_Row(), detail=detail), "")
+        self.assertEqual(_Row.status, AccountStatus.REGISTERED)
+
     def test_registered_and_declares_protocol_only(self):
         from core.registry import get, load_all
 
@@ -595,6 +722,9 @@ class KiroPluginTests(unittest.TestCase):
             "profile_arn": "arn:aws:codewhisperer:us-east-1:699475941385:profile/ABC",
         }
         with (
+            # 库里可能残留真实注册的 AWS 号（测试机不是干净库），钉住 picker
+            # 走「没有可用号 → 自动新建」这条路径，测试不随环境漂移。
+            mock.patch.object(kiro_plugin.KiroPlatform, "_pick_unused_aws", lambda self: None),
             mock.patch.object(
                 kiro_plugin.KiroPlatform, "_register_aws_identity", lambda self, **kw: dict(aws_identity)
             ),

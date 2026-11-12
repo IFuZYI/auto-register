@@ -74,6 +74,8 @@ const SELECTED_KEY_ALIASES: Record<string, string> = {
   // 「平台配置」已并入「全局配置 → 面板配置」：旧路径重定向到这里，
   // 选中态归到「全局配置」。
   '/platform-config': '/settings',
+  // AWS 已从「平台管理」移出：旧链接落到新页，侧栏选中态跟着新页走
+  '/accounts/aws': '/authorized-accounts',
 }
 
 /** 菜单里真实存在的一级 key（路径与 key 同名）。 */
@@ -86,6 +88,7 @@ const MENU_KEYS: ReadonlySet<string> = new Set([
   '/proxies',
   '/settings',
   '/running-tasks',
+  '/authorized-accounts',
 ])
 
 /**

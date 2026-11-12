@@ -12,6 +12,7 @@ import {
   Descriptions,
   Tooltip,
   Radio,
+  message,
   Checkbox,
 } from 'antd'
 import {
@@ -273,7 +274,9 @@ export default function RegisterTaskPage() {
   // 合法取值，于是「看起来没问题」，但用户给 Grok 保存的 browser 被丢掉了。
   // 每个平台的执行器是独立配置（`<platform>_executor`），切换时要读它。
   // Kiro 页的「指定 AWS 账号」需要知道哪些号已经被 Kiro 用掉（source_email）。
+  // 只在 Kiro 平台下加载，别让其它平台的注册页白拉 400 行。
   useEffect(() => {
+    if (platform !== 'kiro') return
     let alive = true
     Promise.all([
       apiFetch('/accounts?platform=aws&page=1&page_size=200') as Promise<{ items?: unknown[] }>,
@@ -298,13 +301,15 @@ export default function RegisterTaskPage() {
             .map((email) => ({ email, usedByKiro: used.has(email.toLowerCase()) })),
         )
       })
-      .catch(() => {
-        // 读不到就只保留手动输入（下拉为空）
+      .catch((error: unknown) => {
+        if (alive) {
+          message.error(`读取 AWS 账号列表失败：${error instanceof Error ? error.message : String(error)}`)
+        }
       })
     return () => {
       alive = false
     }
-  }, [])
+  }, [platform])
 
   useEffect(() => {
     let alive = true

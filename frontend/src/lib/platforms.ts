@@ -97,7 +97,12 @@ export const PLATFORM_OPTIONS = Object.values(PLATFORMS)
     label,
   }))
 
-export const PLATFORM_FILTER_OPTIONS = [{ value: '', label: '全部平台' }, ...PLATFORM_OPTIONS]
+export const PLATFORM_FILTER_OPTIONS = [
+  { value: '', label: '全部平台' },
+  // 从**未过滤**的 PLATFORMS 生成：AWS 虽然不在注册页下拉里，但历史任务、
+  // 邮箱池、邮箱导入的筛选仍要能选它（它是合法来源）。
+  ...Object.values(PLATFORMS).map(({ name, label }) => ({ value: name, label })),
+]
 
 export function getPlatformMeta(platform?: string): PlatformMeta | undefined {
   return PLATFORMS[(platform || '') as PlatformName]

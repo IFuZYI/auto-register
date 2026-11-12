@@ -56,6 +56,9 @@ SENSITIVE_EXTRA_KEYS: frozenset[str] = frozenset(
         # `kiro_aws_*` 是 Kiro 账号上保存的**来源账号**凭据快照（同样是可冒用
         # 身份的 bearer 凭证），一并加密。
         "client_secret",
+        # 历史版本把 AWS 密码抄进过 extra（审计 2026-11-13）：列级已经加密，
+        # extra 里这份也必须按密文处理，列表接口才不会原样下发。
+        "password",
         "kiro_aws_access_token",
         "kiro_aws_refresh_token",
         "kiro_aws_client_secret",

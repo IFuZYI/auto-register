@@ -59,6 +59,23 @@ from services.action_execution import (
 
 
 
+#: 动作响应里**永不回吐正文**的凭据键（状态已落库，前端不需要这些值）。
+_ACTION_SECRET_KEYS = {"access_token", "refresh_token", "sso", "password", "client_secret"}
+
+
+def _redact_action_payload(value):
+    """递归删掉动作响应里的凭据正文（保留 summary/status/message 等）。"""
+    if isinstance(value, dict):
+        return {
+            key: _redact_action_payload(item)
+            for key, item in value.items()
+            if key not in _ACTION_SECRET_KEYS
+        }
+    if isinstance(value, list):
+        return [_redact_action_payload(item) for item in value]
+    return value
+
+
 #: 上传动作 → 该动作的同步状态写入函数（import 路径延迟到调用时）。
 #:
 #: 表驱动而不是逐动作 if 分支：新增面板上传动作时**只加一行**，
@@ -105,7 +122,9 @@ def _execute_platform_action(
     account = _to_platform_account(acc_model)
     result = instance.execute_action(action_id, account, params)
     _apply_action_result(platform, action_id, acc_model, result, session)
-    return result
+    # 动作结果里可能带刚刷新的 AT/RT（探测详情、刷新动作）：状态已经落库，
+    # 响应里不再回吐正文 —— 与列表接口同一口径（审计 2026-11-13）。
+    return _redact_action_payload(result)
 
 
 def _resolve_batch_accounts(platform: str, body: BatchActionRequest, session: Session) -> tuple[list[AccountModel], list[str]]:

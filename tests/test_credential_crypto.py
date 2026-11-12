@@ -43,6 +43,8 @@ SECRETS = {
     "kiro_aws_refresh_token": "aws-rt-plain",
     "kiro_aws_client_secret": "aws-client-secret-plain",
     "kiro_aws_sso": "aws-sso-plain",
+    # 历史版本抄进 extra 的密码（审计 2026-11-13）：也必须按密文处理
+    "password": "pw-plain-extra",
 }
 
 

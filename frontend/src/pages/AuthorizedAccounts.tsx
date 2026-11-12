@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Alert,
   Button,
@@ -11,6 +11,7 @@ import {
   Modal,
   Popconfirm,
   Select,
+  Grid,
   Space,
   Table,
   Tag,
@@ -163,6 +164,10 @@ export default function AuthorizedAccounts() {
   const [email, setEmail] = useState('')
   const [status, setStatus] = useState('')
   const [derivedMap, setDerivedMap] = useState<Record<string, Derived[]>>({})
+  const loadSeq = useRef(0)
+  const detailId = useRef<string>('')
+  const screens = Grid.useBreakpoint()
+  const narrow = !screens.md
 
   const [detail, setDetail] = useState<AccountRow | null>(null)
   const [detailOpen, setDetailOpen] = useState(false)
@@ -184,6 +189,7 @@ export default function AuthorizedAccounts() {
   const [importing, setImporting] = useState(false)
 
   const load = useCallback(async () => {
+    const seq = ++loadSeq.current
     setLoading(true)
     try {
       const params = new URLSearchParams({
@@ -197,13 +203,15 @@ export default function AuthorizedAccounts() {
         apiFetch(`/accounts?${params.toString()}`) as Promise<AccountList>,
         apiFetch('/accounts?platform=kiro&page=1&page_size=200') as Promise<AccountList>,
       ])
+      // 过期响应守卫：快速翻页/改筛选时，先发的慢响应不能覆盖后发的
+      if (seq !== loadSeq.current) return
       setRows(list.items || [])
       setTotal(list.total || 0)
       setDerivedMap(buildDerived(kiroList.items || []))
     } catch (error) {
-      message.error(`读取授权账号失败：${errMessage(error)}`)
+      if (seq === loadSeq.current) message.error(`读取授权账号失败：${errMessage(error)}`)
     } finally {
-      setLoading(false)
+      if (seq === loadSeq.current) setLoading(false)
     }
   }, [page, pageSize, email, status])
 
@@ -214,15 +222,19 @@ export default function AuthorizedAccounts() {
   const derivedTotal = useMemo(() => Object.keys(derivedMap).length, [derivedMap])
 
   const openDetail = async (row: AccountRow) => {
+    detailId.current = row.id
     setDetail(row)
     setDetailOpen(true)
     try {
       const full = (await apiFetch(
         `/accounts/${row.id}?platform=aws`,
       )) as AccountRow
-      if (full && typeof full === 'object') setDetail(full)
-    } catch {
-      // 详情拉不到就先用列表行，抽屉其余部分仍可用
+      // 连点两行时只认最后一次打开的那一行
+      if (full && typeof full === 'object' && detailId.current === row.id) setDetail(full)
+    } catch (error) {
+      if (detailId.current === row.id) {
+        message.error(`读取详情失败：${errMessage(error)}（先显示列表里的字段）`)
+      }
     }
   }
 
@@ -499,7 +511,7 @@ export default function AuthorizedAccounts() {
       <PageHeader
         title="授权账号"
         subtitle={
-          <>AWS Builder ID 是 Kiro 的授权根：共 {total} 个账号，其中 {derivedTotal} 个已换取 Kiro 凭据。</>
+          <>AWS Builder ID 是 Kiro 的授权根：共 {total} 个账号；Kiro 侧已换取凭据的来源邮箱 {derivedTotal} 个（按前 200 条 Kiro 记录统计）。</>
         }
         actions={
           <Space wrap>
@@ -532,6 +544,7 @@ export default function AuthorizedAccounts() {
         <Input.Search
           allowClear
           placeholder="按邮箱筛选"
+          aria-label="按邮箱筛选授权账号"
           style={{ width: 240 }}
           onSearch={(value) => {
             setPage(1)
@@ -541,6 +554,7 @@ export default function AuthorizedAccounts() {
         <Select
           allowClear
           placeholder="全部状态"
+          aria-label="按状态筛选授权账号"
           style={{ width: 132 }}
           value={status || undefined}
           onChange={(value) => {
@@ -570,8 +584,23 @@ export default function AuthorizedAccounts() {
           emptyText: (
             <Empty
               image={Empty.PRESENTED_IMAGE_SIMPLE}
-              description="还没有授权账号。注册一个 AWS Builder ID，或从 JSON 导入一批。"
+              description={
+                email || status
+                  ? '没有匹配的授权账号。换个筛选条件，或清除筛选看全部。'
+                  : '还没有授权账号。注册一个 AWS Builder ID，或从 JSON 导入一批。'
+              }
             >
+              {email || status ? (
+                <Button
+                  onClick={() => {
+                    setEmail('')
+                    setStatus('')
+                    setPage(1)
+                  }}
+                >
+                  清除筛选
+                </Button>
+              ) : (
               <Space>
                 <Button type="primary" icon={<PlusOutlined />} onClick={() => setRegisterOpen(true)}>
                   注册 AWS 账号
@@ -580,6 +609,7 @@ export default function AuthorizedAccounts() {
                   导入
                 </Button>
               </Space>
+              )}
             </Empty>
           ),
         }}
@@ -599,7 +629,7 @@ export default function AuthorizedAccounts() {
       <Drawer
         open={detailOpen}
         onClose={() => setDetailOpen(false)}
-        width={460}
+        width={narrow ? '100%' : 460}
         title={detail?.email || '授权账号'}
       >
         {detail ? (
@@ -607,12 +637,15 @@ export default function AuthorizedAccounts() {
             <AuthTree email={detail.email} status={detail.status} derived={detailDerived} />
             <DetailGroup title="凭据" hint="这些是 AWS Builder ID 的 OIDC 凭据，Kiro 靠它换授权。">
               <DetailRow label="Client ID">
-                <Text style={{ fontFamily: 'var(--font-mono, ui-monospace)' }}>
+                <Text style={{ fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace' }}>
                   {String(detailExtra.client_id || '') || '—'}
                 </Text>
               </DetailRow>
               <DetailRow label="Refresh Token">
-                <SecretLine value={String(detailExtra.refresh_token || '')} empty="无" />
+                <SecretLine
+                  value={String(detailExtra.refresh_token || '')}
+                  empty={detailExtra.has_refresh_token ? '已配置（正文未加载，刷新后可见）' : '无'}
+                />
               </DetailRow>
               <DetailRow label="地区">
                 <Text>{detail.region || String(detailExtra.region || '') || '—'}</Text>
@@ -646,6 +679,8 @@ export default function AuthorizedAccounts() {
         title="注册 AWS 账号"
         open={registerOpen}
         onCancel={registerTaskId ? undefined : closeRegister}
+        closable={!registerTaskId}
+        keyboard={!registerTaskId}
         maskClosable={false}
         footer={null}
         width={registerTaskId ? 720 : 480}
@@ -698,7 +733,11 @@ export default function AuthorizedAccounts() {
         open={importOpen}
         onOk={() => void submitImport()}
         confirmLoading={importing}
-        onCancel={() => setImportOpen(false)}
+        onCancel={() => {
+          setImportOpen(false)
+          setImportText('')
+          setImportFormat('json')
+        }}
         okText="导入"
         cancelText="取消"
         width={560}

@@ -189,6 +189,28 @@ def test_list_payload_per_item_is_small(client):
         _cleanup(client, emails)
 
 
+def test_list_never_ships_sensitive_extra_bodies():
+    """密文集里的**每一个**键都不能以正文出现在列表响应里。
+
+    手写白名单漏过一次（client_secret / kiro_aws_* 被明文下发，审计 2026-11-13），
+    这条按密文集遍历，以后新增键自动被覆盖。
+    """
+    from api.accounts import _slim_extra_for_list
+    from core.credential_crypto import SENSITIVE_EXTRA_KEYS, encrypt_extra
+
+    payload = {key: f"SECRET-{key}" for key in SENSITIVE_EXTRA_KEYS}
+    slim = json.loads(
+        _slim_extra_for_list(json.dumps(encrypt_extra(payload), ensure_ascii=False))
+    )
+    dumped = json.dumps(slim, ensure_ascii=False)
+    for key in SENSITIVE_EXTRA_KEYS:
+        assert f"SECRET-{key}" not in dumped, f"{key} 正文泄漏到列表响应"
+    # 正文换成布尔标记，前端仍能判「有没有」
+    assert slim.get("has_access_token") is True
+    assert slim.get("has_refresh_token") is True
+    assert slim.get("has_client_secret") is True
+
+
 def test_slim_is_idempotent():
     """瘦身必须是幂等的：已经瘦过的行再跑一次，布尔标记不能被翻成 False。
 

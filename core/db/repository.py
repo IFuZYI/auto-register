@@ -618,11 +618,23 @@ class AccountRepository:
         # **落盘前封口**：JSON 文件与 SQLite 列必须同一种形态（都是 `v1:` 密文）。
         # 原来这里写的是明文 —— 一次 `cat accounts.json` 就能拿到全池密码与
         # AT/SSO（data-layer D-01/D-02）。`encrypt_text` 对已加密值幂等。
-        from core.credential_crypto import encrypt_text
+        from core.credential_crypto import encrypt_extra, encrypt_text
 
         for key in ("password", "token"):
             if fields.get(key):
                 fields[key] = encrypt_text(str(fields[key]))
+        # `extra_json` 里的 AT/RT/SSO/client_secret/kiro_aws_* 与 SQLite 列同级：
+        # JSON 后端原来只封 password/token，extra 里的凭据是明文（审计 2026-11-13）。
+        raw_extra = fields.get("extra_json")
+        if raw_extra:
+            try:
+                extra_data = json.loads(raw_extra)
+            except (TypeError, ValueError):
+                extra_data = None
+            if isinstance(extra_data, dict):
+                fields["extra_json"] = json.dumps(
+                    encrypt_extra(extra_data), ensure_ascii=False
+                )
         if existing_record:
             updated = store.update(existing_record["id"], fields)
             return json_record_to_model(updated or {})

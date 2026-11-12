@@ -36,13 +36,11 @@ class AuthorizedAccountsWiringTests(unittest.TestCase):
     def test_platform_options_exclude_aws_but_filters_keep_it(self):
         source = self._read("lib/platforms.ts")
         self.assertIn(".filter(({ name }) => name !== 'aws')", source)
-        # 筛选清单由 PLATFORMS 派生，必须仍然包含 aws
-        self.assertIn("export const PLATFORM_FILTER_OPTIONS", source)
-        self.assertNotIn(
-            "PLATFORM_FILTER_OPTIONS = Object.values(PLATFORMS).filter",
-            source,
-            "筛选清单不能跟着注册下拉一起排除 aws",
-        )
+        # 筛选清单必须从**未过滤**的 PLATFORMS 生成，不能复用 PLATFORM_OPTIONS
+        # （曾经因为复用，AWS 从任务历史/邮箱筛选里消失，旧断言是恒真的）。
+        block = source.split("export const PLATFORM_FILTER_OPTIONS")[1].split("]")[0]
+        self.assertIn("Object.values(PLATFORMS)", block)
+        self.assertNotIn("PLATFORM_OPTIONS", block)
 
     def test_aws_list_shows_registered_platforms(self):
         source = self._read("pages/AuthorizedAccounts.tsx")

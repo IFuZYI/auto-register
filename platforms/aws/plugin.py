@@ -150,7 +150,13 @@ class AwsPlatform(BasePlatform):
             # 关键词必须是 `aws`：AWS 的邮件来自 `no-reply@signin.aws`（iCloud 转发后
             # 变成 `no-reply_at_signin_aws_…`），正文写「AWS Builder ID」——
             # 写 `amazon` 时邮件到了也会被渠道的关键词过滤跳过（2026-11-13 实测）。
-            kwargs: dict[str, Any] = {"keyword": "aws", "timeout": timeout}
+            # `otp_sent_at` 让渠道只认本轮验证码：不传的话，补发/重试时
+            # 可能捞到上一封旧码（审计 2026-11-13）。
+            kwargs: dict[str, Any] = {
+                "keyword": "aws",
+                "timeout": timeout,
+                "otp_sent_at": time.time(),
+            }
             if mailbox_account is not None:
                 try:
                     return mailbox.wait_for_code(mailbox_account, **kwargs)
@@ -286,6 +292,9 @@ class AwsPlatform(BasePlatform):
     def apply_probe_status_policy(self, account, *, detail: dict) -> str:
         """探测结论 → 状态：200 恢复正常，403 落 banned，其余落 invalid。"""
         detail = detail or {}
+        if detail.get("usable") is None or detail.get("indeterminate"):
+            # 网络错误等「测不了」的结论：不改状态（别把好号打成 invalid）
+            return ""
         if detail.get("usable"):
             if str(getattr(account, "status", "") or "").lower() != AccountStatus.REGISTERED.value:
                 account.status = AccountStatus.REGISTERED

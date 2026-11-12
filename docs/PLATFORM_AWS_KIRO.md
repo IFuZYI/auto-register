@@ -3,7 +3,7 @@
 两个平台共用一条 **AWS Builder ID 注册链路**：
 
 ```
-platforms/aws/client.py          15 步协议状态机（OIDC → device → portal → workflow
+platforms/aws/client.py          16 步协议状态机（含条件执行的 `complete_signup`）（OIDC → device → portal → workflow
                                  → 提交邮箱 → 注册 → 资料页 → 发码 → 建身份 → 设密码
                                  → SSO 工作流 → SSO token → device token）
 platforms/aws/crypto.py          XXTEA 指纹信封 · 密码 JWE（RSA-OAEP-256 + A256GCM）
@@ -157,9 +157,11 @@ AI 兜底用的是 OpenAI 兼容的视觉接口（`/v1/chat/completions`，图�
 
 | 邮箱 | Kiro | AWS 来源 | 刷新验证 |
 | --- | --- | --- | --- |
-| `trap_onboard16@icloud.com` | ✅ AT/RT + profileArn | ✅ | ✅ `refresh_token` 换到新 AT |
-| `tribe.chime-5y@icloud.com` | ✅ | ✅ | — |
-| `untied.fried4u@icloud.com` | ✅ | ✅ | — |
+| `t***@icloud.com` | ✅ AT/RT + profileArn | ✅ | ✅ `refresh_token` 换到新 AT |
+| `tr***@icloud.com` | ✅ | ✅ | — |
+| `u***@icloud.com` | ✅ | ✅ | — |
+
+> 真实地址只留在运行库里（`accounts` 表），文档与提交记录不落 PII。
 
 产物：`source=aws`、`plan=Kiro FREE`、`profile_arn=arn:aws:codewhisperer:us-east-1:…`。
 
@@ -235,6 +237,9 @@ portal login → "" → start → get-identity-user（username + 指纹）
 （远端 DNS）稳定；直连只在前几次成功。
 
 ## 7. 已知边界
+
+> 历史记录：本节早期版本写「当前出口被 AWS 判 BLOCKED」「没有接码/打码」——
+> 那是 6.2 修复前的状态，已被 6.1 的 3 个成功账号推翻。现在保留的是**仍然成立**的边界。
 
 - **AWS 风控**：协议链路已真机跑到设置密码，但当前出口被 AWS 判 `BLOCKED`
   （见上一节）。换住宅 IP 前不要期待端到端成功。

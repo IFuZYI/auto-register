@@ -56,6 +56,36 @@ class JsonBackendCredentialEncryptionTests(unittest.TestCase):
         self.assertTrue(str(record.get("password", "")).startswith("v1:"))
         self.assertTrue(str(record.get("token", "")).startswith("v1:"))
 
+    def test_extra_credentials_are_encrypted_in_the_file(self):
+        """extra_json 里的 AT/RT/SSO/client_secret 也必须封口（审计 2026-11-13）。"""
+        AccountRepository.upsert(
+            Account(
+                platform="kiro",
+                email="json-extra@example.com",
+                password=PASSWORD,
+                extra={
+                    "access_token": "at-extra-secret",
+                    "refresh_token": "rt-extra-secret",
+                    "sso": "sso-extra-secret",
+                    "client_secret": "cs-extra-secret",
+                    "kiro_aws_sso": "aws-sso-extra-secret",
+                },
+            )
+        )
+        raw = (self._tmp / "accounts.json").read_text(encoding="utf-8")
+        for secret in (
+            "at-extra-secret",
+            "rt-extra-secret",
+            "sso-extra-secret",
+            "cs-extra-secret",
+            "aws-sso-extra-secret",
+        ):
+            self.assertNotIn(secret, raw, f"JSON 文件里出现了明文 {secret}")
+        row = AccountRepository.find_by_email("kiro", "json-extra@example.com")
+        extra = row.get_extra()
+        self.assertEqual(extra["access_token"], "at-extra-secret")
+        self.assertEqual(extra["client_secret"], "cs-extra-secret")
+
     def test_reads_back_as_plaintext(self):
         self._upsert()
         found = AccountRepository.find_by_email("chatgpt", "json-enc@example.com")

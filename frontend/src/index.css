@@ -1809,7 +1809,7 @@ body {
 }
 
 .auth-account__meta {
-  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 11px;
   color: var(--text-muted);
   overflow-wrap: anywhere;
@@ -1985,7 +1985,8 @@ body {
 
 @media (max-width: 767px) {
   /* 卡片模式下状态 Tag 会被 flex 拉成一条长条 —— 钉回内容宽度 */
-  .auth-page .table-cards .ant-table-tbody > tr.ant-table-row > td > .ant-tag {
+  .auth-page .table-cards .ant-table-tbody > tr.ant-table-row > td > .ant-tag,
+  .auth-page .table-cards .ant-table-tbody > tr.ant-table-row > td > .ant-space > .ant-tag {
     flex: 0 0 auto;
   }
 }

@@ -344,6 +344,40 @@ class ConfigWiringTests(unittest.TestCase):
         names = [provider.name for provider in chain.providers]
         self.assertEqual(names, ["capmonster", "ai"], "没配 key 的 provider 不该进链")
 
+    def test_custom_provider_order_is_respected(self):
+        from core.captcha_providers import build_captcha_chain
+
+        chain = build_captcha_chain(
+            {
+                "capmonster_key": "cm-key",
+                "yescaptcha_key": "yc-key",
+                "captcha_provider_order": "yescaptcha,capmonster",
+            },
+            session_factory=lambda: _FakeSession([]),
+        )
+        self.assertEqual(
+            [provider.name for provider in chain.providers],
+            ["yescaptcha", "capmonster"],
+        )
+
+    def test_no_arg_build_reads_order_from_the_store(self):
+        from unittest import mock
+
+        from core.captcha_providers import build_captcha_chain
+
+        values = {
+            "capmonster_key": "cm-key",
+            "yescaptcha_key": "yc-key",
+            "captcha_provider_order": "yescaptcha,capmonster",
+        }
+        with mock.patch("core.captcha_providers.captcha_config_from_store", lambda: values):
+            chain = build_captcha_chain(session_factory=lambda: _FakeSession([]))
+        self.assertEqual(
+            [provider.name for provider in chain.providers],
+            ["yescaptcha", "capmonster"],
+            "无参调用也要读到 captcha_provider_order",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
