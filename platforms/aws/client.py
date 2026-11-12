@@ -185,6 +185,8 @@ class AwsBuilderIdClient:
         self.visitor_id = str(uuid.uuid4())
         #: `platform-ubid` 是 signin 页里唯一由 JS 生成的 cookie（参考实现 v10）。
         self.platform_ubid = ubid()
+        #: `aws-ubid-main`：服务端下发的主 ubid，指纹里的 `lsUbid` 用它
+        self.aws_ubid_main = ""
         self.ubid = ""
         self.client_id = ""
         self.client_secret = ""
@@ -227,7 +229,7 @@ class AwsBuilderIdClient:
             "User-Agent": self.fingerprint.user_agent,
             "sec-ch-ua": self.fingerprint.sec_ch_ua,
             "sec-ch-ua-mobile": "?0",
-            "sec-ch-ua-platform": '"Windows"',
+            "sec-ch-ua-platform": self.fingerprint.sec_ch_ua_platform,
             "sec-fetch-dest": "empty",
             "sec-fetch-mode": "cors",
             "sec-fetch-site": "same-origin",
@@ -424,6 +426,8 @@ class AwsBuilderIdClient:
             referrer=referer,
             time_on_page=time_on_page,
             email=email,
+            # 参考实现：lsUbid 用 aws-ubid-main（服务端下发），没有才用随机 ubid
+            ubid_main=self.aws_ubid_main or self.platform_ubid,
         )
 
     def _workflow_execute(
@@ -474,6 +478,8 @@ class AwsBuilderIdClient:
             if not javax or javax.lower() in {"path", "domain", "expires", "max-age", "secure", "httponly", "samesite"}:
                 continue
             jar.set(javax, value.strip())
+            if javax == "aws-ubid-main":
+                self.aws_ubid_main = value.strip()
 
     def _set_platform_cookies(self) -> None:
         """种 `platform-ubid`（signin 页 JS 生成的那个 cookie）。"""
@@ -1128,63 +1134,122 @@ class AwsBuilderIdClient:
         }
 
     # ---------------------------------------------------------------- 13-14
-    def sso_workflow(self) -> dict[str, str]:
-        """在 view 目录上再走一遍工作流，拿 authCode / state / csrf。"""
+    def sso_workflow(self, email: str = "", password: str = "") -> dict[str, str]:
+        """在 view 目录上走 SSO 工作流，拿 authCode / state / csrf。
+
+        真机（2026-11-13）：
+        * 注册完成后的会话里 `aws-usi-authn` 已被置为 `deleted`，SSO 登录会停在
+          `get-password` —— 必须用刚设的密码重新登录一次（JWE 加密）；
+        * 已有账号的登录路径会先停在 `get-identity-user` —— 先提交邮箱。
+        只发 stepId 会被 400「Please try signing in again」挡回来。
+        """
         self.portal_login(for_sso=True)
         endpoint = f"{SIGNIN_BASE}/platform/{DIRECTORY_ID}/api/execute"
-        referer = (
-            f"{SIGNIN_BASE}/platform/{DIRECTORY_ID}/login"
-            f"?workflowStateHandle={self.workflow_handle}"
-        )
-        response = self._workflow_execute(
-            endpoint,
-            {
-                "stepId": "",
+
+        def _execute(step_id: str, inputs: list[dict[str, Any]], *, action_id: str = "") -> dict[str, Any]:
+            payload: dict[str, Any] = {
+                "stepId": step_id,
                 "workflowStateHandle": self.workflow_handle,
-                "inputs": [
-                    {
-                        "input_type": "FingerPrintRequestInput",
-                        "fingerPrint": self._fingerprint_input(
-                            page_type="signin", event_type="PageLoad"
-                        ),
-                    }
-                ],
-            },
-            referer=referer,
-        )
-        data = _json_of(response)
-        if data.get("stepId") == "start":
-            self.workflow_handle = str(data.get("workflowStateHandle") or self.workflow_handle)
-            response = self._workflow_execute(
-                endpoint,
-                {
-                    "stepId": "start",
-                    "workflowStateHandle": self.workflow_handle,
-                    "inputs": [
-                        {
-                            "input_type": "FingerPrintRequestInput",
-                            "fingerPrint": self._fingerprint_input(
-                                page_type="signin", event_type="PageLoad"
-                            ),
-                        }
-                    ],
-                },
-                referer=referer,
+                "inputs": inputs,
+                "visitorId": self.visitor_id,
+            }
+            if action_id:
+                payload["actionId"] = action_id
+            # referer 必须跟着**当前** handle 走：工作流每推进一步都会换 handle，
+            # 用第一步的 handle 当 referer 会被服务端判成「上一步的页面」（400）。
+            referer = (
+                f"{SIGNIN_BASE}/platform/{DIRECTORY_ID}/login"
+                f"?workflowStateHandle={self.workflow_handle}"
             )
+            response = self._workflow_execute(endpoint, payload, referer=referer)
             data = _json_of(response)
+            self.workflow_handle = str(data.get("workflowStateHandle") or self.workflow_handle)
+            return data
+
+        fingerprint = {
+            "input_type": "FingerPrintRequestInput",
+            "fingerPrint": self._fingerprint_input(page_type="signin", event_type="PageLoad"),
+        }
+
+        step_id = ""
+        data: dict[str, Any] = {}
+        for _ in range(8):
+            if step_id == "get-identity-user" and email:
+                # 已有账号的登录：只发 username + 指纹。带上
+                # ApplicationType/UserEvent 反而会被 400（真机 2026-11-13：
+                # 与注册时 submit_email 的四件套不同，登录路径只认两件）。
+                inputs = [
+                    {"input_type": "UserRequestInput", "username": email},
+                    fingerprint,
+                ]
+                data = _execute(step_id, inputs, action_id="SUBMIT")
+            elif step_id == "get-password" and password:
+                context = (
+                    (data.get("workflowResponseData") or {}).get("encryptionContextResponse") or {}
+                )
+                public_key = context.get("publicKey") if isinstance(context, dict) else None
+                if not isinstance(public_key, dict) or not public_key.get("n"):
+                    raise AwsRegistrationError("sso_workflow", "SSO 登录未拿到密码加密公钥")
+                encrypted = encrypt_password(
+                    password,
+                    public_key,
+                    issuer=str(context.get("issuer") or "signin"),
+                    audience=str(context.get("audience") or "AWSPasswordService"),
+                    region=str(context.get("region") or REGION),
+                )
+                inputs = [
+                    {
+                        "input_type": "PasswordRequestInput",
+                        "password": encrypted,
+                        "successfullyEncrypted": "SUCCESSFUL",
+                        "errorLog": None,
+                    },
+                    # 与注册时设密码同款：带上 PAGE_SUBMIT 事件，缺了会被 400
+                    {
+                        "input_type": "UserEventRequestInput",
+                        "directoryId": DIRECTORY_ID,
+                        "userName": email,
+                        "userEvents": [
+                            {
+                                "input_type": "UserEvent",
+                                "eventType": "PAGE_SUBMIT",
+                                "pageName": "CREDENTIAL_COLLECTION",
+                                "timeSpentOnPage": 12000,
+                            }
+                        ],
+                    },
+                    {"input_type": "UserRequestInput", "username": email},
+                    fingerprint,
+                ]
+                data = _execute(step_id, inputs, action_id="SUBMIT")
+            else:
+                data = _execute(step_id, [fingerprint])
+
+            current = str(data.get("stepId") or "")
+            if current == "end-of-workflow-success":
+                break
+            step_id = current
+            if not step_id:
+                break
 
         redirect = str((data.get("redirect") or {}).get("url") or "")
         auth_code = _query(redirect, "workflowResultHandle")
         state = _query(redirect, "state")
         wdc = _query(redirect, "wdc_csrf_token")
         if data.get("stepId") == "end-of-workflow-success" and auth_code:
-            params = {k: v for k, v in {"state": state, "workflowResultHandle": auth_code, "wdc_csrf_token": wdc}.items() if v}
+            params = {
+                k: v
+                for k, v in {"state": state, "workflowResultHandle": auth_code, "wdc_csrf_token": wdc}.items()
+                if v
+            }
             self._get(
                 f"{VIEW_BASE}/start/?{urlencode(params)}",
                 headers=self._headers(origin=VIEW_BASE, referer=f"{SIGNIN_BASE}/"),
             )
         if not auth_code:
-            raise AwsRegistrationError("sso_workflow", "未返回授权码")
+            raise AwsRegistrationError(
+                "sso_workflow", f"未返回授权码（最后一步: {data.get('stepId')!r}）"
+            )
         return {"auth_code": auth_code, "state": state, "wdc_csrf_token": wdc}
 
     def sso_token(self, auth_code: str, state: str) -> str:
@@ -1293,7 +1358,7 @@ class AwsBuilderIdClient:
                 password_result["workflow_result_handle"],
             )
 
-        sso = self.sso_workflow()
+        sso = self.sso_workflow(email=email, password=password)
         sso_token = self.sso_token(sso["auth_code"], sso["state"])
         tokens = self.device_token(sso_token)
 

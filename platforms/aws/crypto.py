@@ -31,6 +31,8 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
+from .fingerprint_data import GPU_EXT, REAL_HIST
+
 #: XXTEA 的魔数（与参考实现同值；不是随便选的常量）。
 _DELTA = 0x9E3779B9
 
@@ -218,46 +220,27 @@ _APP_JS_VERSION_RE = re.compile(r"FWCIM_VERSION\s*=\s*[\"'](\d+\.\d+\.\d+)[\"']"
 class FingerprintBuilder:
     """生成 AWS 的加密指纹信封（`ECdITeCs:<base64>`）。
 
-    一台设备（一个注册流程）用一个实例：布局参数与 canvas 直方图**整个会话
-    共享**，随机化发生在实例创建时。`update_app_js()` 可以从 `app.js` 里刷新
-    XXTEA 密钥与 TES 版本 —— 取不到就沿用回退值（不阻塞注册）。
+    形状照抄参考实现 `gen_fwcim`（HAR 实测）：macOS Chrome 131、Apple M4、
+    真实 canvas 直方图、`lsUbid = X<ubid>:<epoch>`。设备/浏览器身份是**固定**的，
+    随机化的只有时间戳、canvas hash、history 长度 —— 之前那版把 UA 随机成
+    Windows Chrome 131~144、GPU 写 Intel、扩展表留空，UA 与 GPU/平台互相矛盾，
+    是典型机器人特征（AWS 直接回 BLOCKED）。
     """
 
     def __init__(self) -> None:
-        self.chrome_version = str(random.randint(131, 144))  # noqa: S311 - 指纹随机化
+        self.chrome_version = "131"
         self.user_agent = (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-            f"(KHTML, like Gecko) Chrome/{self.chrome_version}.0.0.0 Safari/537.36"
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/131.0.0.0 Safari/537.36"
         )
-        self.sec_ch_ua = (
-            f'"Not/A)Brand";v="24", "Chromium";v="{self.chrome_version}", '
-            f'"Google Chrome";v="{self.chrome_version}"'
-        )
+        self.sec_ch_ua = '"Chromium";v="131", "Not_A Brand";v="24"'
+        self.sec_ch_ua_platform = '"macOS"'
         self.key = _FALLBACK_KEY
         self.identifier = IDENTIFIER
         self.version = FALLBACK_TES_VERSION
-        self.visitor_seed = visitor_id()
-        self._start_ms = int(time.time() * 1000) - random.randint(400, 900)
-        self._canvas_hash = random.randint(5_000, 105_000)
-        self._bins = self._build_bins()
-        self._profile_ubid = ""
-
-    @staticmethod
-    def _build_bins() -> list[int]:
-        """canvas 直方图：256 个桶，和为 36000（与参考实现同构）。"""
-        bins = [0] * 256
-        bins[0] = random.randint(9_000, 13_000)
-        bins[255] = random.randint(11_000, 15_000)
-        bins[102] = random.randint(500, 680)
-        bins[153] = random.randint(400, 650)
-        remaining = max(0, 36_000 - sum(bins))
-        for index in range(1, 255):
-            if bins[index] == 0:
-                value = min(remaining, random.randint(2, 18))
-                bins[index] = value
-                remaining -= value
-        bins[0] += remaining
-        return bins
+        self.canvas_hash = random.randint(1_000_000_000, 2_147_483_647)
+        self.platform_ubid = ubid()
 
     def update_app_js(self, text: str) -> None:
         """从 `signin.aws/assets/js/app.js` 刷新 XXTEA 密钥与 TES 版本。"""
@@ -270,82 +253,38 @@ class FingerprintBuilder:
         if version:
             self.version = version.group(1)
 
-    def _performance(self, now_ms: int) -> dict[str, int]:
-        load_end = now_ms - random.randint(500, 1_500)
-        base = load_end - random.randint(2_000, 4_000)
-        connect_end = base + random.randint(300, 600)
-        response = connect_end + random.randint(200, 600)
-        interactive = load_end - random.randint(5, 15)
+    @staticmethod
+    def _performance(nav_start: int) -> dict[str, int]:
+        """参考实现的 `_gen_perf`：导航/资源时序（相对 navigationStart）。"""
+        dns = nav_start + random.randint(30, 40)
+        connect_end = dns + random.randint(1, 3)
+        request = connect_end + random.randint(0, 2)
+        response_start = request + random.randint(250, 350)
+        dom_load = response_start + random.randint(2, 5)
+        dom_interactive = dom_load + random.randint(2_800, 3_500)
+        dom_complete = dom_interactive + random.randint(800, 1_200)
         return {
-            "connectStart": base + 5,
-            "secureConnectionStart": base + 8,
+            "connectStart": dns,
+            "secureConnectionStart": dns,
             "unloadEventEnd": 0,
-            "domainLookupStart": base + 3,
-            "domainLookupEnd": base + 4,
-            "responseStart": response,
+            "domainLookupStart": dns,
+            "domainLookupEnd": dns,
+            "responseStart": response_start,
             "connectEnd": connect_end,
-            "responseEnd": response + 2,
-            "requestStart": connect_end,
-            "domLoading": response + 3,
+            "responseEnd": response_start,
+            "requestStart": request,
+            "domLoading": dom_load,
             "redirectStart": 0,
-            "loadEventEnd": load_end,
-            "domComplete": load_end,
-            "navigationStart": base,
-            "loadEventStart": load_end,
-            "domContentLoadedEventEnd": load_end,
+            "loadEventEnd": dom_complete,
+            "domComplete": dom_complete,
+            "navigationStart": nav_start,
+            "loadEventStart": dom_complete,
+            "domContentLoadedEventEnd": dom_interactive,
             "unloadEventStart": 0,
             "redirectEnd": 0,
-            "domInteractive": interactive,
-            "fetchStart": base + 3,
-            "domContentLoadedEventStart": interactive + 1,
-        }
-
-    @staticmethod
-    def _interaction(event_type: str) -> dict[str, Any]:
-        if event_type in {"PageLoad", "first_load", "EmailVerification"}:
-            if event_type == "EmailVerification":
-                keys = random.randint(4, 20)
-                return {
-                    "clicks": 1,
-                    "touches": 0,
-                    "keyPresses": keys,
-                    "cuts": 0,
-                    "copies": 0,
-                    "pastes": 1,
-                    "keyPressTimeIntervals": [random.randint(30, 900) for _ in range(max(1, keys // 3))],
-                    "mouseClickPositions": ["120.5,20.5"],
-                    "keyCycles": [random.randint(10, 700) for _ in range(max(2, keys // 2))],
-                    "mouseCycles": [random.randint(20, 300)],
-                    "touchCycles": [],
-                }
-            return {
-                "clicks": 0,
-                "touches": 0,
-                "keyPresses": 0,
-                "cuts": 0,
-                "copies": 0,
-                "pastes": 0,
-                "keyPressTimeIntervals": [],
-                "mouseClickPositions": [],
-                "keyCycles": [],
-                "mouseCycles": [],
-                "touchCycles": [],
-            }
-        keys = random.randint(4, 20)
-        return {
-            "clicks": random.randint(1, 5),
-            "touches": 0,
-            "keyPresses": keys,
-            "cuts": 0,
-            "copies": 0,
-            "pastes": 0,
-            "keyPressTimeIntervals": [random.randint(30, 900) for _ in range(max(1, keys // 3))],
-            "mouseClickPositions": [
-                f"{random.randint(50, 1500)},{random.randint(50, 800)}" for _ in range(2)
-            ],
-            "keyCycles": [random.randint(10, 700) for _ in range(max(2, keys // 2))],
-            "mouseCycles": [random.randint(20, 300) for _ in range(2)],
-            "touchCycles": [],
+            "domInteractive": dom_interactive,
+            "fetchStart": dns,
+            "domContentLoadedEventStart": dom_interactive,
         }
 
     def fingerprint(
@@ -357,88 +296,72 @@ class FingerprintBuilder:
         referrer: str,
         time_on_page: int = 0,
         email: str = "",
+        ubid_main: str = "",
     ) -> str:
-        """生成一次事件的指纹信封。`email` 非空时带上表单校验字段。"""
+        """生成一次事件的指纹信封（形状与 `gen_fwcim` 逐字段一致）。"""
         now_ms = int(time.time() * 1000)
-        performance = self._performance(now_ms)
-        if page_type == "profile" and not self._profile_ubid:
-            self._profile_ubid = (
-                f"X{random.choice((10, 19, 42, 55, 73, 81, 96))}-"
-                f"{random.randrange(10**7):07d}-{random.randrange(10**7):07d}:"
-                f"{performance['loadEventEnd'] // 1000}"
-            )
-        start = now_ms - time_on_page if time_on_page else self._start_ms
-        dynamic = (
-            [f"/dist/main/app_{random.getrandbits(64):x}"[:26] + ".min.js"]
-            if page_type == "profile"
-            else ["/assets/js/app.js"]
-        )
-        payload: dict[str, Any] = {
+        nav_start = now_ms - random.randint(3_500, 5_000)
+        ubid = str(ubid_main or self.platform_ubid)
+        payload = {
             "metrics": {
-                name: (random.randint(0, 3) if name == "perf" else 0)
-                for name in (
-                    "el", "script", "h", "batt", "perf", "auto", "tz", "fp2", "lsubid",
-                    "browser", "capabilities", "gpu", "dnt", "math", "tts", "input",
-                    "canvas", "captchainput", "pow",
-                )
+                "el": 0, "script": 0, "h": 0, "batt": 0, "perf": 0, "auto": 0,
+                "tz": 0, "fp2": 0, "lsubid": 1, "browser": 0, "capabilities": 0,
+                "gpu": 0, "dnt": 0, "math": 0, "tts": 0, "input": 0, "canvas": 0,
+                "captchainput": 0, "pow": 0,
             },
-            "start": start,
-            "interaction": self._interaction(event_type),
+            "start": now_ms - random.randint(20, 60),
+            "interaction": {
+                "clicks": 0, "touches": 0, "keyPresses": 0, "cuts": 0,
+                "copies": 0, "pastes": 0, "keyPressTimeIntervals": [],
+                "mouseClickPositions": [], "keyCycles": [], "mouseCycles": [],
+                "touchCycles": [],
+            },
             "scripts": {
-                "dynamicUrls": dynamic,
-                "inlineHashes": [],
-                "elapsed": 0,
-                "dynamicUrlCount": len(dynamic),
-                "inlineHashesCount": 0,
+                "dynamicUrls": ["/assets/js/app.js"], "inlineHashes": [],
+                "elapsed": 0, "dynamicUrlCount": 1, "inlineHashesCount": 0,
             },
-            "history": {"length": 3 if page_type == "profile" else 1},
+            "history": {"length": random.randint(2, 8)},
             "battery": {},
-            "performance": {"timing": performance},
+            "performance": {"timing": self._performance(nav_start)},
             "automation": {
                 "wd": {"properties": {"document": [], "window": [], "navigator": []}},
                 "phantom": {"properties": {"window": []}},
             },
-            "end": now_ms + random.randint(0, 50),
+            "end": now_ms,
             "timeZone": 8,
             "flashVersion": None,
-            "plugins": "PDF Viewer Chrome PDF Viewer ||1920-1080-1032-24-*-*-*",
-            "dupedPlugins": "PDF Viewer Chrome PDF Viewer ||1920-1080-1032-24-*-*-*",
-            "screenInfo": "1920-1080-1032-24-*-*-*",
-            "lsUbid": self._profile_ubid if page_type == "profile" else self.visitor_seed,
-            "referrer": referrer,
+            "plugins": (
+                "PDF Viewer Chrome PDF Viewer Chromium PDF Viewer "
+                "Microsoft Edge PDF Viewer WebKit built-in PDF "
+                "||1440-900-900-30-*-*-*"
+            ),
+            "dupedPlugins": (
+                "PDF Viewer Chrome PDF Viewer Chromium PDF Viewer "
+                "Microsoft Edge PDF Viewer WebKit built-in PDF "
+                "||1440-900-900-30-*-*-*"
+            ),
+            "screenInfo": "1440-900-900-30-*-*-*",
+            "lsUbid": f"X{ubid}:{now_ms // 1000}",
+            "referrer": "https://view.awsapps.com/",
             "userAgent": self.user_agent,
-            "deviceMemory": 8,
-            "hardwareConcurrency": 8,
-            "platform": "Win32",
             "location": location,
             "webDriver": False,
             "capabilities": {
                 "css": {
-                    "textShadow": 1,
-                    "WebkitTextStroke": 1,
-                    "boxShadow": 1,
-                    "borderRadius": 1,
-                    "borderImage": 1,
-                    "opacity": 1,
-                    "transform": 1,
-                    "transition": 1,
+                    "textShadow": 1, "WebkitTextStroke": 1, "boxShadow": 1,
+                    "borderRadius": 1, "borderImage": 1, "opacity": 1,
+                    "transform": 1, "transition": 1,
                 },
                 "js": {
-                    "audio": True,
-                    "geolocation": True,
-                    "localStorage": "supported",
-                    "touch": False,
-                    "video": True,
-                    "webWorker": True,
+                    "audio": True, "geolocation": True, "localStorage": "supported",
+                    "touch": False, "video": True, "webWorker": True,
                 },
                 "elapsed": 0,
             },
             "gpu": {
-                "vendor": "Google Inc. (Intel)",
-                "model": (
-                    "ANGLE (Intel, Intel(R) UHD Graphics 630 Direct3D11 vs_5_0 ps_5_0, D3D11)"
-                ),
-                "extensions": [],
+                "vendor": "Google Inc. (Apple)",
+                "model": "ANGLE (Apple, ANGLE Metal Renderer: Apple M4, Unspecified Version)",
+                "extensions": list(GPU_EXT),
             },
             "dnt": None,
             "math": {
@@ -446,50 +369,23 @@ class FingerprintBuilder:
                 "sin": "0.8178819121159085",
                 "cos": "-0.5753861119575491",
             },
+            "form": {},
             "canvas": {
-                "hash": self._canvas_hash,
+                "hash": self.canvas_hash,
                 "emailHash": None,
-                "histogramBins": list(self._bins),
+                "histogramBins": list(REAL_HIST),
             },
-            "token": {
-                "isCompatible": page_type in {"profile", "signup"},
-                "pageHasCaptcha": 0,
-            },
+            "token": {"isCompatible": False, "pageHasCaptcha": 0},
             "auth": {"form": {"method": "get"}},
             "errors": [],
             "version": self.version,
         }
-        if page_type == "profile":
-            payload["timeToSubmit"] = max(1, time_on_page or random.randint(1_000, 4_000))
-        if email:
-            checksum = f"{binascii.crc32(email.encode('utf-8')) & 0xFFFFFFFF:08X}"
-            payload["form"] = {
-                f"formField29-{now_ms}-{random.randint(1_000, 9_999)}": {
-                    "clicks": 1,
-                    "touches": 0,
-                    "keyPresses": max(3, len(email) // 2),
-                    "cuts": 0,
-                    "copies": 0,
-                    "pastes": 0,
-                    "keyPressTimeIntervals": [80, 120],
-                    "mouseClickPositions": ["120.5,20.5"],
-                    "keyCycles": [100, 120],
-                    "mouseCycles": [90],
-                    "touchCycles": [],
-                    "width": 180,
-                    "height": 32,
-                    "totalFocusTime": 0,
-                    "checksum": checksum,
-                    "autocomplete": False,
-                    "prefilled": False,
-                }
-            }
-        else:
-            payload["form"] = {}
-        plain = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-        crc = binascii.crc32(plain.encode("utf-8")) & 0xFFFFFFFF
-        sealed = xxtea_encrypt(f"{crc:08X}#{plain}", self.key)
-        return f"{self.identifier}:{base64.b64encode(sealed).decode('ascii')}"
+        plain = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
+        crc = f"{binascii.crc32(plain.encode('utf-8')) & 0xFFFFFFFF:08X}"
+        sealed = xxtea_encrypt(f"{crc}#{plain}", self.key)
+        # 参考实现去掉了 base64 的 `=` 填充
+        encoded = base64.b64encode(sealed).decode("ascii").rstrip("=")
+        return f"{self.identifier}:{encoded}"
 
 
 __all__ = [

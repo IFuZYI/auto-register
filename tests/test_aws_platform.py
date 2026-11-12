@@ -207,7 +207,8 @@ class FingerprintTests(unittest.TestCase):
         )
         identifier, _, encoded = envelope.partition(":")
         self.assertEqual(identifier, builder.identifier)
-        plain = xxtea_decrypt(base64.b64decode(encoded), builder.key)
+        # 参考实现去掉了 base64 的 `=` 填充，测试里补回来
+        plain = xxtea_decrypt(base64.b64decode(encoded + "=" * (-len(encoded) % 4)), builder.key)
         checksum, _, payload = plain.partition("#")
         self.assertEqual(len(checksum), 8, "前缀是 8 位大写 CRC32")
         self.assertEqual(checksum, checksum.upper())
@@ -226,8 +227,14 @@ class FingerprintTests(unittest.TestCase):
                 "canvas", "captchainput", "pow",
             },
         )
-        # 带邮箱时要生成 form 字段（AWS 用它做人类输入校验）
-        self.assertTrue(data["form"], "提交邮箱时 form 不能为空")
+        # 指纹形状照抄参考实现：form 恒为空、UA 是 macOS Chrome 131、
+        # GPU 是 Apple M4、canvas 直方图是真实值（自造直方图会被风控识别）。
+        self.assertEqual(data["form"], {})
+        self.assertIn("Macintosh", data["userAgent"])
+        self.assertIn("Apple", data["gpu"]["vendor"])
+        self.assertEqual(len(data["gpu"]["extensions"]), 39)
+        self.assertEqual(sum(data["canvas"]["histogramBins"]), 36_000)
+        self.assertTrue(data["lsUbid"].startswith("X"))
 
     def test_page_load_has_no_form(self):
         from platforms.aws.crypto import FingerprintBuilder, xxtea_decrypt
@@ -240,7 +247,8 @@ class FingerprintTests(unittest.TestCase):
             referrer="https://view.awsapps.com/",
         )
         _, _, encoded = envelope.partition(":")
-        _, _, payload = xxtea_decrypt(base64.b64decode(encoded), builder.key).partition("#")
+        padded = encoded + "=" * (-len(encoded) % 4)
+        _, _, payload = xxtea_decrypt(base64.b64decode(padded), builder.key).partition("#")
         self.assertEqual(json.loads(payload)["form"], {})
 
 
@@ -489,6 +497,96 @@ class AwsProtocolTests(unittest.TestCase):
         client = AwsBuilderIdClient(session=session, log=lambda _m: None)
         with self.assertRaises(TimeoutError):
             client.register(email="a@x.ai", password="Pw-1!", otp_provider=_boom)
+
+
+class SsoPasswordStepTests(unittest.TestCase):
+    """SSO 工作流在 `get-password` 时要密码（真机 2026-11-13）。
+
+    注册完成后的会话没有 `aws-usi-authn`，view 目录的 SSO 登录会要求重新输入
+    密码；只发 `stepId` 会被 400「Please try signing in again」挡回来。
+    """
+
+    def test_sso_workflow_submits_the_password_and_returns_the_code(self):
+        from platforms.aws.client import AwsBuilderIdClient
+
+        fixture = _RsaFixture()
+        seen_password: list[str] = []
+        seen_email: list[str] = []
+
+        def router(method, url, kwargs):
+            payload = kwargs.get("json") or {}
+            if "portal.sso.us-east-1.amazonaws.com/login" in url:
+                return Response(
+                    body={
+                        "redirectUrl": "https://us-east-1.signin.aws/platform/d-9067642ac7/login?workflowStateHandle=sso-1",
+                        "csrfToken": "csrf-1",
+                    }
+                )
+            if "vs.aws.amazon.com/token" in url:
+                return Response(body={"token": "d2c-1"})
+            if url.startswith("https://view.awsapps.com/start/"):
+                return Response(text="<html>start</html>")
+            if url.endswith("/api/execute"):
+                kinds = {
+                    str(node.get("input_type"))
+                    for node in (payload.get("inputs") or [])
+                    if isinstance(node, dict)
+                }
+                if "PasswordRequestInput" in kinds:
+                    node = next(
+                        item for item in payload["inputs"]
+                        if item.get("input_type") == "PasswordRequestInput"
+                    )
+                    seen_password.append(node["password"])
+                    return Response(
+                        body={
+                            "stepId": "end-of-workflow-success",
+                            "redirect": {
+                                "url": "https://view.awsapps.com/start/?workflowResultHandle=auth-1&state=st-1"
+                            },
+                        }
+                    )
+                if payload.get("stepId") == "start":
+                    return Response(
+                        body={
+                            "stepId": "get-identity-user",
+                            "workflowStateHandle": "sso-2",
+                        }
+                    )
+                if payload.get("stepId") == "get-identity-user":
+                    seen_email.append(
+                        next(
+                            item.get("username")
+                            for item in payload["inputs"]
+                            if item.get("input_type") == "UserRequestInput"
+                        )
+                    )
+                    return Response(
+                        body={
+                            "stepId": "get-password",
+                            "workflowStateHandle": "sso-2",
+                            "workflowResponseData": {
+                                "encryptionContextResponse": {
+                                    "publicKey": fixture.jwk,
+                                    "issuer": "signin",
+                                    "audience": "AWSPasswordService",
+                                    "region": "us-east-1",
+                                }
+                            },
+                        }
+                    )
+                return Response(body={"stepId": "start", "workflowStateHandle": "sso-1"})
+            raise AssertionError(f"未预设响应: {method} {url}")
+
+        client = AwsBuilderIdClient(session=ScriptedSession(router), log=lambda _m: None)
+        client.portal_login  # noqa: B018 - 仅说明存在
+        result = client.sso_workflow(email="a@x.ai", password="Pw-1!")
+        self.assertEqual(result["auth_code"], "auth-1")
+        self.assertEqual(result["state"], "st-1")
+        self.assertEqual(seen_email, ["a@x.ai"])
+        self.assertEqual(len(seen_password), 1)
+        claims = fixture.decrypt_jwe(seen_password[0])
+        self.assertEqual(claims["password"], "Pw-1!")
 
 
 class SignupPageSequenceTests(unittest.TestCase):

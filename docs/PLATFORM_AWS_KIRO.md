@@ -151,33 +151,51 @@ AI 兜底用的是 OpenAI 兼容的视觉接口（`/v1/chat/completions`，图�
 
 ## 6. 真机验证记录（2026-11-13）
 
-在有出口的机器上跑了真实注册（iCloud 远程别名 + CapMonster/YesCaptcha/AI 已配）：
+### 6.1 结果
 
-| 阶段 | 结果 |
-| --- | --- |
-| OIDC 客户端注册 / 设备授权 / portal / D2C / workflow 握手 | ✅ 200 |
-| 提交邮箱（400 = 可注册）/ signup / signup init / profile start | ✅ |
-| 发验证码 + 收码（iCloud 远程） | ✅ 邮件约 3 分钟到达 |
-| create-identity（提交 OTP） | ✅ 200，返回 registrationCode/signInState |
-| **设置密码（signup/api/execute）** | ❌ **HTTP 400 `errorCode: BLOCKED`** |
+在有出口的机器上真实注册了 **3 个 Kiro 账号**（iCloud 远程别名 + SOCKS5 代理）：
 
-`BLOCKED` 是 AWS 风控的结论（响应里的 `presentationContext` 只有 clientId /
-identityPoolId / airportCode，没有验证码上下文），不是请求体格式问题 ——
-实测排除了 5 种请求体组合、signup 页预加载、CSRF 同步、cookie 归一、直连与
-SOCKS5 代理出口。参考项目对 `BLOCKED` 的处理也是「换 IP 或稍后重试」。
+| 邮箱 | Kiro | AWS 来源 | 刷新验证 |
+| --- | --- | --- | --- |
+| `trap_onboard16@icloud.com` | ✅ AT/RT + profileArn | ✅ | ✅ `refresh_token` 换到新 AT |
+| `tribe.chime-5y@icloud.com` | ✅ | ✅ | — |
+| `untied.fried4u@icloud.com` | ✅ | ✅ | — |
 
-**这一轮真机顺带修掉的缺陷**（都有回归测试）：
+产物：`source=aws`、`plan=Kiro FREE`、`profile_arn=arn:aws:codewhisperer:us-east-1:…`。
 
-1. OTP 关键词写成 `amazon`，匹配不到 AWS 的邮件（发件人 `signin_aws`、
-   正文「AWS Builder ID」）→ 改 `aws`；
-2. OTP 默认 180s 卡在 AWS 约 3 分钟的投递边界 → AWS 平台默认 300s；
-3. SOCKS5 代理用 `socks5://` 时 curl_cffi 在 `vs.aws.amazon.com` 上连不上
-   （本地 DNS）→ 统一升级 `socks5h://`（`core.proxy_utils.normalize_curl_proxy`）；
-4. D2C token 失败会中断整条注册 → 改为只记日志（它只影响 visitorId）。
+### 6.2 之前为什么 `BLOCKED`
 
-**下一步（按性价比排序）**：换住宅 IP 重试 → 补全 FWCIM 指纹（GPU 扩展、
-canvas 细节，参考 `reference/register/any-auto-register/platforms/kiro/core.py`
-的 `gen_fwcim`）→ 必要时对 signup 页走 camoufox 浏览器路径。
+第一版在「设置密码」被 AWS 回 `400 errorCode: BLOCKED`。根因是**指纹自相矛盾**：
+
+- UA 随机成 Windows Chrome 131–144，但 TLS 指纹是 `chrome131`、GPU 写 Intel、
+  WebGL 扩展为空、canvas 直方图是自造的 —— 典型机器人特征。
+
+修复（照 `any-auto-register/platforms/kiro/core.py` 的 `gen_fwcim` 逐字段移植）：
+
+- UA/`sec-ch-ua`/`sec-ch-ua-platform` 固定为 **macOS Chrome 131**（与
+  `curl_cffi impersonate="chrome131"` 一致）；
+- GPU = Apple M4 + 39 项 WebGL 扩展；canvas 直方图用**真实** 256 桶
+  （和 36000）；`lsUbid = X<aws-ubid-main>:<epoch>`；`history` 2–8；
+- 指纹信封去掉 base64 的 `=` 填充（与参考实现一致）。
+
+### 6.3 之后还卡在 SSO
+
+账号创建成功后，SSO 工作流在 `get-password` 停下（会话里的 `aws-usi-authn`
+已 `deleted`）。真机逐步验证出的登录路径：
+
+```
+portal login → step "" → start → get-identity-user（只发 username + 指纹）
+            → get-password（JWE 密码 + PAGE_SUBMIT 事件 + 指纹）→ end-of-workflow-success
+```
+
+两个坑：登录路径的 `get-identity-user` **只认两件输入**（带
+`ApplicationType`/`UserEvent` 会 400）；`get-password` 必须带
+`UserEventRequestInput`（与注册设密码同款）。
+
+### 6.4 出口
+
+同一出口连续注册多次后会被限流（同一个 400）。实测 **SOCKS5 代理 + `socks5h://`**
+（远端 DNS）稳定；直连只在前几次成功。
 
 ## 7. 已知边界
 
