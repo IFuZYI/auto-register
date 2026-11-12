@@ -51,6 +51,15 @@ SENSITIVE_EXTRA_KEYS: frozenset[str] = frozenset(
         # 任何 `WHERE extra_json LIKE '%cookies%'`，这条理由不成立
         # （data-layer 审计 D-18）。
         "cookies",
+        # AWS Builder ID / Kiro（2026-11-13）：`client_secret` 与 RT 同级 ——
+        # 有 client_id + client_secret + refresh_token 就能无限续期 AT。
+        # `kiro_aws_*` 是 Kiro 账号上保存的**来源账号**凭据快照（同样是可冒用
+        # 身份的 bearer 凭证），一并加密。
+        "client_secret",
+        "kiro_aws_access_token",
+        "kiro_aws_refresh_token",
+        "kiro_aws_client_secret",
+        "kiro_aws_sso",
     }
 )
 

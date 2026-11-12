@@ -172,6 +172,17 @@ def _render_csv(accounts: Sequence[Any]) -> str:
     return buffer.getvalue().rstrip("\n")
 
 
+def _render_kiro_json(accounts: Sequence[Any]) -> str:
+    """Kiro 账号 → `kiro.json`（账号管理器 v2 格式）。
+
+    只导出 kiro 平台的行；其它平台会被过滤掉（格式本身是 Kiro 专属的）。
+    延迟 import：`services` 不该在模块加载期把 `platforms` 整条链拉起来。
+    """
+    from platforms.kiro.credentials import dumps, export_document
+
+    return dumps(export_document(accounts))
+
+
 def _render_json(accounts: Sequence[Any]) -> str:
     # 凭证字段从注册表展开（`export_names()`）—— 手写清单会与注册表漂移
     # （整理前正是手写清单，sso 缺失导致 grok 账号往返丢字段）。
@@ -296,6 +307,13 @@ _FORMAT_LIST: tuple[ExportFormat, ...] = (
         description="给脚本二次处理用",
         extension="json",
         renderer=_render_json,
+    ),
+    ExportFormat(
+        id="kiro_json",
+        label="Kiro 凭据 JSON（kiro.json v2）",
+        description="Kiro 账号管理器的导入格式：只含 kiro 平台账号",
+        extension="json",
+        renderer=_render_kiro_json,
     ),
 )
 

@@ -67,7 +67,13 @@ const SMS_BOOLEAN_KEYS = ['sms_enabled', 'sms_auto_country', 'sms_reuse_phone'] 
  * **提交前**就把空值摘掉 —— 少一次「靠服务端兜底」的往返，也让 payload
  * 在开发者工具里干净。新增口令字段时两边都要补。
  */
-const SECRET_FIELD_KEYS = ['yescaptcha_key', 'twocaptcha_key', 'sms_api_key'] as const
+const SECRET_FIELD_KEYS = [
+  'yescaptcha_key',
+  'twocaptcha_key',
+  'capmonster_key',
+  'ai_captcha_key',
+  'sms_api_key',
+] as const
 
 const TAB_ITEMS = [
   {
@@ -105,6 +111,31 @@ const TAB_ITEMS = [
             label: 'YesCaptcha Key',
             secret: true,
             hint: '在 YesCaptcha 后台的「API 密钥」页复制。',
+          },
+          {
+            key: 'capmonster_key',
+            label: 'CapMonster Key',
+            secret: true,
+            hint:
+              'AWS Builder ID / Kiro 注册用：CapMonster 的 AmazonTask 能直接换 aws-waf-token' +
+              '（YesCaptcha 的 AWS 任务只识别图片，不返 token）。',
+          },
+        ],
+      },
+      {
+        title: 'AWS WAF / 图片验证（AI 兜底）',
+        desc:
+          'OpenAI 兼容的视觉接口：识别图片验证码 / 3×3 格子。它不能签发 aws-waf-token，' +
+          '只在 CapMonster 不可用时兜底图片类验证。',
+        fields: [
+          { key: 'ai_captcha_url', label: '接口地址', placeholder: 'https://api.example.com' },
+          { key: 'ai_captcha_key', label: 'API Key', secret: true, placeholder: 'sk-…' },
+          { key: 'ai_captcha_model', label: '模型', placeholder: 'gpt-4o-mini' },
+          {
+            key: 'captcha_provider_order',
+            label: '降级顺序',
+            placeholder: 'capmonster,yescaptcha,ai',
+            hint: '留空用默认顺序；只写已配置 key 的服务会真正参与。',
           },
         ],
       },

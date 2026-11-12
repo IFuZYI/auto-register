@@ -491,7 +491,11 @@ export default function Accounts() {
     } catch {
       // ignore，退回列
     }
-    if (currentPlatform === 'grok') return ''
+    // grok 的列镜像 SSO、aws/kiro 的列镜像是 RT —— 都不是 AT，不能拿来兜底
+    // （否则详情里「Access Token」会显示成 RT 或一个解析不出的占位串）。
+    if (currentPlatform === 'grok' || currentPlatform === 'aws' || currentPlatform === 'kiro') {
+      return ''
+    }
     // 列表已不下发 token 正文（只给 has_token），正文在详情端点里
     return record?.has_token ? HAS_TOKEN_PLACEHOLDER : ''
   }
@@ -2030,6 +2034,51 @@ export default function Accounts() {
                       }
                     />
                 </DetailRow>
+
+                {currentPlatform === 'kiro' ? (
+                  <DetailGroup
+                    title="Kiro / 来源"
+                    hint="Kiro 账号就是 AWS Builder ID：来源记 aws，密码列存的是 AWS 的密码。"
+                  >
+                    <DetailRow label="来源">
+                      <Tag color="orange" style={{ marginInlineEnd: 8 }}>
+                        {String(rowExtra(currentAccount).source || 'aws')}
+                      </Tag>
+                      <Text type="secondary" style={{ fontSize: 12 }}>
+                        {String(rowExtra(currentAccount).source_email || currentAccount.email || '')}
+                      </Text>
+                    </DetailRow>
+                    <DetailRow label="Profile ARN">
+                      <Text style={{ fontFamily: 'monospace', fontSize: 12 }}>
+                        {String(rowExtra(currentAccount).profile_arn || '') || '—'}
+                      </Text>
+                    </DetailRow>
+                    <DetailRow label="Client ID">
+                      <Text style={{ fontFamily: 'monospace', fontSize: 12 }}>
+                        {String(rowExtra(currentAccount).client_id || '') || '—'}
+                      </Text>
+                    </DetailRow>
+                    <DetailRow label="套餐">
+                      <Text>{String(rowExtra(currentAccount).plan || '') || '—'}</Text>
+                    </DetailRow>
+                  </DetailGroup>
+                ) : null}
+
+                {currentPlatform === 'aws' ? (
+                  <DetailGroup
+                    title="AWS Builder ID"
+                    hint="刷新 AT 需要 client_id + client_secret + refresh_token 三件套。"
+                  >
+                    <DetailRow label="Client ID">
+                      <Text style={{ fontFamily: 'monospace', fontSize: 12 }}>
+                        {String(rowExtra(currentAccount).client_id || '') || '—'}
+                      </Text>
+                    </DetailRow>
+                    <DetailRow label="Region">
+                      <Text>{String(currentAccount.region || rowExtra(currentAccount).region || '') || '—'}</Text>
+                    </DetailRow>
+                  </DetailGroup>
+                ) : null}
 
                 {currentAccount.totpSecret ? (
                   <DetailRow

@@ -61,7 +61,13 @@ class SchemaShapeTests(unittest.TestCase):
         #   cpa_auto_sync_enabled         面板与本地同步
         #   sub2api_auto_sync_enabled     面板与本地同步
         #   grok2api_auto_sync_enabled    面板与本地同步
-        self.assertEqual(len(CONFIG_KEYS), 101, "键数变了要同步改文档")
+        # 101 → 105（2026-11-13）：新增 aws / kiro 两个注册平台 ——
+        #   aws_executor / kiro_executor      执行器（两平台都只有 protocol）
+        #   aws_full_name / kiro_plan         插件 `registration_modes` 声明的旋钮
+        # 105 → 110（同日）：AWS WAF 打码 ——
+        #   capmonster_key / ai_captcha_url / ai_captcha_key /
+        #   ai_captcha_model / captcha_provider_order
+        self.assertEqual(len(CONFIG_KEYS), 110, "键数变了要同步改文档")
 
     def test_every_key_has_a_group(self):
         for item in CONFIG_SCHEMA:
@@ -70,7 +76,8 @@ class SchemaShapeTests(unittest.TestCase):
     def test_secret_set_is_derived(self):
         expected = {item.key for item in CONFIG_SCHEMA if item.secret}
         self.assertEqual(set(SECRET_CONFIG_KEYS), expected)
-        self.assertEqual(len(SECRET_CONFIG_KEYS), 10)
+        # 10 → 12：CapMonster key 与 AI 视觉 key 都是口令（GET 只回 `<key>_set`）
+        self.assertEqual(len(SECRET_CONFIG_KEYS), 12)
 
     def test_keys_in_group_covers_everything(self):
         groups = {item.group for item in CONFIG_SCHEMA}
@@ -112,7 +119,7 @@ class ReadsAreRegisteredTests(unittest.TestCase):
 class SchemaPayloadTests(unittest.TestCase):
     def test_payload_has_no_values(self):
         payload = schema_payload()
-        self.assertEqual(len(payload["keys"]), 101)
+        self.assertEqual(len(payload["keys"]), 110)
         self.assertEqual(sorted(payload["secrets"]), sorted(SECRET_CONFIG_KEYS))
         # 只允许这三个键：多一个就说明有人把值塞进来了
         self.assertEqual(set(payload), {"keys", "secrets", "groups"})

@@ -5,7 +5,7 @@
 
 | 维度 | 支持 |
 | --- | --- |
-| **平台** | ChatGPT（纯协议，无需浏览器）· Grok（camoufox 浏览器路径） |
+| **平台** | ChatGPT（纯协议，无需浏览器）· Grok（camoufox 浏览器路径）· AWS Builder ID（纯协议）· Kiro（AWS Builder ID + Kiro OAuth） |
 | **邮箱来源** | iCloud 隐私邮箱（本地 / 远程仓库）· Outlook / Hotmail（本地号池） |
 | **面板对接** | CPA（CLIProxyAPI）· Sub2API · grok2api · chatgpt2api |
 | **验证码** | 本地 Turnstile Solver（Camoufox）· YesCaptcha · 手动 |
@@ -115,7 +115,8 @@ iCloud 取号的互斥是**进程内** `threading.RLock`；两个进程各持各
 main.py                 FastAPI 入口（面板 + 静态资源 + 调度器 + Solver 拉起）
 api/                    路由层：config / accounts / tasks / actions / backup / auth / integrations
 core/                   注册表、凭据加密、配置 schema、调度器、DB 层、代理与执行器
-platforms/              平台插件：chatgpt（纯协议）· grok（camoufox）· icloud 邮箱客户端
+platforms/              平台插件：chatgpt（纯协议）· grok（camoufox）· aws（Builder ID 协议）
+                        · kiro（Builder ID + Kiro IDE 授权）· icloud 邮箱客户端
 services/               业务层：注册编排、邮箱号池、面板同步、自动维护、导入导出
 modules/                可复用模块：邮箱渠道工厂、配置上下文
 frontend/               React + TypeScript + Vite 管理台（构建产物进 static/）
@@ -165,6 +166,7 @@ cd frontend && npx tsc -b && npx eslint .  # 类型 + 风格
 | [MAINTENANCE](docs/MAINTENANCE.md) | 故障速查、定时任务、**部署约束 §1.6** |
 | [API_REFERENCE](docs/API_REFERENCE.md) | 每个接口的请求 / 响应形状 |
 | [EXTENDING](docs/EXTENDING.md) | 新增平台 / 注册流程 / 邮箱渠道 |
+| [PLATFORM_AWS_KIRO](docs/PLATFORM_AWS_KIRO.md) | AWS Builder ID / Kiro：协议分层、凭据口径、`kiro.json` 导入导出 |
 | [DATABASE_MODULARITY](docs/DATABASE_MODULARITY.md) | 分库、邮箱唯一键、跨库查询 |
 | [DATA_DIRECTORY](docs/DATA_DIRECTORY.md) | 数据目录布局与路径规则 |
 | [GLOSSARY](docs/GLOSSARY.md) · [ADR](docs/adr/) | 术语表 · 架构决策记录 |

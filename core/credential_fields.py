@@ -67,6 +67,10 @@ CREDENTIAL_FIELDS: tuple[CredentialField, ...] = (
 _TOKEN_COLUMN_FIELDS: dict[str, str] = {
     "chatgpt": "access_token",
     "grok": "sso",
+    # AWS Builder ID / Kiro：镜像**长期凭据**（RT）。
+    # 镜像 1 小时过期的 AT 没有意义（明天就是死值），而 RT 刷新一次就能换回 AT。
+    "aws": "refresh_token",
+    "kiro": "refresh_token",
 }
 
 
@@ -100,7 +104,24 @@ def sync_aliases() -> tuple[tuple[str, ...], ...]:
 #: 而导出/导入只经 `export_names()`（`services/account_export` 与 `api/accounts.py`
 #: 两处），所以单独列在这里：**往返不丢，推送范围不变**。
 #: （2026-11-04 独立审查，切片 E：此前 `导出 → 导入` 会静默丢掉 cookies。）
-EXPORT_ONLY_EXTRA_KEYS: tuple[str, ...] = ("cookies",)
+#: AWS Builder ID / Kiro 的凭据字段（2026-11-13）。
+#:
+#: 它们不在 `CREDENTIAL_FIELDS` 里 —— 那张表驱动**面板**的比对与推送，
+#: 而这两个平台没有面板。但它们必须能随「JSON 全字段」导出/导入往返：
+#: 没有 `client_id` / `client_secret` 就刷新不了 token，没有 `profile_arn`
+#: 下游 kiro.rs 用不了，`source` 是用户要求保存的来源（Kiro 记录来源 = aws）。
+EXPORT_ONLY_EXTRA_KEYS: tuple[str, ...] = (
+    "cookies",
+    "client_id",
+    "client_secret",
+    "profile_arn",
+    "auth_method",
+    "login_provider",
+    "plan",
+    "account_id",
+    "source",
+    "source_email",
+)
 
 
 def export_names() -> list[str]:

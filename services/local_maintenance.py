@@ -38,6 +38,9 @@ logger = logging.getLogger(__name__)
 PLATFORM_ACTIONS: dict[str, dict[str, str]] = {
     "chatgpt": {"probe": "probe_local_status", "refresh": "refresh_token"},
     "grok": {"probe": "probe_refresh", "refresh": "refresh_token"},
+    # AWS / Kiro 的动作 id 与 grok 同名，但实现各自独立（OIDC refresh）。
+    "aws": {"probe": "probe", "refresh": "refresh_token"},
+    "kiro": {"probe": "probe", "refresh": "refresh_token"},
 }
 
 #: 平台 → 从面板**拉回**状态的动作 id（刷新策略 `remote_first` 用）。

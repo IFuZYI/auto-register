@@ -8,13 +8,13 @@ from typing import Any, Type
 
 from .base_platform import BasePlatform
 
-# 项目当前维护 ChatGPT 与 Grok 两类注册。
+# 项目当前维护 ChatGPT / Grok / AWS Builder ID / Kiro 四类注册。
 #
 # iCloud 曾在这里：那个平台插件做的是「让远程 icloud-hme 服务开一个隐私邮箱」，
 # 随远程链路整体删除。**注意**：iCloud 作为「本地隐私邮箱来源」仍然存在 ——
 # 它是 `mail_provider=icloud_local` 这个邮箱渠道（modules/mail/icloud_local.py），
 # 管理界面在「邮箱服务 > iCloud 隐私邮箱（本地）」，不在平台列表里。
-SUPPORTED_PLATFORMS = ("chatgpt", "grok")
+SUPPORTED_PLATFORMS = ("chatgpt", "grok", "aws", "kiro")
 
 _registry: dict[str, Type[BasePlatform]] = {}
 

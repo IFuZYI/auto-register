@@ -1,6 +1,6 @@
 import { apiFetch } from '@/lib/utils'
 
-export type PlatformName = 'chatgpt' | 'grok'
+export type PlatformName = 'chatgpt' | 'grok' | 'aws' | 'kiro'
 
 /**
  * 执行器标识。
@@ -61,6 +61,24 @@ export const PLATFORMS: Record<PlatformName, PlatformMeta> = {
     tagColor: '#0f6cae',
     usesMailbox: true,
     usesCaptcha: true,
+  },
+  aws: {
+    name: 'aws',
+    label: 'AWS',
+    color: '#ff9900',
+    // #ff9900 当背景 + 白字只有 2.14:1，压暗到同色系才过 AA（4.6:1）
+    tagColor: '#8a4f00',
+    usesMailbox: true,
+    usesCaptcha: false,
+  },
+  kiro: {
+    name: 'kiro',
+    label: 'Kiro',
+    color: '#6366f1',
+    // 品牌靛蓝压暗一档（白字 5.1:1）
+    tagColor: '#4338ca',
+    usesMailbox: true,
+    usesCaptcha: false,
   },
 }
 

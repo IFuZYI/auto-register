@@ -454,8 +454,13 @@ class MailImportServiceTests(unittest.TestCase):
                         password="pwd",
                     )
                 )
-                # ② 对所有平台都注册过 —— 才真的该拒绝
-                for platform in ("chatgpt", "grok"):
+                # ② 对所有平台都注册过 —— 才真的该拒绝。
+                # 平台清单取**生产口径**（`SUPPORTED_PLATFORMS`），不硬编码：
+                # 2026-11-13 新增 aws / kiro 之后，只注册过 chatgpt+grok 的地址
+                # 对 AWS 仍然可用，硬编码两个平台会让这条夹具变成假阳性。
+                from services.mail_imports.providers import _known_platform_names
+
+                for platform in sorted(_known_platform_names()):
                     session.add(
                         AccountModel(
                             platform=platform,

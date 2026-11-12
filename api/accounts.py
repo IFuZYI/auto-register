@@ -686,6 +686,22 @@ def _import_json_accounts(body: ImportRequest, session: Session) -> dict:
     if not isinstance(payload, list):
         raise HTTPException(400, "JSON 导入需要一个数组（或含 accounts 数组的对象）")
 
+    # kiro.json（账号管理器 v2）：`{"accounts": [{"pluginSecret": {...}}]}`。
+    # 它的凭据藏在 `pluginSecret` 里、字段名是 camelCase，与本仓库的扁平导出
+    # 格式完全不同 —— 先拍平成一份 `extra`，再走通用导入循环。
+    from platforms.kiro.credentials import parse_entry as _parse_kiro_entry
+
+    normalized = []
+    for entry in payload:
+        if isinstance(entry, dict) and isinstance(entry.get("pluginSecret"), dict):
+            flat = _parse_kiro_entry(entry)
+            flat.setdefault("platform", "kiro")
+            flat.setdefault("status", "registered")
+            normalized.append(flat)
+        else:
+            normalized.append(entry)
+    payload = normalized
+
     created = 0
     updated = 0
     skipped = 0

@@ -54,6 +54,19 @@ class YesCaptcha(BaseCaptcha):
     def solve_image(self, image_b64: str) -> str:
         raise NotImplementedError
 
+    def solve_aws_waf(self, **_kwargs) -> str:
+        """AWS WAF 任务（`AwsClassification`）只返回要点击的格子，不签发 token。
+
+        纯协议链路没有浏览器可以点格子 —— 这里如实报「不支持」，让降级链去试下一个
+        provider，而不是返回一个空 token 让注册流程在 WAF 页面上白转。
+        """
+        from core.captcha_providers import CaptchaProviderError
+
+        raise CaptchaProviderError(
+            "yescaptcha",
+            "YesCaptcha 的 AWS 任务只做 3×3 图片识别，不返回 aws-waf-token",
+        )
+
 
 class ManualCaptcha(BaseCaptcha):
     """人工打码，阻塞等待用户输入"""

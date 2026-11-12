@@ -134,6 +134,11 @@ class ScopeTests(unittest.TestCase):
             {
                 "access_token", "refresh_token", "id_token", "session_token", "sso",
                 "cookies",
+                # AWS Builder ID / Kiro 的凭据字段（2026-11-13）：
+                # 没有 client_id/client_secret 就刷新不了，没有 profile_arn
+                # 下游 kiro.rs 用不了；source 是用户要求保存的来源。
+                "client_id", "client_secret", "profile_arn", "auth_method",
+                "login_provider", "plan", "account_id", "source", "source_email",
             },
         )
 

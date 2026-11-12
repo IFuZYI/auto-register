@@ -39,6 +39,14 @@ CONFIG_SCHEMA: tuple[ConfigKey, ...] = (
     # ---- 验证码 ----
     ConfigKey("yescaptcha_key", "captcha", secret=True),
     ConfigKey("twocaptcha_key", "captcha", secret=True),
+    # AWS WAF / Kiro：`AmazonTask` 能直接换 `aws-waf-token`（纯协议链路唯一可用）
+    ConfigKey("capmonster_key", "captcha", secret=True),
+    # AI 视觉兜底（OpenAI 兼容渠道）：图片/3×3 分类，不签发 WAF token
+    ConfigKey("ai_captcha_url", "captcha"),
+    ConfigKey("ai_captcha_key", "captcha", secret=True),
+    ConfigKey("ai_captcha_model", "captcha"),
+    # 降级顺序（逗号分隔）：留空 = capmonster,yescaptcha,ai
+    ConfigKey("captcha_provider_order", "captcha"),
     # 顺序与改造前的 `CONFIG_KEYS` 完全一致（界面按这个顺序渲染），
     # 所以 `default_executor` 排在 `default_captcha_solver` 前面 ——
     # 尽管分组不同。
@@ -111,6 +119,15 @@ CONFIG_SCHEMA: tuple[ConfigKey, ...] = (
     ConfigKey("chatgpt_registration_mode", "chatgpt"),
     ConfigKey("chatgpt_rt_route", "chatgpt"),
     ConfigKey("chatgpt_register_flow", "chatgpt"),
+    # ---- AWS Builder ID / Kiro 注册 ----
+    # 两个平台都只有 `protocol` 一条执行器路径，但执行器键仍要登记：
+    # 注册页保存的是 `<platform>_executor`，不在白名单里会被静默丢弃。
+    ConfigKey("aws_executor", "register"),
+    ConfigKey("kiro_executor", "register"),
+    # 平台专属旋钮由插件在 `registration_modes` 里声明，键必须可写
+    # （`test_mode_keys_are_writable_config` 钉住这条）。
+    ConfigKey("aws_full_name", "aws"),
+    ConfigKey("kiro_plan", "kiro"),
     # ---- 接码 ----
     ConfigKey("sms_enabled", "sms"),
     ConfigKey("sms_provider", "sms"),

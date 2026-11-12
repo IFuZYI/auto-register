@@ -61,19 +61,21 @@ ACTION_CAPABILITIES: dict[str, Capability] = {
     "sync_cliproxyapi_status": Capability.SYNC_STATUS,
     "sync_sub2api_status": Capability.SYNC_STATUS,
     "sync_chatgpt2api_status": Capability.SYNC_STATUS,
+    #: AWS Builder ID / Kiro 也声明 `refresh_token`（各自实现 OIDC 刷新）
     "refresh_token": Capability.REFRESH,
     "backfill_refresh_token": Capability.BACKFILL,
     "bind_2fa": Capability.BIND_2FA,
     "upload_cpa": Capability.UPLOAD,
     "upload_sub2api": Capability.UPLOAD,
     "upload_chatgpt2api": Capability.UPLOAD,
-    # ---- Grok ----
+    # ---- Grok / AWS Builder ID / Kiro ----
+    #: `probe` 是共享 id：grok 走 CPA 探活，aws/kiro 走 OIDC 刷新 ——
+    #: 能力层只分类，实现由各插件的 `execute_action` 决定。
     "probe": Capability.PROBE,
     "probe_refresh": Capability.PROBE,
     "refresh_oauth": Capability.REFRESH,
     "sync_grok2api_status": Capability.SYNC_STATUS,
-    "upload_grok2api": Capability.UPLOAD,
-}
+    "upload_grok2api": Capability.UPLOAD,}
 
 
 def capability_of(action_id: str) -> Capability | None:

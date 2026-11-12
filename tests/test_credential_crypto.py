@@ -36,6 +36,13 @@ SECRETS = {
     "totp_secret": "JBSWY3DPEHPK3PXP",
     # cookies 是会话凭据（真库 607 行）—— 2026-10-30 起纳入加密白名单
     "cookies": "oai-did=plain-cookie-value; session=abc",
+    # AWS Builder ID / Kiro：client_secret 与 RT 同级（有它就能刷新）；
+    # `kiro_aws_*` 是 Kiro 账号上保存的来源账号凭据快照。
+    "client_secret": "client-secret-plain",
+    "kiro_aws_access_token": "aws-at-plain",
+    "kiro_aws_refresh_token": "aws-rt-plain",
+    "kiro_aws_client_secret": "aws-client-secret-plain",
+    "kiro_aws_sso": "aws-sso-plain",
 }
 
 

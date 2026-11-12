@@ -18,6 +18,8 @@ import { HelpTip } from '@/components/settings/SettingsPrimitives'
 const PLATFORM_BAR_COLORS: Record<string, string> = {
   chatgpt: '#10a37f',
   grok: '#1d9bf0',
+  aws: '#ff9900',
+  kiro: '#6366f1',
 }
 
 interface StatCardProps {

@@ -14,8 +14,11 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime, timezone
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 from sqlmodel import Session
 
@@ -346,10 +349,47 @@ def _restamp_at_provenance(extra: dict, writes: dict) -> None:
     extra["chatgpt_token_refresh"] = stamp
 
 
+def _apply_aws_kiro_status(acc_model, action_id, result, session) -> None:
+    """AWS Builder ID / Kiro：把探测/刷新结论交给**平台自己的策略**。
+
+    为什么不在这里再写一份 if/elif：状态映射（403 = 封禁、400 = 失效、200 =
+    恢复）是平台语义，插件里已经有 `apply_probe_status_policy` 这一处实现；
+    服务层再抄一份就会分叉（本仓在 grok 上踩过「测活按钮」与「有效性检查」
+    两套判定的坑）。
+    """
+    from core.base_platform import RegisterConfig
+    from core.registry import get
+
+    platform_name = str(getattr(acc_model, "platform", "") or "").strip().lower()
+    try:
+        platform = get(platform_name)(config=RegisterConfig())
+    except Exception as exc:  # noqa: BLE001 - 插件没加载时不动状态（不影响动作本身）
+        logger.debug("读取平台策略失败（不动状态）: %s", exc)
+        return
+    raw_data = result.get("data")
+    data = raw_data if isinstance(raw_data, dict) else {}
+    detail = data.get("probe") if isinstance(data.get("probe"), dict) else {}
+    if not detail:
+        # 刷新动作：`ok` 就代表凭证有效；失败时把 HTTP 码带上供策略判封禁
+        detail = {
+            "usable": bool(result.get("ok")),
+            "code": data.get("status"),
+            "summary": str(result.get("error") or ""),
+        }
+    reason = platform.apply_probe_status_policy(acc_model, detail=detail)
+    if reason:
+        from datetime import datetime, timezone
+
+        acc_model.updated_at = datetime.now(timezone.utc)
+        account_repository.save(acc_model, session=session)
+
+
 #: 平台 → 状态策略。加一个平台只加一行，不再往 `apply_action_result` 里嵌 `elif`。
 _STATUS_APPLIERS = {
     "chatgpt": _apply_chatgpt_status,
     "grok": _apply_grok_status,
+    "aws": _apply_aws_kiro_status,
+    "kiro": _apply_aws_kiro_status,
 }
 
 
