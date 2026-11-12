@@ -445,7 +445,10 @@ export default function Proxies() {
         }
       />
 
-      <Card className="app-card" title="均衡配置">
+      {/* 绑定策略只有两个控件：不再用一整张卡片装它，压成一条配置带，
+          把「添加代理」和表格往上提。 */}
+      <div className="proxy-config">
+        <span className="proxy-config__label">绑定策略</span>
         <Space size={24} wrap>
           <Space size={8}>
             <span style={{ color: 'var(--text-muted)' }}>按负载均衡</span>
@@ -468,16 +471,16 @@ export default function Proxies() {
             </Tooltip>
           </Space>
         </Space>
-        {!balanceInfo.bindable_count && (
-          <Alert
-            style={{ marginTop: 12 }}
-            type="warning"
-            showIcon
-            message="还没有「绑定」标签的代理"
-            description="账号不会被自动绑定。给至少一个代理打上「绑定」标签后，点「均衡绑定」即可把账号分配过去。"
-          />
-        )}
-      </Card>
+      </div>
+      {!balanceInfo.bindable_count && (
+        <Alert
+          style={{ marginBottom: 16 }}
+          type="warning"
+          showIcon
+          message="还没有「绑定」标签的代理"
+          description="账号不会被自动绑定。给至少一个代理打上「绑定」标签后，点「均衡绑定」即可把账号分配过去。"
+        />
+      )}
 
       <Card title="添加代理（每行一个）" className="app-card">
         <Space direction="vertical" style={{ width: '100%' }} size={12}>

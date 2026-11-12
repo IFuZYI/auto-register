@@ -463,26 +463,27 @@ export default function RegisterTaskPage() {
             </>
           )}
           {platform === 'chatgpt' && (
-            <>
-              <Form.Item label="注册方式">
+            // 三个都是窄控件：并排一行，别让每个各占一整行、把卡片拉长。
+            <div className="form-grid">
+              <Form.Item label="注册方式" className="form-field--md">
                 <ChatGPTRegisterFlowSelect
                   flow={chatgptRegisterFlow}
                   onChange={setChatgptRegisterFlow}
                 />
               </Form.Item>
-              <Form.Item label="ChatGPT Token 方案">
+              <Form.Item label="ChatGPT Token 方案" className="form-field--md">
                 <ChatGPTTokenPlanSelect
                   plan={chatgptTokenPlan}
                   onChange={setChatgptTokenPlan}
                 />
               </Form.Item>
-              <Form.Item label="绑定 2FA">
+              <Form.Item label="绑定 2FA" className="form-field--md">
                 <ChatGPTBind2faSwitch
                   enabled={chatgptBind2fa}
                   onChange={setChatgptBind2fa}
                 />
               </Form.Item>
-            </>
+            </div>
           )}
         </Card>
 

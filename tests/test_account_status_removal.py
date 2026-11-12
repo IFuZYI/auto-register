@@ -402,13 +402,14 @@ class FrontendStatusRemovalTests(unittest.TestCase):
         # （`plusTrialMeta` / `check_plus_trial` / `trial_eligible` 是另一个功能）。
         self.assertNotIn("'trial'", src, "账号页还有 trial 状态值")
 
-    def test_dashboard_shows_registered_card_instead(self):
+    def test_dashboard_shows_registered_segment_instead(self):
         """删掉的两张卡由「正常」替代（保留总数 / 好 / 坏三档结构）。
 
         2026-10-06 用户要求改名：「已注册」→「正常」（正常能使用的账号）。
+        2026-11-13 仪表盘改成「库存带」，卡片 → 状态档；锚点跟着改。
         """
         src = self._src("pages/Dashboard.tsx")
-        self.assertIn("title: '正常'", src)
+        self.assertIn("label: '正常'", src)
         self.assertIn("by_status?.registered", src)
 
     def test_add_modal_has_no_status_field(self):

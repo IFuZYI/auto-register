@@ -310,38 +310,27 @@ class FrontendStatusLabelContractTests(unittest.TestCase):
         for stale in ("'已注册'", "'已封禁'"):
             self.assertNotIn(stale, src, f"仪表盘还留着旧文案 {stale}")
 
-    def test_dashboard_has_a_dedicated_banned_card(self):
-        """用户要求（2026-10-07）：仪表盘在「失效」右侧补一张「禁用」卡。
+    def test_dashboard_has_a_dedicated_banned_segment(self):
+        """「禁用」在总览里必须单独可见（不与「待恢复」合并）。
 
-        此前「禁用」被并进「失效」卡的合计里（过期+失效+禁用），且三张卡
-        （总账号数/正常/失效）按 `lg=6` 只占 18 列 —— 右侧空 6 列。补第四张卡
-        恰好填满 24 列，同时让「禁用」单独可见（它是强判断，不因探测复活，
-        与「过期」「失效」的处置方式不同，合在一起看不出量）。
+        2026-11-13 仪表盘从四张统计卡改成「库存带」：总账号数 + 三档状态
+        （正常/待恢复/禁用）+ 一条状态条。断言锚点跟着改，意图不变：
+        「禁用」是强判断（不因探测复活），必须单独看到量。
         """
         src = self._src("pages/Dashboard.tsx")
-        # 卡片标题与取值来源
-        self.assertIn("title: '禁用'", src, "仪表盘缺「禁用」卡片")
-        self.assertIn("by_status?.banned", src, "「禁用」卡片必须读 by_status.banned")
-        # 四张卡各占 lg=6 → 24 列满行（不补位就留 6 列空档）
-        self.assertIn("lg={6}", src, "统计卡栅格应保持 lg=6（四张满行）")
-        # 「待恢复」卡不再把 banned 并进去（已由独立卡片承担）。
-        #
-        # 标题在 2026-10-31 从「失效」改成「待恢复」：那张卡是
-        # 「过期 + 失效」的**合计**，而下方状态分布里「失效」是单独一项 ——
-        # 同一个屏幕上 77 和 69 都叫「失效」，用户只会认为数据坏了。
-        # 断言本身（不能把 banned 并进来）不变，只换锚点。
-        invalid_block = src.split("title: '待恢复'", 1)[1].split("},", 1)[0]
+        self.assertIn("label: '禁用'", src, "仪表盘缺「禁用」档")
+        self.assertIn("by_status?.banned", src, "「禁用」必须读 by_status.banned")
+        recover_block = src.split("label: '待恢复'", 1)[1].split("},", 1)[0]
         self.assertNotIn(
-            "banned", invalid_block,
-            "「失效」卡仍把 banned 并进合计 —— 会和「禁用」卡双记",
+            "banned", recover_block,
+            "「待恢复」仍把 banned 并进合计 —— 会和「禁用」双记",
         )
 
-    def test_dashboard_banned_card_uses_stop_icon_and_theme_token(self):
-        """禁用卡的图标与配色走现有 token（不引新色板）。"""
+    def test_dashboard_banned_segment_uses_theme_token(self):
+        """禁用的点/条走现有 token（不引新色板）。"""
         src = self._src("pages/Dashboard.tsx")
-        banned_block = src.split("title: '禁用'", 1)[1].split("},", 1)[0]
-        self.assertIn("StopOutlined", banned_block, "禁用卡应使用 StopOutlined 图标")
-        self.assertIn("var(--", banned_block, "禁用卡颜色应引用主题 CSS 变量")
+        banned_block = src.split("label: '禁用'", 1)[1].split("},", 1)[0]
+        self.assertIn("var(--purple)", banned_block, "禁用档颜色应引用主题 CSS 变量")
 
 
 class ActionWiringContractTests(unittest.TestCase):

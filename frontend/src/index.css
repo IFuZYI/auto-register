@@ -511,8 +511,8 @@ body {
               border-color 0.3s var(--ease-standard);
 }
 
+/* 卡片不是按钮：悬停只亮描边，不做位移/投影（位移会暗示「可点」）。 */
 .app-card:hover {
-  box-shadow: var(--shadow-md);
   border-color: var(--border-strong);
 }
 
@@ -2074,4 +2074,242 @@ body {
     left: -15px;
     width: 10px;
   }
+}
+
+/* ── 仪表盘：库存带 ────────────────────────────────────────────────
+   首屏只讲一件事：现在有多少账号、处于什么状态。数字、图例、状态条
+   在同一块里，不再切成四张统计卡。 */
+.inventory {
+  padding: 22px 24px 20px;
+  margin-bottom: 28px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: var(--bg-container);
+}
+
+.inventory__head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 24px;
+  flex-wrap: wrap;
+}
+
+.inventory__label {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-bottom: 4px;
+}
+
+.inventory__value {
+  font-size: 44px;
+  font-weight: 700;
+  line-height: 1.05;
+  letter-spacing: -0.04em;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+
+.inventory__legend {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  flex-wrap: wrap;
+  padding-bottom: 4px;
+}
+
+.inventory__legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.inventory__legend-item b {
+  font-weight: 600;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.inventory__bar {
+  display: flex;
+  gap: 2px;
+  height: 6px;
+  margin-top: 18px;
+  border-radius: 3px;
+  overflow: hidden;
+  background: var(--bg-subtle);
+}
+
+.inventory__bar span {
+  display: block;
+  min-width: 2px;
+  border-radius: 3px;
+}
+
+.dash-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 40px;
+}
+
+@media (max-width: 1023px) {
+  .dash-grid {
+    grid-template-columns: 1fr;
+    gap: 28px;
+  }
+}
+
+.dash-section {
+  min-width: 0;
+}
+
+.dash-section__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 2px;
+}
+
+.dash-section__head h2 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.dash-section__head span {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.dash-row {
+  padding: 12px 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 55%, transparent);
+}
+
+.dash-row:last-child {
+  border-bottom: 0;
+}
+
+.dash-row__top {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.dash-row__label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.dash-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+}
+
+.dash-row__value {
+  font-size: 13px;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.dash-row__value span {
+  margin-left: 6px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.dash-row__track {
+  height: 4px;
+  border-radius: 2px;
+  overflow: hidden;
+  background: var(--bg-subtle);
+}
+
+.dash-row__track span {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  transition: width 0.5s var(--ease-out);
+}
+
+/* ── 质量地板：焦点环 / 减少动效 / 滚动条 ───────────────────────── */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* 细滚动条：默认的宽灰条在深色底上比内容还抢眼 */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* 搜索框的按钮不该和主操作抢蓝色：主按钮只有一个（注册/保存），
+   搜索是辅助动作，用中性描边即可。 */
+.ant-input-search .ant-input-search-button {
+  background: var(--bg-subtle);
+  color: var(--text-secondary);
+  border-color: var(--border);
+  box-shadow: none;
+}
+
+.ant-input-search .ant-input-search-button:not(:disabled):hover {
+  background: var(--bg-subtle);
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+
+/* 代理页的绑定策略：一条配置带，不占一张卡 */
+.proxy-config {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  flex-wrap: wrap;
+  padding: 2px 2px 16px;
+  margin-bottom: 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.proxy-config__label {
+  font-size: 12px;
+  color: var(--text-muted);
 }

@@ -1,17 +1,10 @@
 import { useCallback, useEffect, useState } from 'react'
-import { Card, Row, Col, Tag, Button, Spin, Empty, App } from 'antd'
-import {
-  UserOutlined,
-  CheckCircleOutlined,
-  CloseCircleOutlined,
-  StopOutlined,
-  ReloadOutlined,
-} from '@ant-design/icons'
-import { getPlatformTagColor, getPlatformLabel } from '@/lib/platforms'
+import { Button, Empty, Skeleton, App } from 'antd'
+import { ReloadOutlined } from '@ant-design/icons'
+import { getPlatformLabel } from '@/lib/platforms'
 import { accountStatusMeta } from '@/lib/accountFormat'
 import { apiFetch } from '@/lib/utils'
 import { PageHeader } from '@/components/PageHeader'
-import { GRID_GAP } from '@/theme'
 import { HelpTip } from '@/components/settings/SettingsPrimitives'
 
 /** 平台分布条的配色：按平台名取稳定色相，没有映射时回落主题色。 */
@@ -22,72 +15,21 @@ const PLATFORM_BAR_COLORS: Record<string, string> = {
   kiro: '#6366f1',
 }
 
-interface StatCardProps {
-  title: string
-  /** 加载失败时传 '—'：0 会被读成「真的一个都没有」。 */
-  value: number | string
-  icon: React.ReactNode
-  color: string
-  index: number
-  /** 这个数字由什么构成（进标题旁的 ⓘ）。合计型的卡片必须写清楚， */
-  /*  否则会和下方明细里的同名项对不上（实测「失效 77 vs 69」）。 */
-  hint?: string
-}
-
-function StatCard({ title, value, icon, color, index, hint }: StatCardProps) {
-  return (
-    <div
-      className="stat-card stagger-item"
-      style={{ '--stagger-index': index } as React.CSSProperties}
-    >
-      <div className="stat-card__body">
-        <div
-          style={{
-            display: 'flex',
-            justifyContent: 'space-between',
-            alignItems: 'flex-start',
-            gap: 12,
-          }}
-        >
-          <div style={{ minWidth: 0 }}>
-            <div
-              style={{
-                fontSize: 13,
-                color: 'var(--text-muted)',
-                fontWeight: 500,
-                letterSpacing: 0,
-                marginBottom: 10,
-                display: 'flex',
-                alignItems: 'center',
-                gap: 5,
-              }}
-            >
-              {title}
-              <HelpTip text={hint} />
-            </div>
-            <div className="stat-card__value">
-              {value}
-            </div>
-          </div>
-          <div
-            style={{
-              width: 44,
-              height: 44,
-              flex: '0 0 44px',
-              borderRadius: 13,
-              display: 'grid',
-              placeItems: 'center',
-              fontSize: 20,
-              color,
-              background: `color-mix(in srgb, ${color} 14%, transparent)`,
-            }}
-          >
-            {icon}
-          </div>
-        </div>
-      </div>
-    </div>
-  )
+/** 状态色：与表格里的 Tag 同一套语义，但这里用点 + 细条，不用药丸。 */
+function statusColor(status: string): string {
+  switch (String(status || '').toLowerCase()) {
+    case 'registered':
+      return 'var(--success)'
+    case 'expired':
+    case 'limited':
+      return 'var(--warning)'
+    case 'invalid':
+      return 'var(--danger)'
+    case 'banned':
+      return 'var(--purple)'
+    default:
+      return 'var(--text-muted)'
+  }
 }
 
 /**
@@ -115,6 +57,42 @@ function LoadFailed({ what }: { what: string }) {
   )
 }
 
+interface RowItem {
+  key: string
+  label: string
+  value: number
+  color: string
+  hint?: string
+}
+
+function DistributionRows({ items, total }: { items: RowItem[]; total: number }) {
+  return (
+    <>
+      {items.map((item) => {
+        const pct = total ? Math.round((item.value / total) * 100) : 0
+        return (
+          <div className="dash-row" key={item.key}>
+            <div className="dash-row__top">
+              <span className="dash-row__label">
+                <i className="dash-dot" style={{ background: item.color }} />
+                {item.label}
+                {item.hint ? <HelpTip text={item.hint} /> : null}
+              </span>
+              <span className="dash-row__value">
+                {item.value}
+                <span>{pct}%</span>
+              </span>
+            </div>
+            <div className="dash-row__track">
+              <span style={{ width: `${pct}%`, background: item.color }} />
+            </div>
+          </div>
+        )
+      })}
+    </>
+  )
+}
+
 export default function Dashboard() {
   const { message } = App.useApp()
   const [stats, setStats] = useState<any>(null)
@@ -136,8 +114,6 @@ export default function Dashboard() {
     } finally {
       setLoading(false)
     }
-    // `message` 是 antd App 的 memo 化实例，身份稳定；进依赖是为了满足
-    // exhaustive-deps，同时保证「刷新」按钮与 effect 用同一个 load。
   }, [message])
 
   useEffect(() => {
@@ -145,48 +121,51 @@ export default function Dashboard() {
   }, [load])
 
   const total = stats?.total ?? 0
-  // 出错时四张卡显示 '—' 而不是 0：0 是「账号数为零」这个合法值，用它表示错误
-  // 等于把两种情况混成一个。
-  const num = (v: number | undefined) => (loadFailed ? '—' : (v ?? 0))
-  const statCards = [
+  // 首屏还在加载时不要先亮一个 0：0 是「真的没有账号」，加载中是「还不知道」。
+  const num = (v: number | undefined) =>
+    loadFailed || (loading && stats === null) ? '—' : (v ?? 0)
+
+  // 三档状态：正常 / 待恢复（过期+失效）/ 禁用。与下方「状态分布」的明细
+  // 口径一致：合计项写明构成，别让两个同名数字对不上。
+  const segments: RowItem[] = [
     {
-      title: '总账号数',
-      value: num(total),
-      icon: <UserOutlined />,
-      color: 'var(--accent)',
-    },
-    {
-      title: '正常',
-      value: num(stats?.by_status?.registered),
-      icon: <CheckCircleOutlined />,
+      key: 'registered',
+      label: '正常',
+      value: stats?.by_status?.registered ?? 0,
       color: 'var(--success)',
     },
     {
-      // 标题**不能叫「失效」**：这一档是「过期 + 失效」的合计，而下面的
-      // 状态分布里「失效」是单独一项。实测 77（卡片）对 69（分布），
-      // 同一个屏幕上两个不同的数都叫「失效」—— 用户只会认为数据坏了。
-      // 改叫「待恢复」（这两类都能靠刷新/重登救回来），构成写进 ⓘ。
-      title: '待恢复',
+      key: 'recover',
+      label: '待恢复',
+      value: (stats?.by_status?.expired ?? 0) + (stats?.by_status?.invalid ?? 0),
+      color: 'var(--warning)',
       hint: `过期 ${stats?.by_status?.expired ?? 0} + 失效 ${stats?.by_status?.invalid ?? 0}。这两类都能靠刷新 Token 或重登救回来，所以合成一档看量；下方的状态分布里仍分开列。`,
-      value: loadFailed
-        ? '—'
-        : (stats?.by_status?.expired ?? 0) + (stats?.by_status?.invalid ?? 0),
-      icon: <CloseCircleOutlined />,
-      color: 'var(--danger)',
     },
     {
-      title: '禁用',
-      // 被封的账号（deleted or deactivated）—— 强判断，不因一次可用探测
-      // 复活；与「失效」分开看量：处置方式不同（这号该弃，不重试）。
-      // 紫色：红已归「失效」，橙的轻重感与「禁用更严重」倒挂。
-      value: num(stats?.by_status?.banned),
-      icon: <StopOutlined />,
+      key: 'banned',
+      label: '禁用',
+      value: stats?.by_status?.banned ?? 0,
       color: 'var(--purple)',
     },
   ]
 
-  const platformEntries = Object.entries(stats?.by_platform || {}) as [string, number][]
-  const statusEntries = Object.entries(stats?.by_status || {}) as [string, number][]
+  const platformItems: RowItem[] = Object.entries(stats?.by_platform || {})
+    .map(([platform, count]) => ({
+      key: platform,
+      label: getPlatformLabel(platform),
+      value: Number(count) || 0,
+      color: PLATFORM_BAR_COLORS[platform] || 'var(--accent)',
+    }))
+    .sort((a, b) => b.value - a.value)
+
+  const statusItems: RowItem[] = Object.entries(stats?.by_status || {})
+    .map(([status, count]) => ({
+      key: status,
+      label: accountStatusMeta(status).label,
+      value: Number(count) || 0,
+      color: statusColor(status),
+    }))
+    .sort((a, b) => b.value - a.value)
 
   return (
     <div>
@@ -200,158 +179,90 @@ export default function Dashboard() {
         }
       />
 
-      <Row gutter={[GRID_GAP, GRID_GAP]}>
-        {statCards.map(({ title, value, icon, color, hint }, i) => (
-          <Col xs={12} sm={12} lg={6} key={title}>
-            <StatCard title={title} value={value} icon={icon} color={color} index={i} hint={hint} />
-          </Col>
-        ))}
-      </Row>
+      <section className="inventory" aria-label="账号总览">
+        <div className="inventory__head">
+          <div>
+            <div className="inventory__label">总账号数</div>
+            <div className="inventory__value">{num(total)}</div>
+          </div>
+          <div className="inventory__legend">
+            {segments.map((item) => (
+              <span className="inventory__legend-item" key={item.key}>
+                <i className="dash-dot" style={{ background: item.color }} />
+                {item.label}
+                {item.hint ? <HelpTip text={item.hint} /> : null}
+                <b>{num(item.value)}</b>
+              </span>
+            ))}
+          </div>
+        </div>
+        <div className="inventory__bar" aria-hidden>
+          {segments.map((item) => (
+            <span
+              key={item.key}
+              style={{
+                flexGrow: item.value || 0,
+                background: item.color,
+                opacity: item.value ? 1 : 0.25,
+              }}
+            />
+          ))}
+        </div>
+      </section>
 
-      <Row gutter={[GRID_GAP, GRID_GAP]} style={{ marginTop: GRID_GAP }}>
-        <Col xs={24} lg={12}>
-          <Card title="平台分布" styles={{ body: { paddingTop: 20 } }}>
-            {loading ? (
-              <div style={{ textAlign: 'center', padding: 48 }}>
-                <Spin />
-              </div>
-            ) : loadFailed ? (
-              <LoadFailed what="平台分布" />
-            ) : platformEntries.length ? (
-              platformEntries.map(([platform, count], i) => {
-                const pct = total ? Math.round((count / total) * 100) : 0
-                const color = PLATFORM_BAR_COLORS[platform] || 'var(--accent)'
-                return (
-                  <div
-                    key={platform}
-                    className="stagger-item"
-                    style={
-                      { marginBottom: 20, '--stagger-index': i } as React.CSSProperties
-                    }
-                  >
-                    <div
-                      style={{
-                        display: 'flex',
-                        justifyContent: 'space-between',
-                        alignItems: 'center',
-                        marginBottom: 8,
-                        gap: 12,
-                      }}
-                    >
-                      <Tag
-                        color={getPlatformTagColor(platform)}
-                        style={{ margin: 0, fontWeight: 500 }}
-                      >
-                        {getPlatformLabel(platform)}
-                      </Tag>
-                      <span
-                        style={{
-                          fontSize: 13,
-                          color: 'var(--text-secondary)',
-                          fontVariantNumeric: 'tabular-nums',
-                        }}
-                      >
-                        {count}
-                        <span style={{ color: 'var(--text-muted)' }}> · {pct}%</span>
-                      </span>
-                    </div>
-                    {/* 自绘进度条：比 antd Progress 更细，两端圆角更贴合卡面 */}
-                    <div
-                      style={{
-                        height: 6,
-                        borderRadius: 3,
-                        background: 'var(--bg-subtle)',
-                        overflow: 'hidden',
-                      }}
-                    >
-                      <div
-                        style={{
-                          width: `${pct}%`,
-                          height: '100%',
-                          borderRadius: 3,
-                          background: color,
-                          transition: 'width 0.6s var(--ease-out)',
-                        }}
-                      />
-                    </div>
-                  </div>
-                )
-              })
-            ) : (
-              <Empty
-                image={Empty.PRESENTED_IMAGE_SIMPLE}
-                description={
-                  <span style={{ fontSize: 13 }}>
-                    暂无账号数据
-                    <br />
-                    <span style={{ color: 'var(--text-muted)' }}>注册成功后这里会显示各平台占比</span>
-                  </span>
-                }
-                style={{ margin: '8px 0' }}
-              />
-            )}
-          </Card>
-        </Col>
+      <div className="dash-grid">
+        <section className="dash-section" aria-label="平台分布">
+          <div className="dash-section__head">
+            <h2>平台分布</h2>
+            <span>{platformItems.length} 个平台</span>
+          </div>
+          {loading && !stats ? (
+            <Skeleton active paragraph={{ rows: 4 }} title={false} style={{ marginTop: 18 }} />
+          ) : loadFailed ? (
+            <LoadFailed what="平台分布" />
+          ) : platformItems.length ? (
+            <DistributionRows items={platformItems} total={total} />
+          ) : (
+            <Empty
+              image={Empty.PRESENTED_IMAGE_SIMPLE}
+              description={
+                <span style={{ fontSize: 13 }}>
+                  暂无账号数据
+                  <br />
+                  <span style={{ color: 'var(--text-muted)' }}>注册成功后这里会显示各平台占比</span>
+                </span>
+              }
+              style={{ margin: '8px 0' }}
+            />
+          )}
+        </section>
 
-        <Col xs={24} lg={12}>
-          <Card title="状态分布" styles={{ body: { paddingTop: 12 } }}>
-            {loading ? (
-              <div style={{ textAlign: 'center', padding: 48 }}>
-                <Spin />
-              </div>
-            ) : loadFailed ? (
-              <LoadFailed what="状态分布" />
-            ) : statusEntries.length ? (
-              statusEntries.map(([status, count], i) => {
-                const meta = accountStatusMeta(status)
-                return (
-                <div
-                  key={status}
-                  className="stagger-item"
-                  style={
-                    {
-                      display: 'flex',
-                      justifyContent: 'space-between',
-                      alignItems: 'center',
-                      padding: '12px 0',
-                      borderBottom:
-                        i === statusEntries.length - 1 ? 'none' : '1px solid var(--border)',
-                      '--stagger-index': i,
-                    } as React.CSSProperties
-                  }
-                >
-                  <Tag color={meta.color} style={{ margin: 0 }}>
-                    {meta.label}
-                  </Tag>
-                  <span
-                    style={{
-                      fontSize: 15,
-                      fontWeight: 600,
-                      fontVariantNumeric: 'tabular-nums',
-                      color: 'var(--text)',
-                    }}
-                  >
-                    {count}
-                  </span>
-                </div>
-                )
-              })
-            ) : (
-              <Empty
-                image={Empty.PRESENTED_IMAGE_SIMPLE}
-                description={
-                  <span style={{ fontSize: 13 }}>
-                    暂无状态数据
-                    <br />
-                    <span style={{ color: 'var(--text-muted)' }}>账号注册与检测结果会汇总到这里</span>
-                  </span>
-                }
-                style={{ margin: '8px 0' }}
-              />
-            )}
-          </Card>
-        </Col>
-      </Row>
+        <section className="dash-section" aria-label="状态分布">
+          <div className="dash-section__head">
+            <h2>状态分布</h2>
+            <span>{statusItems.length} 种状态</span>
+          </div>
+          {loading && !stats ? (
+            <Skeleton active paragraph={{ rows: 4 }} title={false} style={{ marginTop: 18 }} />
+          ) : loadFailed ? (
+            <LoadFailed what="状态分布" />
+          ) : statusItems.length ? (
+            <DistributionRows items={statusItems} total={total} />
+          ) : (
+            <Empty
+              image={Empty.PRESENTED_IMAGE_SIMPLE}
+              description={
+                <span style={{ fontSize: 13 }}>
+                  暂无状态数据
+                  <br />
+                  <span style={{ color: 'var(--text-muted)' }}>账号注册与检测结果会汇总到这里</span>
+                </span>
+              }
+              style={{ margin: '8px 0' }}
+            />
+          )}
+        </section>
+      </div>
     </div>
   )
 }
