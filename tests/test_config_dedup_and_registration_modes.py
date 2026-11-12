@@ -453,6 +453,7 @@ class SidebarOrderTests(unittest.TestCase):
         "/running-tasks",
         "/accounts",
         "/authorized-accounts",
+        "/authorized-accounts/aws",
         "/mail",
         "/mail/icloud",
         "/mail/outlook",
@@ -565,7 +566,10 @@ class PanelSubmenuTests(unittest.TestCase):
     def test_submenu_starts_expanded(self):
         """二级项默认展开 —— 与「平台管理」「邮箱服务」一致。"""
         src = self._app_src()
-        self.assertIn("defaultOpenKeys={['/accounts', '/mail', '/panel-management']}", src)
+        self.assertIn(
+            "defaultOpenKeys={['/accounts', '/mail', '/panel-management', '/authorized-accounts']}",
+            src,
+        )
 
 
 if __name__ == "__main__":

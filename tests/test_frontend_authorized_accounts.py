@@ -24,10 +24,14 @@ class AuthorizedAccountsWiringTests(unittest.TestCase):
 
     def test_menu_and_route_are_wired(self):
         source = self._read("App.tsx")
+        # 一级「授权账号」是父菜单，AWS 是它的子项
         self.assertIn("key: '/authorized-accounts'", source)
         self.assertIn("label: '授权账号'", source)
-        self.assertIn('path="/authorized-accounts"', source)
-        self.assertIn('to="/authorized-accounts"', source, "/accounts/aws 应重定向")
+        self.assertIn("key: '/authorized-accounts/aws'", source)
+        self.assertIn("label: 'AWS'", source)
+        self.assertIn('path="/authorized-accounts/aws"', source)
+        self.assertIn('to="/authorized-accounts/aws"', source, "/authorized-accounts 应重定向到子项")
+        self.assertIn('to="/authorized-accounts/aws"', source, "/accounts/aws 应重定向")
 
     def test_platform_menu_excludes_aws(self):
         source = self._read("App.tsx")

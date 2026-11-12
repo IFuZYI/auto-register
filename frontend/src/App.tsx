@@ -75,7 +75,7 @@ const SELECTED_KEY_ALIASES: Record<string, string> = {
   // 选中态归到「全局配置」。
   '/platform-config': '/settings',
   // AWS 已从「平台管理」移出：旧链接落到新页，侧栏选中态跟着新页走
-  '/accounts/aws': '/authorized-accounts',
+  '/accounts/aws': '/authorized-accounts/aws',
 }
 
 /** 菜单里真实存在的一级 key（路径与 key 同名）。 */
@@ -106,7 +106,12 @@ function getSelectedKey(pathname: string): string[] {
   // 而子项是异步来的（面板列表 / 平台列表），首帧还不存在 → 硬刷新后父项一直
   // 是灰的（实测；`/mail` 的子项是写死的所以没这毛病）。把父 key 一起选上，
   // 父项自己挂载时就注册了路径，不再依赖子项何时到。
-  if (key.startsWith('/accounts/') || key.startsWith('/mail/') || key.startsWith('/panel-management/')) {
+  if (
+    key.startsWith('/accounts/') ||
+    key.startsWith('/mail/') ||
+    key.startsWith('/panel-management/') ||
+    key.startsWith('/authorized-accounts/')
+  ) {
     return [key.slice(0, key.indexOf('/', 1)), key]
   }
   return ['/']
@@ -360,9 +365,12 @@ function AppContent() {
         })),
     },
     {
+      // 授权账号是「授权根」的集合，AWS 是它的第一个子项（以后可能加别的
+      // 授权来源）。页面本身在 `/authorized-accounts/aws`。
       key: '/authorized-accounts',
       icon: <SafetyCertificateOutlined />,
       label: '授权账号',
+      children: [{ key: '/authorized-accounts/aws', label: 'AWS' }],
     },
     {
       // 邮箱服务提到一级：它不再是「全局配置里的一个 tab」，而是一组页面。
@@ -434,7 +442,7 @@ function AppContent() {
           <Menu
             mode="inline"
             selectedKeys={getSelectedKey(location.pathname)}
-            defaultOpenKeys={['/accounts', '/mail', '/panel-management']}
+            defaultOpenKeys={['/accounts', '/mail', '/panel-management', '/authorized-accounts']}
             items={menuItems}
             onClick={({ key }) => navigate(key)}
             // 子项缩进从默认 24 收到 16：232px 侧栏里
@@ -531,9 +539,10 @@ function AppContent() {
                 <Routes>
                   <Route path="/" element={<Dashboard />} />
                   <Route path="/accounts" element={<Accounts />} />
-                  <Route path="/accounts/aws" element={<Navigate to="/authorized-accounts" replace />} />
+                  <Route path="/accounts/aws" element={<Navigate to="/authorized-accounts/aws" replace />} />
                   <Route path="/accounts/:platform" element={<Accounts />} />
-                  <Route path="/authorized-accounts" element={<AuthorizedAccounts />} />
+                  <Route path="/authorized-accounts" element={<Navigate to="/authorized-accounts/aws" replace />} />
+                  <Route path="/authorized-accounts/aws" element={<AuthorizedAccounts />} />
                   <Route path="/register" element={<RegisterTaskPage />} />
                   {/* iCloud 控制台搬到「邮箱服务」下了。旧路径重定向，老书签不 404 */}
                   <Route path="/icloud" element={<Navigate to="/mail/icloud" replace />} />

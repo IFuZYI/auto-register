@@ -27,7 +27,8 @@ Kiro 记录通过 `extra.source = "aws"` 与 `extra.source_email` 指回去 —�
 ## 1.1 管理入口
 
 AWS 不再是「平台管理」里的一个平台（2026-11-13 调整）：它是 Kiro 的**授权根**，
-入口是侧栏一级页 **「授权账号」**（`/authorized-accounts`）。
+入口是侧栏 **「授权账号 → AWS」**（`/authorized-accounts/aws`；父级
+`/authorized-accounts` 会重定向过来）。
 
 - 列表只列 `platform=aws` 的账号；
 - 「授权链」列按 Kiro 账号的 `extra.source_email` 归组，显示每个 Builder ID

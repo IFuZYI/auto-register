@@ -509,7 +509,7 @@ export default function AuthorizedAccounts() {
   return (
     <div className="auth-page">
       <PageHeader
-        title="授权账号"
+        title="AWS"
         subtitle={
           <>AWS Builder ID 是 Kiro 的授权根：共 {total} 个账号；Kiro 侧已换取凭据的来源邮箱 {derivedTotal} 个（按前 200 条 Kiro 记录统计）。</>
         }
