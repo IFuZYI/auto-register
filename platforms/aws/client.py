@@ -30,11 +30,12 @@ from __future__ import annotations
 
 import json
 import logging
+import random
 import re
 import time
 import uuid
 from typing import Any, Callable, Mapping, Optional
-from urllib.parse import parse_qs, quote, urlencode, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
 
 from .constants import (
     CLIENT_NAME,
@@ -182,6 +183,8 @@ class AwsBuilderIdClient:
         self.session = session if session is not None else self._new_session(proxy)
         self.fingerprint = FingerprintBuilder()
         self.visitor_id = str(uuid.uuid4())
+        #: `platform-ubid` 是 signin 页里唯一由 JS 生成的 cookie（参考实现 v10）。
+        self.platform_ubid = ubid()
         self.ubid = ""
         self.client_id = ""
         self.client_secret = ""
@@ -194,12 +197,20 @@ class AwsBuilderIdClient:
 
     # ---------------------------------------------------------------- 传输
     @staticmethod
-    def _new_session(proxy: str):
+    def _normalize_proxy(proxy: str) -> str:
+        """`socks5://` → `socks5h://`（远端 DNS，见 `core.proxy_utils`）。"""
+        from core.proxy_utils import normalize_curl_proxy
+
+        return normalize_curl_proxy(proxy)
+
+    @classmethod
+    def _new_session(cls, proxy: str):
         from curl_cffi import requests as curl_requests
 
         session = curl_requests.Session(impersonate="chrome131", timeout=HTTP_TIMEOUT)
-        if proxy:
-            session.proxies = {"http": proxy, "https": proxy}
+        normalized = cls._normalize_proxy(proxy)
+        if normalized:
+            session.proxies = {"http": normalized, "https": normalized}
         session.cookies.set("awsccc", awsccc())
         return session
 
@@ -335,12 +346,17 @@ class AwsBuilderIdClient:
 
     # ---------------------------------------------------------------- 4-5
     def _fetch_d2c(self, referer: str) -> None:
+        """取 D2C token（只影响 visitorId；失败不该打断注册）。"""
         origin = "https://" + (urlparse(referer).netloc or "us-east-1.signin.aws")
-        response = self._post(
-            D2C_URL,
-            {},
-            headers=self._headers(origin=origin, referer=referer),
-        )
+        try:
+            response = self._post(
+                D2C_URL,
+                {},
+                headers=self._headers(origin=origin, referer=referer),
+            )
+        except Exception as exc:  # noqa: BLE001 - 代理/网络问题不该毁掉整条注册
+            logger.debug("D2C token 获取失败（继续，visitorId 用随机值）: %s", exc)
+            return
         data = _json_of(response)
         token = str(data.get("token") or "")
         if not token:
@@ -459,7 +475,135 @@ class AwsBuilderIdClient:
                 continue
             jar.set(javax, value.strip())
 
+    def _set_platform_cookies(self) -> None:
+        """种 `platform-ubid`（signin 页 JS 生成的那个 cookie）。"""
+        jar = getattr(self.session, "cookies", None)
+        if jar is None:
+            return
+        try:
+            jar.set(
+                "platform-ubid",
+                self.platform_ubid,
+                domain="us-east-1.signin.aws",
+                path="/platform",
+            )
+        except TypeError:
+            jar.set("platform-ubid", self.platform_ubid)
+
+    def _normalize_signin_cookies(self) -> None:
+        """signin.aws 的 cookie 只留**裸域名**一份。
+
+        curl_cffi 会把同一个 Set-Cookie 存成 host-only 与 `.domain` 两份；
+        我们自己的 `_capture_cookies` 早先还会再造一份 host-only —— 服务端因此
+        同时收到新旧两套 `workflow-csrf-token` / `directory-csrf-token`，
+        signup API 直接回 400「Please try signing in again」（2026-11-13 真机）。
+        规则：裸域名 > `.域名` > host-only；同名的落选者删掉。
+        """
+        jar = getattr(self.session, "cookies", None)
+        if jar is None:
+            return
+        try:
+            cookies = list(jar.jar)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("读取 cookie jar 失败（跳过归一）: %s", exc)
+            return
+        bare = "us-east-1.signin.aws"
+        groups: dict[str, list[Any]] = {}
+        for cookie in cookies:
+            domain = str(getattr(cookie, "domain", "") or "")
+            if "signin.aws" not in domain and domain != "":
+                continue
+            groups.setdefault(cookie.name, []).append(cookie)
+        for name, items in groups.items():
+            if len(items) < 2:
+                continue
+            keeper = None
+            for cookie in items:
+                if str(getattr(cookie, "domain", "")) == bare:
+                    keeper = cookie
+                    break
+            if keeper is None:
+                for cookie in items:
+                    if str(getattr(cookie, "domain", "")).startswith(".") and "signin.aws" in cookie.domain:
+                        keeper = cookie
+                        break
+            if keeper is None:
+                continue
+            for cookie in items:
+                if cookie is keeper:
+                    continue
+                try:
+                    jar.delete(
+                        cookie.name,
+                        domain=str(getattr(cookie, "domain", "") or ""),
+                        path=str(getattr(cookie, "path", "/") or "/"),
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("删除重复 cookie 失败: %s", exc)
+
+    def _sync_signup_csrf(self) -> None:
+        """把 `workflow-csrf-token` 里的 `signupCsrfToken` 合并进
+        `directory-csrf-token`。
+
+        2026-11-13 真机：signup 页 GET 之后服务端会下发带 `signupCsrfToken` 的
+        `workflow-csrf-token`，而浏览器 JS 会把它同步到 `directory-csrf-token`。
+        不同步时 `signup/api/execute` 回 400「Please try signing in again」——
+        与「会话过期」长得一模一样，很容易误判成流程超时。
+        """
+        jar = getattr(self.session, "cookies", None)
+        if jar is None:
+            return
+        try:
+            cookies = list(jar.jar)
+        except Exception as exc:  # noqa: BLE001 - 没有 jar 可遍历就跳过
+            logger.debug("读取 cookie jar 失败（跳过 csrf 同步）: %s", exc)
+            return
+        workflow: dict[str, str] = {}
+        directory: dict[str, tuple[str, str]] = {}
+        for cookie in cookies:
+            domain = str(getattr(cookie, "domain", "") or "")
+            if "signin.aws" not in domain:
+                continue
+            if cookie.name == "workflow-csrf-token":
+                workflow[domain] = cookie.value
+            elif cookie.name == "directory-csrf-token":
+                directory[domain] = (cookie.value, str(getattr(cookie, "path", "/") or "/"))
+        if not workflow or not directory:
+            return
+        bare = "us-east-1.signin.aws"
+        wf_value = workflow.get(bare) or workflow.get(f".{bare}") or next(iter(workflow.values()))
+        dir_domain = bare if bare in directory else (f".{bare}" if f".{bare}" in directory else next(iter(directory)))
+        dir_value, dir_path = directory[dir_domain]
+        try:
+            import json as _json
+
+            wf_json = _json.loads(unquote(wf_value))
+            dir_json = _json.loads(unquote(dir_value))
+        except (ValueError, TypeError) as exc:
+            logger.debug("csrf cookie 解析失败（跳过同步）: %s", exc)
+            return
+        if not isinstance(wf_json, dict) or not isinstance(dir_json, dict):
+            return
+        signup_token = str(wf_json.get("signupCsrfToken") or "")
+        if not signup_token or "signupCsrfToken" in dir_json:
+            return
+        dir_json["signupCsrfToken"] = signup_token
+        new_value = quote(_json.dumps(dir_json, separators=(",", ":")), safe="")
+        for cookie in cookies:
+            if cookie.name == "directory-csrf-token":
+                try:
+                    jar.delete(
+                        cookie.name,
+                        domain=str(getattr(cookie, "domain", "") or ""),
+                        path=str(getattr(cookie, "path", "/") or "/"),
+                    )
+                except Exception as exc:  # noqa: BLE001 - 删不掉就跳过
+                    logger.debug("删除旧 directory-csrf-token 失败: %s", exc)
+        jar.set("directory-csrf-token", new_value, domain=dir_domain, path=dir_path)
+        logger.debug("已把 signupCsrfToken 合并进 directory-csrf-token")
+
     def workflow_init(self) -> None:
+        self._set_platform_cookies()
         endpoint = f"{SIGNIN_BASE}/platform/{DIRECTORY_ID}/api/execute"
         referer = (
             f"{SIGNIN_BASE}/platform/{DIRECTORY_ID}/login"
@@ -602,6 +746,9 @@ class AwsBuilderIdClient:
             self.workflow_id = _query(redirect, "workflowID") or self.workflow_id
         if not self.workflow_id:
             raise AwsRegistrationError("signup_init", f"未返回 workflowID: {last_body}")
+        # 服务端在 signup 页下发 signupCsrfToken，浏览器会合并进 directory-csrf-token
+        self._normalize_signin_cookies()
+        self._sync_signup_csrf()
 
     def profile_init(self) -> None:
         self.ubid = ubid()
@@ -717,14 +864,123 @@ class AwsBuilderIdClient:
             )
         return registration_code, sign_in_state
 
-    def set_password(
-        self, email: str, password: str, registration_code: str, sign_in_state: str
-    ) -> tuple[str, str, str]:
-        endpoint = f"{SIGNIN_BASE}/platform/{DIRECTORY_ID}/signup/api/execute"
-        referer = (
+    def _open_signup_page(self, registration_code: str, sign_in_state: str) -> str:
+        """建立 signup 页面会话（HAR 实测必需）。
+
+        2026-11-13 真机：跳过这一步直接 POST `signup/api/execute` 会回
+        **HTTP 400「Please try signing in again」**。浏览器打开密码页时会先
+        GET 页面、加载 app.js/config，并让服务端下发页面级 cookie。
+        """
+        signup_url = (
             f"{SIGNIN_BASE}/platform/{DIRECTORY_ID}/signup"
             f"?registrationCode={registration_code}&state={sign_in_state}"
         )
+        self._get(
+            signup_url,
+            headers={
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "User-Agent": self.fingerprint.user_agent,
+                "Referer": f"{PROFILE_BASE}/",
+                "sec-fetch-dest": "document",
+                "sec-fetch-mode": "navigate",
+            },
+        )
+        for path in ("/assets/js/app.js", "/platform/config?directoryId="):
+            try:
+                self._get(
+                    f"{SIGNIN_BASE}{path}",
+                    headers={"Accept": "*/*", "Referer": signup_url},
+                )
+            except Exception as exc:  # noqa: BLE001 - 资源加载失败不阻塞（服务端只要会话）
+                logger.debug("signup 资源加载失败（忽略）: %s", exc)
+        jar = getattr(self.session, "cookies", None)
+        if jar is not None:
+            # awsccc 要种在 signin 域（portal 域那份带不过去）
+            try:
+                jar.set("awsccc", awsccc(), domain="us-east-1.signin.aws", path="/")
+            except TypeError:
+                jar.set("awsccc", awsccc())
+        return signup_url
+
+    def _send_credential_page_events(self, email: str, referer: str) -> None:
+        """发 PAGE_LOAD 事件与指纹指标（浏览器进密码页时会发，缺了像机器人）。"""
+        request_id = str(uuid.uuid4())
+        headers = self._headers(referer=referer, origin=SIGNIN_BASE)
+        headers.update(
+            {
+                "x-amzn-requestid": request_id,
+                "x-amz-date": time.strftime("%a, %d %b %Y %H:%M:%S GMT", time.gmtime()),
+                "priority": "u=1, i",
+            }
+        )
+        try:
+            self._post(
+                f"{SIGNIN_BASE}/platform/user-event/send-event",
+                {
+                    "inputs": [
+                        {
+                            "input_type": "UserEventRequestInput",
+                            "directoryId": DIRECTORY_ID,
+                            "userName": email,
+                            "userEvents": [
+                                {
+                                    "input_type": "UserEvent",
+                                    "eventType": "PAGE_LOAD",
+                                    "pageName": "CREDENTIAL_COLLECTION",
+                                }
+                            ],
+                        },
+                        {
+                            "input_type": "FingerPrintRequestInput",
+                            "fingerPrint": self._fingerprint_input(
+                                page_type="signup", event_type="PageLoad"
+                            ),
+                        },
+                    ],
+                    "requestId": request_id,
+                },
+                headers=headers,
+            )
+        except Exception as exc:  # noqa: BLE001 - 埋点失败不影响主流程
+            logger.debug("send-event 失败（忽略）: %s", exc)
+        try:
+            self.session.post(
+                f"{SIGNIN_BASE}/metrics/fingerprint",
+                data=(
+                    "name=IsFingerprintGenerated:Success&value="
+                    + self._fingerprint_input(page_type="signup", event_type="PageLoad")
+                ),
+                headers={
+                    "Accept": "*/*",
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Origin": SIGNIN_BASE,
+                    "Referer": referer,
+                    "User-Agent": self.fingerprint.user_agent,
+                },
+                timeout=self.timeout,
+            )
+        except Exception as exc:  # noqa: BLE001 - 埋点失败不影响主流程
+            logger.debug("metrics/fingerprint 失败（忽略）: %s", exc)
+
+    def set_password(
+        self, email: str, password: str, registration_code: str, sign_in_state: str
+    ) -> dict[str, Any]:
+        """设置密码；返回下一步所需的句柄。
+
+        返回 `{"completed": bool, "workflow_state_handle", "state", "workflow_result_handle"}`：
+
+        * `completed=True` —— 新版（HAR）直接回 `end-of-user-registration-success`，
+          不需要再走 `complete_signup`；
+        * `completed=False` —— 旧版回一个 login 的 redirect，需要 `complete_signup`。
+        """
+        endpoint = f"{SIGNIN_BASE}/platform/{DIRECTORY_ID}/signup/api/execute"
+        signup_url = self._open_signup_page(registration_code, sign_in_state)
+        self._normalize_signin_cookies()
+        self._sync_signup_csrf()
+        self._send_credential_page_events(email, signup_url)
+        # 浏览器在密码页停留 1-3 秒再提交（参考实现同款）
+        time.sleep(random.uniform(1.0, 3.0))
+
         response = self._workflow_execute(
             endpoint,
             {
@@ -744,14 +1000,25 @@ class AwsBuilderIdClient:
                     },
                 ],
             },
-            referer=referer,
+            referer=signup_url,
         )
         data = _json_of(response)
         self.workflow_handle = str(data.get("workflowStateHandle") or self.workflow_handle)
+        if data.get("stepId") == "end-of-user-registration-success":
+            redirect = str((data.get("redirect") or {}).get("url") or "")
+            return {
+                "completed": True,
+                "workflow_state_handle": "",
+                "state": _query(redirect, "state"),
+                "workflow_result_handle": _query(redirect, "workflowResultHandle"),
+            }
         context = ((data.get("workflowResponseData") or {}).get("encryptionContextResponse") or {})
         public_key = context.get("publicKey") if isinstance(context, dict) else None
         if not isinstance(public_key, dict) or not public_key.get("n"):
-            raise AwsRegistrationError("set_password", "未获取到密码加密公钥")
+            raise AwsRegistrationError(
+                "set_password",
+                f"未获取到密码加密公钥（stepId={data.get('stepId')!r}）",
+            )
         encrypted = encrypt_password(
             password,
             public_key,
@@ -771,6 +1038,21 @@ class AwsBuilderIdClient:
                         "input_type": "PasswordRequestInput",
                         "password": encrypted,
                         "successfullyEncrypted": "SUCCESSFUL",
+                        # HAR 版带这个字段（可为 null）；缺了服务端不一定拒，但没必要赌
+                        "errorLog": None,
+                    },
+                    {
+                        "input_type": "UserEventRequestInput",
+                        "directoryId": DIRECTORY_ID,
+                        "userName": email,
+                        "userEvents": [
+                            {
+                                "input_type": "UserEvent",
+                                "eventType": "PAGE_SUBMIT",
+                                "pageName": "CREDENTIAL_COLLECTION",
+                                "timeSpentOnPage": random.randint(8_000, 25_000),
+                            }
+                        ],
                     },
                     {"input_type": "UserRequestInput", "username": email},
                     {
@@ -782,16 +1064,28 @@ class AwsBuilderIdClient:
                 ],
                 "visitorId": self.visitor_id,
             },
-            referer=referer,
+            referer=signup_url,
         )
-        redirect = str((_json_of(response).get("redirect") or {}).get("url") or "")
+        data = _json_of(response)
+        redirect = str((data.get("redirect") or {}).get("url") or "")
+        if data.get("stepId") == "end-of-user-registration-success":
+            return {
+                "completed": True,
+                "workflow_state_handle": "",
+                "state": _query(redirect, "state"),
+                "workflow_result_handle": _query(redirect, "workflowResultHandle"),
+            }
         if not redirect:
-            raise AwsRegistrationError("set_password", "密码设置未返回 redirect")
-        return (
-            _query(redirect, "workflowStateHandle"),
-            _query(redirect, "state"),
-            _query(redirect, "workflowResultHandle"),
-        )
+            raise AwsRegistrationError(
+                "set_password",
+                f"密码设置未返回 redirect（stepId={data.get('stepId')!r}）",
+            )
+        return {
+            "completed": False,
+            "workflow_state_handle": _query(redirect, "workflowStateHandle"),
+            "state": _query(redirect, "state"),
+            "workflow_result_handle": _query(redirect, "workflowResultHandle"),
+        }
 
     def complete_signup(
         self, email: str, handle: str, state: str, result_handle: str
@@ -987,11 +1281,17 @@ class AwsBuilderIdClient:
             raise AwsRegistrationError("otp", "未取到验证码")
 
         registration_code, sign_in_state = self.create_identity(email, full_name, otp)
-        handle, state, result_handle = self.set_password(
+        password_result = self.set_password(
             email, password, registration_code, sign_in_state
         )
         self._log("[AWS] 密码已设置")
-        self.complete_signup(email, handle, state, result_handle)
+        if not password_result.get("completed"):
+            self.complete_signup(
+                email,
+                password_result["workflow_state_handle"],
+                password_result["state"],
+                password_result["workflow_result_handle"],
+            )
 
         sso = self.sso_workflow()
         sso_token = self.sso_token(sso["auth_code"], sso["state"])

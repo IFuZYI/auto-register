@@ -138,11 +138,40 @@ AI 兜底用的是 OpenAI 兼容的视觉接口（`/v1/chat/completions`，图�
 传给模型）。**推理型模型会把 token 花在 `reasoning_content` 上**，所以
 `max_tokens` 给到 512，并且 `content` 为空时明确报错（而不是返回空串）。
 
-## 6. 已知边界
+## 6. 真机验证记录（2026-11-13）
 
-- **网络未联调**：注册链路的每一步都按参考实现对齐（请求形状、指纹信封、
-  JWE 头、SSO 流程），测试用 `ScriptedSession` 驱动真实状态机；但真实 AWS
-  环境下的成功与否需要在有出口的机器上跑一次（`scripts/` 下可加 e2e 脚本）。
+在有出口的机器上跑了真实注册（iCloud 远程别名 + CapMonster/YesCaptcha/AI 已配）：
+
+| 阶段 | 结果 |
+| --- | --- |
+| OIDC 客户端注册 / 设备授权 / portal / D2C / workflow 握手 | ✅ 200 |
+| 提交邮箱（400 = 可注册）/ signup / signup init / profile start | ✅ |
+| 发验证码 + 收码（iCloud 远程） | ✅ 邮件约 3 分钟到达 |
+| create-identity（提交 OTP） | ✅ 200，返回 registrationCode/signInState |
+| **设置密码（signup/api/execute）** | ❌ **HTTP 400 `errorCode: BLOCKED`** |
+
+`BLOCKED` 是 AWS 风控的结论（响应里的 `presentationContext` 只有 clientId /
+identityPoolId / airportCode，没有验证码上下文），不是请求体格式问题 ——
+实测排除了 5 种请求体组合、signup 页预加载、CSRF 同步、cookie 归一、直连与
+SOCKS5 代理出口。参考项目对 `BLOCKED` 的处理也是「换 IP 或稍后重试」。
+
+**这一轮真机顺带修掉的缺陷**（都有回归测试）：
+
+1. OTP 关键词写成 `amazon`，匹配不到 AWS 的邮件（发件人 `signin_aws`、
+   正文「AWS Builder ID」）→ 改 `aws`；
+2. OTP 默认 180s 卡在 AWS 约 3 分钟的投递边界 → AWS 平台默认 300s；
+3. SOCKS5 代理用 `socks5://` 时 curl_cffi 在 `vs.aws.amazon.com` 上连不上
+   （本地 DNS）→ 统一升级 `socks5h://`（`core.proxy_utils.normalize_curl_proxy`）；
+4. D2C token 失败会中断整条注册 → 改为只记日志（它只影响 visitorId）。
+
+**下一步（按性价比排序）**：换住宅 IP 重试 → 补全 FWCIM 指纹（GPU 扩展、
+canvas 细节，参考 `reference/register/any-auto-register/platforms/kiro/core.py`
+的 `gen_fwcim`）→ 必要时对 signup 页走 camoufox 浏览器路径。
+
+## 7. 已知边界
+
+- **AWS 风控**：协议链路已真机跑到设置密码，但当前出口被 AWS 判 `BLOCKED`
+  （见上一节）。换住宅 IP 前不要期待端到端成功。
 - **没有接码/打码**：AWS 目前对 Builder ID 注册只发邮箱验证码；若上游开始
   要求手机号或人机验证，链路会以 `AwsRegistrationError` 明确失败（不是静默卡住）。
 - **自动维护**：`PLATFORM_ACTIONS` 已登记 aws / kiro 的探测与刷新动作，

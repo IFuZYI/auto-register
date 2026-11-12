@@ -147,7 +147,10 @@ class AwsPlatform(BasePlatform):
 
         def _otp() -> str:
             timeout = self.get_mailbox_otp_timeout()
-            kwargs: dict[str, Any] = {"keyword": "amazon", "timeout": timeout}
+            # 关键词必须是 `aws`：AWS 的邮件来自 `no-reply@signin.aws`（iCloud 转发后
+            # 变成 `no-reply_at_signin_aws_…`），正文写「AWS Builder ID」——
+            # 写 `amazon` 时邮件到了也会被渠道的关键词过滤跳过（2026-11-13 实测）。
+            kwargs: dict[str, Any] = {"keyword": "aws", "timeout": timeout}
             if mailbox_account is not None:
                 try:
                     return mailbox.wait_for_code(mailbox_account, **kwargs)
@@ -194,6 +197,15 @@ class AwsPlatform(BasePlatform):
             status=AccountStatus.REGISTERED,
             extra=account_extra,
         )
+
+    def get_mailbox_otp_timeout(self, default: int = 300) -> int:
+        """AWS 的 OTP 等待默认 300s（覆盖基类的 180s）。
+
+        实测（2026-11-13）：AWS 验证码邮件约 3 分钟后才到，180s 会卡在边界上 ——
+        超时后工作流状态丢失，只能整轮重来（白等一次发码）。
+        配置里显式给了 `mailbox_otp_timeout_seconds` 时以配置为准。
+        """
+        return super().get_mailbox_otp_timeout(default=default)
 
     def _record_mailbox_status(self, mailbox, account, status: str) -> None:
         """把注册结果记回邮箱渠道（号池记账钩子；渠道不支持时静默跳过）。"""

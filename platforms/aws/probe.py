@@ -34,7 +34,10 @@ def _session(proxy: str = "", session: Any = None):
 
     client = curl_requests.Session(impersonate="chrome131", timeout=HTTP_TIMEOUT)
     if proxy:
-        client.proxies = {"http": proxy, "https": proxy}
+        from core.proxy_utils import normalize_curl_proxy
+
+        normalized = normalize_curl_proxy(proxy)
+        client.proxies = {"http": normalized, "https": normalized}
     return client, True
 
 

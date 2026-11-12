@@ -106,6 +106,20 @@ def normalize_proxy_url(proxy_url: Optional[str]) -> Optional[str]:
     return value
 
 
+def normalize_curl_proxy(proxy_url: Optional[str]) -> str:
+    """curl_cffi 用的代理串：`socks5://` 升级成 `socks5h://`（远端 DNS）。
+
+    2026-11-13 实测：代理池里是 `socks5://`，curl_cffi 在
+    `vs.aws.amazon.com` 上 SOCKS5 连接失败（本地 DNS 解析到代理不可达的 IP）；
+    同一代理换 `socks5h://` 立刻 200。SOCKS5 代理本来就该让代理解析域名 ——
+    否则 DNS 结果取决于本机网络，跨境代理下必然踩坑。
+    """
+    text = str(proxy_url or "").strip()
+    if text.lower().startswith("socks5://"):
+        return "socks5h://" + text[len("socks5://"):]
+    return text
+
+
 def redact_proxy_url(proxy_url: Optional[str]) -> str:
     """Return a log-safe proxy URL without authentication credentials."""
     value = str(proxy_url or "").strip()

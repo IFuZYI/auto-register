@@ -101,7 +101,10 @@ def authorize_kiro(
 
         session = curl_requests.Session(impersonate="chrome131", timeout=60)
         if proxy:
-            session.proxies = {"http": proxy, "https": proxy}
+            from core.proxy_utils import normalize_curl_proxy
+
+            normalized = normalize_curl_proxy(proxy)
+            session.proxies = {"http": normalized, "https": normalized}
 
     try:
         registration = session.post(

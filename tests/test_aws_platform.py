@@ -87,21 +87,46 @@ class Response:
         return json.loads(json.dumps(self._body))
 
 
+class _FakeCookie:
+    def __init__(self, name: str, value: str, domain: str = "", path: str = "/") -> None:
+        self.name = name
+        self.value = value
+        self.domain = domain
+        self.path = path
+
+
 class _CookieJar:
     def __init__(self) -> None:
-        self._items: dict[str, str] = {}
+        self._items: dict[tuple[str, str, str], _FakeCookie] = {}
 
-    def set(self, name: str, value: str, domain: str = "", path: str = "", **_) -> None:
-        self._items[str(name)] = str(value)
+    def set(self, name: str, value: str, domain: str = "", path: str = "/", **_) -> None:
+        key = (str(name), str(domain), str(path))
+        self._items[key] = _FakeCookie(str(name), str(value), str(domain), str(path))
 
     def get(self, name: str, default=None, **_) -> str:
-        return self._items.get(str(name), default)
+        for cookie in self._items.values():
+            if cookie.name == str(name):
+                return cookie.value
+        return default
 
     def get_dict(self, **_) -> dict[str, str]:
-        return dict(self._items)
+        return {cookie.name: cookie.value for cookie in self._items.values()}
+
+    def delete(self, name: str, domain=None, path=None, **_) -> None:
+        # domain=None = 不限域名；domain="" 是合法的 host-only 值，不能当通配
+        for key in list(self._items):
+            if key[0] != str(name):
+                continue
+            if domain is not None and key[1] != str(domain):
+                continue
+            del self._items[key]
+
+    @property
+    def jar(self):
+        return list(self._items.values())
 
     def __iter__(self):
-        return iter(())
+        return iter(list(self._items.values()))
 
 
 class ScriptedSession:
@@ -267,6 +292,16 @@ class _AwsFlowRouter:
             return Response(body={"deviceCode": "device-1", "userCode": "USER-CODE"})
         if "vs.aws.amazon.com/token" in url:
             return Response(body={"token": "d2c-token-1"})
+        if "/signup?registrationCode=" in url:
+            return Response(text="<html>signup</html>")
+        if "/assets/js/app.js" in url:
+            return Response(text="FWCIM_VERSION = '4.0.0';")
+        if "/platform/config?directoryId=" in url:
+            return Response(body={"config": {}})
+        if "/platform/user-event/send-event" in url:
+            return Response(body={"ok": True})
+        if "/metrics/fingerprint" in url:
+            return Response(text="ok")
         if "/token/whoAmI" in url:
             return Response(body={"userId": "u-1"})
         if "portal.sso.us-east-1.amazonaws.com/login" in url:
@@ -456,6 +491,236 @@ class AwsProtocolTests(unittest.TestCase):
             client.register(email="a@x.ai", password="Pw-1!", otp_provider=_boom)
 
 
+class SignupPageSequenceTests(unittest.TestCase):
+    """设置密码前必须先建立 signup 页面会话（HAR 实测）。
+
+    实测（2026-11-13）：跳过 signup 页 GET 直接 POST `signup/api/execute`
+    → HTTP 400「Please try signing in again」。参考实现（HAR v10）在 POST 前
+    会 GET signup 页、加载 app.js/config、发 PAGE_LOAD 事件与指纹指标。
+    """
+
+    def _run(self):
+        from platforms.aws.client import AwsBuilderIdClient
+
+        router = _AwsFlowRouter()
+        session = ScriptedSession(router)
+        client = AwsBuilderIdClient(session=session, log=lambda _m: None)
+        result = client.register(
+            email="a@x.ai", password="Pw-1!", otp_provider=lambda: "123456"
+        )
+        return client, result, session
+
+    def test_signup_page_is_opened_before_password_post(self):
+        _, _, session = self._run()
+        urls = [item["url"] for item in session.requests]
+        page_calls = [i for i, url in enumerate(urls) if "/signup?registrationCode=" in url]
+        password_posts = [
+            i
+            for i, item in enumerate(session.requests)
+            if item["url"].endswith("/signup/api/execute")
+            and any(
+                isinstance(node, dict) and node.get("input_type") == "PasswordRequestInput"
+                for node in ((item.get("json") or {}).get("inputs") or [])
+            )
+        ]
+        self.assertTrue(page_calls, "没有 GET signup 页面 —— 服务端会回 400")
+        self.assertTrue(password_posts)
+        self.assertLess(page_calls[0], password_posts[0])
+
+    def test_password_post_carries_page_submit_event_and_error_log(self):
+        _, _, session = self._run()
+        password_posts = [
+            item
+            for item in session.requests
+            if item["url"].endswith("/signup/api/execute")
+            and any(
+                isinstance(node, dict) and node.get("input_type") == "PasswordRequestInput"
+                for node in ((item.get("json") or {}).get("inputs") or [])
+            )
+        ]
+        self.assertEqual(len(password_posts), 1)
+        payload = password_posts[0]["json"]
+        kinds = [node.get("input_type") for node in payload["inputs"]]
+        self.assertIn("UserEventRequestInput", kinds, "缺 PAGE_SUBMIT 事件")
+        self.assertIn("visitorId", payload)
+        password_node = next(
+            node for node in payload["inputs"] if node.get("input_type") == "PasswordRequestInput"
+        )
+        self.assertIn("errorLog", password_node, "HAR 版的密码节点带 errorLog（可为 null）")
+
+    def test_har_completion_shape_skips_the_extra_workflow_call(self):
+        """POST #2 直接回 end-of-user-registration-success 时不再走 complete_signup。"""
+
+        class _HarRouter(_AwsFlowRouter):
+            def __call__(self, method, url, kwargs):
+                payload = kwargs.get("json") or {}
+                if url.endswith("/signup/api/execute"):
+                    kinds = {
+                        str(node.get("input_type"))
+                        for node in (payload.get("inputs") or [])
+                        if isinstance(node, dict)
+                    }
+                    if "PasswordRequestInput" in kinds:
+                        return Response(
+                            body={
+                                "stepId": "end-of-user-registration-success",
+                                "redirect": {
+                                    "url": "https://us-east-1.signin.aws/platform/d-9067642ac7/login"
+                                    "?workflowResultHandle=har-result&state=har-state"
+                                },
+                            }
+                        )
+                return super().__call__(method, url, kwargs)
+
+        from platforms.aws.client import AwsBuilderIdClient
+
+        session = ScriptedSession(_HarRouter())
+        client = AwsBuilderIdClient(session=session, log=lambda _m: None)
+        with mock.patch.object(
+            AwsBuilderIdClient, "complete_signup", side_effect=AssertionError("不该再调")
+        ):
+            result = client.register(
+                email="a@x.ai", password="Pw-1!", otp_provider=lambda: "123456"
+            )
+        self.assertEqual(result["sso"], "sso-token-1")
+
+
+class SignupCsrfSyncTests(unittest.TestCase):
+    """signup 页会把 `signupCsrfToken` 放进 `workflow-csrf-token`，必须合并到
+    `directory-csrf-token` —— 否则 signup API 回 400「Please try signing in again」。
+    """
+
+    def test_signup_csrf_token_is_merged_into_directory_token(self):
+        import json as _json
+        from urllib.parse import quote
+
+        from platforms.aws.client import AwsBuilderIdClient
+
+        wf_value = quote(
+            _json.dumps({"workflowCsrfToken": "wf-1", "signupCsrfToken": "signup-1"}),
+            safe="",
+        )
+        dir_value = quote(_json.dumps({"workflowCsrfToken": "dir-1"}), safe="")
+        session = ScriptedSession(_AwsFlowRouter())
+        session.cookies.set(
+            "workflow-csrf-token", wf_value, domain="us-east-1.signin.aws", path="/platform/d-x"
+        )
+        session.cookies.set(
+            "directory-csrf-token", dir_value, domain="us-east-1.signin.aws", path="/platform/d-x"
+        )
+        client = AwsBuilderIdClient(session=session, log=lambda _m: None)
+        client._sync_signup_csrf()
+
+        from urllib.parse import unquote
+
+        merged = None
+        for cookie in session.cookies:
+            if cookie.name == "directory-csrf-token":
+                merged = _json.loads(unquote(cookie.value))
+        self.assertIsNotNone(merged)
+        self.assertEqual(merged.get("signupCsrfToken"), "signup-1")
+
+    def test_platform_ubid_cookie_is_set(self):
+        from platforms.aws.client import AwsBuilderIdClient
+
+        session = ScriptedSession(_AwsFlowRouter())
+        client = AwsBuilderIdClient(session=session, log=lambda _m: None)
+        client._set_platform_cookies()
+        names = {cookie.name for cookie in session.cookies}
+        self.assertIn("platform-ubid", names)
+
+
+class CookieNormalizationTests(unittest.TestCase):
+    """signin.aws 的 cookie 只能留**裸域名**一份（参考实现 v10）。
+
+    2026-11-13 真机：jar 里 `workflow-csrf-token` 同时有 host-only（旧）与
+    `us-east-1.signin.aws`（新）两份，服务端拿到新旧两套 CSRF，signup API 回
+    400「Please try signing in again」——与「会话过期」无法区分。
+    """
+
+    def test_duplicate_host_only_cookie_is_dropped_in_favour_of_bare_domain(self):
+        from platforms.aws.client import AwsBuilderIdClient
+
+        session = ScriptedSession(_AwsFlowRouter())
+        session.cookies.set("workflow-csrf-token", "old-host-only", domain="", path="/")
+        session.cookies.set(
+            "workflow-csrf-token", "new-bare", domain="us-east-1.signin.aws", path="/"
+        )
+        client = AwsBuilderIdClient(session=session, log=lambda _m: None)
+        client._normalize_signin_cookies()
+
+        values = [
+            (cookie.domain, cookie.value)
+            for cookie in session.cookies
+            if cookie.name == "workflow-csrf-token"
+        ]
+        self.assertEqual(values, [("us-east-1.signin.aws", "new-bare")])
+
+    def test_dot_domain_cookie_is_dropped(self):
+        from platforms.aws.client import AwsBuilderIdClient
+
+        session = ScriptedSession(_AwsFlowRouter())
+        session.cookies.set(
+            "directory-csrf-token", "dot", domain=".us-east-1.signin.aws", path="/platform"
+        )
+        session.cookies.set(
+            "directory-csrf-token", "bare", domain="us-east-1.signin.aws", path="/platform"
+        )
+        client = AwsBuilderIdClient(session=session, log=lambda _m: None)
+        client._normalize_signin_cookies()
+        values = [
+            (cookie.domain, cookie.value)
+            for cookie in session.cookies
+            if cookie.name == "directory-csrf-token"
+        ]
+        self.assertEqual(values, [("us-east-1.signin.aws", "bare")])
+
+
+class ProxyAndD2CTests(unittest.TestCase):
+    """SOCKS5 代理必须用 `socks5h://`（远端 DNS）；D2C 失败不该中断注册。
+
+    实测（2026-11-13）：代理池里是 `socks5://`，curl_cffi 在
+    `vs.aws.amazon.com` 上 SOCKS5 连接失败（本地 DNS 解析到代理不可达的 IP）；
+    换 `socks5h://` 立刻 200。同一轮里 D2C 一失败就把整个注册打断，也不合理 ——
+    它只影响 visitorId。
+    """
+
+    def test_socks5_proxy_is_upgraded_to_remote_dns(self):
+        from platforms.aws.client import AwsBuilderIdClient
+
+        client = AwsBuilderIdClient(
+            proxy="socks5://user:pass@10.0.0.1:1080", log=lambda _m: None
+        )
+        proxies = getattr(client.session, "proxies", {}) or {}
+        self.assertEqual(proxies.get("https"), "socks5h://user:pass@10.0.0.1:1080")
+        self.assertEqual(proxies.get("http"), "socks5h://user:pass@10.0.0.1:1080")
+
+    def test_http_proxy_is_kept_as_is(self):
+        from platforms.aws.client import AwsBuilderIdClient
+
+        client = AwsBuilderIdClient(proxy="http://10.0.0.1:8080", log=lambda _m: None)
+        self.assertEqual(getattr(client.session, "proxies", {}).get("https"), "http://10.0.0.1:8080")
+
+    def test_d2c_failure_does_not_abort_portal_login(self):
+        from platforms.aws.client import AwsBuilderIdClient
+
+        def router(method, url, kwargs):
+            if "vs.aws.amazon.com/token" in url:
+                raise ConnectionError("proxy cannot reach vs.aws.amazon.com")
+            if "portal.sso.us-east-1.amazonaws.com/login" in url:
+                return Response(
+                    body={
+                        "redirectUrl": "https://us-east-1.signin.aws/platform/d-9067642ac7/login?workflowStateHandle=h-1",
+                        "csrfToken": "csrf-1",
+                    }
+                )
+            raise AssertionError(f"未预设响应: {method} {url}")
+
+        client = AwsBuilderIdClient(session=ScriptedSession(router), log=lambda _m: None)
+        client.portal_login()  # 不该抛
+        self.assertEqual(client.workflow_handle, "h-1")
+
+
 class WafChallengeTests(unittest.TestCase):
     """AWS WAF 挑战：识别 → 交给打码 provider 换 token → 带 cookie 重试。"""
 
@@ -558,14 +823,16 @@ class _StubMailbox:
         self.email = email
         self.code = code
         self.waited = 0
+        self.last_kwargs: dict = {}
 
     def get_email(self):
         from core.mailboxes.base import MailboxAccount
 
         return MailboxAccount(email=self.email, account_id="token-1")
 
-    def wait_for_code(self, account, **_kwargs):
+    def wait_for_code(self, account, **kwargs):
         self.waited += 1
+        self.last_kwargs = dict(kwargs)
         return self.code
 
 
@@ -685,6 +952,49 @@ class AwsPluginContractTests(unittest.TestCase):
         ):
             client = platform._make_client(proxy=None)
         self.assertIs(client.captcha, sentinel, "打码链没接到 client 上 —— WAF 一定会失败")
+
+    def test_otp_waits_with_an_aws_matching_keyword_and_long_timeout(self):
+        """AWS 的邮件来自 signin.aws、正文写「AWS Builder ID」——关键词必须是 aws。
+
+        实测（2026-11-13）：关键词写成 `amazon` 时，验证码邮件到了也会被
+        邮箱渠道的关键词过滤跳过（发件人是 `no-reply_at_signin_aws_…`），
+        表现为「等码超时」而邮件其实就在收件箱里。
+        """
+        from core.base_platform import RegisterConfig
+        from platforms.aws import plugin as aws_plugin
+
+        client = _StubClient(
+            {
+                "email": "aws@x.ai",
+                "password": "Pw-1!",
+                "client_id": "cid",
+                "client_secret": "csec",
+                "access_token": "at-1",
+                "refresh_token": "rt-1",
+                "sso": "sso-1",
+            }
+        )
+        mailbox = _StubMailbox()
+        platform = aws_plugin.AwsPlatform(config=RegisterConfig(), mailbox=mailbox)
+        with mock.patch.object(
+            aws_plugin.AwsPlatform, "_make_client", lambda self, proxy=None: client
+        ):
+            platform.register(password="Pw-1!")
+
+        keyword = str(mailbox.last_kwargs.get("keyword") or "").lower()
+        self.assertIn("aws", keyword, f"关键词 {keyword!r} 匹配不到 AWS 的验证邮件")
+        self.assertGreaterEqual(
+            int(mailbox.last_kwargs.get("timeout") or 0),
+            300,
+            "AWS 验证码投递实测约 3 分钟，180s 会卡在边界上",
+        )
+
+    def test_otp_timeout_defaults_to_300_without_config(self):
+        from core.base_platform import RegisterConfig
+        from platforms.aws import plugin as aws_plugin
+
+        platform = aws_plugin.AwsPlatform(config=RegisterConfig())
+        self.assertEqual(platform.get_mailbox_otp_timeout(), 300)
 
     def test_check_valid_uses_refresh_endpoint(self):
         from core.base_platform import RegisterConfig
