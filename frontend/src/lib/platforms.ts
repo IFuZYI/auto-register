@@ -82,10 +82,20 @@ export const PLATFORMS: Record<PlatformName, PlatformMeta> = {
   },
 }
 
-export const PLATFORM_OPTIONS = Object.values(PLATFORMS).map(({ name, label }) => ({
-  value: name,
-  label,
-}))
+/**
+ * 注册页的平台下拉。
+ *
+ * **不含 AWS**：AWS Builder ID 已从「平台管理」移到「授权账号」页 ——
+ * 它是 Kiro 的授权根，不是并列的注册平台。注册入口在那一页自己给。
+ * 筛选类下拉仍用 `PLATFORM_FILTER_OPTIONS`（历史任务/邮箱池里 AWS 仍是
+ * 合法来源，不能从筛选里消失）。
+ */
+export const PLATFORM_OPTIONS = Object.values(PLATFORMS)
+  .filter(({ name }) => name !== 'aws')
+  .map(({ name, label }) => ({
+    value: name,
+    label,
+  }))
 
 export const PLATFORM_FILTER_OPTIONS = [{ value: '', label: '全部平台' }, ...PLATFORM_OPTIONS]
 

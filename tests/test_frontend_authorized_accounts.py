@@ -1,0 +1,56 @@
+"""前端接线契约：AWS 从「平台管理」移到「授权账号」页。
+
+这是纯源码契约（不跑浏览器）：改菜单、路由或平台下拉时，这里会指出漏改的一侧。
+
+* `App.tsx`：菜单里有 `/authorized-accounts`，且「平台管理」的二级项过滤掉 aws；
+  路由把 `/accounts/aws` 重定向过去。
+* `platforms.ts`：注册页的 `PLATFORM_OPTIONS` 不再包含 aws，但筛选用的
+  `PLATFORM_FILTER_OPTIONS` 仍然包含（历史任务/邮箱池里 AWS 仍是合法来源）。
+* `AuthorizedAccounts.tsx`：确实用 `platform: 'aws'` 起注册任务，并给出
+  Kiro 派生链（`source_email`）。
+"""
+from __future__ import annotations
+
+import unittest
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+FRONTEND = ROOT / "frontend" / "src"
+
+
+class AuthorizedAccountsWiringTests(unittest.TestCase):
+    def _read(self, relative: str) -> str:
+        return (FRONTEND / relative).read_text(encoding="utf-8")
+
+    def test_menu_and_route_are_wired(self):
+        source = self._read("App.tsx")
+        self.assertIn("key: '/authorized-accounts'", source)
+        self.assertIn("label: '授权账号'", source)
+        self.assertIn('path="/authorized-accounts"', source)
+        self.assertIn('to="/authorized-accounts"', source, "/accounts/aws 应重定向")
+
+    def test_platform_menu_excludes_aws(self):
+        source = self._read("App.tsx")
+        self.assertIn("p.key !== 'aws'", source, "平台管理的二级菜单仍在列 AWS")
+
+    def test_platform_options_exclude_aws_but_filters_keep_it(self):
+        source = self._read("lib/platforms.ts")
+        self.assertIn(".filter(({ name }) => name !== 'aws')", source)
+        # 筛选清单由 PLATFORMS 派生，必须仍然包含 aws
+        self.assertIn("export const PLATFORM_FILTER_OPTIONS", source)
+        self.assertNotIn(
+            "PLATFORM_FILTER_OPTIONS = Object.values(PLATFORMS).filter",
+            source,
+            "筛选清单不能跟着注册下拉一起排除 aws",
+        )
+
+    def test_page_registers_aws_and_shows_the_derivation_chain(self):
+        source = self._read("pages/AuthorizedAccounts.tsx")
+        self.assertIn("platform: 'aws'", source)
+        self.assertIn("/tasks/register", source)
+        self.assertIn("source_email", source, "授权链要按 Kiro 的 source_email 归组")
+        self.assertIn("authorized", source.lower())
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -5,7 +5,7 @@
 
 | 维度 | 支持 |
 | --- | --- |
-| **平台** | ChatGPT（纯协议，无需浏览器）· Grok（camoufox 浏览器路径）· AWS Builder ID（纯协议）· Kiro（AWS Builder ID + Kiro OAuth） |
+| **平台** | ChatGPT（纯协议，无需浏览器）· Grok（camoufox 浏览器路径）· AWS Builder ID（纯协议，管理入口在「授权账号」页）· Kiro（AWS Builder ID + Kiro OAuth） |
 | **邮箱来源** | iCloud 隐私邮箱（本地 / 远程仓库）· Outlook / Hotmail（本地号池） |
 | **面板对接** | CPA（CLIProxyAPI）· Sub2API · grok2api · chatgpt2api |
 | **验证码** | 本地 Turnstile Solver（Camoufox）· YesCaptcha · 手动 |

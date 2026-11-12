@@ -24,6 +24,17 @@ platforms/kiro/authorize.py      Builder ID SSO → Kiro IDE 授权码 → Kiro 
 Kiro 记录通过 `extra.source = "aws"` 与 `extra.source_email` 指回去 —— 这就是
 「kiro 保存来源（aws）」的落地方式。
 
+## 1.1 管理入口
+
+AWS 不再是「平台管理」里的一个平台（2026-11-13 调整）：它是 Kiro 的**授权根**，
+入口是侧栏一级页 **「授权账号」**（`/authorized-accounts`）。
+
+- 列表只列 `platform=aws` 的账号；
+- 「授权链」列按 Kiro 账号的 `extra.source_email` 归组，显示每个 Builder ID
+  派生出了几个 Kiro 账号；抽屉里是纵向的授权树（根 + 派生的 Kiro 账号/套餐）；
+- 注册、导入、导出、测活、刷新凭据都在这一页；`/accounts/aws` 会重定向过来；
+- 「平台管理」下只剩 ChatGPT / Grok / Kiro；注册页的平台下拉也不再列 AWS。
+
 ## 2. 账号记录口径
 
 ### `aws` 平台

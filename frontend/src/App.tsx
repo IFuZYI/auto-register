@@ -14,6 +14,7 @@ import {
   PlayCircleOutlined,
   ThunderboltFilled,
   AppstoreOutlined,
+  SafetyCertificateOutlined,
 } from '@ant-design/icons'
 import zhCN from 'antd/es/locale/zh_CN'
 // 路由级懒加载：这些页面原本静态导入，全部打进同一个 1.5 MB 的包 ——
@@ -30,6 +31,7 @@ const PAGE_LOADERS = {
   Settings: () => import('@/pages/Settings'),
   MailICloudLocalPage: () => import('@/pages/mail/MailICloudLocalPage'),
   MailOutlookPage: () => import('@/pages/mail/MailOutlookPage'),
+  AuthorizedAccounts: () => import('@/pages/AuthorizedAccounts'),
   PanelManagement: () => import('@/pages/PanelManagement'),
   TaskHistory: () => import('@/pages/TaskHistory'),
   RunningTasks: () => import('@/pages/RunningTasks'),
@@ -43,6 +45,7 @@ const Proxies = lazy(PAGE_LOADERS.Proxies)
 const Settings = lazy(PAGE_LOADERS.Settings)
 const MailICloudLocalPage = lazy(PAGE_LOADERS.MailICloudLocalPage)
 const MailOutlookPage = lazy(PAGE_LOADERS.MailOutlookPage)
+const AuthorizedAccounts = lazy(PAGE_LOADERS.AuthorizedAccounts)
 const PanelManagement = lazy(PAGE_LOADERS.PanelManagement)
 const TaskHistory = lazy(PAGE_LOADERS.TaskHistory)
 const RunningTasks = lazy(PAGE_LOADERS.RunningTasks)
@@ -345,11 +348,18 @@ function AppContent() {
       // 一个二级页（/mail/icloud）。iCloud 在 `uses_mailbox: False` 的平台里
       // 是个特例：它本身就是邮箱来源，管理界面跟其它平台的通用账号列表不是一回事。
       children: platforms
-        .filter(p => p.key !== 'icloud')
+        // AWS 不在这里：它是 Kiro 的授权根，入口是下面的「授权账号」页
+        // （/authorized-accounts）。iCloud 也不是注册平台 —— 它在「邮箱服务」。
+        .filter(p => p.key !== 'icloud' && p.key !== 'aws')
         .map(p => ({
           key: `/accounts/${p.key}`,
           label: p.label,
         })),
+    },
+    {
+      key: '/authorized-accounts',
+      icon: <SafetyCertificateOutlined />,
+      label: '授权账号',
     },
     {
       // 邮箱服务提到一级：它不再是「全局配置里的一个 tab」，而是一组页面。
@@ -518,7 +528,9 @@ function AppContent() {
                 <Routes>
                   <Route path="/" element={<Dashboard />} />
                   <Route path="/accounts" element={<Accounts />} />
+                  <Route path="/accounts/aws" element={<Navigate to="/authorized-accounts" replace />} />
                   <Route path="/accounts/:platform" element={<Accounts />} />
+                  <Route path="/authorized-accounts" element={<AuthorizedAccounts />} />
                   <Route path="/register" element={<RegisterTaskPage />} />
                   {/* iCloud 控制台搬到「邮箱服务」下了。旧路径重定向，老书签不 404 */}
                   <Route path="/icloud" element={<Navigate to="/mail/icloud" replace />} />

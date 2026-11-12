@@ -1783,3 +1783,209 @@ body {
 .maint-interval__unit {
   width: 96px;
 }
+
+/* ── 授权账号（AWS Builder ID）────────────────────────────────────────
+   这页只有一件「有颜色」的东西：授权链。根节点用 AWS 橙、派生节点用
+   Kiro 靛蓝，中间一条细线；其余全部沿用主题的中性色。 */
+.auth-page .auth-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  margin-bottom: 14px;
+}
+
+.auth-account {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.auth-account__email {
+  font-weight: 600;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.auth-account__meta {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 11px;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+
+.auth-time {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-secondary);
+}
+.auth-time span {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+/* 行内授权链：根 → 派生 */
+.auth-chain {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  white-space: nowrap;
+}
+
+.auth-chain__node {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+}
+
+.auth-chain__node--root {
+  background: #ff9900;
+  box-shadow: 0 0 0 3px rgba(255, 153, 0, 0.16);
+}
+
+.auth-chain__node--derived {
+  background: #6366f1;
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.16);
+}
+
+.auth-chain__node--idle {
+  background: transparent;
+  border: 1px dashed var(--border-strong);
+}
+
+.auth-chain__link {
+  width: 26px;
+  height: 1px;
+  background: linear-gradient(90deg, rgba(255, 153, 0, 0.75), rgba(99, 102, 241, 0.6));
+}
+
+.auth-chain__link--idle {
+  background: repeating-linear-gradient(
+    90deg,
+    var(--border-strong) 0 3px,
+    transparent 3px 6px
+  );
+}
+
+.auth-chain__label {
+  font-size: 12px;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 抽屉里的纵向授权树 */
+.auth-tree {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--bg-subtle);
+}
+
+.auth-tree__root,
+.auth-tree__branch {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 8px 0;
+}
+
+.auth-tree__root {
+  position: relative;
+}
+
+.auth-tree__branches {
+  margin-left: 3px;
+  padding-left: 14px;
+  border-left: 1px solid var(--border-strong);
+  display: flex;
+  flex-direction: column;
+}
+
+.auth-tree__branch {
+  position: relative;
+}
+
+.auth-tree__branch::before {
+  content: '';
+  position: absolute;
+  left: -15px;
+  top: 18px;
+  width: 12px;
+  height: 1px;
+  background: var(--border-strong);
+}
+
+.auth-tree__node {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-top: 6px;
+  flex: 0 0 auto;
+}
+
+.auth-tree__node--root {
+  background: #ff9900;
+  box-shadow: 0 0 0 3px rgba(255, 153, 0, 0.16);
+}
+
+.auth-tree__node--derived {
+  background: #6366f1;
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.16);
+}
+
+.auth-tree__body {
+  min-width: 0;
+}
+
+.auth-tree__email {
+  font-weight: 600;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.auth-tree__meta {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.auth-tree__empty {
+  padding: 8px 0 4px;
+  font-size: 12px;
+  color: var(--text-muted);
+  max-width: 46ch;
+}
+
+/* 说明条：比 Alert 安静（不抢标题与主按钮的注意力），只用一条细边。 */
+.auth-note {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 10px 14px;
+  margin-bottom: 16px;
+  border-left: 2px solid var(--border-strong);
+  background: var(--bg-subtle);
+  border-radius: 0 10px 10px 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.65;
+  max-width: 78ch;
+}
+
+.auth-note .anticon {
+  margin-top: 3px;
+  color: var(--text-muted);
+}
+
+@media (max-width: 767px) {
+  /* 卡片模式下状态 Tag 会被 flex 拉成一条长条 —— 钉回内容宽度 */
+  .auth-page .table-cards .ant-table-tbody > tr.ant-table-row > td > .ant-tag {
+    flex: 0 0 auto;
+  }
+}

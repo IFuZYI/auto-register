@@ -445,10 +445,14 @@ class SidebarOrderTests(unittest.TestCase):
     """
 
     #: 期望的一级菜单顺序（`/mail` 的二级项会被正则一并抓到，见下）
+    #:
+    #: 2026-11-13：`/authorized-accounts`（授权账号）加在「平台管理」之后 ——
+    #: AWS 从平台管理移到这里（它是 Kiro 的授权根，不是并列的注册平台）。
     EXPECTED = [
         "/",
         "/running-tasks",
         "/accounts",
+        "/authorized-accounts",
         "/mail",
         "/mail/icloud",
         "/mail/outlook",
