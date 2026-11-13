@@ -104,7 +104,8 @@ Agent2API 的 Kiro 解析器读扁平字段（`accessToken` / `refreshToken` /
 同一邮箱的 GitHub/Google 两个 provider 不会撞），身份回退读 `email`；
 `loginProvider` 小写（插件的 refresh 分支按 `"builderid"` 比较）；
 **不导出 `uid`**（它会把 Agent2API 的身份压成同一个 `"builderid"`，
-23 个号互相覆盖）。
+23 个号互相覆盖）。这些约束由 `scripts/check_kiro_agent2api_export.py`
+（`tests/test_kiro_agent2api_contract.py`）守住。
 
 ### 3.2 Kiro 账号管理器（`kiro_json`，保留格式）
 
