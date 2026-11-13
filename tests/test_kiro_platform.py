@@ -653,6 +653,47 @@ class KiroExportImportTests(unittest.TestCase):
         payload = json.loads(render_accounts([other], "kiro_json"))
         self.assertEqual(payload["accounts"], [])
 
+    def test_legacy_camel_case_row_exports_its_credentials(self):
+        """旧行只有 camelCase 拼写时，`kiro.json` 导出不能是空凭据。
+
+        旧版 JSON 导入的 catch-all 会把 `clientId` / `clientSecret` /
+        `accessToken` / `refreshToken` / `profileArn` 原样落进 extra（当时
+        还没有归一表）。`to_account_entry` 原来只读 snake_case，这类行导出
+        出来的 `pluginSecret` 是空串 —— 恢复后既刷新不了也调不了 Kiro 后端。
+        """
+        from core.models.account import AccountRecord
+        from services.account_export import render_accounts
+
+        legacy = AccountRecord(
+            platform="kiro",
+            email="legacy@x.ai",
+            password="pw",
+            extra={
+                "accessToken": "at-legacy",
+                "refreshToken": "rt-legacy",
+                "clientId": "cid-legacy",
+                "clientSecret": "csec-legacy",
+                "profileArn": "arn:aws:codewhisperer:us-east-1:699475941385:profile/LEGACY",
+                "region": "us-east-1",
+                "auth_method": "idc",
+                "login_provider": "BuilderId",
+                "plan": "Kiro FREE",
+                "account_id": "legacy@x.ai",
+                "uid": "builderid",
+                "source": "aws",
+            },
+        )
+        secret = json.loads(render_accounts([legacy], "kiro_json"))["accounts"][0]["pluginSecret"]
+        self.assertEqual(secret["access"], "at-legacy", "camelCase 的 AT 被漏读，导出为空")
+        self.assertEqual(secret["refresh"], "rt-legacy", "camelCase 的 RT 被漏读，导出为空")
+        self.assertEqual(secret["clientId"], "cid-legacy")
+        self.assertEqual(secret["clientSecret"], "csec-legacy")
+        self.assertEqual(
+            secret["profileArn"],
+            "arn:aws:codewhisperer:us-east-1:699475941385:profile/LEGACY",
+            "camelCase 的 profileArn 被漏读，回落成了默认 ARN（指错 profile）",
+        )
+
     def test_generic_json_export_keeps_kiro_credentials(self):
         """「JSON 全字段」导出不能丢 kiro 的 client_secret / profile_arn / source。"""
         from services.account_export import render_accounts

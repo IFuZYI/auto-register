@@ -49,6 +49,8 @@ import re
 import time
 from typing import Any, Iterable, Mapping
 
+from core.credential_fields import first_present
+
 from .constants import (
     AUTH_METHOD_IDC,
     EXPORT_SOURCE,
@@ -190,16 +192,29 @@ def _ms_of(value: Any) -> int:
 
 
 def to_account_entry(account: Any) -> dict[str, Any]:
-    """账号 → kiro.json 的 `accounts[]` 条目（字段名与样例逐一对齐）。"""
+    """账号 → kiro.json 的 `accounts[]` 条目（字段名与样例逐一对齐）。
+
+    读取带**别名兜底**：旧版 JSON 导入的 catch-all 会把 camelCase 拼写原样
+    落进 extra（`clientId` / `clientSecret` / `accessToken` / `refreshToken` /
+    `profileArn`），只读 snake_case 的话这类旧行导出出来是空凭据 —— 恢复后
+    刷新不了、也调不了 Kiro 后端。`access` / `refresh` 是账号管理器
+    `pluginSecret` 的拼写，同样是历史行可能带的形状。
+    """
     extra = _extra_of(account)
     email = _attr(account, "email") or _clean(extra.get("account_id"))
-    access = _clean(extra.get("access_token")) or _attr(account, "access_token")
-    refresh = _clean(extra.get("refresh_token")) or _attr(account, "refresh_token") or _attr(account, "token")
+    access = first_present(extra, ("access_token", "accessToken", "access")) or _attr(
+        account, "access_token"
+    )
+    refresh = (
+        first_present(extra, ("refresh_token", "refreshToken", "refresh"))
+        or _attr(account, "refresh_token")
+        or _attr(account, "token")
+    )
     auth_method = _clean(extra.get("auth_method")) or AUTH_METHOD_IDC
     login_provider = _clean(extra.get("login_provider")) or "BuilderId"
     plan = _clean(extra.get("plan")) or DEFAULT_PLAN
     region = _clean(extra.get("region")) or REGION
-    profile_arn = _clean(extra.get("profile_arn")) or DEFAULT_PROFILE_ARN
+    profile_arn = first_present(extra, ("profile_arn", "profileArn")) or DEFAULT_PROFILE_ARN
     account_id = _clean(extra.get("account_id")) or email
     uid = _clean(extra.get("uid")) or ("github" if auth_method == AUTH_METHOD_SOCIAL else "builderid")
     expires_ms = _ms_of(extra.get("expires_at"))
@@ -236,8 +251,8 @@ def to_account_entry(account: Any) -> dict[str, Any]:
         "pluginSecret": {
             "access": access,
             "accountId": account_id,
-            "clientId": _clean(extra.get("client_id")),
-            "clientSecret": _clean(extra.get("client_secret")),
+            "clientId": first_present(extra, ("client_id", "clientId")),
+            "clientSecret": first_present(extra, ("client_secret", "clientSecret")),
             "expires": expires_ms,
             "loginProvider": login_provider,
             "method": auth_method,

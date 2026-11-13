@@ -21,9 +21,42 @@ const KINDS: Record<string, TaskKindMeta> = {
   chatgpt2api_sync: { label: '凭证同步', color: 'magenta' },
 }
 
+/**
+ * 前缀型来源：后端按平台/动作拼出来的 source，逐个登记不现实。
+ *
+ * - `auto_probe_<platform>` / `auto_refresh_<platform>`：本地自动维护
+ *   （`services/local_maintenance.py` 按 `PLATFORM_ACTIONS` 给每个平台注册，
+ *   所以 AWS / Kiro 也是这两个前缀）；
+ * - `auto_pull_<panel>`：自动维护里从面板拉回状态。
+ *
+ * （`action:<id>` 单独处理 —— 它要按动作 id 给更具体的文案。）
+ *
+ * 不登记的话任务页会直接显示 `auto_probe_aws` 这种原始 id —— 平台标签
+ * 就在旁边，这里只需要说清「是什么任务」。
+ */
+const PREFIX_KINDS: { prefix: string; label: string; color: string }[] = [
+  { prefix: 'auto_probe_', label: '自动检测', color: 'cyan' },
+  { prefix: 'auto_refresh_', label: '自动刷新', color: 'cyan' },
+  { prefix: 'auto_pull_', label: '自动同步', color: 'magenta' },
+]
+
+/** 批量动作里最常见的两个 id（AWS / Kiro 的授权账号页就这两个动作）。 */
+const BATCH_ACTION_LABELS: Record<string, string> = {
+  probe: '批量测活',
+  refresh_token: '批量刷新 Token',
+}
+
 /** 任务类型 → 标签与颜色；未知类型原样显示（历史任务兼容）。 */
 export function taskKindMeta(source?: string): TaskKindMeta {
   const key = String(source || '').trim()
   if (!key) return { label: '未知', color: 'default' }
-  return KINDS[key] || { label: key, color: 'default' }
+  const exact = KINDS[key]
+  if (exact) return exact
+  if (key.startsWith('action:')) {
+    const actionId = key.slice('action:'.length)
+    return { label: BATCH_ACTION_LABELS[actionId] || '批量动作', color: 'blue' }
+  }
+  const prefixed = PREFIX_KINDS.find(({ prefix }) => key.startsWith(prefix))
+  if (prefixed) return { label: prefixed.label, color: prefixed.color }
+  return { label: key, color: 'default' }
 }

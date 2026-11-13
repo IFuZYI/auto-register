@@ -101,6 +101,17 @@ AWS 不再是「平台管理」里的一个平台（2026-11-13 调整）：它�
 > 在 `credential_crypto.SENSITIVE_EXTRA_KEYS` 里 —— 落盘即密文。它们与 RT
 > 同级：有这三件套就能无限续期 AT。
 
+`kiro.json` 之外，**通用导出**（账号页 → 导出）也覆盖了这些凭据：
+
+- **CSV（全字段表格）** 末尾追加了 `client_id` / `client_secret` / `sso` 三列
+  —— 前 11 列的位置不动，按列号切 CSV 的下游脚本不受影响；
+- **JSON（全字段）** 带上 `kiro_aws_access_token` / `kiro_aws_refresh_token` /
+  `kiro_aws_client_secret` / `kiro_aws_sso` / `kiro_aws_client_id` /
+  `kiro_aws_region` / `kiro_aws_email` 快照与显示名 `name` —— 备份/换机恢复
+  不会丢来源账号，Kiro 的展示名也不会变回邮箱；
+- 两者都有 camelCase 兜底（`clientId` / `clientSecret` / `profileArn`）：
+  旧版 JSON 导入把 camelCase 原样落库的行，导出来不会是空列。
+
 ## 4. 刷新与测活
 
 两个平台共用一组 OIDC 端点（`POST https://oidc.us-east-1.amazonaws.com/token`，
@@ -242,6 +253,46 @@ portal login → "" → start → get-identity-user（username + 指纹）
 同一出口连续注册多次后会被限流（同一个 400）。实测 **SOCKS5 代理 + `socks5h://`**
 （远端 DNS）稳定；直连只在前几次成功。
 
+### 6.7 自动维护（本地定时任务）
+
+AWS / Kiro 与 ChatGPT / Grok 共用同一套本地维护骨架
+（`services/local_maintenance.py`）：每个平台 **10 个配置键**，前缀 `aws_` / `kiro_`
+（键表在 `core/config_schema.py` 的 `maintenance` 分区）。
+
+| 键（`<平台>_` 前缀） | 作用 | 默认 |
+| --- | --- | --- |
+| `auto_refresh_enabled` | 自动刷新 Token 的总开关 | 关 |
+| `refresh_scope` | 刷谁：`failed`（失效/过期/受限）· `all` · `random` | `failed` |
+| `refresh_random_count` | `random` 档每轮刷多少个（1–1000） | `50` |
+| `refresh_interval` | 刷新间隔：`30m` / `6h` / `1d`（最短 5 分钟、最长 30 天） | `6h` |
+| `refresh_disable_banned` | 上游回答「已停用」时把账号标成 `banned` | 开 |
+| `auto_probe_enabled` | 自动检测的总开关 | 关 |
+| `probe_mode` | `sample`（按比例抽检）· `all`（全量） | `sample` |
+| `probe_sample_percent` | 抽检比例（1–100） | `20` |
+| `probe_strategy` | 抽检挑谁：`oldest`（最久未检测优先）· `random` | `oldest` |
+| `probe_interval` | 检测间隔（同 `refresh_interval` 的单位与上下限） | `6h` |
+
+周期任务**按 `PLATFORM_ACTIONS` 遍历注册**（`services/local_maintenance.py`
+末尾的循环）：AWS / Kiro 各两条，共 **4 条** —— `aws_auto_probe` /
+`aws_auto_refresh` / `kiro_auto_probe` / `kiro_auto_refresh`。它们复用手动动作
+同一条链（`probe` / `refresh_token`），所以定时与手动的判定、写回规则不会分叉。
+各自的开关关闭时（`auto_probe_enabled` / `auto_refresh_enabled`），或
+`probe_mode` / `refresh_scope` 不在白名单时，对应任务的 `interval_seconds`
+返回 0（= 不跑）—— 非法值不会退化成「全量」，静默放大执行量比不跑更危险。
+
+设置页的「本地维护」分区对 AWS / Kiro **不渲染「刷新策略」**
+（`*_sync_strategy`，即面板同步策略）：这两个平台没有可同步的面板
+（`PLATFORM_ACTIONS` 只有 probe / refresh），多一个永远是 `local_only` 的下拉
+只会让人以为配了会生效。前端键表在 `frontend/src/lib/maintenanceKeys.ts`
+（`syncable: false`），后端也**没有** `aws_sync_strategy` / `kiro_sync_strategy`
+这两个键 —— 提交上来会被当未知键丢弃。
+
+> **`probe_checked_at` 是抽检轮转的输入**：AWS / Kiro 的探测不像 ChatGPT 那样
+> 落 `chatgpt_local.checked_at`，只写 `extra.probe_checked_at`（毫秒 epoch，
+> `core/probe_credentials.mark_probe_checked`，**失败也写** —— 400/403 同样是
+> 「已经看过一眼」）。`services/local_maintenance.last_probe_at` 读它排序；
+> 没有这个戳时所有号都是 0，`oldest` 退化成 id 序、每轮都挑同一批号。
+
 ## 7. 已知边界
 
 > 历史记录：本节早期版本写「当前出口被 AWS 判 BLOCKED」「没有接码/打码」——
@@ -252,9 +303,9 @@ portal login → "" → start → get-identity-user（username + 指纹）
 - **验证码**：Builder ID 注册只发邮箱验证码；AWS WAF 需要 token 时走
   CapMonster → YesCaptcha → AI 的降级链，链上没有可用 provider 时
   `AwsCaptchaRequired` 明确失败（不是静默卡住）。
-- **自动维护**：`PLATFORM_ACTIONS` 已登记 aws / kiro 的探测与刷新动作，
-  但周期任务仍只为 chatgpt / grok 注册（配置键与界面还没做）—— 目前用
-  「账号页 → 测活 / 刷新 Token」手动触发，或批量动作。
+- **自动维护**：探测与刷新已接入本地定时任务（每平台 10 个配置键、AWS / Kiro
+  各两条周期任务），见 §6.7；手动触发仍可用「账号页 → 测活 / 刷新 Token」或
+  批量动作。
 - **打码需要预付余额**：CapMonster 的 `AmazonTask` 与 YesCaptcha 的
   `AwsClassification` 都按次计费；余额不足时 `AwsCaptchaRequired` 的 message
   里会带 provider 的原始报错（便于排查余额/网络）。

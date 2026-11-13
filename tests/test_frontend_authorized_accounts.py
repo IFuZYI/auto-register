@@ -92,5 +92,48 @@ class AuthorizedAccountsWiringTests(unittest.TestCase):
         self.assertIn("authorized", source.lower())
 
 
+class TaskPagePlatformWiringTests(unittest.TestCase):
+    """任务页（运行中 / 历史）必须能显示并筛选 AWS / Kiro。
+
+    平台筛选与标签都来自 `lib/platforms.ts`：筛选下拉用 `PLATFORM_FILTER_OPTIONS`
+    （从**未过滤**的 `PLATFORMS` 生成），平台列用 `getPlatformLabel`。任何一侧
+    缺 aws / kiro，任务页上这两个平台就是原始值 `aws` 或干脆选不到 —— 这条契约
+    把「页面接了共用表」和「共用表里有这两个平台」一起钉住。
+    """
+
+    def _read(self, relative: str) -> str:
+        return (FRONTEND / relative).read_text(encoding="utf-8")
+
+    def test_task_history_filters_and_labels_by_shared_platform_table(self):
+        source = self._read("pages/TaskHistory.tsx")
+        self.assertIn(
+            "PLATFORM_FILTER_OPTIONS",
+            source,
+            "任务历史没有用共用的平台筛选表 —— AWS / Kiro 可能选不到",
+        )
+        self.assertIn(
+            "options={PLATFORM_FILTER_OPTIONS}",
+            source,
+            "筛选下拉没把 PLATFORM_FILTER_OPTIONS 接到 Select 上",
+        )
+        self.assertIn("getPlatformLabel", source, "任务历史的平台列没用共用标签")
+
+    def test_running_tasks_labels_by_shared_platform_table(self):
+        source = self._read("pages/RunningTasks.tsx")
+        self.assertIn("getPlatformLabel", source, "运行中任务的平台标签没用共用标签")
+
+    def test_platform_table_contains_aws_and_kiro(self):
+        """筛选选项与标签都从 PLATFORMS 展开 —— 少了平台，标签回落成原始值。"""
+        source = self._read("lib/platforms.ts")
+        block = source.split("export const PLATFORMS", 1)[1].split(
+            "export const PLATFORM_OPTIONS", 1
+        )[0]
+        for name, label in (("aws", "AWS"), ("kiro", "Kiro")):
+            self.assertIn(f"{name}: {{", block, f"PLATFORMS 里没有 {name}")
+            self.assertIn(
+                f"label: '{label}'", block, f"PLATFORMS 里 {name} 的标签不对"
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

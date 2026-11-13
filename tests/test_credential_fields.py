@@ -326,6 +326,57 @@ class ImportExportWiringTests(unittest.TestCase):
                     "SENSITIVE_EXTRA_KEYS —— 别名键会明文落盘",
                 )
 
+    def test_every_camel_case_sensitive_key_is_normalized(self):
+        """反向契约：密文集里的 camelCase 键必须**有人归一**。
+
+        上面那条只遍历 `IMPORT_CAMEL_ALIASES` —— 只往 `SENSITIVE_EXTRA_KEYS`
+        里加一个新的 camelCase 别名（复审实证：`webAccessToken`）而忘了登记
+        归一表时，它仍然是绿的：键会被加密，但落进 extra 后没有消费者读得到
+        （读取方按 snake_case 查）。这就是「只加密不归一」。
+
+        所以反向查一遍：`SENSITIVE_EXTRA_KEYS` 里每个 **camelCase** 键，要么
+        是 `CREDENTIAL_FIELDS` 的别名（`canonical_writes` 会归一），要么是
+        `IMPORT_CAMEL_ALIASES` 的键（导入循环会归一）；归一目标还必须是
+        规范名 —— 归到一个没人读的键等于没归。
+
+        注：brief 的字面写法是「出现在 `IMPORT_CAMEL_ALIASES` 的值里」，但该
+        表的值是 snake_case 规范名，camelCase 键不可能出现在值里；这里按复审
+        建议（`task-2-rereview` 的 M2）落成「被任一张归一表覆盖」。蛇形键
+        （`device_code` / `kiro_aws_*`）不在射程内：它们本身就是规范拼写。
+        """
+        from core.credential_crypto import SENSITIVE_EXTRA_KEYS
+        from core.credential_fields import (
+            CREDENTIAL_FIELDS,
+            EXPORT_ONLY_EXTRA_KEYS,
+            IMPORT_CAMEL_ALIASES,
+        )
+
+        canonical_names = {field.name for field in CREDENTIAL_FIELDS} | set(
+            EXPORT_ONLY_EXTRA_KEYS
+        )
+        alias_to_canonical = {
+            alias: field.name for field in CREDENTIAL_FIELDS for alias in field.aliases
+        }
+        alias_to_canonical.update(IMPORT_CAMEL_ALIASES)
+
+        def is_camel_case(key: str) -> bool:
+            return "_" not in key and key != key.lower()
+
+        camel_sensitive = [key for key in SENSITIVE_EXTRA_KEYS if is_camel_case(key)]
+        self.assertTrue(camel_sensitive, "密文集里没有 camelCase 键？这条契约会变成恒真")
+        for key in camel_sensitive:
+            self.assertIn(
+                key, alias_to_canonical,
+                f"{key} 在 SENSITIVE_EXTRA_KEYS 里，但没有任何归一表认它 —— "
+                "「只加密不归一」：值会以 camelCase 键落盘，读取方（snake_case）"
+                "永远读不到。登记到 IMPORT_CAMEL_ALIASES 或 CREDENTIAL_FIELDS 别名",
+            )
+            self.assertIn(
+                alias_to_canonical[key], canonical_names,
+                f"{key} → {alias_to_canonical[key]}：归一目标不是规范名，"
+                "归一出来的值没人读",
+            )
+
     def test_tracked_keys_are_registry_driven(self):
         """动作结果落库（api/actions）不再用手写集合 —— 走注册表归一。"""
         import inspect

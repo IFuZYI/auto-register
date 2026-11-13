@@ -29,6 +29,19 @@ eq(mod.taskKindMeta('refresh_token'), { label: '刷新 Token', color: 'green' },
 eq(mod.taskKindMeta('auto_refresh'), { label: '自动刷新', color: 'cyan' }, 'auto_refresh')
 eq(mod.taskKindMeta('chatgpt2api_sync'), { label: '凭证同步', color: 'magenta' }, 'chatgpt2api_sync')
 
+// ── 前缀型来源：自动维护（AWS / Kiro 也走这条路）与批量动作 ──
+// 后端真实创建过的 source：`auto_probe_<platform>` / `auto_refresh_<platform>`
+// （services/local_maintenance.py）与 `action:<id>`（api/tasks.py 的批量动作）。
+// 没有这些文案时任务页会直接显示 `auto_probe_aws` 这种原始 id。
+eq(mod.taskKindMeta('auto_probe_aws'), { label: '自动检测', color: 'cyan' }, 'auto_probe_aws')
+eq(mod.taskKindMeta('auto_probe_kiro'), { label: '自动检测', color: 'cyan' }, 'auto_probe_kiro')
+eq(mod.taskKindMeta('auto_refresh_aws'), { label: '自动刷新', color: 'cyan' }, 'auto_refresh_aws')
+eq(mod.taskKindMeta('auto_refresh_kiro'), { label: '自动刷新', color: 'cyan' }, 'auto_refresh_kiro')
+eq(mod.taskKindMeta('auto_pull_cpa'), { label: '自动同步', color: 'magenta' }, 'auto_pull_cpa')
+eq(mod.taskKindMeta('action:probe'), { label: '批量测活', color: 'blue' }, 'action:probe')
+eq(mod.taskKindMeta('action:refresh_token'), { label: '批量刷新 Token', color: 'blue' }, 'action:refresh_token')
+eq(mod.taskKindMeta('action:unknown-op'), { label: '批量动作', color: 'blue' }, 'action:unknown-op')
+
 // ── 空值 / 未知值：不吞掉，原样显示 ──
 eq(mod.taskKindMeta(''), { label: '未知', color: 'default' }, 'empty')
 eq(mod.taskKindMeta(undefined), { label: '未知', color: 'default' }, 'undefined')
