@@ -56,6 +56,14 @@ class ExportEndpointTests(unittest.TestCase):
         self.assertIn("email_pw_2fa", ids)
         self.assertIn(body["default"], ids)
 
+    def test_kiro_auth_token_without_kiro_accounts_is_400(self):
+        response = self.client.post(
+            "/accounts/export-text",
+            json={"format": "kiro_auth_token", "platform": "chatgpt"},
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("没有可导出的 Kiro 账号", response.json()["detail"])
+
     def test_selection_export_keeps_the_requested_order(self):
         ids = [self._id_of("plain@example.com"), self._id_of("bound@example.com")]
 

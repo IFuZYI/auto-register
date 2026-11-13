@@ -316,22 +316,32 @@ def to_auth_token_entry(account: Any) -> dict[str, Any]:
         aws_client_id = _clean(extra.get("kiro_aws_client_id"))
         aws_client_secret = _clean(extra.get("kiro_aws_client_secret"))
         aws_refresh = _clean(extra.get("kiro_aws_refresh_token"))
-        if aws_client_id and aws_client_secret and aws_refresh:
-            client_id = aws_client_id
-            client_secret = aws_client_secret
-            access = _clean(extra.get("kiro_aws_access_token")) or access
-            refresh = aws_refresh
-            region = _clean(extra.get("kiro_aws_region")) or region
-            # AWS SSO AT 的过期时间没存：置为过去，强制插件先刷新。
-            expires_ms = 1
-            # 让插件按 loginProvider=builderid 填固定的 Builder ID profile。
-            profile_arn = ""
+        if not (aws_client_id and aws_client_secret and aws_refresh):
+            # 没有 AWS 快照的 idc 号导给 Agent2API 必然 invalid_client（它走
+            # AWS OIDC 刷新）。**失败要响**：导出一份「看起来成功、每个号都
+            # 查不了」的文件比直接报错更糟。
+            raise ValueError(
+                "idc 账号缺少 AWS SSO 快照（kiro_aws_client_id / "
+                f"kiro_aws_client_secret / kiro_aws_refresh_token），无法导出给 "
+                f"Agent2API: {email or account_id or '?'}"
+            )
+        client_id = aws_client_id
+        client_secret = aws_client_secret
+        access = _clean(extra.get("kiro_aws_access_token")) or access
+        refresh = aws_refresh
+        region = _clean(extra.get("kiro_aws_region")) or region
+        # AWS SSO AT 的过期时间没存：置为过去，强制插件先刷新。
+        expires_ms = 1
+        # 让插件按 loginProvider=builderid 填固定的 Builder ID profile。
+        profile_arn = ""
     name = _clean(extra.get("name")) or account_id or email
     # Agent2API 的账号迁移导入要求每条记录有**唯一 id**；身份回退读 email。
-    # 用 email 的哈希而不是邮箱原文：id 会出现在 URL / 日志里。
-    # 同一邮箱可以有 GitHub/Google 两个 provider：uid 必须进种子，否则两条
-    # 记录的 id 相同、导入时后一条覆盖前一条。
-    seed = f"{email or account_id or access}:{uid}".lower()
+    # 用 email+uid 的哈希做确定性 id（同邮箱的 GitHub/Google 不会撞）。
+    # 注意：这不是保密措施（email 在同一条记录里是明文），只是一个稳定的
+    # 关联键；不要用会轮换的 access token 当种子，否则每次刷新都换 id。
+    if not (email or account_id):
+        raise ValueError("Kiro 账号缺少 email/accountId，无法生成 Agent2API 账号 id")
+    seed = f"{email or account_id}:{uid}".lower()
     account_file_id = f"kiro-{hashlib.sha256(seed.encode('utf-8')).hexdigest()[:16]}"
 
     return {

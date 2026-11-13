@@ -592,7 +592,15 @@ class KiroAgent2ApiExportTests(unittest.TestCase):
     账号管理器的 pluginSecret 嵌套格式。
     """
 
-    def _account(self, *, auth_method="idc", login_provider="BuilderId", client_id="kid", client_secret="ksecret"):
+    def _account(
+        self,
+        *,
+        auth_method="idc",
+        login_provider="BuilderId",
+        client_id="kid",
+        client_secret="ksecret",
+        aws=True,
+    ):
         from core.models.account import AccountRecord
         from platforms.kiro.credentials import build_extra
 
@@ -610,20 +618,32 @@ class KiroAgent2ApiExportTests(unittest.TestCase):
             email="a@x.ai",
             expires_at=1794478346773,
         )
+        if aws and auth_method == "idc":
+            extra.update(
+                {
+                    "kiro_aws_client_id": "aws-cid",
+                    "kiro_aws_client_secret": "aws-csecret",
+                    "kiro_aws_refresh_token": "aws-rt",
+                    "kiro_aws_access_token": "aws-at",
+                    "kiro_aws_region": "us-east-1",
+                }
+            )
         return AccountRecord(platform="kiro", email="a@x.ai", password="pw", token="rt-1", extra=extra)
 
     def test_single_account_is_the_flat_auth_token_file(self):
         from services.account_export import render_accounts
 
         doc = json.loads(render_accounts([self._account()], "kiro_auth_token"))
-        self.assertEqual(doc["accessToken"], "at-1")
-        self.assertEqual(doc["refreshToken"], "rt-1")
-        self.assertEqual(doc["profileArn"], "arn:aws:codewhisperer:us-east-1:1:profile/X")
-        self.assertEqual(doc["clientId"], "kid")
-        self.assertEqual(doc["clientSecret"], "ksecret")
+        # idc 走 AWS SSO：client/RT 必须是 AWS 的，profile 留空、expires 置过去。
+        self.assertEqual(doc["accessToken"], "aws-at")
+        self.assertEqual(doc["refreshToken"], "aws-rt")
+        self.assertEqual(doc["profileArn"], "")
+        self.assertEqual(doc["clientId"], "aws-cid")
+        self.assertEqual(doc["clientSecret"], "aws-csecret")
         self.assertEqual(doc["region"], "us-east-1")
         self.assertEqual(doc["method"], "idc")
-        self.assertRegex(doc["expiresAt"], r"^\d{4}-\d{2}-\d{2}T")
+        self.assertEqual(doc["expires"], 1)
+        self.assertEqual(doc["expiresAt"], "1970-01-01T00:00:00.001Z")
         self.assertNotIn("pluginSecret", doc)
         # Agent2API 的账号导入要求每条有唯一 id；身份回退读 email。
         self.assertTrue(doc["id"].startswith("kiro-"))
@@ -645,7 +665,7 @@ class KiroAgent2ApiExportTests(unittest.TestCase):
         self.assertEqual(len(doc["accounts"]), 2)
         entry = doc["accounts"][0]
         self.assertEqual(entry["provider"], "kiro")
-        self.assertEqual(entry["accessToken"], "at-1")
+        self.assertEqual(entry["accessToken"], "aws-at")
         self.assertEqual(entry["method"], "idc")
         ids = [item["id"] for item in doc["accounts"]]
         self.assertEqual(len(set(ids)), 2, "每条账号的 id 必须唯一")
@@ -663,6 +683,13 @@ class KiroAgent2ApiExportTests(unittest.TestCase):
         self.assertEqual(doc["clientId"], "")
         self.assertEqual(doc["loginProvider"], "github")
         self.assertNotIn("uid", doc)
+
+    def test_idc_without_aws_snapshot_raises_instead_of_exporting_broken_creds(self):
+        from services.account_export import render_accounts
+
+        with self.assertRaisesRegex(ValueError, "缺少 AWS SSO 快照"):
+            render_accounts([self._account(aws=False)], "kiro_auth_token")
+
 
 
 class KiroExportImportTests(unittest.TestCase):

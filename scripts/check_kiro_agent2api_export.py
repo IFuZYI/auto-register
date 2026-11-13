@@ -72,7 +72,7 @@ def check() -> list[str]:
     problems: list[str] = []
 
     if len(entries) != 2:
-        return [f"expected 2 accounts, got {len(entries)}"]
+        problems.append(f"expected 2 accounts, got {len(entries)}")
     for index, entry in enumerate(entries):
         where = f"accounts[{index}]"
         if not str(entry.get("id") or "").strip():
@@ -87,7 +87,12 @@ def check() -> list[str]:
             problems.append(f"{where}: 缺少 accessToken")
         if not str(entry.get("refreshToken") or "").strip():
             problems.append(f"{where}: 缺少 refreshToken")
+        if not str(entry.get("expiresAt") or "").startswith("1970-"):
+            if entry.get("method") == "idc":
+                problems.append(f"{where}: idc 的 expiresAt 应强制刷新（1970…）")
         if entry.get("method") == "idc":
+            if entry.get("loginProvider") != "builderid":
+                problems.append(f"{where}: idc 的 loginProvider 必须是 builderid")
             # Agent2API 的 idc 刷新走 AWS SSO OIDC：必须是 AWS 的 client + RT，
             # 不是 Kiro IDE 的 OAuth 客户端（否则 invalid_client，额度/对话全挂）。
             if entry.get("clientId") != "aws-cid":
@@ -98,10 +103,24 @@ def check() -> list[str]:
                 problems.append(f"{where}: idc 必须强制刷新（AWS SSO AT 过期时间未知）")
             if str(entry.get("profileArn") or "").strip():
                 problems.append(f"{where}: idc 的 profileArn 应为空，交给插件填 Builder ID profile")
+            if not str(entry.get("clientSecret") or "").strip():
+                problems.append(f"{where}: 缺少 clientSecret")
+        elif entry.get("method") == "social":
+            if entry.get("loginProvider") not in ("github", "google"):
+                problems.append(f"{where}: social 的 loginProvider 应是 github/google")
 
     ids = [str(entry.get("id") or "") for entry in entries]
     if len(set(ids)) != len(ids):
         problems.append("同一邮箱的两个 provider 导出了相同 id，导入会互相覆盖")
+
+    # 缺少 AWS 快照的 idc 必须报错，而不是导出一份「看起来成功」的文件。
+    broken = _sample("idc", "BuilderId", "kid", "ksecret")
+    try:
+        render_auth_tokens([broken])
+    except ValueError:
+        pass
+    else:
+        problems.append("缺少 AWS 快照的 idc 没有报错，会导出 invalid_client 文件")
     return problems
 
 

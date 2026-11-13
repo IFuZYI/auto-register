@@ -75,6 +75,7 @@ AWS 不再是「平台管理」里的一个平台（2026-11-13 调整）：它�
   走 Agent2API 的批量账号导入（`POST /api/accounts/import`）。
 
 ```json
+// idc（Builder ID）：AWS SSO 凭据，expires 置过去强制先刷新，profile 留空
 {
   "id": "kiro-3f2a…（email+uid 的哈希）",
   "provider": "kiro",
@@ -82,11 +83,11 @@ AWS 不再是「平台管理」里的一个平台（2026-11-13 调整）：它�
   "email": "a@b.com",
   "accessToken": "aoa…",
   "refreshToken": "aor…",
-  "expires": 1794478346773,
-  "expiresAt": "2026-11-12T19:32:26.773Z",
+  "expires": 1,
+  "expiresAt": "1970-01-01T00:00:00.001Z",
   "region": "us-east-1",
-  "profileArn": "arn:aws:codewhisperer:…",
-  "clientId": "…",
+  "profileArn": "",
+  "clientId": "…（AWS SSO client）",
   "clientSecret": "…",
   "method": "idc",
   "loginProvider": "builderid",
@@ -95,10 +96,13 @@ AWS 不再是「平台管理」里的一个平台（2026-11-13 调整）：它�
 }
 ```
 
+social（GitHub/Google）用 Kiro OAuth 客户端与 RT，`expires` 是真实过期时间、
+`profileArn` 是 Kiro profile；`clientId`/`clientSecret` 通常为空（取决于导入来源）。
+
 Agent2API 的 Kiro 解析器读扁平字段（`accessToken` / `refreshToken` /
 `expiresAt`（RFC3339 字符串）/ `region` / `profileArn` / `clientId` /
 `clientSecret`），不认 `pluginSecret` 嵌套；`expires`（毫秒）同时给出，
-账号迁移导入也能用。social 账号的 `clientId` / `clientSecret` 为空。
+账号迁移导入也能用。
 
 账号迁移导入额外要求：每条记录有**唯一 `id`**（用 `email:uid` 的哈希，
 同一邮箱的 GitHub/Google 两个 provider 不会撞），身份回退读 `email`；
@@ -151,6 +155,10 @@ Kiro 的 OAuth 客户端与 RT。
 > `client_secret` 与 `kiro_aws_{access_token,refresh_token,client_secret,sso}`
 > 在 `credential_crypto.SENSITIVE_EXTRA_KEYS` 里 —— 落盘即密文。它们与 RT
 > 同级：有这三件套就能无限续期 AT。
+
+通用 CSV / JSON 导出（账号页 → 导出）仍包含 `kiro_aws_*` 快照
+（`EXPORT_ONLY_EXTRA_KEYS`），用于迁移与审计；只有 Agent2API 的
+`kiro_auth_token` 会按 idc/social 替换成对应的客户端。
 
 ## 4. 刷新与测活
 

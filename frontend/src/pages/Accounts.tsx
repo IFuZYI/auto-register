@@ -891,10 +891,11 @@ export default function Accounts() {
   }
 
   /**
-   * 「导出凭据」：把 Kiro 账号导出成账号管理器的 `kiro.json`（v2）。
+   * 「导出凭据」：把 Kiro 账号导出成 Agent2API 的 Kiro 导入文件
+   * （`kiro_auth_token`：单账号 = kiro-auth-token.json，多账号 = accounts 数组）。
    *
    * 与通用「导出」的区别：不弹格式选择，直接给这个格式 —— 这个文件的用途
-   * 就是喂给 Kiro 账号管理器，选错格式等于白导。
+   * 就是喂给 Agent2API，选错格式等于白导。
    * 勾选了就导勾选的，没勾选就导当前筛选结果。
    */
   const [kiroExporting, setKiroExporting] = useState(false)

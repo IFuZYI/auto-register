@@ -532,10 +532,18 @@ def export_accounts_text(
             created_at_end=body.created_at_end,
         )
 
+    if body.format == "kiro_auth_token" and not any(
+        str(getattr(account, "platform", "") or "") == "kiro" for account in accounts
+    ):
+        # 空文件会让导入端「成功导入 0 条」，调用方以为拿到了东西。
+        raise HTTPException(400, "没有可导出的 Kiro 账号（筛选结果为空？）")
+
     try:
         content = render_accounts(accounts, body.format)
     except KeyError:
         raise HTTPException(400, f"未知的导出格式: {body.format}")
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
     if response is not None:
         # 导出内容含明文凭据：不缓存
         response.headers["Cache-Control"] = "no-store"
