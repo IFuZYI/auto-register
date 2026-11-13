@@ -10,7 +10,7 @@
 | **面板对接** | CPA（CLIProxyAPI）· Sub2API · grok2api · chatgpt2api |
 | **验证码** | CapMonster（AWS WAF `AmazonTask`，纯协议链唯一能换 token）· YesCaptcha · AI 视觉兜底 · 本地 Turnstile Solver（Camoufox）· 手动 |
 | **手机接码** | SmsBower · HeroSMS（ChatGPT 命中 add-phone 时无人值守） |
-| **凭据加密** | AES-256-GCM，password / AT / RT / IDT / ST / SSO / 2FA / cookies 落盘即密文 |
+| **凭据加密** | AES-256-GCM，password / AT / RT / IDT / ST / SSO / client_secret / kiro_aws_* 快照 / 2FA / cookies 落盘即密文 |
 
 > ⚠️ 本项目仅供学习与研究，不得用于商业用途。使用产生的一切后果由使用者自负。
 

@@ -49,6 +49,9 @@ SOURCE_PREFIX = "kiro_aws_"
 def _source_snapshot(identity: dict[str, Any]) -> dict[str, str]:
     """来源 AWS 账号的凭据快照（重塑前缀，避免与 Kiro 凭据的键撞车）。"""
     snapshot: dict[str, str] = {}
+    email = str(identity.get("email") or "").strip()
+    if email:
+        snapshot[f"{SOURCE_PREFIX}email"] = email
     for key in ("access_token", "refresh_token", "client_id", "client_secret", "sso", "region"):
         value = str(identity.get(key) or "").strip()
         if value:

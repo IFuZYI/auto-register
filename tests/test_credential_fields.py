@@ -620,10 +620,3 @@ class TokenColumnMigrationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
-    def test_export_only_keys_are_exactly_cookies(self):
-        """额外键的**清单本身**也要钉住 —— 上面那条断言的是字面量集合，
-        这条保证常量没被顺手扩成别的凭据（比如把 password 塞进导出）。"""
-        from core.credential_fields import EXPORT_ONLY_EXTRA_KEYS
-
-        self.assertEqual(EXPORT_ONLY_EXTRA_KEYS, ("cookies",))

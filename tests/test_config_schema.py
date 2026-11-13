@@ -123,10 +123,11 @@ class MaintenanceKeyTests(unittest.TestCase):
             self.assertNotIn(f"{platform}_sync_strategy", CONFIG_KEYS)
 
     def test_maintenance_key_order_matches_the_panel(self):
-        """十个键必须**连续且按界面顺序**排列。
+        """十个键必须在 schema 里**连续且按声明顺序**排列。
 
-        顺序即界面顺序（`MaintenancePanel` 的键表也按这个顺序展开）；
-        散开或换序会让「哪一项属于哪个平台」在设置页里变得不可读。
+        面板的控件顺序由 `lib/maintenanceKeys.ts` 单独组织（检测在前、刷新在后），
+        这里钉的是 `CONFIG_KEYS` 的声明顺序；散开或换序会让「哪一项属于哪个平台」
+        在配置接口里变得不可读。
         """
         for platform in ("aws", "kiro"):
             expected = [f"{platform}_{suffix}" for suffix in self.PER_PLATFORM]

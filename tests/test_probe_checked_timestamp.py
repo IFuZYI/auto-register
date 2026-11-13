@@ -158,6 +158,23 @@ class ActionChainStampsProbeTests(unittest.TestCase):
         self.assertGreater(model.get_extra()["probe_checked_at"], 10**12)
         self.assertEqual(model.status, "banned")
 
+    def test_refresh_action_does_not_stamp(self):
+        """刷新不是「检测」：盖戳会让高频刷新的号在抽检排序里永远像刚看过。"""
+        model = self._apply(
+            "kiro",
+            "refresh_token",
+            {
+                "ok": True,
+                "data": {
+                    "access_token": "at-new",
+                    "refresh_token": "rt-new",
+                    "expires_in": 3600,
+                },
+            },
+        )
+        self.assertNotIn("probe_checked_at", model.get_extra())
+        self.assertEqual(model.get_extra()["access_token"], "at-new")
+
     def test_probe_indeterminate_stamps(self):
         """网络错误不改状态，但「看过一眼」要记下来。"""
         model = self._apply(

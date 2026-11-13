@@ -372,6 +372,7 @@ register_job("my_job", interval_seconds=lambda: ..., runner=lambda: ...)
 | `services/panel_comparison.py` | `compare_aliases()`（比对哪些字段） |
 | `services/panel_sync.py` / `panel_push.py` | `sync_aliases()`（拉/推哪些字段） |
 | `services/account_export.py` / `api/accounts.py` | `export_names()`（导出/导入字段） |
+| `api/accounts.py`（JSON 导入） | `IMPORT_CAMEL_ALIASES`（camelCase → 规范名归一） |
 | `api/actions.py` | `canonical_writes()`（动作结果落库归一） |
 | `platforms/grok/plugin.py` 等读侧 | `get_credential()` / `token_column_credential()` |
 
