@@ -147,7 +147,8 @@ CONFIG_SCHEMA: tuple[ConfigKey, ...] = (
     ConfigKey("sms_code_retries_per_phone", "sms"),
     # ---- 自动维护（本地定时任务；与「面板同步」是两件事）----
     #
-    # 命名约定：`<作用域>_<动作>_<参数>`，作用域是 `log` / `chatgpt` / `grok`。
+    # 命名约定：`<作用域>_<动作>_<参数>`，作用域是
+    # `log` / `chatgpt` / `grok` / `aws` / `kiro`。
     #
     # 间隔一律 `<数字><单位>`：`30m` / `6h` / `1d`。用户 2026-10-31 明确要的是
     # 「执行间隔」而不是「执行时间」—— 凌晨三点跑是**一天一次**的特例，而
@@ -182,6 +183,31 @@ CONFIG_SCHEMA: tuple[ConfigKey, ...] = (
     ConfigKey("grok_probe_strategy", "maintenance"),
     ConfigKey("grok_probe_interval", "maintenance"),
     ConfigKey("grok_sync_strategy", "maintenance"),
+    # AWS Builder ID / Kiro 本地维护（与上面同构）
+    #
+    # **没有 `*_sync_strategy`**：这两个平台没有可同步的面板（`PLATFORM_ACTIONS`
+    # 只登记 probe / refresh）。多配一个键会让设置页长出一个永远是 `local_only`
+    # 的下拉 —— 用户配了也不生效，比缺一个键更难发现。
+    ConfigKey("aws_auto_refresh_enabled", "maintenance"),
+    ConfigKey("aws_refresh_scope", "maintenance"),
+    ConfigKey("aws_refresh_random_count", "maintenance"),
+    ConfigKey("aws_refresh_interval", "maintenance"),
+    ConfigKey("aws_refresh_disable_banned", "maintenance"),
+    ConfigKey("aws_auto_probe_enabled", "maintenance"),
+    ConfigKey("aws_probe_mode", "maintenance"),
+    ConfigKey("aws_probe_sample_percent", "maintenance"),
+    ConfigKey("aws_probe_strategy", "maintenance"),
+    ConfigKey("aws_probe_interval", "maintenance"),
+    ConfigKey("kiro_auto_refresh_enabled", "maintenance"),
+    ConfigKey("kiro_refresh_scope", "maintenance"),
+    ConfigKey("kiro_refresh_random_count", "maintenance"),
+    ConfigKey("kiro_refresh_interval", "maintenance"),
+    ConfigKey("kiro_refresh_disable_banned", "maintenance"),
+    ConfigKey("kiro_auto_probe_enabled", "maintenance"),
+    ConfigKey("kiro_probe_mode", "maintenance"),
+    ConfigKey("kiro_probe_sample_percent", "maintenance"),
+    ConfigKey("kiro_probe_strategy", "maintenance"),
+    ConfigKey("kiro_probe_interval", "maintenance"),
     # ---- 贡献模式 ----
     ConfigKey("contribution_enabled", "contribution"),
     ConfigKey("contribution_server_url", "contribution"),

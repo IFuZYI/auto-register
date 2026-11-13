@@ -91,11 +91,26 @@ const PANEL_CARDS: MaintenanceCard[] = [
   },
 ]
 
+/** 一个本地维护平台。 */
+interface LocalPlatform {
+  prefix: string
+  label: string
+  subject: string
+  /**
+   * 有没有可同步的面板。`false` = 不渲染「刷新策略」，也不读写
+   * `*_sync_strategy`。AWS / Kiro 没有面板可对账（后端 `PLATFORM_ACTIONS`
+   * 只登记 probe / refresh），多一个下拉只会让人以为配了会生效。
+   */
+  syncable?: boolean
+}
+
 /** 本地维护的平台。顺序 = 界面顺序。 */
-const LOCAL_PLATFORMS = [
+const LOCAL_PLATFORMS: LocalPlatform[] = [
   { prefix: 'chatgpt', label: 'ChatGPT', subject: '账号' },
   { prefix: 'grok', label: 'Grok', subject: '账号' },
-] as const
+  { prefix: 'aws', label: 'AWS', subject: '账号', syncable: false },
+  { prefix: 'kiro', label: 'Kiro', subject: '账号', syncable: false },
+]
 
 const PROBE_MODE_OPTIONS = [
   { value: 'sample', label: '抽检' },
@@ -129,10 +144,13 @@ const SYNC_STRATEGY_OPTIONS = [
  * 本页要读写的全部配置键。
  *
  * **显式列出**而不是 `form.getFieldsValue(true)`：后者会把整份 config
- * （101 个键）提交上去，其中未渲染的字段值是 undefined，归一化会把它们
+ * （130 个键）提交上去，其中未渲染的字段值是 undefined，归一化会把它们
  * 变成「有意义的默认值」，等于保存一次就清空用户配好的东西（踩过）。
+ *
+ * 没有面板的平台（`syncable: false`）**不列** `*_sync_strategy`：这个键在
+ * 后端根本不存在，提交上去只会被当成未知键丢弃（还会回报 `ignored`）。
  */
-const LOCAL_KEYS: string[] = LOCAL_PLATFORMS.flatMap(({ prefix }) => [
+const LOCAL_KEYS: string[] = LOCAL_PLATFORMS.flatMap(({ prefix, syncable }) => [
   `${prefix}_auto_probe_enabled`,
   `${prefix}_probe_mode`,
   `${prefix}_probe_sample_percent`,
@@ -143,7 +161,7 @@ const LOCAL_KEYS: string[] = LOCAL_PLATFORMS.flatMap(({ prefix }) => [
   `${prefix}_refresh_random_count`,
   `${prefix}_refresh_interval`,
   `${prefix}_refresh_disable_banned`,
-  `${prefix}_sync_strategy`,
+  ...(syncable === false ? [] : [`${prefix}_sync_strategy`]),
 ])
 
 const LOG_KEYS = ['log_cleanup_enabled', 'log_cleanup_keep_days', 'log_cleanup_interval']
@@ -176,7 +194,7 @@ const TEXT_DEFAULTS: Record<string, string> = {
   log_cleanup_keep_days: '7',
   log_cleanup_interval: '24h',
 }
-for (const { prefix } of LOCAL_PLATFORMS) {
+for (const { prefix, syncable } of LOCAL_PLATFORMS) {
   Object.assign(TEXT_DEFAULTS, {
     [`${prefix}_probe_mode`]: 'sample',
     [`${prefix}_probe_sample_percent`]: '20',
@@ -185,8 +203,8 @@ for (const { prefix } of LOCAL_PLATFORMS) {
     [`${prefix}_refresh_scope`]: 'failed',
     [`${prefix}_refresh_random_count`]: '50',
     [`${prefix}_refresh_interval`]: '6h',
-    [`${prefix}_sync_strategy`]: 'local_only',
   })
+  if (syncable !== false) TEXT_DEFAULTS[`${prefix}_sync_strategy`] = 'local_only'
 }
 
 /** 一行开关（规则头）。开关关着时不渲染 `children`。 */
@@ -350,10 +368,12 @@ function LocalPlatformSection({
   prefix,
   label,
   subject,
+  syncable,
 }: {
   prefix: string
   label: string
   subject: string
+  syncable?: boolean
 }) {
   const probeMode = Form.useWatch(`${prefix}_probe_mode`)
   const refreshScope = Form.useWatch(`${prefix}_refresh_scope`)
@@ -440,17 +460,19 @@ function LocalPlatformSection({
             <Switch checkedChildren="开启" unCheckedChildren="关闭" aria-label={`${label} 检测到封禁就标记为禁用`} />
           </Form.Item>
         </SettingRow>
-        <SelectRow
-          name={`${prefix}_sync_strategy`}
-          label="刷新策略"
-          options={SYNC_STRATEGY_OPTIONS}
-          width={340}
-          hint={
-            '决定这一轮要不要和面板对账。' +
-            '「先同步远程」不是可有可无的一步：面板那侧可能已经用别的路径换过凭证，' +
-            '本地拿着旧的去刷等于白刷一次，上游还会把旧凭证判失效。'
-          }
-        />
+        {syncable !== false ? (
+          <SelectRow
+            name={`${prefix}_sync_strategy`}
+            label="刷新策略"
+            options={SYNC_STRATEGY_OPTIONS}
+            width={340}
+            hint={
+              '决定这一轮要不要和面板对账。' +
+              '「先同步远程」不是可有可无的一步：面板那侧可能已经用别的路径换过凭证，' +
+              '本地拿着旧的去刷等于白刷一次，上游还会把旧凭证判失效。'
+            }
+          />
+        ) : null}
       </RuleBlock>
     </section>
   )
@@ -524,8 +546,14 @@ export function MaintenancePanel() {
   // 平台节是静态的，用 `useMemo` 只是为了让它的引用稳定（避免每帧重挂载表单行）。
   const platformSections = useMemo(
     () =>
-      LOCAL_PLATFORMS.map(({ prefix, label, subject }) => (
-        <LocalPlatformSection key={prefix} prefix={prefix} label={label} subject={subject} />
+      LOCAL_PLATFORMS.map(({ prefix, label, subject, syncable }) => (
+        <LocalPlatformSection
+          key={prefix}
+          prefix={prefix}
+          label={label}
+          subject={subject}
+          syncable={syncable}
+        />
       )),
     [],
   )

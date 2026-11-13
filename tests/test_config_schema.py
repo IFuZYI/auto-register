@@ -67,7 +67,10 @@ class SchemaShapeTests(unittest.TestCase):
         # 105 → 110（同日）：AWS WAF 打码 ——
         #   capmonster_key / ai_captcha_url / ai_captcha_key /
         #   ai_captcha_model / captcha_provider_order
-        self.assertEqual(len(CONFIG_KEYS), 110, "键数变了要同步改文档")
+        # 110 → 130（同日）：AWS / Kiro 接入自动维护 —— 每平台 10 个维护键
+        #   （auto_refresh_* / refresh_* / auto_probe_* / probe_*），
+        #   **不含** sync_strategy：这两个平台没有可同步的面板。
+        self.assertEqual(len(CONFIG_KEYS), 130, "键数变了要同步改文档")
 
     def test_every_key_has_a_group(self):
         for item in CONFIG_SCHEMA:
@@ -83,6 +86,41 @@ class SchemaShapeTests(unittest.TestCase):
         groups = {item.group for item in CONFIG_SCHEMA}
         collected = {key for group in groups for key in keys_in_group(group)}
         self.assertEqual(collected, set(CONFIG_KEYS))
+
+
+class MaintenanceKeyTests(unittest.TestCase):
+    """AWS / Kiro 的维护键：每平台 10 个，且**没有** sync_strategy。
+
+    两个平台没有可同步的面板（`services.local_maintenance.PLATFORM_ACTIONS`
+    只登记 probe / refresh）。配一个 `*_sync_strategy` 只会在设置页长出一个
+    永远无效的下拉 —— 用户配了它也不会生效，比缺一个键更难发现。
+    """
+
+    #: 与 chatgpt / grok 对齐的十个键，顺序即界面顺序。
+    PER_PLATFORM = (
+        "auto_refresh_enabled",
+        "refresh_scope",
+        "refresh_random_count",
+        "refresh_interval",
+        "refresh_disable_banned",
+        "auto_probe_enabled",
+        "probe_mode",
+        "probe_sample_percent",
+        "probe_strategy",
+        "probe_interval",
+    )
+
+    def test_aws_and_kiro_maintenance_keys_are_registered(self):
+        for platform in ("aws", "kiro"):
+            for suffix in self.PER_PLATFORM:
+                key = f"{platform}_{suffix}"
+                self.assertIn(key, CONFIG_KEYS, f"{key} 没登记 → PUT /api/config 会静默丢弃")
+                self.assertEqual(BY_KEY[key].group, "maintenance", f"{key} 的分组不对")
+
+    def test_aws_and_kiro_have_no_sync_strategy(self):
+        """没有面板就没有「刷新策略」——多一个键就是多一个无效控件。"""
+        for platform in ("aws", "kiro"):
+            self.assertNotIn(f"{platform}_sync_strategy", CONFIG_KEYS)
 
 
 class ApiDerivesFromSchemaTests(unittest.TestCase):
@@ -119,7 +157,7 @@ class ReadsAreRegisteredTests(unittest.TestCase):
 class SchemaPayloadTests(unittest.TestCase):
     def test_payload_has_no_values(self):
         payload = schema_payload()
-        self.assertEqual(len(payload["keys"]), 110)
+        self.assertEqual(len(payload["keys"]), 130)
         self.assertEqual(sorted(payload["secrets"]), sorted(SECRET_CONFIG_KEYS))
         # 只允许这三个键：多一个就说明有人把值塞进来了
         self.assertEqual(set(payload), {"keys", "secrets", "groups"})

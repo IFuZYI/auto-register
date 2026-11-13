@@ -1135,3 +1135,43 @@ class PlatformAwareAccountColumnsTests(unittest.TestCase):
         src = self._src()
         self.assertIn('title="Grok 接入"', src, "Grok 详情该有自己的一组")
         self.assertIn('title="本地真实状态"', src, "GPT 那组不能被顶掉")
+
+
+class MaintenancePanelPlatformContractTests(unittest.TestCase):
+    """自动维护面板必须覆盖 AWS / Kiro，且不给它们「刷新策略」。
+
+    两个平台没有可同步的面板（后端 `services.local_maintenance.PLATFORM_ACTIONS`
+    只登记 probe / refresh）。渲染一个永远是 `local_only` 的下拉，用户配了它
+    也不会生效 —— 比缺一个控件更难发现。
+    """
+
+    PANEL = FRONTEND / "src" / "components" / "settings" / "MaintenancePanel.tsx"
+
+    def _src(self) -> str:
+        return self.PANEL.read_text(encoding="utf-8")
+
+    def test_aws_and_kiro_sections_exist(self):
+        src = self._src()
+        for prefix, label in (("aws", "AWS"), ("kiro", "Kiro")):
+            self.assertIn(f"prefix: '{prefix}'", src, f"{label} 没有本地维护分区")
+            self.assertIn(f"label: '{label}'", src, f"{label} 的显示名不对")
+
+    def test_platforms_without_a_panel_are_marked_not_syncable(self):
+        import re
+
+        src = self._src()
+        # 只认**平台条目**里的标记（注释里提到这个词不算）。
+        marked = re.findall(r"prefix: '(\w+)'[^}]*syncable: false", src)
+        self.assertEqual(
+            sorted(marked),
+            ["aws", "kiro"],
+            "只有 AWS / Kiro 该标 syncable: false（别的平台有面板可同步）",
+        )
+
+    def test_sync_strategy_control_is_hidden_for_non_syncable_platforms(self):
+        src = self._src()
+        self.assertRegex(
+            src,
+            r"\{syncable !== false \? \(\s*<SelectRow\s+name=\{`\$\{prefix\}_sync_strategy`\}",
+            "「刷新策略」下拉没被 syncable 包住 —— AWS / Kiro 会渲染一个永远无效的控件",
+        )

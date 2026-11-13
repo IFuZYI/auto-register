@@ -274,20 +274,67 @@ class SchedulerIntervalTests(unittest.TestCase):
 
 
 class JobRegistrationTests(unittest.TestCase):
-    def test_local_maintenance_registers_five_interval_jobs(self):
+    def test_local_maintenance_registers_an_interval_job_per_platform(self):
+        """`PLATFORM_ACTIONS` 里每个平台都要有 probe + refresh 两条周期任务。
+
+        只登记动作、不注册任务的症状是「面板上配了、定时器永远不跑」——
+        没有报错，只有什么都不发生。
+        """
         import services.local_maintenance  # noqa: F401
         from core.scheduler import _jobs
+        from services.local_maintenance import PLATFORM_ACTIONS
 
-        expected = {
-            "log_auto_cleanup",
-            "chatgpt_auto_probe",
-            "chatgpt_auto_refresh",
-            "grok_auto_probe",
-            "grok_auto_refresh",
-        }
+        expected = {"log_auto_cleanup"}
+        for platform in PLATFORM_ACTIONS:
+            expected.add(f"{platform}_auto_probe")
+            expected.add(f"{platform}_auto_refresh")
         for name in expected:
             self.assertIn(name, _jobs, f"{name} 没有注册")
             self.assertIsNotNone(_jobs[name].interval, f"{name} 不是间隔任务")
+
+    def test_aws_and_kiro_are_scheduled(self):
+        """AWS / Kiro 必须真的注册进调度器（不只是出现在 PLATFORM_ACTIONS 里）。"""
+        import services.local_maintenance  # noqa: F401
+        from core.scheduler import _jobs
+
+        for platform in ("aws", "kiro"):
+            for action in ("auto_probe", "auto_refresh"):
+                name = f"{platform}_{action}"
+                self.assertIn(name, _jobs, f"{name} 没有注册")
+                self.assertIsNotNone(_jobs[name].interval, f"{name} 不是间隔任务")
+
+    def test_each_platform_job_reads_its_own_config(self):
+        """lambda 必须**绑定**自己的平台名。
+
+        循环里直接闭包 `_p` 会晚绑定 —— 所有平台共用最后一个平台的配置键，
+        症状是「开 AWS 把 Kiro 一起开起来」。`_register_job` 的 interval
+        回调就是这个坑的暴露点。
+        """
+        import services.local_maintenance  # noqa: F401
+        from core.config_store import config_store
+        from core.scheduler import _jobs
+
+        platforms = ("chatgpt", "grok", "aws", "kiro")
+        try:
+            for platform in platforms:
+                config_store.set(f"{platform}_auto_probe_enabled", "")
+                config_store.set(f"{platform}_probe_mode", "")
+            config_store.set("aws_auto_probe_enabled", "1")
+            config_store.set("aws_probe_mode", "sample")
+            self.assertNotEqual(
+                _jobs["aws_auto_probe"].interval(), 0,
+                "开了 AWS 的自动检测，调度器却没读到",
+            )
+            for platform in ("chatgpt", "grok", "kiro"):
+                self.assertEqual(
+                    _jobs[f"{platform}_auto_probe"].interval(), 0,
+                    f"开 AWS 不该把 {platform} 一起开起来",
+                )
+        finally:
+            for platform in platforms:
+                config_store.set(f"{platform}_auto_probe_enabled", "")
+                config_store.set(f"{platform}_probe_mode", "")
+
 
 class BannedSwitchDefaultTests(unittest.TestCase):
     """「封禁账号标记为禁用」默认开 —— 不能靠改默认值改掉既有行为。"""
@@ -307,8 +354,8 @@ class BannedSwitchDefaultTests(unittest.TestCase):
             "死常量又回来了：改它不改变任何行为，默认值请改 _config_bool 的 default",
         )
 
-    def test_both_platforms_read_true_when_unset(self):
-        """库里没配过（空串）时，两个平台的开关都按「开」处理。
+    def test_every_platform_reads_true_when_unset(self):
+        """库里没配过（空串）时，每个平台的开关都按「开」处理。
 
         直接测真正生效的那次调用（`_config_bool(key, True)`），而不是一个
         不生效的常量集合。
@@ -316,7 +363,7 @@ class BannedSwitchDefaultTests(unittest.TestCase):
         from core.config_store import config_store
         from services.local_maintenance import _config_bool
 
-        for platform in ("chatgpt", "grok"):
+        for platform in ("chatgpt", "grok", "aws", "kiro"):
             key = f"{platform}_refresh_disable_banned"
             config_store.set(key, "")
             self.assertTrue(_config_bool(key, True), f"{key} 未配置时应按默认开")
@@ -332,7 +379,7 @@ class BannedSwitchDefaultTests(unittest.TestCase):
         from core.config_store import config_store
         import services.local_maintenance as lm
 
-        for platform in ("chatgpt", "grok"):
+        for platform in ("chatgpt", "grok", "aws", "kiro"):
             config_store.set(f"{platform}_refresh_disable_banned", "")
             seen: dict = {}
 

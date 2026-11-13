@@ -669,7 +669,7 @@ def _bind_refresh(_platform: str):
     return _runner
 
 
-for _p in ("chatgpt", "grok"):
+for _p in ("chatgpt", "grok", "aws", "kiro"):
     _register_job(
         f"{_p}_auto_probe",
         interval_seconds=(lambda _k=_p: get_auto_probe_interval_seconds(_k)),
