@@ -107,6 +107,14 @@ Agent2API 的 Kiro 解析器读扁平字段（`accessToken` / `refreshToken` /
 23 个号互相覆盖）。这些约束由 `scripts/check_kiro_agent2api_export.py`
 （`tests/test_kiro_agent2api_contract.py`）守住。
 
+**idc 账号的凭据来源**：Agent2API 的 `idc` 刷新走 **AWS SSO OIDC**
+（`oidc.{region}.amazonaws.com`），用的是 AWS 的 client + RT，不是 Kiro IDE
+的 OAuth 客户端（后者会 `invalid_client`，表现为额度/对话全部「查询失败」）。
+所以 idc 记录导出 `kiro_aws_client_id` / `kiro_aws_client_secret` /
+`kiro_aws_refresh_token` / `kiro_aws_access_token`，`profileArn` 留空让插件
+填固定的 Builder ID profile，`expires` 置为过去强制先刷新。social 账号仍用
+Kiro 的 OAuth 客户端与 RT。
+
 ### 3.2 Kiro 账号管理器（`kiro_json`，保留格式）
 
 `services/account_export.py` 仍注册 `kiro_json`（v2，账号管理器格式），

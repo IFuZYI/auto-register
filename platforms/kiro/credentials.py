@@ -307,6 +307,25 @@ def to_auth_token_entry(account: Any) -> dict[str, Any]:
     account_id = _clean(extra.get("account_id")) or email
     uid = _clean(extra.get("uid")) or ("github" if auth_method == AUTH_METHOD_SOCIAL else "builderid")
     expires_ms = _ms_of(extra.get("expires_at"))
+    client_id = _clean(extra.get("client_id"))
+    client_secret = _clean(extra.get("client_secret"))
+    # Agent2API 的 idc 刷新走 AWS SSO OIDC（oidc.{region}.amazonaws.com），
+    # 用的是 **AWS** 的 client + RT；Kiro IDE 的 OAuth 客户端在那边是
+    # invalid_client（额度/对话全部「查询失败」）。有来源快照就用 AWS 的。
+    if auth_method == AUTH_METHOD_IDC:
+        aws_client_id = _clean(extra.get("kiro_aws_client_id"))
+        aws_client_secret = _clean(extra.get("kiro_aws_client_secret"))
+        aws_refresh = _clean(extra.get("kiro_aws_refresh_token"))
+        if aws_client_id and aws_client_secret and aws_refresh:
+            client_id = aws_client_id
+            client_secret = aws_client_secret
+            access = _clean(extra.get("kiro_aws_access_token")) or access
+            refresh = aws_refresh
+            region = _clean(extra.get("kiro_aws_region")) or region
+            # AWS SSO AT 的过期时间没存：置为过去，强制插件先刷新。
+            expires_ms = 1
+            # 让插件按 loginProvider=builderid 填固定的 Builder ID profile。
+            profile_arn = ""
     name = _clean(extra.get("name")) or account_id or email
     # Agent2API 的账号迁移导入要求每条记录有**唯一 id**；身份回退读 email。
     # 用 email 的哈希而不是邮箱原文：id 会出现在 URL / 日志里。
@@ -326,8 +345,8 @@ def to_auth_token_entry(account: Any) -> dict[str, Any]:
         "expiresAt": _rfc3339(expires_ms),
         "region": region,
         "profileArn": profile_arn,
-        "clientId": _clean(extra.get("client_id")),
-        "clientSecret": _clean(extra.get("client_secret")),
+        "clientId": client_id,
+        "clientSecret": client_secret,
         "method": auth_method,
         # 插件的 refresh 分支按小写比较 "builderid"；uid 不导出（它会把
         # Agent2API 的身份压成同一个 "builderid"，23 个号互相覆盖）。

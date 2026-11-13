@@ -20,7 +20,13 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 
-def _sample(auth_method: str, login_provider: str, client_id: str, client_secret: str):
+def _sample(
+    auth_method: str,
+    login_provider: str,
+    client_id: str,
+    client_secret: str,
+    aws_extra: dict | None = None,
+):
     from core.models.account import AccountRecord
     from platforms.kiro.credentials import build_extra
 
@@ -38,6 +44,7 @@ def _sample(auth_method: str, login_provider: str, client_id: str, client_secret
         email="a@x.ai",
         expires_at=1794478346773,
     )
+    extra.update(aws_extra or {})
     return AccountRecord(
         platform="kiro", email="a@x.ai", password="pw", token="rt-1", extra=extra
     )
@@ -46,7 +53,19 @@ def _sample(auth_method: str, login_provider: str, client_id: str, client_secret
 def check() -> list[str]:
     from platforms.kiro.credentials import render_auth_tokens
 
-    idc = _sample("idc", "BuilderId", "kid", "ksecret")
+    idc = _sample(
+        "idc",
+        "BuilderId",
+        "kiro-cid",
+        "kiro-csecret",
+        {
+            "kiro_aws_client_id": "aws-cid",
+            "kiro_aws_client_secret": "aws-csecret",
+            "kiro_aws_refresh_token": "aws-rt",
+            "kiro_aws_access_token": "aws-at",
+            "kiro_aws_region": "us-east-1",
+        },
+    )
     social = _sample("social", "github", "", "")
     doc = json.loads(render_auth_tokens([idc, social]))
     entries = doc["accounts"]
@@ -68,6 +87,17 @@ def check() -> list[str]:
             problems.append(f"{where}: 缺少 accessToken")
         if not str(entry.get("refreshToken") or "").strip():
             problems.append(f"{where}: 缺少 refreshToken")
+        if entry.get("method") == "idc":
+            # Agent2API 的 idc 刷新走 AWS SSO OIDC：必须是 AWS 的 client + RT，
+            # 不是 Kiro IDE 的 OAuth 客户端（否则 invalid_client，额度/对话全挂）。
+            if entry.get("clientId") != "aws-cid":
+                problems.append(f"{where}: idc 的 clientId 必须是 AWS SSO 客户端")
+            if entry.get("refreshToken") != "aws-rt":
+                problems.append(f"{where}: idc 的 refreshToken 必须是 AWS SSO 的 RT")
+            if int(entry.get("expires") or 0) > 10**12:
+                problems.append(f"{where}: idc 必须强制刷新（AWS SSO AT 过期时间未知）")
+            if str(entry.get("profileArn") or "").strip():
+                problems.append(f"{where}: idc 的 profileArn 应为空，交给插件填 Builder ID profile")
 
     ids = [str(entry.get("id") or "") for entry in entries]
     if len(set(ids)) != len(ids):
