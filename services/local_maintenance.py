@@ -196,6 +196,12 @@ def last_probe_at(extra: dict[str, Any]) -> float:
     「从没探测过」必须是 0 而不是 `now` —— 抽检策略「优先更久未检测的」
     里，新号正是最该被看一眼的（它连一次都没验证过）。用 now 会把新号
     排到最后，越新的号越不被检查。
+
+    三种落点，按优先级：
+    - `chatgpt_local.checked_at` / `probe.checked_at`：ISO 字符串（ChatGPT 探针）；
+    - `probe_checked_at`：毫秒 epoch（AWS / Kiro 的探测只写这个，见
+      `core.probe_credentials.mark_probe_checked`）。没有它时排序退化成 id 序，
+      抽检每轮都挑同一批号。
     """
     candidates = (
         (extra.get("chatgpt_local") or {}).get("checked_at"),
@@ -205,7 +211,21 @@ def last_probe_at(extra: dict[str, Any]) -> float:
         parsed = _parse_time(raw)
         if parsed:
             return parsed
-    return 0.0
+    return _parse_epoch_ms(extra.get("probe_checked_at"))
+
+
+def _parse_epoch_ms(value: Any) -> float:
+    """毫秒 epoch → 秒；空值 / 非法值返回 0。
+
+    与 `extra["expires_at"]` 同款单位（毫秒），所以这里不必猜秒还是毫秒。
+    """
+    try:
+        amount = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    if amount <= 0 or not math.isfinite(amount):
+        return 0.0
+    return amount / 1000.0
 
 
 def _parse_time(value: Any) -> float:
@@ -669,7 +689,10 @@ def _bind_refresh(_platform: str):
     return _runner
 
 
-for _p in ("chatgpt", "grok", "aws", "kiro"):
+#: 一个平台只要有 probe / refresh 动作，就必须有自己的两条周期任务 ——
+#: 直接遍历 `PLATFORM_ACTIONS`，新增平台时不会漏注册（漏了不会报错，
+#: 只是「面板上配了、定时器永远不跑」）。
+for _p in PLATFORM_ACTIONS:
     _register_job(
         f"{_p}_auto_probe",
         interval_seconds=(lambda _k=_p: get_auto_probe_interval_seconds(_k)),

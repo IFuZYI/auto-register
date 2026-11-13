@@ -345,6 +345,8 @@ class FrontendWiringTests(unittest.TestCase):
 
     #: 维护开关所在的文件。搬迁只改这个常量，断言本身不动。
     MAINTENANCE_SRC = "components/settings/MaintenancePanel.tsx"
+    #: 平台清单（2026-11-13 从面板抽到 lib，供 node 真实执行做键表契约检查）。
+    PLATFORMS_SRC = "lib/maintenanceKeys.ts"
 
     def _src(self, rel: str) -> str:
         return (ROOT / "frontend" / "src" / rel).read_text(encoding="utf-8")
@@ -365,8 +367,11 @@ class FrontendWiringTests(unittest.TestCase):
             "本地维护的「自动刷新 Token」开关声明不见了",
         )
         self.assertIn("switchKey: 'chatgpt2api_auto_sync_enabled'", src, "缺面板同步开关声明")
+        platforms = self._src(self.PLATFORMS_SRC)
         for prefix in ("'chatgpt'", "'grok'"):
-            self.assertIn(f"prefix: {prefix}", src, f"平台清单里少了 {prefix} —— 那一节不会渲染")
+            self.assertIn(
+                f"prefix: {prefix}", platforms, f"平台清单里少了 {prefix} —— 那一节不会渲染"
+            )
 
     def test_switches_are_boolean_typed(self):
         """开关必须是 `Form.Item valuePropName="checked"` + `<Switch>`。

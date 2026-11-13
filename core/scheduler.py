@@ -220,9 +220,14 @@ class Scheduler:
                                     is BasePlatform.apply_probe_status_policy
                                 ):
                                     fresh.status = "invalid"
-                            from core.probe_credentials import persist_probe_credentials
+                            from core.probe_credentials import (
+                                mark_probe_checked,
+                                persist_probe_credentials,
+                            )
 
                             persist_probe_credentials(fresh, detail)
+                            # 抽检轮转靠这个戳（aws / kiro 没有 chatgpt_local.checked_at）。
+                            mark_probe_checked(fresh, detail)
                         fresh.updated_at = datetime.now(timezone.utc)
                         account_repository.upsert(fresh)
                 if valid:

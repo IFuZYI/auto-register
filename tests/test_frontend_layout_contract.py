@@ -1143,35 +1143,49 @@ class MaintenancePanelPlatformContractTests(unittest.TestCase):
     两个平台没有可同步的面板（后端 `services.local_maintenance.PLATFORM_ACTIONS`
     只登记 probe / refresh）。渲染一个永远是 `local_only` 的下拉，用户配了它
     也不会生效 —— 比缺一个控件更难发现。
+
+    平台表现在在 `lib/maintenanceKeys.ts`（纯数据，供 node 真实执行做键表
+    契约检查，见 `tests/test_maintenance_keys_contract.py`）；面板只负责渲染。
     """
 
     PANEL = FRONTEND / "src" / "components" / "settings" / "MaintenancePanel.tsx"
+    PLATFORMS = FRONTEND / "src" / "lib" / "maintenanceKeys.ts"
 
-    def _src(self) -> str:
+    def _panel(self) -> str:
         return self.PANEL.read_text(encoding="utf-8")
 
+    def _platforms(self) -> str:
+        return self.PLATFORMS.read_text(encoding="utf-8")
+
     def test_aws_and_kiro_sections_exist(self):
-        src = self._src()
+        src = self._platforms()
         for prefix, label in (("aws", "AWS"), ("kiro", "Kiro")):
             self.assertIn(f"prefix: '{prefix}'", src, f"{label} 没有本地维护分区")
             self.assertIn(f"label: '{label}'", src, f"{label} 的显示名不对")
 
-    def test_platforms_without_a_panel_are_marked_not_syncable(self):
+    def test_every_platform_declares_syncable_explicitly(self):
+        """`syncable` 是**必填**布尔：漏写由 tsc 抓，这里再钉一遍取值。"""
         import re
 
-        src = self._src()
+        src = self._platforms()
         # 只认**平台条目**里的标记（注释里提到这个词不算）。
-        marked = re.findall(r"prefix: '(\w+)'[^}]*syncable: false", src)
+        marked = dict(re.findall(r"prefix: '(\w+)'[^}]*syncable: (true|false)", src))
         self.assertEqual(
-            sorted(marked),
-            ["aws", "kiro"],
-            "只有 AWS / Kiro 该标 syncable: false（别的平台有面板可同步）",
+            marked,
+            {"chatgpt": "true", "grok": "true", "aws": "false", "kiro": "false"},
+            "四个平台都必须显式声明 syncable（AWS / Kiro 为 false）",
         )
 
     def test_sync_strategy_control_is_hidden_for_non_syncable_platforms(self):
-        src = self._src()
+        src = self._panel()
         self.assertRegex(
             src,
-            r"\{syncable !== false \? \(\s*<SelectRow\s+name=\{`\$\{prefix\}_sync_strategy`\}",
+            r"\{syncable \? \(\s*<SelectRow\s+name=\{`\$\{prefix\}_sync_strategy`\}",
             "「刷新策略」下拉没被 syncable 包住 —— AWS / Kiro 会渲染一个永远无效的控件",
         )
+
+    def test_panel_uses_the_shared_key_builder(self):
+        """键表必须来自 `lib/maintenanceKeys.ts`，不许在面板里再抄一份。"""
+        src = self._panel()
+        self.assertIn("from '@/lib/maintenanceKeys'", src)
+        self.assertIn("localKeysFor()", src)

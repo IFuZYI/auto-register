@@ -954,9 +954,14 @@ def _do_check(account_id: str):
                         fresh.status = "invalid"
                     # **成功也要写回**：探测本身就是一次刷新，成功时同样换回了
                     # 新 AT（上游可能轮换 RT）。审计第三轮 Critical。
-                    from core.probe_credentials import persist_probe_credentials
+                    from core.probe_credentials import (
+                        mark_probe_checked,
+                        persist_probe_credentials,
+                    )
 
                     persist_probe_credentials(fresh, detail)
+                    # 抽检轮转靠这个戳（aws / kiro 没有 chatgpt_local.checked_at）。
+                    mark_probe_checked(fresh, detail)
                 fresh.updated_at = datetime.now(timezone.utc)
                 account_repository.upsert(fresh)
         except Exception:

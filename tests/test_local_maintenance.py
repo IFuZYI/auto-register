@@ -109,6 +109,26 @@ class LastProbeAtTests(unittest.TestCase):
         self.assertEqual(last_probe_at({"chatgpt_local": {}}), 0.0)
         self.assertEqual(last_probe_at({"chatgpt_local": {"checked_at": "not-a-time"}}), 0.0)
 
+    def test_aws_probe_timestamp_is_used(self):
+        """AWS / Kiro 的探测只写 `probe_checked_at`（毫秒 epoch）。
+
+        没有这个回退时 `last_probe_at` 恒为 0，排序退化成 id 序 —— 抽检
+        每一轮都挑同一批号。
+        """
+        self.assertAlmostEqual(
+            last_probe_at({"probe_checked_at": 1_700_000_000_000}), 1_700_000_000.0, places=3
+        )
+        self.assertEqual(last_probe_at({"probe_checked_at": "not-a-time"}), 0.0)
+        self.assertEqual(last_probe_at({"probe_checked_at": 0}), 0.0)
+
+    def test_chatgpt_local_still_wins(self):
+        """既有形态优先：`chatgpt_local.checked_at` 在时不用新字段。"""
+        extra = {
+            "chatgpt_local": {"checked_at": "2026-10-31T00:00:00Z"},
+            "probe_checked_at": 1_600_000_000_000,
+        }
+        self.assertGreater(last_probe_at(extra), 1_700_000_000)
+
 
 class ProbeSelectionTests(unittest.TestCase):
     def test_all_mode_returns_everything_in_order(self):
@@ -126,6 +146,25 @@ class ProbeSelectionTests(unittest.TestCase):
         self.assertEqual(len(picked), 2)
         self.assertEqual(picked[0].id, 2, "从没探测过的号没排在最前")
         self.assertEqual(picked[1].id, 3, "第二顺位应该是最久没检测的")
+
+    def test_probe_checked_at_drives_the_oldest_rotation(self):
+        """AWS / Kiro 的抽检轮转必须真的轮得动（否则每轮都挑同一批）。"""
+        extras = [
+            {"probe_checked_at": 1_700_000_000_000},  # 刚看过
+            {"probe_checked_at": 1_600_000_000_000},  # 上一次
+            {},  # 从没看过 → 最优先
+        ]
+        rows = [
+            Pick(
+                id=idx,
+                email=f"aws{idx}@example.com",
+                status="registered",
+                last_probe_at=last_probe_at(extra),
+            )
+            for idx, extra in enumerate(extras)
+        ]
+        ordered = select_probe_targets(rows, mode="sample", percent=100, strategy="oldest")
+        self.assertEqual([p.id for p in ordered], [2, 1, 0])
 
     def test_sample_percent_rounds_and_keeps_at_least_one(self):
         rows = [_pick(i) for i in range(3)]

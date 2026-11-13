@@ -122,6 +122,21 @@ class MaintenanceKeyTests(unittest.TestCase):
         for platform in ("aws", "kiro"):
             self.assertNotIn(f"{platform}_sync_strategy", CONFIG_KEYS)
 
+    def test_maintenance_key_order_matches_the_panel(self):
+        """十个键必须**连续且按界面顺序**排列。
+
+        顺序即界面顺序（`MaintenancePanel` 的键表也按这个顺序展开）；
+        散开或换序会让「哪一项属于哪个平台」在设置页里变得不可读。
+        """
+        for platform in ("aws", "kiro"):
+            expected = [f"{platform}_{suffix}" for suffix in self.PER_PLATFORM]
+            start = CONFIG_KEYS.index(expected[0])
+            self.assertEqual(
+                list(CONFIG_KEYS[start:start + len(expected)]),
+                expected,
+                f"{platform} 的维护键没有连续按界面顺序排列",
+            )
+
 
 class ApiDerivesFromSchemaTests(unittest.TestCase):
     def test_api_config_keys_match_schema_exactly(self):

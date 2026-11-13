@@ -349,7 +349,10 @@ def _restamp_at_provenance(extra: dict, writes: dict) -> None:
     extra["chatgpt_token_refresh"] = stamp
 
 
-from core.probe_credentials import persist_probe_credentials  # noqa: F401  (re-export)
+from core.probe_credentials import (  # noqa: F401  (persist 仍是既有 re-export)
+    mark_probe_checked,
+    persist_probe_credentials,
+)
 
 
 def _apply_aws_kiro_status(acc_model, action_id, result, session) -> None:
@@ -392,6 +395,10 @@ def _apply_aws_kiro_status(acc_model, action_id, result, session) -> None:
             detail.update({"usable": None, "indeterminate": True})
     reason = platform.apply_probe_status_policy(acc_model, detail=detail)
     changed = bool(reason) or persist_probe_credentials(acc_model, detail, session)
+    if capability_of(action_id) is Capability.PROBE:
+        # 抽检轮转的时间戳：**成功与失败都写**（400/403/测不了同样是「看过一眼」）。
+        # 只给 probe 写 —— refresh 不是「检测」，盖上去会让常刷新的号永远轮不到抽检。
+        changed = mark_probe_checked(acc_model, detail) or changed
     if changed:
         from datetime import datetime, timezone
 
