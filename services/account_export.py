@@ -118,11 +118,14 @@ EXPORT_FIELDS: dict[str, ExportField] = {
         ExportField("session_token", "SessionToken", _extra_key("session_token", "sessionToken")),
         # grok 账号的主凭证是 SSO —— 导出/导入必须带上，否则换机器导入丢 SSO
         # （整理前实测的真 bug：导出没有 sso 字段，grok 账号往返即丢）。
-        ExportField("sso", "SSO", _extra_key("sso", "sso_token")),
+        # `ssoToken` 是旧版 JSON 导入 catch-all 会原样收下的 camelCase 拼写
+        #（`SENSITIVE_EXTRA_KEYS` 里也有它）—— 旧行导出要能读出来。
+        ExportField("sso", "SSO", _extra_key("sso", "sso_token", "ssoToken")),
         # AWS Builder ID / Kiro 的 OIDC 客户端：没有 client_id + client_secret
         # 就刷新不了 token（导入端从 extra 读 snake_case，见 api/accounts.py）。
-        ExportField("client_id", "ClientId", _extra_key("client_id")),
-        ExportField("client_secret", "ClientSecret", _extra_key("client_secret")),
+        # camelCase 兜底给旧行（旧版导入把 `clientId`/`clientSecret` 原样落库）。
+        ExportField("client_id", "ClientId", _extra_key("client_id", "clientId")),
+        ExportField("client_secret", "ClientSecret", _extra_key("client_secret", "clientSecret")),
         ExportField("phone_number", "手机号", _extra_key("phone_number")),
         ExportField("bound_email", "绑定邮箱", _extra_key("bound_email")),
         ExportField("user_id", "UID", _attr("user_id")),
@@ -192,6 +195,23 @@ def _render_kiro_json(accounts: Sequence[Any]) -> str:
     return dumps(export_document(accounts))
 
 
+#: `export_names()` 里**没有** `EXPORT_FIELDS` 读取器的键：旧行可能落成
+#: camelCase（`profileArn` 是账号管理器格式的拼写）。导出时按这份兜底。
+#: 有读取器的键（client_id / client_secret / sso）已在 `_extra_key` 里带别名。
+_EXTRA_ONLY_ALIASES: dict[str, tuple[str, ...]] = {
+    "profile_arn": ("profile_arn", "profileArn"),
+}
+
+
+def _extra_only_value(extra: dict, field_id: str) -> str:
+    """读只在 extra 的导出键（带 camelCase 兜底；空值不挡后面的别名）。"""
+    for name in _EXTRA_ONLY_ALIASES.get(field_id, (field_id,)):
+        value = _text(extra.get(name))
+        if value:
+            return value
+    return ""
+
+
 def _render_json(accounts: Sequence[Any]) -> str:
     # 凭证字段从注册表展开（`export_names()`）—— 手写清单会与注册表漂移
     # （整理前正是手写清单，sso 缺失导致 grok 账号往返丢字段）。
@@ -204,11 +224,11 @@ def _render_json(accounts: Sequence[Any]) -> str:
             {
                 # `export_names()` 里可能含**只在 extra 里**的键（如 `cookies`，
                 # 见 `credential_fields.EXPORT_ONLY_EXTRA_KEYS`）—— 它们没有
-                # `EXPORT_FIELDS` 读取器，直接从 extra 取值。
+                # `EXPORT_FIELDS` 读取器，直接从 extra 取值（带 camelCase 兜底）。
                 field_id: (
                     EXPORT_FIELDS[field_id].read(account, extra)
                     if field_id in EXPORT_FIELDS
-                    else str(extra.get(field_id) or "")
+                    else _extra_only_value(extra, field_id)
                 )
                 for field_id in (
                     "platform",

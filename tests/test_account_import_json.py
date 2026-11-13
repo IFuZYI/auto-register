@@ -701,12 +701,18 @@ class CamelCaseJsonImportTests(unittest.TestCase):
             self.assertNotIn(secret, raw, "别名键的机密值必须加密落盘")
 
     def test_existing_snake_case_value_is_not_overwritten_by_the_alias(self):
-        """两条拼写同时出现时以 snake_case 为准 —— 归一不能反向覆盖。"""
-        entry = self._entry(access_token="at-snake", accessToken="at-camel")
+        """两条拼写同时出现时以 snake_case 为准 —— 归一不能反向覆盖。
+
+        用 `client_id` / `clientId`：`canonical_writes` 只认
+        `CREDENTIAL_FIELDS` 的别名，看不到 clientId —— 这条才真正压到
+        `IMPORT_CAMEL_ALIASES` 的 setdefault 路径（换回 access_token 会变成
+        只测 canonical_writes，覆盖不到新加的映射）。
+        """
+        entry = self._entry(client_id="cid-snake", clientId="cid-camel")
         self.assertEqual(self._import(entry).status_code, 200)
 
         extra = account_repository.find_by_email("aws", self.EMAIL).get_extra()
-        self.assertEqual(extra.get("access_token"), "at-snake")
+        self.assertEqual(extra.get("client_id"), "cid-snake")
 
     def test_refresh_action_reads_the_normalized_credentials(self):
         """归一的目的是「能刷新」：AWS 刷新动作要能拿到 client_id/secret/RT。"""

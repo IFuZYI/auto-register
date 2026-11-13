@@ -289,6 +289,43 @@ class ImportExportWiringTests(unittest.TestCase):
         src = inspect.getsource(_render_json)
         self.assertIn("export_names", src, "_render_json 没有从注册表取凭证字段")
 
+    def test_import_alias_targets_are_registered_or_sensitive(self):
+        """`IMPORT_CAMEL_ALIASES` 的每个目标都必须是「有人管」的键。
+
+        契约两段（复审要求，2026-11-13）：
+
+        1. 目标 ∈ 凭证字段 ∪ 只进导出的额外键 ∪ 密文集。前两者决定它会被
+           导出/导入，后者决定它以密文落盘 —— 指向不存在的键等于归一出
+           一个谁都不读、也不加密的值。`client_id` / `profile_arn` 按设计住在
+           `EXPORT_ONLY_EXTRA_KEYS`（不参与面板比对/同步，也不是机密），
+           所以登记表必须把它们算进来。
+        2. 目标是敏感键时，**camelCase 别名自身也必须在
+           `SENSITIVE_EXTRA_KEYS` 里** —— 否则归一保留的别名键会明文落盘
+           （`clientSecret` / `ssoToken` 都在，未来新增的敏感别名漏登记就红）。
+        """
+        from core.credential_crypto import SENSITIVE_EXTRA_KEYS
+        from core.credential_fields import (
+            CREDENTIAL_FIELDS,
+            EXPORT_ONLY_EXTRA_KEYS,
+            IMPORT_CAMEL_ALIASES,
+        )
+
+        registered = {field.name for field in CREDENTIAL_FIELDS} | set(
+            EXPORT_ONLY_EXTRA_KEYS
+        )
+        sensitive = set(SENSITIVE_EXTRA_KEYS)
+        for alias, name in IMPORT_CAMEL_ALIASES.items():
+            self.assertIn(
+                name, registered | sensitive,
+                f"{alias} → {name}：目标键未登记，归一出来的值没人读/没人加密",
+            )
+            if name in sensitive:
+                self.assertIn(
+                    alias, sensitive,
+                    f"{alias} → {name}：目标是敏感键，但别名自身不在 "
+                    "SENSITIVE_EXTRA_KEYS —— 别名键会明文落盘",
+                )
+
     def test_tracked_keys_are_registry_driven(self):
         """动作结果落库（api/actions）不再用手写集合 —— 走注册表归一。"""
         import inspect

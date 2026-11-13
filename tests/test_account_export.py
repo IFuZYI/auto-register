@@ -153,6 +153,45 @@ class ExportFormatTests(unittest.TestCase):
         for key, want in snapshot.items():
             self.assertEqual(row.get(key), want, f"JSON 导出缺 {key} —— 备份会丢")
 
+    def test_legacy_camel_case_extra_exports_through_csv_and_json(self):
+        """旧行只落了 camelCase 时，CSV/JSON 导出仍要读得出来。
+
+        `clientId` / `clientSecret` / `ssoToken` 在旧版导入里会原样进 extra
+        （catch-all），`profileArn` 则在账号管理器格式里出现。导出读取器不带
+        别名的后果：备份出来的 CSV/JSON 这三列（以及 profile_arn）是空串，
+        恢复后 AWS/Kiro 刷新不了、Grok 的 SSO 直接丢。
+        """
+        profile_arn = "arn:aws:codewhisperer:us-east-1:1:profile/legacy"
+        account = AccountModel(
+            platform="kiro",
+            email="legacy-camel@example.com",
+            password="pw-legacy",
+            status="registered",
+            extra_json=json.dumps(
+                {
+                    "clientId": "legacy-cid",
+                    "clientSecret": "legacy-csec",
+                    "profileArn": profile_arn,
+                    "ssoToken": "legacy-sso",
+                },
+                ensure_ascii=False,
+            ),
+        )
+
+        csv_row = next(csv.DictReader(io.StringIO(render_accounts([account], "csv"))))
+        self.assertEqual(csv_row["client_id"], "legacy-cid")
+        self.assertEqual(csv_row["client_secret"], "legacy-csec")
+        self.assertEqual(csv_row["sso"], "legacy-sso")
+
+        json_row = json.loads(render_accounts([account], "json"))[0]
+        self.assertEqual(json_row["client_id"], "legacy-cid")
+        self.assertEqual(json_row["client_secret"], "legacy-csec")
+        self.assertEqual(json_row["sso"], "legacy-sso")
+        self.assertEqual(
+            json_row["profile_arn"], profile_arn,
+            "旧行的 profileArn 没被 JSON 导出读到",
+        )
+
     def test_json_export_is_parsable(self):
         rows = json.loads(render_accounts([_account()], "json"))
         self.assertEqual(rows[0]["totp_secret"], SECRET)
