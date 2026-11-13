@@ -79,7 +79,7 @@ AWS 不再是「平台管理」里的一个平台（2026-11-13 调整）：它�
 {
   "id": "kiro-3f2a…（email+uid 的哈希）",
   "provider": "kiro",
-  "name": "a@b.com",
+  "name": "a@b.com (BuilderId)",
   "email": "a@b.com",
   "accessToken": "aoa…",
   "refreshToken": "aor…",

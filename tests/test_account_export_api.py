@@ -56,6 +56,50 @@ class ExportEndpointTests(unittest.TestCase):
         self.assertIn("email_pw_2fa", ids)
         self.assertIn(body["default"], ids)
 
+    def test_kiro_auth_token_export_is_the_flat_agent2api_file(self):
+        from sqlmodel import Session, delete
+
+        from core.db import AccountModel, engine
+
+        with Session(engine) as session:
+            session.exec(delete(AccountModel).where(AccountModel.email == "kiro-export@x.ai"))
+            model = AccountModel(platform="kiro", email="kiro-export@x.ai", password="pw")
+            model.set_extra(
+                {
+                    "access_token": "at-kiro",
+                    "refresh_token": "rt-kiro",
+                    "client_id": "cid-kiro",
+                    "client_secret": "cs-kiro",
+                    "auth_method": "idc",
+                    "login_provider": "BuilderId",
+                    "account_id": "kiro-export@x.ai",
+                    "kiro_aws_client_id": "aws-cid",
+                    "kiro_aws_client_secret": "aws-cs",
+                    "kiro_aws_refresh_token": "aws-rt",
+                    "kiro_aws_access_token": "aws-at",
+                    "kiro_aws_region": "us-east-1",
+                }
+            )
+            session.add(model)
+            session.commit()
+            model_id = model.id
+        try:
+            response = self.client.post(
+                "/accounts/export-text",
+                json={"format": "kiro_auth_token", "account_ids": [model_id]},
+            )
+            self.assertEqual(response.status_code, 200, response.text[:300])
+            body = response.json()
+            self.assertEqual(body["total"], 1)
+            doc = json.loads(body["content"])
+            self.assertEqual(doc["accessToken"], "aws-at")
+            self.assertEqual(doc["clientId"], "aws-cid")
+            self.assertEqual(doc["email"], "kiro-export@x.ai")
+        finally:
+            with Session(engine) as session:
+                session.exec(delete(AccountModel).where(AccountModel.email == "kiro-export@x.ai"))
+                session.commit()
+
     def test_kiro_auth_token_without_kiro_accounts_is_400(self):
         response = self.client.post(
             "/accounts/export-text",

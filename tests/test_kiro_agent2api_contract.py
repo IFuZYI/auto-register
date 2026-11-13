@@ -46,3 +46,41 @@ class KiroAgent2ApiContractTests(unittest.TestCase):
         text = "\n".join(problems)
         for expected in ("缺少 id", "缺少 email", "clientId 必须是 AWS", "loginProvider"):
             self.assertIn(expected, text)
+
+    def test_checker_flags_a_missing_method(self):
+        """method 丢了不能让 idc/social 两条分支都跳过、误判成通过。"""
+        doc = json.dumps(
+            {
+                "accounts": [
+                    {
+                        "id": "kiro-a",
+                        "email": "a@x.ai",
+                        "loginProvider": "builderid",
+                        "accessToken": "at",
+                        "refreshToken": "rt",
+                        "clientId": "cid",
+                        "clientSecret": "cs",
+                        "expires": 1,
+                        "expiresAt": "1970-01-01T00:00:00.001Z",
+                        "profileArn": "",
+                    },
+                    {
+                        "id": "kiro-b",
+                        "email": "b@x.ai",
+                        "loginProvider": "github",
+                        "accessToken": "at",
+                        "refreshToken": "rt",
+                        "clientId": "",
+                        "clientSecret": "",
+                        "expires": 1794478346773,
+                        "expiresAt": "2026-11-12T19:32:26.773Z",
+                        "profileArn": "arn",
+                    },
+                ]
+            }
+        )
+        with mock.patch(
+            "platforms.kiro.credentials.render_auth_tokens", return_value=doc
+        ):
+            problems = check()
+        self.assertTrue(any("method 必须是 idc/social" in p for p in problems))

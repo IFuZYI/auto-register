@@ -148,9 +148,9 @@ class ExportFormat:
     # 多列格式相反，空字段必须留着占位。
     skip_empty_rows: bool = False
     renderer: Optional[Callable[[Sequence[Any]], str]] = field(default=None, compare=False)
-    #: 不在「导出格式」下拉里出现，但仍可按 id 调用（专用入口用）。
-    #: `kiro_json` 属于这种：Kiro 页有独立的「导出凭据」按钮，通用导出
-    #: 下拉里再列一次就是两个入口做同一件事。
+    #: 不在「导出格式」下拉里出现，但仍可按 id 调用（API-only / 专用入口）。
+    #: 当前两个：`kiro_auth_token`（Kiro 页「导出凭据」按 id 调用）、
+    #: `kiro_json`（账号管理器 v2，无 UI 入口，仅 API）。
     hidden: bool = False
 
     @property
@@ -362,7 +362,7 @@ _FORMAT_LIST: tuple[ExportFormat, ...] = (
         description="Kiro 账号管理器的导入格式：只含 kiro 平台账号",
         extension="json",
         renderer=_render_kiro_json,
-        # 专用入口：平台管理 → Kiro → 更多 → 导出凭据
+        # 无 UI 入口（API-only）：账号管理器 v2，见 PLATFORM_AWS_KIRO §3.2
         hidden=True,
     ),
 )

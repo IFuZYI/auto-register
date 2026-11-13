@@ -532,9 +532,9 @@ def export_accounts_text(
             created_at_end=body.created_at_end,
         )
 
-    if body.format == "kiro_auth_token" and not any(
-        str(getattr(account, "platform", "") or "") == "kiro" for account in accounts
-    ):
+    kiro_only = body.format in ("kiro_auth_token", "kiro_json")
+    kiro_rows = [a for a in accounts if str(getattr(a, "platform", "") or "") == "kiro"]
+    if kiro_only and not kiro_rows:
         # 空文件会让导入端「成功导入 0 条」，调用方以为拿到了东西。
         raise HTTPException(400, "没有可导出的 Kiro 账号（筛选结果为空？）")
 
@@ -550,7 +550,7 @@ def export_accounts_text(
 
     return {
         "format": body.format,
-        "total": len(accounts),
+        "total": len(kiro_rows) if kiro_only else len(accounts),
         "lines": len([line for line in content.split("\n") if line]) if content else 0,
         "content": content,
         "filename": export_filename(body.platform, body.format),
@@ -706,6 +706,10 @@ def _import_json_accounts(body: ImportRequest, session: Session) -> dict:
             if isinstance(payload.get(key), list):
                 payload = payload[key]
                 break
+        else:
+            # 单账号扁平文件（Kiro「导出凭据」单账号形态）：包成一条
+            if any(key in payload for key in ("email", "accessToken", "pluginSecret")):
+                payload = [payload]
     if not isinstance(payload, list):
         raise HTTPException(400, "JSON 导入需要一个数组（或含 accounts 数组的对象）")
 
@@ -746,6 +750,13 @@ def _import_json_accounts(body: ImportRequest, session: Session) -> dict:
         for key, value in canonical.items():
             if not str(entry.get(key) or "").strip():
                 entry[key] = value
+        # Kiro 扁平凭证：method/loginProvider 是刷新路径的 auth_method/
+        # login_provider（social 号丢了就会按 idc 去 AWS 刷新）。
+        if str(entry.get("platform") or entry.get("provider") or "").lower() == "kiro":
+            if not str(entry.get("auth_method") or "").strip() and entry.get("method"):
+                entry["auth_method"] = entry["method"]
+            if not str(entry.get("login_provider") or "").strip() and entry.get("loginProvider"):
+                entry["login_provider"] = entry["loginProvider"]
 
     created = 0
     updated = 0

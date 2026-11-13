@@ -166,7 +166,7 @@ cd frontend && npx tsc -b && npx eslint .  # 类型 + 风格
 | [MAINTENANCE](docs/MAINTENANCE.md) | 故障速查、定时任务、**部署约束 §1.6** |
 | [API_REFERENCE](docs/API_REFERENCE.md) | 每个接口的请求 / 响应形状 |
 | [EXTENDING](docs/EXTENDING.md) | 新增平台 / 注册流程 / 邮箱渠道 |
-| [PLATFORM_AWS_KIRO](docs/PLATFORM_AWS_KIRO.md) | AWS Builder ID / Kiro：协议分层、凭据口径、`kiro.json` 导入导出 |
+| [PLATFORM_AWS_KIRO](docs/PLATFORM_AWS_KIRO.md) | AWS Builder ID / Kiro：协议分层、凭据口径、`kiro.json` / Agent2API 导入导出 |
 | [DATABASE_MODULARITY](docs/DATABASE_MODULARITY.md) | 分库、邮箱唯一键、跨库查询 |
 | [DATA_DIRECTORY](docs/DATA_DIRECTORY.md) | 数据目录布局与路径规则 |
 | [GLOSSARY](docs/GLOSSARY.md) · [ADR](docs/adr/) | 术语表 · 架构决策记录 |

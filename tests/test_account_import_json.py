@@ -86,6 +86,42 @@ class JsonImportTests(unittest.TestCase):
         finally:
             self._cleanup("chatgpt", email)
 
+    def test_single_flat_kiro_object_is_importable(self):
+        """Agent2API 单账号扁平文件（kiro-auth-token.json）也能直接导入。"""
+        email = "agent2api-single@example.com"
+        payload = {
+            "id": "kiro-test",
+            "provider": "kiro",
+            "email": email,
+            "accessToken": "at-flat",
+            "refreshToken": "rt-flat",
+            "clientId": "cid-flat",
+            "clientSecret": "cs-flat",
+            "profileArn": "arn:flat",
+            "method": "idc",
+            "loginProvider": "builderid",
+            "accountId": email,
+            "expires": 1,
+            "expiresAt": "1970-01-01T00:00:00.001Z",
+            "region": "us-east-1",
+            "plan": "Kiro FREE",
+        }
+        try:
+            r = self._import(payload, platform="kiro")
+            self.assertEqual(r.status_code, 200, r.text[:300])
+            self.assertEqual(r.json()["created"], 1)
+            saved = account_repository.find_by_email("kiro", email)
+            self.assertIsNotNone(saved)
+            extra = saved.get_extra()
+            self.assertEqual(extra["access_token"], "at-flat")
+            self.assertEqual(extra["refresh_token"], "rt-flat")
+            self.assertEqual(extra["client_id"], "cid-flat")
+            self.assertEqual(extra["client_secret"], "cs-flat")
+            self.assertEqual(extra["auth_method"], "idc")
+            self.assertEqual(extra["login_provider"], "builderid")
+        finally:
+            self._cleanup("kiro", email)
+
     def test_created_at_is_preserved(self):
         """created_at 要保留原值 —— 列表排序与筛选依赖它。"""
         email = "json-created@example.com"

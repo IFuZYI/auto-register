@@ -3,7 +3,7 @@
 模块结构：
 
 - `constants.py`   Kiro 端点 / 默认 profileArn / 来源常量
-- `credentials.py` kiro.json（v2）↔ 账号 extra 的双向映射
+- `credentials.py` kiro.json（v2）/ Agent2API 扁平凭证 ↔ 账号 extra 的映射
 - `authorize.py`   Builder ID SSO → Kiro IDE 授权码 → Kiro AT/RT
 - `probe.py`       Kiro token 刷新与测活
 - `plugin.py`      `KiroPlatform` 平台实现

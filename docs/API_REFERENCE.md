@@ -133,7 +133,7 @@ JWT 默认有效期为 7 天。密码与 JWT 签名密钥存入配置存储；�
 }
 ```
 
-`account_ids` 非空时优先按给定顺序导出；否则使用筛选项。成功返回 `format`、`total`、`lines`、`content`、`filename`。可用格式由服务端动态返回，现有格式包括 `email_pw`、`email_pw_2fa`、`email_pw_2fa_at`、`email_pw_2fa_rt`、`email_pw_2fa_at_rt`、`email_pw_2fa_phone`、`email_pw_rt`、`email_2fa`、`at`、`rt`、`totp`、`csv`、`json`。
+`account_ids` 非空时优先按给定顺序导出；否则使用筛选项。成功返回 `format`、`total`、`lines`、`content`、`filename`。可用格式由服务端动态返回，现有格式包括 `email_pw`、`email_pw_2fa`、`email_pw_2fa_at`、`email_pw_2fa_rt`、`email_pw_2fa_at_rt`、`email_pw_2fa_phone`、`email_pw_rt`、`email_2fa`、`at`、`rt`、`totp`、`csv`、`json`。另有 `hidden` 格式 `kiro_auth_token`（Kiro → Agent2API）与 `kiro_json`（账号管理器 v2），不在下拉里，只能按 id 调用。
 
 ---
 

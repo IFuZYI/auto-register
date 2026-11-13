@@ -1,4 +1,4 @@
-"""Kiro 凭据格式：账号 `extra` ↔ `kiro.json`（账号管理器导出格式，v2）。
+"""Kiro 凭据格式：账号 `extra` ↔ `kiro.json`（v2）/ Agent2API 扁平凭证。
 
 ## 为什么要有这个模块
 
@@ -50,6 +50,7 @@ import time
 from typing import Any, Iterable, Mapping
 
 from core.credential_fields import first_present
+from core.secret_box import CredentialKeyError
 
 from .constants import (
     AUTH_METHOD_IDC,
@@ -162,11 +163,26 @@ def _extra_of(account: Any) -> dict[str, Any]:
     if callable(getter):
         try:
             value = getter()
-        except Exception as exc:  # noqa: BLE001 - 读不出 extra 时按空处理
+        except CredentialKeyError as exc:
+            who = str(getattr(account, "email", "") or getattr(account, "id", "") or "?")
+            raise CredentialKeyError(
+                f"账号 {who} 的凭证无法解密"
+                f"（密钥文件或 CREDENTIAL_ENCRYPTION_KEY 是不是变过？）: {exc}"
+            ) from exc
+        except Exception as exc:  # noqa: BLE001 - 其它异常仍不让整次导出失败
             logger.debug("读取 extra 失败（按空处理）: %s", exc)
             return {}
         return value if isinstance(value, dict) else {}
     return {}
+
+
+def _first(extra: Mapping[str, Any], *keys: str) -> str:
+    """按顺序取第一个非空值（规范名优先，兼容旧行落库的 camelCase）。"""
+    for key in keys:
+        value = _clean(extra.get(key))
+        if value:
+            return value
+    return ""
 
 
 def _attr(account: Any, name: str) -> str:
@@ -296,19 +312,25 @@ def to_auth_token_entry(account: Any) -> dict[str, Any]:
     `clientId` / `clientSecret`，没有 `pluginSecret` 嵌套。
     """
     extra = _extra_of(account)
-    email = _attr(account, "email") or _clean(extra.get("account_id"))
-    access = _clean(extra.get("access_token")) or _attr(account, "access_token")
-    refresh = _clean(extra.get("refresh_token")) or _attr(account, "refresh_token") or _attr(account, "token")
-    auth_method = _clean(extra.get("auth_method")) or AUTH_METHOD_IDC
-    login_provider = _clean(extra.get("login_provider")) or "BuilderId"
-    plan = _clean(extra.get("plan")) or DEFAULT_PLAN
-    region = _clean(extra.get("region")) or REGION
-    profile_arn = _clean(extra.get("profile_arn")) or DEFAULT_PROFILE_ARN
-    account_id = _clean(extra.get("account_id")) or email
-    uid = _clean(extra.get("uid")) or ("github" if auth_method == AUTH_METHOD_SOCIAL else "builderid")
-    expires_ms = _ms_of(extra.get("expires_at"))
-    client_id = _clean(extra.get("client_id"))
-    client_secret = _clean(extra.get("client_secret"))
+    email = _attr(account, "email") or _first(extra, "account_id", "accountId")
+    # 旧行（JSON 导入的 catch-all）把 camelCase 原样落进 extra：与
+    # `to_account_entry` 同一套别名，别让「新导出路径」比旧路径少读字段。
+    access = _first(extra, "access_token", "accessToken", "access") or _attr(account, "access_token")
+    refresh = (
+        _first(extra, "refresh_token", "refreshToken", "refresh")
+        or _attr(account, "refresh_token")
+        or _attr(account, "token")
+    )
+    auth_method = (_first(extra, "auth_method", "authMethod", "method") or AUTH_METHOD_IDC).lower()
+    login_provider = _first(extra, "login_provider", "loginProvider") or "BuilderId"
+    plan = _first(extra, "plan") or DEFAULT_PLAN
+    region = _first(extra, "region") or REGION
+    profile_arn = _first(extra, "profile_arn", "profileArn") or DEFAULT_PROFILE_ARN
+    account_id = _first(extra, "account_id", "accountId") or email
+    uid = _first(extra, "uid") or ("github" if auth_method == AUTH_METHOD_SOCIAL else "builderid")
+    expires_ms = _ms_of(_first(extra, "expires_at", "expiresAt", "expires"))
+    client_id = _first(extra, "client_id", "clientId")
+    client_secret = _first(extra, "client_secret", "clientSecret")
     # Agent2API 的 idc 刷新走 AWS SSO OIDC（oidc.{region}.amazonaws.com），
     # 用的是 **AWS** 的 client + RT；Kiro IDE 的 OAuth 客户端在那边是
     # invalid_client（额度/对话全部「查询失败」）。有来源快照就用 AWS 的。
@@ -407,11 +429,20 @@ def parse_entry(entry: Mapping[str, Any]) -> dict[str, Any]:
     """单条 kiro.json 账号 → 规范 `extra` 字典。"""
     secret = entry.get("pluginSecret") if isinstance(entry.get("pluginSecret"), dict) else {}
     public = entry.get("pluginPublic") if isinstance(entry.get("pluginPublic"), dict) else {}
-    auth_method = _clean(secret.get("method")).lower() or (
-        AUTH_METHOD_SOCIAL if _clean(secret.get("loginProvider")).lower() in {"github", "google"} else AUTH_METHOD_IDC
+    # 管理器格式把字段藏在 pluginSecret；Agent2API 的扁平格式直接放在顶层。
+    # 两条都读，别让「导出 → 再导入」丢掉 client/身份（runtime 审计 4a-4c）。
+    auth_method = _clean(secret.get("method") or entry.get("method")).lower() or (
+        AUTH_METHOD_SOCIAL
+        if _clean(secret.get("loginProvider") or entry.get("loginProvider")).lower() in {"github", "google"}
+        else AUTH_METHOD_IDC
     )
-    login_provider = _clean(secret.get("loginProvider")) or "BuilderId"
-    account_id = _clean(secret.get("accountId")) or _clean(public.get("accountId"))
+    login_provider = _clean(secret.get("loginProvider") or entry.get("loginProvider")) or "BuilderId"
+    account_id = (
+        _clean(secret.get("accountId"))
+        or _clean(public.get("accountId"))
+        or _clean(entry.get("accountId"))
+        or _clean(entry.get("email"))
+    )
     if not account_id:
         # `name` 常是 "user@x.com (GitHub)"：带后缀时不能当邮箱用，否则
         # 账号键会变成 "user@x.com (github)"（审计第二轮）。
@@ -431,14 +462,19 @@ def parse_entry(entry: Mapping[str, Any]) -> dict[str, Any]:
     record = build_extra(
         access_token=_clean(secret.get("access")) or _clean(entry.get("accessToken")),
         refresh_token=_clean(secret.get("refresh")) or _clean(entry.get("refreshToken")),
-        client_id=_clean(secret.get("clientId")),
-        client_secret=_clean(secret.get("clientSecret")),
-        expires_at=_ms_of(secret.get("expires")) or _ms_of(public.get("expiresAtMs")),
-        profile_arn=_clean(secret.get("profileArn")),
-        region=_clean(secret.get("region")) or REGION,
+        client_id=_clean(secret.get("clientId") or entry.get("clientId")),
+        client_secret=_clean(secret.get("clientSecret") or entry.get("clientSecret")),
+        expires_at=_ms_of(secret.get("expires"))
+        or _ms_of(public.get("expiresAtMs"))
+        or _ms_of(entry.get("expires")),
+        profile_arn=_clean(secret.get("profileArn") or entry.get("profileArn")),
+        region=_clean(secret.get("region") or entry.get("region")) or REGION,
         auth_method=auth_method,
         login_provider=login_provider,
-        plan=_clean(secret.get("plan")) or _clean(public.get("plan")) or DEFAULT_PLAN,
+        plan=_clean(secret.get("plan"))
+        or _clean(public.get("plan"))
+        or _clean(entry.get("plan"))
+        or DEFAULT_PLAN,
         account_id=account_id,
         uid=_clean(secret.get("uid")) or _clean(entry.get("uid")),
         email=email or account_id,
@@ -455,7 +491,10 @@ def parse_document(payload: Any) -> list[dict[str, Any]]:
     if isinstance(payload, dict):
         entries = payload.get("accounts")
         if not isinstance(entries, list):
-            entries = []
+            # 单账号扁平文件（Agent2API 的 kiro-auth-token.json）
+            entries = [payload] if (
+                "accessToken" in payload or "pluginSecret" in payload or "email" in payload
+            ) else []
     elif isinstance(payload, list):
         entries = payload
     else:

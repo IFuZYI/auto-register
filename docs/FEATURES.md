@@ -511,6 +511,10 @@ grok2api（SSO），不再有 CPA / Sub2API 的上传路径 —— 见「Grok �
 格式清单由后端 `services/account_export.py` 的 `EXPORT_FORMATS` 统一定义，加一个新格式
 只改这一处，前端下拉框自动跟上。
 
+`hidden` 格式不进下拉，只能按 id 调用：`kiro_auth_token`（Kiro → Agent2API，
+专用入口「Kiro → 更多 → 导出凭据」：单账号扁平 `kiro-auth-token.json`，
+多账号 `accounts` 数组）与 `kiro_json`（账号管理器 v2，API-only）。
+
 ## 核心概念
 
 | 概念 | 说明 |

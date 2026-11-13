@@ -60,9 +60,16 @@ Kiro 授权 → 凭据落库 → 测活/刷新 → 导出」的完整链路；�
 
 - CSV：追加 `client_id` / `client_secret` / `sso`（旧 11 列顺序不变）。
 - 通用 JSON：导出含 `kiro_aws_*` 快照与 `name`；导入接受 camelCase 别名归一。
-- `kiro.json` v2：导出与账号管理器样例逐层同构（键集/类型/version=2），
-  `source=plugin`；导入时 idc 账号映射回 `source=aws`。
+- `kiro.json` v2（保留格式，API-only）：与账号管理器样例逐层同构
+  （键集/类型/version=2），`source=plugin`；导入时 idc 账号映射回 `source=aws`。
+- `kiro_auth_token`（Agent2API，专用入口）：单账号 → 扁平
+  `kiro-auth-token.json`；多账号 → `{"version":2,"accounts":[…]}`。每条有
+  唯一 `id`（email:uid 哈希）、`email`、小写 `loginProvider`、无 `uid`；
+  idc 用 AWS SSO 凭据（`kiro_aws_*`）、`profileArn=""`、`expires=1` 强制刷新，
+  social 用 Kiro OAuth 凭据。缺 AWS 快照的 idc 直接 400，不导无效文件。
 - 入口：平台管理 → Kiro → 更多 → 导出凭据（确认 + loading + 延迟 revoke）。
+- 契约守卫：`scripts/check_kiro_agent2api_export.py` +
+  `tests/test_kiro_agent2api_contract.py`（id/email/uid/loginProvider/idc 分支）。
 
 ### 2.6 设计优化
 
@@ -117,6 +124,8 @@ Kiro 授权 → 凭据落库 → 测活/刷新 → 导出」的完整链路；�
 | `f0f5f29` | 评审 3 修复（探测写回等） |
 | `3ee1a73`…`bcad5f0` | 平台同步：自动维护 / 导入导出 / 任务页 / 终审 |
 | `d1f10e7` / `fd7fdc6` | 死测试守卫 + 评审修复 |
+| `58ac73b`…`5e09470` | 导出凭据改为 Agent2API 格式（唯一 id / idc AWS 凭据） |
+| `17627e4` / `e41dffb` | Agent2API 导入契约守卫 + 终审修复 |
 
 ## 6. 已知限制与 backlog
 

@@ -375,10 +375,13 @@ register_job("my_job", interval_seconds=lambda: ..., runner=lambda: ...)
 | `api/accounts.py`（JSON 导入） | `IMPORT_CAMEL_ALIASES`（camelCase → 规范名归一） |
 | `api/actions.py` | `canonical_writes()`（动作结果落库归一） |
 | `platforms/grok/plugin.py` 等读侧 | `get_credential()` / `token_column_credential()` |
+| `platforms/kiro/credentials.to_auth_token_entry` | 直接读 `access_token` / `refresh_token` / `client_id` / `client_secret` / `profile_arn` / `region` / `expires_at` / `plan` / `account_id`（Agent2API 导出，**不走** `export_names()`） |
 
 新增字段的步骤：① 注册表加一项；② 按需把规范名加进 `account_export` 的
 `EXPORT_FIELDS` 与 `api/accounts._IMPORT_EXTRA_KEYS`（往返不丢）；③ 跑
-`tests/test_credential_fields.py`（注册表契约 + 往返测试）。
+`tests/test_credential_fields.py`（注册表契约 + 往返测试）；④ 若字段进
+Agent2API 导出，同步 `to_auth_token_entry` 与
+`scripts/check_kiro_agent2api_export.py`。
 
 **`token` 列（历史遗留列）的镜像规则**：token 列 = **平台主凭证的镜像**
 （chatgpt → AT，grok → SSO），规则表在注册表的 `_TOKEN_COLUMN_FIELDS`。
@@ -402,6 +405,7 @@ register_job("my_job", interval_seconds=lambda: ..., runner=lambda: ...)
 | `test_panel_management_actions.py` | 面板动作存在性、`scope`、多平台接线 | 新面板没补 `_rows_for()`；动作漏标 scope |
 | `test_deploy_config_contract.py` | compose/Dockerfile/.env.example 的一致性（含镜像内 `HEALTHCHECK`，裸 `docker run` 也能探活） | 新增 `${VAR}` 插值却没写进 `.env.example`；Dockerfile 漏 `HEALTHCHECK` 或探了会 401 的端点 |
 | `test_config_dedup_and_registration_modes.py` | 注册方式声明与运行时兜底一致 | 插件改了默认值没同步声明 |
+| `test_kiro_agent2api_contract.py` | Kiro → Agent2API 导出契约：唯一 `id`/`email`、无 `uid`、小写 `loginProvider`、idc 用 AWS 凭据、缺快照报错 | 改 `to_auth_token_entry` 或 `scripts/check_kiro_agent2api_export.py` |
 | `test_contrast_gate_contract.py` | 主题色板两套齐、preset 标签钉住 | 加新颜色没做对比度处理 |
 | `test_data_paths.py` | 数据路径默认落在 `data/` 下 | 新增路径常量写错基准 |
 | `test_credential_fields.py` | 凭证字段注册表（字段/别名/标签、token 列镜像、导出往返含 SSO、启动迁移把被 AT 盖过的 grok token 列修回 SSO 镜像） | 改 `core/credential_fields.py` 的字段表；消费方不再同源 |
@@ -487,6 +491,8 @@ register_job("my_job", interval_seconds=lambda: ..., runner=lambda: ...)
 ```bash
 # 后端全量（约 150 秒，2300+ 用例）
 python -m pytest tests/ -q
+# Kiro → Agent2API 导出契约（套件里也有，脚本可单独跑）
+python scripts/check_kiro_agent2api_export.py
 
 # 前端三件套
 cd frontend && npx tsc -b && npm run lint && npm run build

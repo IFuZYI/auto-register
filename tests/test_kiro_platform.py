@@ -684,12 +684,81 @@ class KiroAgent2ApiExportTests(unittest.TestCase):
         self.assertEqual(doc["loginProvider"], "github")
         self.assertNotIn("uid", doc)
 
+    def test_legacy_camel_case_row_exports_its_credentials(self):
+        """旧行把 camelCase 原样落进 extra —— 新导出路径不能比旧路径少读字段。"""
+        from core.models.account import AccountRecord
+        from services.account_export import render_accounts
+
+        legacy = AccountRecord(
+            platform="kiro",
+            email="legacy@x.ai",
+            password="pw",
+            token="",
+            extra={
+                "accessToken": "at-legacy",
+                "refreshToken": "rt-legacy",
+                "clientId": "cid-legacy",
+                "clientSecret": "cs-legacy",
+                "profileArn": "arn:legacy",
+                "authMethod": "social",
+                "loginProvider": "github",
+                "expiresAt": 1794478346773,
+            },
+        )
+        doc = json.loads(render_accounts([legacy], "kiro_auth_token"))
+        self.assertEqual(doc["accessToken"], "at-legacy")
+        self.assertEqual(doc["refreshToken"], "rt-legacy")
+        self.assertEqual(doc["clientId"], "cid-legacy")
+        self.assertEqual(doc["clientSecret"], "cs-legacy")
+        self.assertEqual(doc["profileArn"], "arn:legacy")
+        self.assertEqual(doc["method"], "social")
+        self.assertEqual(doc["loginProvider"], "github")
+        self.assertEqual(doc["expires"], 1794478346773)
+
     def test_idc_without_aws_snapshot_raises_instead_of_exporting_broken_creds(self):
         from services.account_export import render_accounts
 
         with self.assertRaisesRegex(ValueError, "缺少 AWS SSO 快照"):
             render_accounts([self._account(aws=False)], "kiro_auth_token")
 
+
+
+class KiroFlatParseTests(unittest.TestCase):
+    def test_parse_document_accepts_a_single_flat_agent2api_object(self):
+        from platforms.kiro.credentials import parse_document
+
+        flat = {
+            "provider": "kiro",
+            "email": "a@x.ai",
+            "accessToken": "at",
+            "refreshToken": "rt",
+            "clientId": "cid",
+            "clientSecret": "cs",
+            "profileArn": "arn",
+            "method": "social",
+            "loginProvider": "github",
+            "accountId": "a@x.ai",
+            "expires": 1794478346773,
+            "region": "us-east-1",
+        }
+        records = parse_document(flat)
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["email"], "a@x.ai")
+        self.assertEqual(records[0]["client_id"], "cid")
+        self.assertEqual(records[0]["client_secret"], "cs")
+        self.assertEqual(records[0]["profile_arn"], "arn")
+        self.assertEqual(records[0]["auth_method"], "social")
+        self.assertEqual(records[0]["login_provider"], "github")
+        self.assertEqual(records[0]["expires_at"], 1794478346773)
+
+    def test_parse_document_reads_the_batch_shape(self):
+        from platforms.kiro.credentials import parse_document
+
+        doc = {"version": 2, "accounts": [{"email": "b@x.ai", "accessToken": "at", "clientId": "cid"}]}
+        records = parse_document(doc)
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["email"], "b@x.ai")
+        self.assertEqual(records[0]["client_id"], "cid")
 
 
 class KiroExportImportTests(unittest.TestCase):
@@ -721,11 +790,11 @@ class KiroExportImportTests(unittest.TestCase):
     def test_kiro_json_format_is_registered_but_hidden_from_the_menu(self):
         from services.account_export import EXPORT_FORMATS, list_export_formats
 
-        # 注册表里仍在（专用「导出凭据」按 id 调用），但不进通用导出的下拉：
-        # Kiro 页已有独立入口，两个入口做同一件事只会让人选错格式。
+        # 注册表里仍在（API-only，无 UI 入口），但不进通用导出的下拉。
         self.assertIn("kiro_json", EXPORT_FORMATS)
         ids = {item["id"] for item in list_export_formats()}
         self.assertNotIn("kiro_json", ids)
+        self.assertNotIn("kiro_auth_token", ids)
 
     def test_kiro_json_format_renders_version_2_document(self):
         from services.account_export import render_accounts

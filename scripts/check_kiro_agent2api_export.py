@@ -87,10 +87,14 @@ def check() -> list[str]:
             problems.append(f"{where}: 缺少 accessToken")
         if not str(entry.get("refreshToken") or "").strip():
             problems.append(f"{where}: 缺少 refreshToken")
-        if not str(entry.get("expiresAt") or "").startswith("1970-"):
-            if entry.get("method") == "idc":
+        method = entry.get("method")
+        if method not in ("idc", "social"):
+            # 少了 method，下面两条分支都不进 —— 整份文件会被判成「没问题」，
+            # 而 Agent2API 按 method 选刷新路径，等于把错误推迟到运行时。
+            problems.append(f"{where}: method 必须是 idc/social")
+        if method == "idc":
+            if not str(entry.get("expiresAt") or "").startswith("1970-"):
                 problems.append(f"{where}: idc 的 expiresAt 应强制刷新（1970…）")
-        if entry.get("method") == "idc":
             if entry.get("loginProvider") != "builderid":
                 problems.append(f"{where}: idc 的 loginProvider 必须是 builderid")
             # Agent2API 的 idc 刷新走 AWS SSO OIDC：必须是 AWS 的 client + RT，
@@ -105,7 +109,7 @@ def check() -> list[str]:
                 problems.append(f"{where}: idc 的 profileArn 应为空，交给插件填 Builder ID profile")
             if not str(entry.get("clientSecret") or "").strip():
                 problems.append(f"{where}: 缺少 clientSecret")
-        elif entry.get("method") == "social":
+        elif method == "social":
             if entry.get("loginProvider") not in ("github", "google"):
                 problems.append(f"{where}: social 的 loginProvider 应是 github/google")
 
