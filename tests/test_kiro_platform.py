@@ -470,6 +470,15 @@ class KiroSourceSelectionTests(unittest.TestCase):
                 platform.register()
 
 
+class KiroSourceSnapshotTests(unittest.TestCase):
+    def test_snapshot_includes_the_source_email(self):
+        from platforms.kiro.plugin import _source_snapshot
+
+        snapshot = _source_snapshot({"email": "a@x.ai", "access_token": "at"})
+        self.assertEqual(snapshot["kiro_aws_email"], "a@x.ai")
+        self.assertEqual(snapshot["kiro_aws_access_token"], "at")
+
+
 class KiroParseNameFallbackTests(unittest.TestCase):
     """`name` 兜底 accountId 时不能把 "user@x.com (GitHub)" 当邮箱。"""
 
@@ -571,6 +580,7 @@ class KiroReuseLoginTests(unittest.TestCase):
         # 来源快照（供审计/回滚），不是明文密码
         self.assertEqual(extra["kiro_aws_sso"], "aws-sso")
         self.assertEqual(extra["kiro_aws_refresh_token"], "aws-rt")
+        self.assertEqual(extra["kiro_aws_email"], "aws-reuse@x.ai")
         self.assertNotIn("password", extra)
 
 

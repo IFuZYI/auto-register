@@ -30,7 +30,8 @@ class DeadTestGuardTests(unittest.TestCase):
         )
         self.assertEqual(find_dead_tests(source), [("test_never_runs", 4)])
 
-    def test_flags_module_level_test_after_the_guard(self):
+    def test_module_level_test_after_guard_is_still_collected(self):
+        """守卫之后的模块级 def 会在 import 时定义，pytest 照常收集 —— 不是死测试。"""
         source = (
             'if __name__ == "__main__":\n'
             "    unittest.main()\n"
@@ -38,7 +39,26 @@ class DeadTestGuardTests(unittest.TestCase):
             "def test_after_guard(self):\n"
             "    pass\n"
         )
-        self.assertEqual(find_dead_tests(source), [("test_after_guard", 4)])
+        self.assertEqual(find_dead_tests(source), [])
+
+    def test_flags_test_nested_under_try_inside_guard(self):
+        source = (
+            'if __name__ == "__main__":\n'
+            "    try:\n"
+            "        def test_nested(self):\n"
+            "            pass\n"
+            "    except Exception:\n"
+            "        pass\n"
+        )
+        self.assertEqual(find_dead_tests(source), [("test_nested", 3)])
+
+    def test_flags_reversed_main_guard(self):
+        source = (
+            'if "__main__" == __name__:\n'
+            "    def test_reversed(self):\n"
+            "        pass\n"
+        )
+        self.assertEqual(find_dead_tests(source), [("test_reversed", 2)])
 
     def test_allows_tests_in_classes_and_before_the_guard(self):
         source = (

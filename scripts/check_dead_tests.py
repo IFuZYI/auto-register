@@ -18,20 +18,16 @@ from pathlib import Path
 
 
 def _is_main_guard(node: ast.AST) -> bool:
+    """`if __name__ == "__main__":` / `if "__main__" == __name__:`."""
     if not isinstance(node, ast.If):
         return False
     test = node.test
-    if not isinstance(test, ast.Compare):
+    if not isinstance(test, ast.Compare) or len(test.ops) != 1 or not isinstance(test.ops[0], ast.Eq):
         return False
-    left, ops, comparators = test.left, test.ops, test.comparators
+    left, right = test.left, test.comparators[0]
     return (
-        isinstance(left, ast.Name)
-        and left.id == "__name__"
-        and len(ops) == 1
-        and isinstance(ops[0], ast.Eq)
-        and len(comparators) == 1
-        and isinstance(comparators[0], ast.Constant)
-        and comparators[0].value == "__main__"
+        (isinstance(left, ast.Name) and left.id == "__name__" and isinstance(right, ast.Constant) and right.value == "__main__")
+        or (isinstance(left, ast.Constant) and left.value == "__main__" and isinstance(right, ast.Name) and right.id == "__name__")
     )
 
 
@@ -49,18 +45,16 @@ def find_dead_tests(source: str) -> list[tuple[str, int]]:
     tree = ast.parse(source)
     dead: list[tuple[str, int]] = []
 
-    guards = [node for node in tree.body if _is_main_guard(node)]
-    for guard in guards:
-        # 1) A def *inside* the guard body (indented under `if __name__ ...`).
-        dead.extend((node.name, node.lineno) for node in _test_defs(guard.body))
-        # 2) A module-level def *after* the guard (syntactically valid, never run).
-        guard_end = guard.end_lineno or guard.lineno
-        dead.extend(
-            (node.name, node.lineno)
-            for node in _test_defs(tree.body)
-            if node.lineno > guard_end
-        )
-    return dead
+    # 只有**守卫内部**的定义是死的：模块级 `def test_*` 在守卫之后仍然会在
+    # import 时定义，pytest 照常收集（review 实证：2 collected / 2 passed）。
+    # 守卫内部可能嵌在 try/with/for 或 class 里，所以用 walk 而不是只看直接子节点。
+    for guard in tree.body:
+        if not _is_main_guard(guard):
+            continue
+        for node in ast.walk(guard):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test"):
+                dead.append((node.name, node.lineno))
+    return sorted(set(dead), key=lambda item: item[1])
 
 
 def main(argv: list[str]) -> int:
