@@ -76,8 +76,10 @@ AWS 不再是「平台管理」里的一个平台（2026-11-13 调整）：它�
 
 ```json
 {
+  "id": "kiro-3f2a…（email+uid 的哈希）",
   "provider": "kiro",
   "name": "a@b.com",
+  "email": "a@b.com",
   "accessToken": "aoa…",
   "refreshToken": "aor…",
   "expires": 1794478346773,
@@ -87,8 +89,7 @@ AWS 不再是「平台管理」里的一个平台（2026-11-13 调整）：它�
   "clientId": "…",
   "clientSecret": "…",
   "method": "idc",
-  "loginProvider": "BuilderId",
-  "uid": "builderid",
+  "loginProvider": "builderid",
   "accountId": "a@b.com",
   "plan": "Kiro FREE"
 }
@@ -98,6 +99,12 @@ Agent2API 的 Kiro 解析器读扁平字段（`accessToken` / `refreshToken` /
 `expiresAt`（RFC3339 字符串）/ `region` / `profileArn` / `clientId` /
 `clientSecret`），不认 `pluginSecret` 嵌套；`expires`（毫秒）同时给出，
 账号迁移导入也能用。social 账号的 `clientId` / `clientSecret` 为空。
+
+账号迁移导入额外要求：每条记录有**唯一 `id`**（用 `email:uid` 的哈希，
+同一邮箱的 GitHub/Google 两个 provider 不会撞），身份回退读 `email`；
+`loginProvider` 小写（插件的 refresh 分支按 `"builderid"` 比较）；
+**不导出 `uid`**（它会把 Agent2API 的身份压成同一个 `"builderid"`，
+23 个号互相覆盖）。
 
 ### 3.2 Kiro 账号管理器（`kiro_json`，保留格式）
 

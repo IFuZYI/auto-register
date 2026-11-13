@@ -308,10 +308,18 @@ def to_auth_token_entry(account: Any) -> dict[str, Any]:
     uid = _clean(extra.get("uid")) or ("github" if auth_method == AUTH_METHOD_SOCIAL else "builderid")
     expires_ms = _ms_of(extra.get("expires_at"))
     name = _clean(extra.get("name")) or account_id or email
+    # Agent2API 的账号迁移导入要求每条记录有**唯一 id**；身份回退读 email。
+    # 用 email 的哈希而不是邮箱原文：id 会出现在 URL / 日志里。
+    # 同一邮箱可以有 GitHub/Google 两个 provider：uid 必须进种子，否则两条
+    # 记录的 id 相同、导入时后一条覆盖前一条。
+    seed = f"{email or account_id or access}:{uid}".lower()
+    account_file_id = f"kiro-{hashlib.sha256(seed.encode('utf-8')).hexdigest()[:16]}"
 
     return {
+        "id": account_file_id,
         "provider": "kiro",
         "name": name,
+        "email": email,
         "accessToken": access,
         "refreshToken": refresh,
         "expires": expires_ms,
@@ -321,8 +329,9 @@ def to_auth_token_entry(account: Any) -> dict[str, Any]:
         "clientId": _clean(extra.get("client_id")),
         "clientSecret": _clean(extra.get("client_secret")),
         "method": auth_method,
-        "loginProvider": login_provider,
-        "uid": uid,
+        # 插件的 refresh 分支按小写比较 "builderid"；uid 不导出（它会把
+        # Agent2API 的身份压成同一个 "builderid"，23 个号互相覆盖）。
+        "loginProvider": login_provider.lower(),
         "accountId": account_id,
         "plan": plan,
     }

@@ -607,7 +607,6 @@ class KiroAgent2ApiExportTests(unittest.TestCase):
             login_provider=login_provider,
             plan="Kiro FREE",
             account_id="a@x.ai",
-            uid="builderid",
             email="a@x.ai",
             expires_at=1794478346773,
         )
@@ -626,6 +625,13 @@ class KiroAgent2ApiExportTests(unittest.TestCase):
         self.assertEqual(doc["method"], "idc")
         self.assertRegex(doc["expiresAt"], r"^\d{4}-\d{2}-\d{2}T")
         self.assertNotIn("pluginSecret", doc)
+        # Agent2API 的账号导入要求每条有唯一 id；身份回退读 email。
+        self.assertTrue(doc["id"].startswith("kiro-"))
+        self.assertEqual(doc["email"], "a@x.ai")
+        # 插件的 refresh 分支比较小写 login_provider；uid 会把网关身份压成
+        # "builderid"（23 个号互相覆盖），所以不导出 uid。
+        self.assertEqual(doc["loginProvider"], "builderid")
+        self.assertNotIn("uid", doc)
 
     def test_multiple_accounts_is_the_agent2api_transfer_document(self):
         from services.account_export import render_accounts
@@ -641,6 +647,10 @@ class KiroAgent2ApiExportTests(unittest.TestCase):
         self.assertEqual(entry["provider"], "kiro")
         self.assertEqual(entry["accessToken"], "at-1")
         self.assertEqual(entry["method"], "idc")
+        ids = [item["id"] for item in doc["accounts"]]
+        self.assertEqual(len(set(ids)), 2, "每条账号的 id 必须唯一")
+        self.assertEqual([item["email"] for item in doc["accounts"]], ["a@x.ai", "a@x.ai"])
+        self.assertTrue(all("uid" not in item for item in doc["accounts"]))
 
     def test_social_account_has_no_client_credentials(self):
         from services.account_export import render_accounts
@@ -652,6 +662,7 @@ class KiroAgent2ApiExportTests(unittest.TestCase):
         self.assertEqual(doc["method"], "social")
         self.assertEqual(doc["clientId"], "")
         self.assertEqual(doc["loginProvider"], "github")
+        self.assertNotIn("uid", doc)
 
 
 class KiroExportImportTests(unittest.TestCase):
