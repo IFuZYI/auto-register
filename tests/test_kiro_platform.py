@@ -584,6 +584,76 @@ class KiroReuseLoginTests(unittest.TestCase):
         self.assertNotIn("password", extra)
 
 
+class KiroAgent2ApiExportTests(unittest.TestCase):
+    """导出的凭据是给 Agent2API 导入的（Kiro 提供商的文件导入 / 账号导入）。
+
+    Agent2API 的 Kiro 解析器读的是扁平字段（accessToken / refreshToken /
+    expiresAt / region / profileArn / clientId / clientSecret），不是 Kiro
+    账号管理器的 pluginSecret 嵌套格式。
+    """
+
+    def _account(self, *, auth_method="idc", login_provider="BuilderId", client_id="kid", client_secret="ksecret"):
+        from core.models.account import AccountRecord
+        from platforms.kiro.credentials import build_extra
+
+        extra = build_extra(
+            access_token="at-1",
+            refresh_token="rt-1",
+            client_id=client_id,
+            client_secret=client_secret,
+            profile_arn="arn:aws:codewhisperer:us-east-1:1:profile/X",
+            region="us-east-1",
+            auth_method=auth_method,
+            login_provider=login_provider,
+            plan="Kiro FREE",
+            account_id="a@x.ai",
+            uid="builderid",
+            email="a@x.ai",
+            expires_at=1794478346773,
+        )
+        return AccountRecord(platform="kiro", email="a@x.ai", password="pw", token="rt-1", extra=extra)
+
+    def test_single_account_is_the_flat_auth_token_file(self):
+        from services.account_export import render_accounts
+
+        doc = json.loads(render_accounts([self._account()], "kiro_auth_token"))
+        self.assertEqual(doc["accessToken"], "at-1")
+        self.assertEqual(doc["refreshToken"], "rt-1")
+        self.assertEqual(doc["profileArn"], "arn:aws:codewhisperer:us-east-1:1:profile/X")
+        self.assertEqual(doc["clientId"], "kid")
+        self.assertEqual(doc["clientSecret"], "ksecret")
+        self.assertEqual(doc["region"], "us-east-1")
+        self.assertEqual(doc["method"], "idc")
+        self.assertRegex(doc["expiresAt"], r"^\d{4}-\d{2}-\d{2}T")
+        self.assertNotIn("pluginSecret", doc)
+
+    def test_multiple_accounts_is_the_agent2api_transfer_document(self):
+        from services.account_export import render_accounts
+
+        social = self._account(
+            auth_method="social", login_provider="github", client_id="", client_secret=""
+        )
+        doc = json.loads(render_accounts([self._account(), social], "kiro_auth_token"))
+        self.assertEqual(doc["version"], 2)
+        self.assertEqual(doc["customProviders"], [])
+        self.assertEqual(len(doc["accounts"]), 2)
+        entry = doc["accounts"][0]
+        self.assertEqual(entry["provider"], "kiro")
+        self.assertEqual(entry["accessToken"], "at-1")
+        self.assertEqual(entry["method"], "idc")
+
+    def test_social_account_has_no_client_credentials(self):
+        from services.account_export import render_accounts
+
+        social = self._account(
+            auth_method="social", login_provider="github", client_id="", client_secret=""
+        )
+        doc = json.loads(render_accounts([social], "kiro_auth_token"))
+        self.assertEqual(doc["method"], "social")
+        self.assertEqual(doc["clientId"], "")
+        self.assertEqual(doc["loginProvider"], "github")
+
+
 class KiroExportImportTests(unittest.TestCase):
     """导出/导入：既要能吐 kiro.json，也要能把 kiro.json 收进来。"""
 

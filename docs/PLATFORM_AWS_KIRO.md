@@ -62,11 +62,47 @@ AWS 不再是「平台管理」里的一个平台（2026-11-13 调整）：它�
 | `extra.auth_method` / `login_provider` / `uid` | `idc` + `BuilderId`（本项目注册的号都是 IdC） |
 | `extra.kiro_aws_*` | 来源账号的 Builder ID 凭据快照（加密；追溯/复核用） |
 
-## 3. 凭据格式：`kiro.json`（v2）
+## 3. 凭据导出
 
-`services/account_export.py` 注册了 `kiro_json` 导出格式，产物与 Kiro 账号管理器
-的导出文件同构。`kiro_json` **不在通用「导出」下拉里**（`hidden`），只走专用入口：**平台管理 → Kiro → 更多 → 导出凭据**（勾选了就只导
-勾选的，没勾选就导当前筛选；直接下载 `kiro.json`，不弹格式选择）：
+### 3.1 Agent2API（专用入口）
+
+**平台管理 → Kiro → 更多 → 导出凭据** 导出的是 **Agent2API** 的 Kiro 导入文件
+（格式 id `kiro_auth_token`，`hidden`，不在通用「导出」下拉里）：
+
+- **勾选/筛选到 1 个账号** → 扁平的 `kiro-auth-token.json`，直接喂给 Agent2API
+  的 Kiro「文件」入口；
+- **多个账号** → `agent2api-accounts.json`（`{"version":2,"accounts":[…]}`），
+  走 Agent2API 的批量账号导入（`POST /api/accounts/import`）。
+
+```json
+{
+  "provider": "kiro",
+  "name": "a@b.com",
+  "accessToken": "aoa…",
+  "refreshToken": "aor…",
+  "expires": 1794478346773,
+  "expiresAt": "2026-11-12T19:32:26.773Z",
+  "region": "us-east-1",
+  "profileArn": "arn:aws:codewhisperer:…",
+  "clientId": "…",
+  "clientSecret": "…",
+  "method": "idc",
+  "loginProvider": "BuilderId",
+  "uid": "builderid",
+  "accountId": "a@b.com",
+  "plan": "Kiro FREE"
+}
+```
+
+Agent2API 的 Kiro 解析器读扁平字段（`accessToken` / `refreshToken` /
+`expiresAt`（RFC3339 字符串）/ `region` / `profileArn` / `clientId` /
+`clientSecret`），不认 `pluginSecret` 嵌套；`expires`（毫秒）同时给出，
+账号迁移导入也能用。social 账号的 `clientId` / `clientSecret` 为空。
+
+### 3.2 Kiro 账号管理器（`kiro_json`，保留格式）
+
+`services/account_export.py` 仍注册 `kiro_json`（v2，账号管理器格式），
+但**不在任何 UI 下拉里**——需要时按 id 调用：
 
 ```json
 {
@@ -93,24 +129,12 @@ AWS 不再是「平台管理」里的一个平台（2026-11-13 调整）：它�
 `api/accounts.py` 认出 `pluginSecret` 后调用
 `platforms.kiro.credentials.parse_entry()` 拍平，凭据落进 `extra`。
 
-`source` 的口径：**导出写 `plugin`**（账号管理器 `kiro.json` 的取值，样例文件就是
-`plugin`；写 `aws` 管理器不认），**导入时**对 `auth_method=idc` 的账号映射回
-`aws` —— 本项目注册的号来源是 AWS，这条链不能因为一次导出/导入就断。
+`source` 的口径：导出写 `plugin`（管理器的取值），导入时对 `auth_method=idc`
+的账号映射回 `aws` —— 本项目注册的号来源是 AWS，这条链不能因为一次导出/导入就断。
 
 > `client_secret` 与 `kiro_aws_{access_token,refresh_token,client_secret,sso}`
 > 在 `credential_crypto.SENSITIVE_EXTRA_KEYS` 里 —— 落盘即密文。它们与 RT
 > 同级：有这三件套就能无限续期 AT。
-
-`kiro.json` 之外，**通用导出**（账号页 → 导出）也覆盖了这些凭据：
-
-- **CSV（全字段表格）** 末尾追加了 `client_id` / `client_secret` / `sso` 三列
-  —— 前 11 列的位置不动，按列号切 CSV 的下游脚本不受影响；
-- **JSON（全字段）** 带上 `kiro_aws_access_token` / `kiro_aws_refresh_token` /
-  `kiro_aws_client_secret` / `kiro_aws_sso` / `kiro_aws_client_id` /
-  `kiro_aws_region` / `kiro_aws_email` 快照与显示名 `name` —— 备份/换机恢复
-  不会丢来源账号，Kiro 的展示名也不会变回邮箱；
-- 两者都有 camelCase 兜底（`clientId` / `clientSecret` / `profileArn`）：
-  旧版 JSON 导入把 camelCase 原样落库的行，导出来不会是空列。
 
 ## 4. 刷新与测活
 

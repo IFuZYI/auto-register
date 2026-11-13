@@ -80,8 +80,9 @@ class AuthorizedAccountsWiringTests(unittest.TestCase):
         """Kiro 的「导出凭据」：格式、下载名、仅 kiro 可见。"""
         source = self._read("pages/Accounts.tsx")
         self.assertIn("kiro_export", source)
-        self.assertIn("format: 'kiro_json'", source)
-        self.assertIn("link.download = 'kiro.json'", source)
+        self.assertIn("format: 'kiro_auth_token'", source)
+        self.assertIn("kiro-auth-token.json", source)
+        self.assertIn("agent2api-accounts.json", source)
         self.assertIn("currentPlatform === 'kiro'", source)
 
     def test_page_registers_aws_and_shows_the_derivation_chain(self):

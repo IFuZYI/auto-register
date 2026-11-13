@@ -902,7 +902,7 @@ export default function Accounts() {
   const doExportKiroCredentials = async () => {
     setKiroExporting(true)
     try {
-      const body: Record<string, unknown> = { format: 'kiro_json', platform: 'kiro' }
+      const body: Record<string, unknown> = { format: 'kiro_auth_token', platform: 'kiro' }
       if (selectedRowKeys.length > 0) {
         body.account_ids = selectedRowKeys
       } else {
@@ -920,7 +920,11 @@ export default function Accounts() {
       const url = URL.createObjectURL(blob)
       const link = document.createElement('a')
       link.href = url
-      link.download = 'kiro.json'
+      // 单账号 = Agent2API 的 kiro-auth-token.json；多账号 = 账号迁移文档
+      link.download =
+        selectedRowKeys.length === 1 || (selectedRowKeys.length === 0 && total === 1)
+          ? 'kiro-auth-token.json'
+          : 'agent2api-accounts.json'
       link.click()
       // Safari/旧 Firefox 立刻 revoke 会取消下载
       window.setTimeout(() => URL.revokeObjectURL(url), 1000)

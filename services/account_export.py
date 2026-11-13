@@ -188,6 +188,13 @@ def _render_csv(accounts: Sequence[Any]) -> str:
     return buffer.getvalue().rstrip("\n")
 
 
+def _render_kiro_auth_tokens(accounts: Sequence[Any]) -> str:
+    """Agent2API 的 Kiro 导入文件（扁平凭证 / 账号迁移文档）。"""
+    from platforms.kiro.credentials import render_auth_tokens
+
+    return render_auth_tokens(accounts)
+
+
 def _render_kiro_json(accounts: Sequence[Any]) -> str:
     """Kiro 账号 → `kiro.json`（账号管理器 v2 格式）。
 
@@ -340,6 +347,14 @@ _FORMAT_LIST: tuple[ExportFormat, ...] = (
         description="给脚本二次处理用",
         extension="json",
         renderer=_render_json,
+    ),
+    ExportFormat(
+        id="kiro_auth_token",
+        label="Kiro 授权文件（Agent2API）",
+        description="Agent2API 的 Kiro 导入格式：单账号为 kiro-auth-token.json，多账号为 accounts 数组",
+        extension="json",
+        renderer=_render_kiro_auth_tokens,
+        hidden=True,
     ),
     ExportFormat(
         id="kiro_json",

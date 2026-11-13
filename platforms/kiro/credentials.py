@@ -275,6 +275,84 @@ def to_account_entry(account: Any) -> dict[str, Any]:
     }
 
 
+def _rfc3339(ms: int) -> str:
+    """毫秒 → RFC3339（Agent2API 的 `expiresAt` 是字符串，不是毫秒数字）。"""
+    if not ms:
+        return ""
+    from datetime import datetime, timezone
+
+    return (
+        datetime.fromtimestamp(ms / 1000, tz=timezone.utc)
+        .isoformat(timespec="milliseconds")
+        .replace("+00:00", "Z")
+    )
+
+
+def to_auth_token_entry(account: Any) -> dict[str, Any]:
+    """账号 → Agent2API 的 Kiro 扁平凭证（`kiro-auth-token.json` 字段）。
+
+    与 `to_account_entry`（账号管理器 v2）不同：Agent2API 的解析器读的是
+    顶层 `accessToken` / `refreshToken` / `expiresAt` / `profileArn` /
+    `clientId` / `clientSecret`，没有 `pluginSecret` 嵌套。
+    """
+    extra = _extra_of(account)
+    email = _attr(account, "email") or _clean(extra.get("account_id"))
+    access = _clean(extra.get("access_token")) or _attr(account, "access_token")
+    refresh = _clean(extra.get("refresh_token")) or _attr(account, "refresh_token") or _attr(account, "token")
+    auth_method = _clean(extra.get("auth_method")) or AUTH_METHOD_IDC
+    login_provider = _clean(extra.get("login_provider")) or "BuilderId"
+    plan = _clean(extra.get("plan")) or DEFAULT_PLAN
+    region = _clean(extra.get("region")) or REGION
+    profile_arn = _clean(extra.get("profile_arn")) or DEFAULT_PROFILE_ARN
+    account_id = _clean(extra.get("account_id")) or email
+    uid = _clean(extra.get("uid")) or ("github" if auth_method == AUTH_METHOD_SOCIAL else "builderid")
+    expires_ms = _ms_of(extra.get("expires_at"))
+    name = _clean(extra.get("name")) or account_id or email
+
+    return {
+        "provider": "kiro",
+        "name": name,
+        "accessToken": access,
+        "refreshToken": refresh,
+        "expires": expires_ms,
+        "expiresAt": _rfc3339(expires_ms),
+        "region": region,
+        "profileArn": profile_arn,
+        "clientId": _clean(extra.get("client_id")),
+        "clientSecret": _clean(extra.get("client_secret")),
+        "method": auth_method,
+        "loginProvider": login_provider,
+        "uid": uid,
+        "accountId": account_id,
+        "plan": plan,
+    }
+
+
+def render_auth_tokens(accounts: Iterable[Any]) -> str:
+    """Agent2API 导入文件。
+
+    单账号 → 扁平 `kiro-auth-token.json`（Kiro 提供商的「文件」入口）；
+    多账号 → Agent2API 账号迁移文档（`accounts` 数组，批量导入用）。
+    """
+    entries = [
+        to_auth_token_entry(account)
+        for account in accounts
+        if str(getattr(account, "platform", "") or "") == "kiro"
+    ]
+    if len(entries) == 1:
+        return json.dumps(entries[0], ensure_ascii=False, indent=2)
+    return json.dumps(
+        {
+            "version": 2,
+            "exportedAt": _now_ms(),
+            "customProviders": [],
+            "accounts": entries,
+        },
+        ensure_ascii=False,
+        indent=2,
+    )
+
+
 def build_document(
     entries: Iterable[Mapping[str, Any]], *, exported_at: int | None = None
 ) -> dict[str, Any]:
@@ -400,4 +478,6 @@ __all__ = [
     "parse_entry",
     "records_from_entries",
     "to_account_entry",
+    "to_auth_token_entry",
+    "render_auth_tokens",
 ]
