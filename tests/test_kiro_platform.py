@@ -610,12 +610,14 @@ class KiroExportImportTests(unittest.TestCase):
             platform="kiro", email="kiro-export@x.ai", password="pw", token="rt-1", extra=extra
         )
 
-    def test_kiro_json_format_is_registered(self):
+    def test_kiro_json_format_is_registered_but_hidden_from_the_menu(self):
         from services.account_export import EXPORT_FORMATS, list_export_formats
 
+        # 注册表里仍在（专用「导出凭据」按 id 调用），但不进通用导出的下拉：
+        # Kiro 页已有独立入口，两个入口做同一件事只会让人选错格式。
         self.assertIn("kiro_json", EXPORT_FORMATS)
         ids = {item["id"] for item in list_export_formats()}
-        self.assertIn("kiro_json", ids)
+        self.assertNotIn("kiro_json", ids)
 
     def test_kiro_json_format_renders_version_2_document(self):
         from services.account_export import render_accounts

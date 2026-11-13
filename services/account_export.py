@@ -148,6 +148,10 @@ class ExportFormat:
     # 多列格式相反，空字段必须留着占位。
     skip_empty_rows: bool = False
     renderer: Optional[Callable[[Sequence[Any]], str]] = field(default=None, compare=False)
+    #: 不在「导出格式」下拉里出现，但仍可按 id 调用（专用入口用）。
+    #: `kiro_json` 属于这种：Kiro 页有独立的「导出凭据」按钮，通用导出
+    #: 下拉里再列一次就是两个入口做同一件事。
+    hidden: bool = False
 
     @property
     def sample(self) -> str:
@@ -343,6 +347,8 @@ _FORMAT_LIST: tuple[ExportFormat, ...] = (
         description="Kiro 账号管理器的导入格式：只含 kiro 平台账号",
         extension="json",
         renderer=_render_kiro_json,
+        # 专用入口：平台管理 → Kiro → 更多 → 导出凭据
+        hidden=True,
     ),
 )
 
@@ -404,6 +410,7 @@ def list_export_formats() -> list[dict]:
             "sample": f.sample,
         }
         for f in _FORMAT_LIST
+        if not f.hidden
     ]
 
 
