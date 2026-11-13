@@ -1378,8 +1378,7 @@ class AwsBuilderIdClient:
         password_result = self.set_password(
             email, password, registration_code, sign_in_state
         )
-        self.password_set = True
-        self._log("[AWS] 密码已设置")
+        self._log("[AWS] 密码已设置" if self.password_set else "[AWS] 工作流已完成（密码未提交）")
         if not password_result.get("completed"):
             self.complete_signup(
                 email,

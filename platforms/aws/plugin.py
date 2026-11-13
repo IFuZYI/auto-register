@@ -197,6 +197,16 @@ class AwsPlatform(BasePlatform):
             raise
         except Exception as exc:
             logger.debug("AWS 注册失败: %s", exc)
+            # 传输层异常（超时/断连）也可能发生在 create-identity 之后：
+            # 号已经建好，不落库就白烧。与 AwsRegistrationError 同款处理。
+            if getattr(client, "identity_created", False) or getattr(client, "password_set", False):
+                self._save_partial_account(client, email, final_password)
+                self._record_mailbox_status(mailbox, mailbox_account, "used")
+                state = "密码已设置" if getattr(client, "password_set", False) else "密码未确认"
+                raise RuntimeError(
+                    f"AWS 账号已创建（{state}），但请求失败：{exc}。"
+                    "账号已保存到「授权账号」，可稍后重试补凭据。"
+                ) from exc
             self._record_mailbox_status(mailbox, mailbox_account, "failed")
             raise
 
@@ -281,7 +291,13 @@ class AwsPlatform(BasePlatform):
             "refresh_token": str(extra.get("refresh_token") or account.refresh_token or ""),
         }
         if not credentials["refresh_token"]:
-            return {"code": None, "usable": False, "summary": "缺少 refresh_token"}
+            # 半成品（needs_sso）或导入缺字段：测不了，不是失效。
+            return {
+                "code": None,
+                "usable": None,
+                "indeterminate": True,
+                "summary": "缺少 refresh_token（待补凭据）",
+            }
         proxy = (self.config.proxy if self.config else None) or ""
         detail = probe_builder_id(proxy=proxy, **credentials)
         detail["refreshed_at"] = int(time.time())

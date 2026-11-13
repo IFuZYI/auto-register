@@ -470,6 +470,33 @@ class KiroSourceSelectionTests(unittest.TestCase):
                 platform.register()
 
 
+class KiroParseNameFallbackTests(unittest.TestCase):
+    """`name` 兜底 accountId 时不能把 "user@x.com (GitHub)" 当邮箱。"""
+
+    def test_name_with_provider_suffix_is_not_used_as_email(self):
+        from platforms.kiro.credentials import parse_entry
+
+        record = parse_entry(
+            {
+                "name": "user@x.com (GitHub)",
+                "pluginSecret": {"method": "social", "loginProvider": "github"},
+            }
+        )
+        self.assertFalse(record.get("account_id"))
+        self.assertNotIn("(github)", record.get("email", ""))
+
+    def test_plain_email_name_is_still_used(self):
+        from platforms.kiro.credentials import parse_entry
+
+        record = parse_entry(
+            {
+                "name": "user@x.com",
+                "pluginSecret": {"method": "social", "loginProvider": "github"},
+            }
+        )
+        self.assertEqual(record["account_id"], "user@x.com")
+
+
 class KiroReuseLoginTests(unittest.TestCase):
     """复用登录主链路：SSO（含 OTP）→ Kiro 授权 → 来源快照。"""
 

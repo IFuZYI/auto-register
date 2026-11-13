@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type Key } from 'react'
+import { useEffect, useMemo, useRef, useState, type Key } from 'react'
 import {
   Card,
   Table,
@@ -98,6 +98,9 @@ export default function Proxies() {
   })
   const [balanceEnabled, setBalanceEnabled] = useState(true)
   const [balanceLoaded, setBalanceLoaded] = useState(false)
+  // 「单代理上限」的草稿值：每敲一个键都 PUT 会先写 1 再写 10（还弹两次 toast）
+  const [balanceMaxDraft, setBalanceMaxDraft] = useState<number | null>(null)
+  const balanceMaxTimer = useRef<number | null>(null)
   const [balanceMax, setBalanceMax] = useState(0)
   const [balancing, setBalancing] = useState(false)
 
@@ -467,9 +470,24 @@ export default function Proxies() {
             <Tooltip title="0 = 不限。超过上限的代理不再接收新绑定（全部超限时忽略上限）">
               <InputNumber
                 min={0}
-                value={balanceMax}
+                value={balanceMaxDraft ?? balanceMax}
                 aria-label="单代理上限（0 表示不限）"
-                onChange={(value) => saveBalanceCfg(balanceEnabled, Number(value) || 0)}
+                onChange={(value) => {
+                  const next = Number(value) || 0
+                  setBalanceMaxDraft(next)
+                  if (balanceMaxTimer.current) window.clearTimeout(balanceMaxTimer.current)
+                  balanceMaxTimer.current = window.setTimeout(() => {
+                    setBalanceMaxDraft(null)
+                    void saveBalanceCfg(balanceEnabled, next)
+                  }, 600)
+                }}
+                onBlur={() => {
+                  if (balanceMaxDraft === null) return
+                  if (balanceMaxTimer.current) window.clearTimeout(balanceMaxTimer.current)
+                  const next = balanceMaxDraft
+                  setBalanceMaxDraft(null)
+                  void saveBalanceCfg(balanceEnabled, next)
+                }}
                 style={{ width: 90 }}
               />
             </Tooltip>
@@ -478,6 +496,7 @@ export default function Proxies() {
       </div>
       {balanceLoaded && !balanceInfo.bindable_count && (
         <Alert
+          style={{ marginTop: 4 }}
           type="warning"
           showIcon
           message="还没有「绑定」标签的代理"

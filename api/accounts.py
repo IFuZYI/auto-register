@@ -931,29 +931,32 @@ def _do_check(account_id: str):
         from core.registry import get
         try:
             PlatformCls = get(acc.platform)
-            plugin = PlatformCls(config=RegisterConfig())
+            # 与动作链路一致：优先用账号绑定的出口，别让检测走直连
+            account_extra = acc.get_extra() if hasattr(acc, "get_extra") else {}
+            check_proxy = str((account_extra or {}).get("register_proxy") or "")
+            plugin = PlatformCls(config=RegisterConfig(proxy=check_proxy or None))
             obj = acc.to_record()
             valid = plugin.check_valid(obj)
             # 重新取一次：check_valid 期间可能已被别处改动
             fresh = account_repository.get(account_id)
             if fresh:
                 if fresh.platform != "chatgpt":
+                    detail = getattr(plugin, "last_probe_detail", {}) or {}
                     if valid:
                         # 正向确认可用 → 过期/失效恢复「正常」（禁用不动）
                         if fresh.status in ("expired", "invalid"):
                             fresh.status = "registered"
                     elif callable(getattr(plugin, "apply_probe_status_policy", None)):
                         # 状态语义归平台自己（grok 的 SSO 三态、aws/kiro 的
-                        # 403=封禁 / 400=失效 / 网络错误=不改）。这里再写一份
-                        # 就会与动作链路分叉（审计 2026-11-13：aws/kiro 403
-                        # 曾被写成 invalid 而不是 banned）。
-                        detail = getattr(plugin, "last_probe_detail", {}) or {}
+                        # 403=封禁 / 400=失效 / 网络错误=不改）。
                         plugin.apply_probe_status_policy(fresh, detail=detail)
-                        from services.action_execution import persist_probe_credentials
-
-                        persist_probe_credentials(fresh, detail)
                     else:
                         fresh.status = "invalid"
+                    # **成功也要写回**：探测本身就是一次刷新，成功时同样换回了
+                    # 新 AT（上游可能轮换 RT）。审计第三轮 Critical。
+                    from core.probe_credentials import persist_probe_credentials
+
+                    persist_probe_credentials(fresh, detail)
                 fresh.updated_at = datetime.now(timezone.utc)
                 account_repository.upsert(fresh)
         except Exception:

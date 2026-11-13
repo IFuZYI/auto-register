@@ -108,7 +108,10 @@ def probe_kiro(
     )
     if not refreshed.get("ok"):
         code = refreshed.get("code")
-        indeterminate = code is None
+        code_num = code if isinstance(code, int) else None
+        indeterminate = (
+            code_num is None or code_num >= 500 or code_num in (408, 429)
+        )
         return {
             "code": code,
             # 网络错误/缺凭据 = 测不了（None），不是失效（False）

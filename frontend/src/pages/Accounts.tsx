@@ -897,7 +897,10 @@ export default function Accounts() {
    * 就是喂给 Kiro 账号管理器，选错格式等于白导。
    * 勾选了就导勾选的，没勾选就导当前筛选结果。
    */
-  const exportKiroCredentials = async () => {
+  const [kiroExporting, setKiroExporting] = useState(false)
+
+  const doExportKiroCredentials = async () => {
+    setKiroExporting(true)
     try {
       const body: Record<string, unknown> = { format: 'kiro_json', platform: 'kiro' }
       if (selectedRowKeys.length > 0) {
@@ -919,7 +922,8 @@ export default function Accounts() {
       link.href = url
       link.download = 'kiro.json'
       link.click()
-      URL.revokeObjectURL(url)
+      // Safari/旧 Firefox 立刻 revoke 会取消下载
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000)
       message.success(
         selectedRowKeys.length > 0
           ? `已导出 ${selectedRowKeys.length} 个账号的凭据`
@@ -927,7 +931,19 @@ export default function Accounts() {
       )
     } catch (e) {
       message.error(`导出凭据失败: ${e instanceof Error ? e.message : String(e)}`)
+    } finally {
+      setKiroExporting(false)
     }
+  }
+
+  const exportKiroCredentials = () => {
+    Modal.confirm({
+      title: '导出 Kiro 凭据？',
+      content: '文件包含明文 access/refresh token 与 clientSecret，下载后请妥善保管。',
+      okText: '导出',
+      cancelText: '取消',
+      onOk: () => doExportKiroCredentials(),
+    })
   }
 
   /**
@@ -1507,7 +1523,7 @@ export default function Accounts() {
                     label: selectedRowKeys.length > 0
                       ? `导出凭据 (${selectedRowKeys.length})`
                       : '导出凭据',
-                    disabled: total === 0,
+                    disabled: total === 0 || kiroExporting,
                   }] : []),
                   { type: 'divider' as const },
                   // 「手工新增」= 手动录一条，与「注册」（自动跑流程）不是一回事，

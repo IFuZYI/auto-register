@@ -349,33 +349,7 @@ def _restamp_at_provenance(extra: dict, writes: dict) -> None:
     extra["chatgpt_token_refresh"] = stamp
 
 
-def persist_probe_credentials(acc_model, detail: dict, session=None) -> bool:
-    """把探测/刷新换回的新 AT/RT/expires_at 写回账号行（动作与单账号检测共用）。
-
-    返回是否发生了写入。写回失败只记日志，不影响动作结论。
-    """
-    detail = detail or {}
-    if not detail.get("usable") or not (detail.get("access_token") or detail.get("refresh_token")):
-        return False
-    try:
-        from datetime import datetime, timezone
-
-        extra = dict(acc_model.get_extra() or {})
-        if detail.get("access_token"):
-            extra["access_token"] = str(detail["access_token"])
-        if detail.get("refresh_token"):
-            extra["refresh_token"] = str(detail["refresh_token"])
-        if detail.get("expires_in"):
-            extra["expires_at"] = int(
-                datetime.now(timezone.utc).timestamp() * 1000
-            ) + int(detail["expires_in"]) * 1000
-        acc_model.set_extra(extra)
-        if detail.get("refresh_token"):
-            acc_model.token = str(detail["refresh_token"])
-        return True
-    except Exception as exc:  # noqa: BLE001 - 写回失败不影响动作结论
-        logger.debug("探测凭据写回失败: %s", exc)
-        return False
+from core.probe_credentials import persist_probe_credentials  # noqa: F401  (re-export)
 
 
 def _apply_aws_kiro_status(acc_model, action_id, result, session) -> None:

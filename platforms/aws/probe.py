@@ -112,7 +112,8 @@ def probe_builder_id(
             "expires_in": result["expires_in"],
         }
     code: Optional[int] = result.get("code")
-    indeterminate = code is None
+    code_num = code if isinstance(code, int) else None
+    indeterminate = code_num is None or code_num >= 500 or code_num in (408, 429)
     return {
         "code": code,
         # 网络错误/超时 = 测不了（None），不是失效（False）—— 状态策略会跳过

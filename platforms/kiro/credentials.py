@@ -45,6 +45,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 import time
 from typing import Any, Iterable, Mapping
 
@@ -279,7 +280,13 @@ def parse_entry(entry: Mapping[str, Any]) -> dict[str, Any]:
         AUTH_METHOD_SOCIAL if _clean(secret.get("loginProvider")).lower() in {"github", "google"} else AUTH_METHOD_IDC
     )
     login_provider = _clean(secret.get("loginProvider")) or "BuilderId"
-    account_id = _clean(secret.get("accountId")) or _clean(public.get("accountId")) or _clean(entry.get("name"))
+    account_id = _clean(secret.get("accountId")) or _clean(public.get("accountId"))
+    if not account_id:
+        # `name` 常是 "user@x.com (GitHub)"：带后缀时不能当邮箱用，否则
+        # 账号键会变成 "user@x.com (github)"（审计第二轮）。
+        raw_name = _clean(entry.get("name"))
+        if raw_name and re.fullmatch(r"[^@\s()]+@[^@\s()]+\.[^@\s()]+", raw_name):
+            account_id = raw_name
     email = account_id if "@" in account_id else _clean(public.get("accountId"))
     raw_source = _clean(entry.get("source"))
     # 管理器导出的 `plugin` 对 idc（Builder ID）账号等价于我们的 `source=aws`；

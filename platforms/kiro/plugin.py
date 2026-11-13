@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from core.base_mailbox import BaseMailbox
@@ -160,7 +160,8 @@ class KiroPlatform(BasePlatform):
             and row.email.strip().lower() not in used
             and str(row.status or "").strip().lower() not in ("banned", "invalid")
         ]
-        candidates.sort(key=lambda row: row.created_at or datetime.min)
+        epoch = datetime.min.replace(tzinfo=timezone.utc)
+        candidates.sort(key=lambda row: row.created_at or epoch)
         return candidates[0] if candidates else None
 
     def _mailbox_account_for_reuse(self, mailbox, email: str):
@@ -304,6 +305,13 @@ class KiroPlatform(BasePlatform):
             "0", "false", "no", "off", ""
         }
 
+        # `manual` 必须给 kiro_aws_email —— 在 email 分支之前校验，
+        # 否则「manual + email」会被静默当成新建 AWS。
+        if source_mode == "manual" and not requested_aws:
+            raise RuntimeError(
+                "kiro_source=manual 需要同时指定 kiro_aws_email（要复用哪个 AWS 账号）"
+            )
+
         # 用户点名要注册某个邮箱 → 必须为这个邮箱新建 AWS，不能拿别的号复用。
         # （「补 Kiro」走的是 kiro_aws_email，不带 email；两者不会打架。）
         if str(email or "").strip() and not requested_aws:
@@ -320,11 +328,6 @@ class KiroPlatform(BasePlatform):
             if self.is_email_registered(row.email):
                 raise RuntimeError(f"该 AWS 账号已注册 Kiro: {row.email}")
             return self._reuse_aws_account(row, extra=extra, proxy=proxy, plan=plan)
-
-        if source_mode == "manual":
-            raise RuntimeError(
-                "kiro_source=manual 需要同时指定 kiro_aws_email（要复用哪个 AWS 账号）"
-            )
 
         if source_mode == "reuse":
             row = self._pick_unused_aws()
