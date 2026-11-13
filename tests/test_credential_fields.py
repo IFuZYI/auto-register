@@ -143,6 +143,13 @@ class ScopeTests(unittest.TestCase):
                 # pluginIdentity（social 号 GitHub/Google 的区分维度）、
                 # expires_at 是导出给下游的到期时间、needs_sso 标记半成品。
                 "uid", "expires_at", "needs_sso",
+                # Task 2（2026-11-13）：Kiro 的来源 AWS 快照与显示名。
+                # `kiro_aws_*` 是账号上保存的来源凭据（与 AT/RT 同级机密），
+                # `name` 是 kiro.json 的显示名 —— 备份/恢复都不能丢。
+                "kiro_aws_access_token", "kiro_aws_refresh_token",
+                "kiro_aws_client_secret", "kiro_aws_sso",
+                "kiro_aws_client_id", "kiro_aws_region", "kiro_aws_email",
+                "name",
             },
         )
 

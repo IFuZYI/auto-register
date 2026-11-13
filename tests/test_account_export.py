@@ -1,8 +1,11 @@
+import csv
+import io
 import json
 import unittest
 
 from core.db import AccountModel
 from services.account_export import (
+    EXPORT_FIELDS,
     EXPORT_FORMATS,
     SEPARATOR,
     export_filename,
@@ -79,6 +82,76 @@ class ExportFormatTests(unittest.TestCase):
         header, row = content.split("\n")
         self.assertIn("totp_secret", header.split(","))
         self.assertEqual(row.split(",")[header.split(",").index("totp_secret")], SECRET)
+
+    def test_csv_header_appends_the_aws_kiro_columns(self):
+        """CSV 补 client_id / client_secret / sso —— **追加在末尾**。
+
+        旧列序必须原样保留：按列号切 CSV 的脚本（用户自己的、以及本仓库
+        `parse_delimited_line` 之外的消费方）依赖前 11 列的位置。AWS/Kiro
+        没有 client_id/client_secret 就刷新不了，Grok 没有 sso 就废号。
+        """
+        content = render_accounts([_account()], "csv")
+        header = content.split("\n")[0].split(",")
+        self.assertEqual(
+            header,
+            [
+                "platform",
+                "email",
+                "password",
+                "status",
+                "region",
+                "user_id",
+                "totp_secret",
+                "access_token",
+                "refresh_token",
+                "cashier_url",
+                "created_at",
+                # 2026-11-13：AWS/Kiro/Grok 的凭据列，只许追加、不许插队
+                "client_id",
+                "client_secret",
+                "sso",
+            ],
+        )
+        self.assertIn("client_id", EXPORT_FIELDS)
+        self.assertIn("client_secret", EXPORT_FIELDS)
+
+    def test_csv_round_trip_keeps_client_credentials_and_sso(self):
+        """导出的 CSV 按表头读回来，client_id / client_secret / sso 不能丢。"""
+        account = _account(
+            platform="kiro",
+            extra={
+                "client_id": "cid-1",
+                "client_secret": "csec-1",
+                "sso": "sso-1",
+            },
+        )
+        content = render_accounts([account], "csv")
+        row = next(csv.DictReader(io.StringIO(content)))
+        self.assertEqual(row["client_id"], "cid-1")
+        self.assertEqual(row["client_secret"], "csec-1")
+        self.assertEqual(row["sso"], "sso-1")
+
+    def test_json_export_carries_the_kiro_source_snapshot_and_name(self):
+        """JSON 全字段导出要带上 Kiro 的来源快照与显示名（备份/恢复不丢）。
+
+        `kiro_aws_*` 是 Kiro 账号上保存的**来源 AWS 账号**凭据快照；
+        `name` 是 `kiro.json` 的显示名。备份→换机器恢复后两者都必须还在，
+        否则下游 kiro.rs 少了可追溯的来源、账号列表也丢了显示名。
+        """
+        snapshot = {
+            "kiro_aws_access_token": "aws-at-1",
+            "kiro_aws_refresh_token": "aws-rt-1",
+            "kiro_aws_client_secret": "aws-csec-1",
+            "kiro_aws_sso": "aws-sso-1",
+            "kiro_aws_client_id": "aws-cid-1",
+            "kiro_aws_region": "us-east-1",
+            "kiro_aws_email": "aws-source@example.com",
+            "name": "demo@example.com (BuilderId)",
+        }
+        account = _account(platform="kiro", extra=snapshot)
+        row = json.loads(render_accounts([account], "json"))[0]
+        for key, want in snapshot.items():
+            self.assertEqual(row.get(key), want, f"JSON 导出缺 {key} —— 备份会丢")
 
     def test_json_export_is_parsable(self):
         rows = json.loads(render_accounts([_account()], "json"))

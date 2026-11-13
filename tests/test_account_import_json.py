@@ -622,3 +622,142 @@ class TextImportUpdateMustMergeNotReplaceTests(unittest.TestCase):
         raw = row.extra_json or ""
         self.assertIn("v1:", raw, "落盘必须是密文信封")
         self.assertNotIn(self.AT, raw, "AT 不许明文落盘")
+
+
+class CamelCaseJsonImportTests(unittest.TestCase):
+    """通用 JSON 导入：camelCase 别名要落成 snake_case。
+
+    来源：`kiro.json` / 账号管理器导出、以及旧版导入的 catch-all —— 它们把
+    `accessToken` / `clientId` / `profileArn` / `ssoToken` 原样塞进 extra。
+    而刷新路径（AWS/Kiro）只读 snake_case（`extra["client_id"]` 等），不归一
+    就是「导入成功但刷新不了」。别名键本身仍照收（未知键保留），且在
+    `SENSITIVE_EXTRA_KEYS` 里的那些按密文落盘。
+    """
+
+    EMAIL = "camel-import@example.com"
+    ACCESS = "at-camel-1"
+    REFRESH = "rt-camel-1"
+    CLIENT_ID = "cid-camel-1"
+    CLIENT_SECRET = "csec-camel-1"
+    PROFILE_ARN = "arn:aws:codewhisperer:us-east-1:1:profile/camel"
+    SSO = "sso-camel-1"
+
+    @classmethod
+    def setUpClass(cls):
+        cls._ctx = _client()
+        cls.client = cls._ctx.__enter__()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._ctx.__exit__(None, None, None)
+
+    def tearDown(self):
+        row = account_repository.find_by_email("aws", self.EMAIL)
+        if row is not None:
+            account_repository.delete(row.id, "aws")
+
+    def _entry(self, **overrides):
+        entry = {
+            "platform": "aws",
+            "email": self.EMAIL,
+            "accessToken": self.ACCESS,
+            "refreshToken": self.REFRESH,
+            "clientId": self.CLIENT_ID,
+            "clientSecret": self.CLIENT_SECRET,
+            "profileArn": self.PROFILE_ARN,
+            "ssoToken": self.SSO,
+        }
+        entry.update(overrides)
+        return entry
+
+    def _import(self, entry):
+        return self.client.post("/api/accounts/import", json={
+            "platform": "aws",
+            "lines": [json.dumps([entry], ensure_ascii=False)],
+            "format": "json",
+        })
+
+    def test_camel_case_aliases_land_as_snake_case(self):
+        response = self._import(self._entry())
+        self.assertEqual(response.status_code, 200, response.text[:300])
+
+        row = account_repository.find_by_email("aws", self.EMAIL)
+        self.assertIsNotNone(row)
+        extra = row.get_extra()
+        expected = {
+            "access_token": self.ACCESS,
+            "refresh_token": self.REFRESH,
+            "client_id": self.CLIENT_ID,
+            "client_secret": self.CLIENT_SECRET,
+            "profile_arn": self.PROFILE_ARN,
+            "sso": self.SSO,
+        }
+        for key, want in expected.items():
+            self.assertEqual(extra.get(key), want, f"camelCase 别名没落成 {key}")
+        # 别名键仍保留（未知键照收），且机密值以密文落盘
+        self.assertEqual(extra.get("clientId"), self.CLIENT_ID, "别名键被丢掉了")
+        raw = row.extra_json or ""
+        for secret in (self.ACCESS, self.REFRESH, self.CLIENT_SECRET, self.SSO):
+            self.assertNotIn(secret, raw, "别名键的机密值必须加密落盘")
+
+    def test_existing_snake_case_value_is_not_overwritten_by_the_alias(self):
+        """两条拼写同时出现时以 snake_case 为准 —— 归一不能反向覆盖。"""
+        entry = self._entry(access_token="at-snake", accessToken="at-camel")
+        self.assertEqual(self._import(entry).status_code, 200)
+
+        extra = account_repository.find_by_email("aws", self.EMAIL).get_extra()
+        self.assertEqual(extra.get("access_token"), "at-snake")
+
+    def test_refresh_action_reads_the_normalized_credentials(self):
+        """归一的目的是「能刷新」：AWS 刷新动作要能拿到 client_id/secret/RT。"""
+        from unittest import mock
+
+        from core.base_platform import RegisterConfig
+        from core.models.account import AccountRecord
+        from platforms.aws import plugin as aws_plugin
+
+        self.assertEqual(self._import(self._entry()).status_code, 200)
+        row = account_repository.find_by_email("aws", self.EMAIL)
+        account = AccountRecord(
+            platform="aws", email=self.EMAIL, extra=row.get_extra(),
+        )
+
+        captured = {}
+
+        def _fake_refresh(**kwargs):
+            captured.update(kwargs)
+            return {
+                "ok": True,
+                "access_token": "at-refreshed",
+                "refresh_token": "rt-refreshed",
+                "expires_in": 3600,
+            }
+
+        platform = aws_plugin.AwsPlatform(config=RegisterConfig())
+        with mock.patch.object(aws_plugin, "refresh_builder_id", _fake_refresh):
+            result = platform.execute_action("refresh_token", account, {})
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(captured.get("client_id"), self.CLIENT_ID)
+        self.assertEqual(captured.get("client_secret"), self.CLIENT_SECRET)
+        self.assertEqual(captured.get("refresh_token"), self.REFRESH)
+
+    def test_list_response_does_not_leak_the_camel_case_credentials(self):
+        """列表接口按密文集瘦身 —— camelCase 别名同样不能以正文下发。"""
+        self.assertEqual(self._import(self._entry()).status_code, 200)
+
+        response = self.client.get(
+            "/api/accounts", params={"platform": "aws", "email": self.EMAIL}
+        )
+        self.assertEqual(response.status_code, 200, response.text[:300])
+        items = [item for item in response.json()["items"] if item["email"] == self.EMAIL]
+        self.assertEqual(len(items), 1, "导入的账号没出现在列表里")
+
+        dumped = json.dumps(items[0], ensure_ascii=False)
+        for secret in (self.ACCESS, self.REFRESH, self.CLIENT_SECRET, self.SSO):
+            self.assertNotIn(secret, dumped, "列表把凭据正文下发了")
+
+        extra = json.loads(items[0]["extra_json"])
+        self.assertTrue(extra.get("has_access_token"), "AT 正文没了，布尔标记也丢了")
+        self.assertTrue(extra.get("has_client_secret"), "client_secret 的布尔标记丢了")
+

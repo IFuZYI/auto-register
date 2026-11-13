@@ -14,6 +14,7 @@ from services.account_export import (
 from services.chatgpt_account_state import filter_accounts_by_plus_status
 from services.chatgpt_account_selection import normalize_account_ids
 from core.credential_crypto import SENSITIVE_EXTRA_KEYS
+from core.credential_fields import IMPORT_CAMEL_ALIASES, canonical_writes
 from core.credential_fields import export_names as _export_names
 from core.credential_fields import sync_token_column
 from core.time_utils import UtcDatetime
@@ -715,6 +716,28 @@ def _import_json_accounts(body: ImportRequest, session: Session) -> dict:
         else:
             normalized.append(entry)
     payload = normalized
+
+    # camelCase → snake_case（导入归一）：kiro.json / 账号管理器导出用的是
+    # camelCase（accessToken / clientId / profileArn / ssoToken …），而刷新
+    # 路径只读 snake_case（`extra["client_id"]` 等）。不归一就是「导入成功、
+    # 刷新时缺 client_id/client_secret」。
+    #
+    # 两条规矩：
+    # 1. **只补缺席或空值** —— 两条拼写同时出现时以已有的 snake_case 为准，
+    #    别名不许反向覆盖（导出的规范格式优先）。
+    # 2. **别名键不删** —— 未知键照收（catch-all 会把它们写进 extra，
+    #    `SENSITIVE_EXTRA_KEYS` 里的按密文落盘）。
+    for entry in payload:
+        if not isinstance(entry, dict):
+            continue
+        canonical = canonical_writes(entry)
+        for alias, name in IMPORT_CAMEL_ALIASES.items():
+            value = str(entry.get(alias) or "").strip()
+            if value:
+                canonical.setdefault(name, value)
+        for key, value in canonical.items():
+            if not str(entry.get(key) or "").strip():
+                entry[key] = value
 
     created = 0
     updated = 0

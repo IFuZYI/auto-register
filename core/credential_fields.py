@@ -126,7 +126,42 @@ EXPORT_ONLY_EXTRA_KEYS: tuple[str, ...] = (
     "uid",
     "expires_at",
     "needs_sso",
+    # Kiro 的**来源 AWS 账号**凭据快照（`platforms/kiro/plugin.py` 的
+    # `SOURCE_PREFIX`）与显示名（`kiro.json` 的 `name`）。
+    # 快照里 client_secret / AT / RT / SSO 都是可冒用身份的 bearer 凭据
+    # （`SENSITIVE_EXTRA_KEYS` 已按密文落盘），备份/恢复不能丢；`name` 是
+    # 账号管理器里的显示名，丢了导出回 `kiro.json` 只能拿邮箱凑。
+    "kiro_aws_access_token",
+    "kiro_aws_refresh_token",
+    "kiro_aws_client_secret",
+    "kiro_aws_sso",
+    "kiro_aws_client_id",
+    "kiro_aws_region",
+    "kiro_aws_email",
+    "name",
 )
+
+
+#: 通用 JSON 导入要额外归一的 camelCase 拼写（别名 → 规范名）。
+#:
+#: `canonical_writes()` 已经覆盖 `CREDENTIAL_FIELDS` 的别名
+#: （accessToken / refreshToken / sessionToken / idToken / sso_token），这里
+#: 只补它没覆盖、但导入方真的会带的几个：
+#:
+#: - `clientId` / `clientSecret` / `profileArn` —— kiro.json / 账号管理器与
+#:   AWS 的 OIDC 响应都是 camelCase。不归一则刷新路径（只读 snake_case）
+#:   拿不到 client_id / client_secret，导入的号「看着成功、其实刷不了」。
+#: - `ssoToken` —— `SENSITIVE_EXTRA_KEYS` 已把它当别名按密文落盘，旧版导入的
+#:   catch-all 会原样收下；不归一则「有 ssoToken 却没有 sso」。
+#:
+#: 别名键**不删**（未知键照收）；导入端只写规范名缺席或为空的键，
+#: 已有的 snake_case 值绝不被别名反向覆盖。
+IMPORT_CAMEL_ALIASES: dict[str, str] = {
+    "clientId": "client_id",
+    "clientSecret": "client_secret",
+    "profileArn": "profile_arn",
+    "ssoToken": "sso",
+}
 
 
 def export_names() -> list[str]:
@@ -232,6 +267,8 @@ def token_column_credential(row: Any, platform: str, field_name: str) -> str:
 __all__ = [
     "CREDENTIAL_FIELDS",
     "CredentialField",
+    "EXPORT_ONLY_EXTRA_KEYS",
+    "IMPORT_CAMEL_ALIASES",
     "canonical_writes",
     "compare_aliases",
     "export_names",

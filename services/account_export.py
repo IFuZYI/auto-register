@@ -119,6 +119,10 @@ EXPORT_FIELDS: dict[str, ExportField] = {
         # grok 账号的主凭证是 SSO —— 导出/导入必须带上，否则换机器导入丢 SSO
         # （整理前实测的真 bug：导出没有 sso 字段，grok 账号往返即丢）。
         ExportField("sso", "SSO", _extra_key("sso", "sso_token")),
+        # AWS Builder ID / Kiro 的 OIDC 客户端：没有 client_id + client_secret
+        # 就刷新不了 token（导入端从 extra 读 snake_case，见 api/accounts.py）。
+        ExportField("client_id", "ClientId", _extra_key("client_id")),
+        ExportField("client_secret", "ClientSecret", _extra_key("client_secret")),
         ExportField("phone_number", "手机号", _extra_key("phone_number")),
         ExportField("bound_email", "绑定邮箱", _extra_key("bound_email")),
         ExportField("user_id", "UID", _attr("user_id")),
@@ -162,6 +166,11 @@ def _render_csv(accounts: Sequence[Any]) -> str:
         "refresh_token",
         "cashier_url",
         "created_at",
+        # AWS / Kiro / Grok 的凭据列：**追加在末尾**，前 11 列的位置不动
+        # （按列号切 CSV 的脚本依赖旧列序）。
+        "client_id",
+        "client_secret",
+        "sso",
     )
     buffer = io.StringIO()
     writer = csv.writer(buffer, lineterminator="\n")
