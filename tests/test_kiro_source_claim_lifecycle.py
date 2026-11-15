@@ -53,13 +53,24 @@ class KiroSourceClaimLifecycleTests(unittest.TestCase):
             # 两个 worker 都已完成选择、进入保存阶段，才能检查对方的锁；
             # 否则一个 worker 可能在另一个尚未开始检查时就结束并释放。
             both_saving.wait(timeout=10)
-            for worker in _BlockingKiro.instances:
-                self.assertIsNotNone(worker._source_claim, "保存前已经释放来源")
-                email = worker._source_claim.email
-                competing = try_acquire(email)
-                claims_held_at_save.append(competing is None)
-                if competing is not None:
-                    competing.release()
+            # **只断言「本条账号的来源此刻仍被某个 worker 持有」**。
+            #
+            # 原写法遍历 `instances` 断言「每个实例的 _source_claim 都不是
+            # None」——那会和「落库后立刻释放」这个**合法**时序赛跑：A 已经
+            # 保存完并调了 release_registration_resources（把 _source_claim
+            # 置 None），B 才开始遍历，于是报假的「保存前已经释放来源」。
+            # 全量并发跑时实测偶发（单跑 10/10 通过）。
+            # 独占性仍由下面的 try_acquire 证明：抢不到 = 别人正持有。
+            held = [
+                w for w in _BlockingKiro.instances
+                if w._source_claim is not None and w._source_claim.email == account.email
+            ]
+            self.assertTrue(held, f"保存前已经释放来源: {account.email}")
+            email = held[0]._source_claim.email
+            competing = try_acquire(email)
+            claims_held_at_save.append(competing is None)
+            if competing is not None:
+                competing.release()
             saved.append(account)
             return account
 

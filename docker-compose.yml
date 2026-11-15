@@ -1,13 +1,14 @@
-# ── 部署硬约束：**必须单进程** ────────────────────────────────────────────────
+# ── 并发部署：SQLite 可多进程，JSON 只能单进程 ───────────────────────────────
 #
-# 不要给本服务加 `deploy.replicas` / `scale`，也不要在同一份 SQLite 数据目录上
-# 起第二个容器。iCloud 取号的互斥是 `services/icloud/_locks.py` 里的
-# **进程内** `threading.RLock` —— 两个进程各持自己那把锁，谁也挡不住谁，
-# 于是会领到**同一个隐私邮箱**，两边注册都失败且日志里看不出原因。
+# iCloud 取号的互斥已换成数据库层条件更新（`claim_available`）：多进程同时抢
+# 同一个号只有一个能拿到（tests/test_icloud_claim_cross_process.py 钉住）。
 #
-# 详见 docs/MAINTENANCE.md §1.6「部署约束：必须单进程」。
-# 要扩进程，先把取号换成跨进程原语（`icloud_alias_repository.update_where`
-# 的条件更新），再考虑多副本。
+# - SQLite 后端（本文件默认）：可以 `deploy.replicas: 2~4`，写是串行的，别开太多。
+#   多副本时**副本里设 APP_SCHEDULER_ENABLED=0**，只留一个跑周期任务。
+# - JSON 后端（全新部署默认，没有 account_manager.db 时）：JsonStore 的锁是
+#   threading.RLock，不跨进程 —— 必须单进程，或先设 STORAGE_BACKEND=sqlite。
+#
+# 详见 docs/MAINTENANCE.md §1.6「并发部署」。
 #
 services:
   app:

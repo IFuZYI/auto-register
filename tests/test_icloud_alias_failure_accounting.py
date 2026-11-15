@@ -56,6 +56,12 @@ class AliasesResetOnSuccessTests(unittest.TestCase):
                 writes.append(fields)
 
             @staticmethod
+            def claim_available(alias_id):
+                # 抢号现在是条件更新（跨进程唯一），fake 必须实现这条契约。
+                # 返回 True = 本次抢到；返回 False 时 claim_alias 会试下一个候选。
+                return True
+
+            @staticmethod
             def mark_failed(alias_id, *, reset=False):
                 writes.append({"consecutive_failures": 0 if reset else 3})
                 return 0 if reset else 3

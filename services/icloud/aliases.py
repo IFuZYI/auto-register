@@ -199,13 +199,19 @@ def claim_alias(
                 # 状态可能被手工放回 available，但 `used_platforms` 已经
                 # 记着本平台用过 —— 不能因为状态被重置就再发一次。
                 continue
+            # 抢号：**条件更新**，不是「读到就写」。抢不到说明另一个进程/线程
+            # 刚把它领走 —— 试下一个候选，而不是把这个号也发出去。
+            # （这是「必须单进程」那条约束的正解，见 docs/MAINTENANCE.md §1.6）
+            if not icloud_alias_repository.claim_available(candidate["id"]):
+                logger.info(
+                    "iCloud 号池：%s 已被其它进程领走，试下一个",
+                    candidate.get("address"),
+                )
+                continue
             existing = candidate
             break
 
         if existing is not None:
-            icloud_alias_repository.set_fields(
-                existing["id"], pool_status=POOL_STATUS_IN_USE
-            )
             # 领到了 = 这个号是可用的，把历史失败计数清零。
             #
             # `mark_failed` 的 docstring 一直写着「领取成功时用 reset=True

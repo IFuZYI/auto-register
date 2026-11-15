@@ -65,13 +65,19 @@ HOST=127.0.0.1 PORT=8000 python main.py
 
 ---
 
-## 部署硬约束：必须单进程
+## 并发部署：SQLite 可以多进程，JSON 只能单进程
 
-**不要**加 `deploy.replicas` / `scale`，也不要让两个进程共用同一份 SQLite 数据目录。
+iCloud 取号的互斥**已经**从进程内 `RLock` 换成了数据库层的条件更新
+（`ICloudAliasRepository.claim_available`）：8 个进程同时抢 1 个号，只有 1 个
+拿到（`tests/test_icloud_claim_cross_process.py` 钉住）。
 
-iCloud 取号的互斥是**进程内** `threading.RLock`；两个进程各持各的锁，谁也挡不住谁，
-结果是**领到同一个隐私邮箱**，两边注册都失败，而日志里看不出原因。
-要扩进程，先把取号换成跨进程原语。详见 [MAINTENANCE §1.6](docs/MAINTENANCE.md)。
+- **SQLite 后端**：可以起多个后端进程 / 容器副本（建议 2–4 个；SQLite 写是串行的）。
+- **JSON 后端（全新部署的默认）**：`JsonStore` 的锁是 `threading.RLock`，**不跨进程**
+  —— 同一份 `DATA_DIR` 仍然只能起一个进程。要多副本先设 `STORAGE_BACKEND=sqlite`。
+
+多副本还要做两件事：副本里设 `APP_SCHEDULER_ENABLED=0`（否则每个副本各跑一份
+周期任务），以及配**粘性会话**（登录退避计数、2FA 临时令牌在进程内存里）。
+详见 [MAINTENANCE §1.6](docs/MAINTENANCE.md)。
 
 ---
 

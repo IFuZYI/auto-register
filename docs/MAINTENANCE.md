@@ -144,39 +144,58 @@ curl -s -o /dev/null -w '%{http_code}\n' \
      http://127.0.0.1:8000/api/config                # 设了密码时应当是 401
 ```
 
-### 1.6 部署约束：**必须单进程**（iCloud 取号的互斥是进程内锁）
+### 1.6 并发部署：SQLite 下可以多进程，JSON 下仍然只能单进程
 
-**症状**：两个注册任务（几乎同时启动）领到**同一个隐私邮箱**，两边都失败 —— 一边撞
-「邮箱已被占用 / 这个地址已经在 `accounts` 里」，另一边注册到一半报错。日志里看不出
-原因，因为两个任务各自都以为自己是唯一领到这个号的。
+**历史症状**：两个注册任务（几乎同时启动）领到**同一个隐私邮箱**，两边都失败 ——
+一边撞「邮箱已被占用」，另一边注册到一半报错。日志里看不出原因，因为两个任务
+各自都以为自己是唯一领到这个号的。
 
-**根因**：iCloud 取号的互斥是 `services/icloud/_locks.py` 里的
-`_ACCOUNT_LOCKS: dict[int, threading.RLock]` —— 一把 **进程内** 的 `threading.RLock`。
-`claim_alias`（`services/icloud/aliases.py`）用
-`with _facade._account_lock(account_id):` 把「查池 → 标记 `in_use` → 写回」这段
-读-改-写整段包在锁里。但 `threading.RLock` **只在一个进程内互斥**：同一份 SQLite
-数据库上有两个进程时，两个进程各持自己那把锁，谁也挡不住谁，于是都会从池里挑中
-同一个 `available` 别名。
+**根因（已修）**：iCloud 取号的互斥原本是 `services/icloud/_locks.py` 里的
+`threading.RLock` —— 一把**进程内**锁。`claim_alias` 用
+`with _facade._account_lock(account_id):` 把「查池 → 标 `in_use` → 写回」整段
+包在锁里，而 `threading.RLock` 只在一个进程内互斥：两个进程各持自己那把锁，
+于是都从池里挑中同一个 `available` 别名。
 
-**约束**：同一份数据（同一个 `DATA_DIR` / 同一个 SQLite 库）**只允许起一个后端进程**：
+**现在的做法**：把裁决交给**存储层**，进程内锁只作为快路径保留。
 
-- 不要给 `main.py` 加 `--workers N`，也不要 `uvicorn main:app --workers N`；
-- 不要在 `docker-compose.yml` 里 `--scale app=2` 或加 `deploy.replicas`
-  （当前 compose 是单容器，没有 `command` 覆盖）；
-- 不要手动起第二个 `python main.py` 指向同一个 `DATA_DIR`（哪怕端口不同）。
+| 层 | 机制 |
+| --- | --- |
+| `ICloudAliasRepository.claim_available(id)` | SQLite：一条条件 `UPDATE … WHERE id=? AND pool_status IN ('available','',NULL)`，`rowcount` 就是裁决结果；JSON：`JsonTableStore.update_if` 在同一把文件锁内做「读-判-写」 |
+| `claim_alias` | 抢不到 → 记一行日志，试**下一个**候选（不再把同一个号发出去） |
 
-**当前部署天然满足**：
+**实测证据**（`tests/test_icloud_claim_cross_process.py` 与一次性探针，8 个真进程
+同时抢 1 个号）：
 
-- `main.py` 的 `__main__` 只有一行 `uvicorn.run("main:app", host=host, port=port, reload=reload_enabled)`
-  —— **没有 `workers=`**，uvicorn 默认单进程；
-- `deploy/account-manager.service` 是 `Type=simple` + 单条
-  `ExecStart=/usr/bin/xvfb-run … /home/Register/.venv/bin/python main.py`；
-- `docker/entrypoint.sh` 最后是 `exec xvfb-run … python main.py`（`exec` 只有这一个
-  `main.py`，没有 fork 出第二个）。
+```
+旧实现 fca2eec : 声称领到=8  去重地址=1   ← 8 个进程都拿到同一个邮箱
+新实现         : 声称领到=1  去重地址=1
+```
 
-**守卫**：`tests/test_icloud_claim_holds_the_lock.py` 钉住「取号的读-改-写全程在锁内」，
-但它守的是**单进程内**的互斥。真要横向扩进程，必须先把这把锁换成跨进程原语（例如
-仓储层的条件更新 `update_where` / 文件锁），**只加 worker 数量会静默地把互斥取消掉**。
+**因此部署约束变成：**
+
+- **SQLite 后端（有 `account_manager.db` 的部署）**：可以起多个后端进程 / 多个
+  容器副本，取号由数据库条件更新保证唯一。仍建议 2–4 个副本：SQLite 的写是
+  串行的（WAL + `busy_timeout`），副本越多写锁竞争越明显。
+- **JSON 后端（全新部署的默认）**：`JsonStore` 的锁是 `threading.RLock`，
+  **不跨进程** —— 同一份 `DATA_DIR` 仍然只能起**一个**后端进程。要用多副本，
+  先设 `STORAGE_BACKEND=sqlite`（或让库文件先存在）。
+
+**多副本还差两件事（未做，按需再上）：**
+
+1. **周期任务会跑 N 份** —— 调度器的 `last_run_at` 在内存里，每个副本各跑一份。
+   已给开关：副本里设 `APP_SCHEDULER_ENABLED=0`，只留一个「调度者」。
+2. **进程内状态不共享** —— 登录退避计数、2FA 临时令牌、`_pending_2fa` 都在内存，
+   多副本下会出现「刚输完密码，验证码提交打到另一个副本 → 临时令牌无效」。
+   多副本必须配**粘性会话**（按 cookie/IP 粘到同一副本），或把这几处搬到库里。
+
+**任务执行不需要 claim**：任务线程由接收请求的那个进程启动
+（`api/tasks.py:332`），全仓没有「轮询 pending 任务」的调度器，所以一个任务
+只会在一个副本里跑。但 SSE 日志流在客户端重连时可能落到另一个副本，需要粘性
+会话才能续上。
+
+**守卫**：`tests/test_icloud_claim_holds_the_lock.py` 钉住「单进程内取号的读-改-写
+全程在锁内」；`tests/test_icloud_claim_cross_process.py` 钉住「跨进程只能有一个
+赢家」（8 进程竞态 + 正控断言走的是 SQL 分支）。
 
 ---
 
@@ -567,7 +586,7 @@ git diff --stat
 | Grok 注册报 `no_confirmation: 未确认发信（页面未给出理由）` | 页面文案还是那一屏邮箱表单、**没有任何报错**，说明请求根本没发出去（按钮当时是禁用态 / React 还没挂上事件处理） | 看提示尾巴：`已用 X 触发提交` 说明用的是哪一档（按钮 / `form.requestSubmit()` / 输入框 Enter）；`没抓到任何 /auth/ 请求` = 三档都试了还是没发出去；`只见到其它 auth 请求` = 发码接口改名了；`页面按钮[…] 输入框[…]` 是当时的快照 |
 | Grok 账号没有 AT / RT | **不是故障**：2026-10-23 起注册只产 SSO（device flow 每次都 `授权未确认`，白烧 4 分钟/号），且 SSO 是 HS256 JWT、载荷只有 `session_id`、没有 `exp` | 刷新走 SSO → 登录协议；列表看「2API 接入 / 探测」，不看「AT 到期」（那一列只给 ChatGPT） |
 | 窄屏表格「内容被裁、也没有滚动条」 | 只把 `tr` 设成 `block`，`table` 还是 `display: table` —— 浏览器把 block 级 tbody 包进匿名 table-cell，宽度仍按列算 | `table` / `tbody` 都设 `display: block`，并 `col { width: auto }`（见 §5.1） |
-| 两个注册任务领到**同一个隐私邮箱**、两边都失败（日志里看不出原因） | 同一份 SQLite 库上起了**多个**后端进程：iCloud 取号的互斥是进程内 `RLock`，跨进程不互斥（§1.6） | 保证单进程（不加 `--workers` / 不 scale、不跑第二个 `main.py`）；真要扩进程先把锁换成跨进程原语（§1.6） |
+| 两个注册任务领到**同一个隐私邮箱**、两边都失败（日志里看不出原因） | **v1.0.1 之前**：iCloud 取号靠进程内 `RLock`，同库多进程时跨进程不互斥（§1.6） | 已修：`claim_available` 用条件 UPDATE 裁决，8 进程竞态只剩 1 个赢家。仍出现就查是不是 JSON 后端跑了多进程（JSON 的锁不跨进程） |
 | Kiro 任务 28 轮全失败，日志里反复出现同一个「复用 AWS 账号登录」 | 复用失败不留任何标记（`source_email` 只在**成功**落库时写），而候选池按 FIFO 排序 → 每轮都重新选中同一个号。实测 2026-11-14：55 个 AWS 里 52 个已被 Kiro 用掉，剩下的候选只有 3 个，排第一的那个被连续选中 **55 次** | 失败记进**按任务分键**的进程内表（`source_claims._FAILED_SOURCES`），同一任务后续轮次换候选；不写库、不跨任务，一次抖动不永久判死（§5.5） |
 | 信明明到了，任务却一直等到「等码超时」 | 上游 IMAP 超时后**降级 Web API**，而降级路径的按收件人过滤不可靠：`WebClient.FindByAlias` 只对 To/主题/发件人做子串匹配，收件人信息缺失时命中 0 封。实测同一封存在的邮件 `method=imap` 读到 1 封、`method=web_api` 读到 0 封 | 等码读窄但**不能太小**（`OTP_READ_LIMIT=20` 是实测能稳定读到信的最小档位；`DEFAULT_READ_DAYS=2`），别把自己推过上游 15s 信封预算；降级信号经 `warning` 上报，等码当可恢复错误继续等（§5.5） |
 | 收件箱读一次要 20–35s，还时不时降级 | 等码发 `limit=50, days=3650`：上游信封预算是 `max(15s, limit×0.3s)`，`limit=50` 正好顶到 15s 悬崖；10 年窗口还要 SEARCH 上千封（实测同一主号 `total=1447`） | 等码收窄时间窗（`days=2`）+ 取 `limit=20`：实测 2–6s 且稳定 `imap`；`limit=5/10` 会被上游候选截断而**丢信**（同一别名读到 0 封），`limit=50` 会顶到 15s 预算悬崖并降级（§5.5） |

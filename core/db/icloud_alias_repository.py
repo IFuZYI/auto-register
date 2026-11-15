@@ -254,6 +254,68 @@ class ICloudAliasRepository:
             return hit
 
     @staticmethod
+    def claim_available(alias_id: Any) -> bool:
+        """把「可用」的别名**原子地**标成 `in_use`；抢不到返回 False。
+
+        为什么不能用 `set_fields`：那是无条件的读-改-写。两个进程各自读到
+        `available`，然后先后写 `in_use` —— 两边都以为自己领到了，同一个邮箱
+        被发给两个注册任务（`docs/MAINTENANCE.md` §1.6 记的就是这个症状）。
+
+        这里把裁决交给存储层：
+
+        - **SQLite**：一条条件 UPDATE，`rowcount` 就是裁决结果。这条语句在
+          数据库层原子，跨进程有效 —— 于是「加 replicas 会领到同一个邮箱」
+          这个约束被解除。
+        - **JSON**：表级 store 的 `update_if` 在同一把文件锁内做「读-判-写」，
+          同进程多线程安全；**跨进程仍不安全**（那把锁是 `threading.RLock`），
+          JSON 部署必须单进程，见 §1.6。
+
+        `pool_status` 为 `NULL` / 空串的老行按「可用」处理，与
+        `find_candidates` 的口径一致。
+        """
+        from datetime import datetime, timezone
+
+        store = ICloudAliasRepository._store()
+        if store is not None:
+            # 判定条件必须与 `find_candidates` 的候选口径**完全一致**：
+            # 它也把 `used` 算作候选（别的平台用过的地址还能给本平台用，
+            # 同平台复用由 used_platforms 单独挡）。只认 available 会让
+            # 「跨平台复用」永远抢不到 → 直接去新生成，白烧 Apple 额度。
+            for expected in ("available", "used", ""):
+                if store.update_if(
+                    alias_id,
+                    {"pool_status": "in_use"},
+                    expect={"pool_status": expected},
+                ):
+                    return True
+            return False
+
+        from sqlalchemy import or_, update as _update
+
+        from .registry import platform_session
+
+        with platform_session("icloud") as s:
+            stmt = (
+                _update(ICloudAliasModel)
+                .where(ICloudAliasModel.id == alias_id)
+                .where(
+                    or_(
+                        ICloudAliasModel.pool_status.in_(("available", "used")),
+                        ICloudAliasModel.pool_status == "",
+                        ICloudAliasModel.pool_status.is_(None),
+                    )
+                )
+                .values(
+                    pool_status="in_use", updated_at=datetime.now(timezone.utc)
+                )
+            )
+            result = s.exec(stmt)
+            hit = int(getattr(result, "rowcount", 0) or 0)
+            if hit:
+                s.commit()
+            return hit == 1
+
+    @staticmethod
     def release_stale(*, older_than_minutes: int = 120) -> int:
         """把「领了但一直没落定」的 `in_use` 别名放回 `available`。
 

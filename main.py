@@ -189,7 +189,13 @@ async def lifespan(app: FastAPI):
     from services import local_maintenance  # noqa: F401  注册自动检测/刷新/日志清理
     from core.scheduler import registered_jobs, scheduler
     print(f"[OK] 周期任务: {registered_jobs()}")
-    scheduler.start()
+    # 多副本部署时**只让一个进程跑周期任务**：调度器的 last_run_at 在内存里，
+    # 每个进程各跑一份 = 每个周期任务被执行 N 次（N = 副本数）。给运维一个
+    # 开关，把副本里的这个值设成 0，只留一个「调度者」。
+    if os.getenv("APP_SCHEDULER_ENABLED", "1").strip() not in {"0", "false", "False"}:
+        scheduler.start()
+    else:
+        print("[OK] 周期任务: 本进程已禁用（APP_SCHEDULER_ENABLED=0）")
     from services.solver_manager import start_async
     start_async()
     yield

@@ -125,6 +125,35 @@ class JsonTableStore:
         self._store.put(self.table, row_id, merged)
         return _from_storage(merged)
 
+    def update_if(
+        self, row_id: Any, patch: dict[str, Any], *, expect: dict[str, Any]
+    ) -> bool:
+        """**条件更新**：当前值全部等于 `expect` 才写，返回是否写入。
+
+        为什么要它：`update()` 是无条件的读-改-写，两个线程/两个进程各自读到
+        「可用」再先后写「占用」，两边都会以为自己抢到了。取号（iCloud 别名）
+        正是这种场景 —— 抢不到必须能知道抢不到。
+
+        「读-判-写」整段在同一把锁内完成（与 `update` 共用 `_shared`，它按
+        路径全局共享），所以同进程并发不会互相覆盖。
+
+        **跨进程仍不安全**：`_shared` 是 `threading.RLock`，不跨进程。JSON
+        后端只能单进程部署 —— 见 docs/MAINTENANCE.md §1.6。
+        """
+        with self._store._lock, self._store._shared:
+            existing = self._store.get(self.table, row_id)
+            if not isinstance(existing, dict):
+                return False
+            current = _from_storage(existing)
+            for key, wanted in expect.items():
+                if str(current.get(key) or "") != str(wanted or ""):
+                    return False
+            merged = {**existing, **_to_storage(patch)}
+            merged["id"] = existing.get("id", row_id)
+            merged["updated_at"] = datetime.now(timezone.utc).isoformat()
+            self._store.put(self.table, row_id, merged)
+            return True
+
     def delete(self, row_id: Any) -> bool:
         return self._store.delete(self.table, row_id)
 
