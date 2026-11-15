@@ -4,6 +4,7 @@ import type { ColumnsType } from 'antd/es/table'
 import {
   CloudDownloadOutlined,
   CloudUploadOutlined,
+  SettingOutlined,
   SyncOutlined,
 } from '@ant-design/icons'
 import { apiFetch } from '@/lib/utils'
@@ -20,6 +21,7 @@ import {
   summarizeRows,
 } from '@/lib/panelComparison'
 import { withDataLabels } from '@/lib/tableCards'
+import { rowsForComparisonDisplay } from '@/lib/panelComparison'
 
 /**
  * 选中面板后的本地管理面板：本地账号 ↔ 远端账号的对比 + 面板操作。
@@ -97,6 +99,18 @@ const PLATFORM_LABELS: Record<string, string> = {
  * 不含 `unknown_time` —— 它永远不会是行状态（时间只是辅助信息），
  * 摆成筛选项会恒为 0。
  */
+/**
+ * 时间方向的展示文案（对比列与「时间」列共用一套，避免两处措辞漂移）。
+ *
+ * `''` 表示无法判定：不渲染任何字，而不是写「未知」——每行都出现的
+ * 灰色废字只会增加噪音（与「缺省值不渲染」同一规矩）。
+ */
+const DIRECTION_LABELS: Record<string, string> = {
+  local_newer: '本地较新',
+  remote_newer: '远端较新',
+  time_synced: '同小时',
+}
+
 const STATE_ORDER = [
   // 顺序由用户指定（2026-10-26）：从「已同步」到「仅远端」，
   // 越往下越需要动作。此前按状态机内部枚举排（未上传在前），
@@ -229,7 +243,20 @@ const COLUMNS: ColumnsType<ComparisonRow> = [
                 : `本地 ${row.local_updated_hour || '—'} / 远端 ${row.remote_updated_hour || '—'}（小时档位；两侧都能解出签发时间时按秒级比较）`
         }
       >
-        <Tag color={STATE_COLORS[value] || 'default'}>{row.label}</Tag>
+        <span style={{ display: 'inline-flex', flexDirection: 'column', gap: 3 }}>
+          <Tag color={STATE_COLORS[value] || 'default'} style={{ marginInlineEnd: 0 }}>
+            {row.label}
+          </Tag>
+          {/* 时间方向决定「该推还是该拉」。它原来只出现在最右一列，
+              9 列宽表首屏滚不到 —— 而这一格正是看到「凭证不同」之后
+              紧接着要回答的问题。所以在这里给一行小字，最右列仍然保留
+              完整口径与 tooltip。 */}
+          {value === 'credential_diff' && DIRECTION_LABELS[row.time_relation] ? (
+            <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+              {DIRECTION_LABELS[row.time_relation]}
+            </span>
+          ) : null}
+        </span>
       </Tooltip>
     ),
   },
@@ -337,12 +364,7 @@ const COLUMNS: ColumnsType<ComparisonRow> = [
     dataIndex: 'time_relation',
     width: 110,
     render: (value: string, row) => {
-      const labels: Record<string, string> = {
-        local_newer: '本地较新',
-        remote_newer: '远端较新',
-        time_synced: '同小时',
-      }
-      const text = labels[value] || ''
+      const text = DIRECTION_LABELS[value] || ''
       if (!text) return <span style={{ color: 'var(--text-muted)', fontSize: 12 }}>—</span>
       const basisTip =
         row.time_basis === 'credential'
@@ -379,6 +401,7 @@ export function PanelComparisonPanel({
   platforms = [],
   platformActions = {},
   syncAction = '',
+  onConfigure,
 }: {
   panelKey: string
   panelLabel: string
@@ -405,6 +428,8 @@ export function PanelComparisonPanel({
   }
   /** 拉远端状态的动作 id（如 `sync_cliproxyapi_status`）；空串表示没有 */
   syncAction?: string
+  /** 远端未连接时，用户真正需要的下一步是设置连接，而不是执行同步。 */
+  onConfigure?: () => void
 }) {
   // 窄屏把 9 列表格折叠成卡片（同 lib/tableCards 的约定）。
   const screens = Grid.useBreakpoint()
@@ -412,6 +437,14 @@ export function PanelComparisonPanel({
 
   const { message } = App.useApp()
   const [payload, setPayload] = useState<ComparisonPayload | null>(null)
+  /**
+   * 上一次读取失败的原因。
+   *
+   * 没有它时，请求失败后页面只剩一个空表 + 「没有符合条件的账号」——
+   * 那会被读成「这个面板是空的」，而不是「远端没读到」。列表空是合法数据，
+   * 判据只能是「请求抛错」。
+   */
+  const [loadError, setLoadError] = useState('')
   const [loading, setLoading] = useState(false)
   const [syncing, setSyncing] = useState(false)
   const [stateFilter, setStateFilter] = useState('')
@@ -436,9 +469,12 @@ export function PanelComparisonPanel({
           `/integrations/panels/${panelKey}/comparison${query}`,
         )) as ComparisonPayload
         setPayload(data)
-        if (refresh) message.success('已同步到最新')
+        setLoadError('')
+        if (refresh) message.success('对比数据已刷新')
       } catch (e: unknown) {
-        message.error(e instanceof Error ? e.message : '加载对比数据失败')
+        const detail = e instanceof Error ? e.message : '加载对比数据失败'
+        setLoadError(detail)
+        message.error(detail)
       } finally {
         setLoading(false)
         setSyncing(false)
@@ -449,6 +485,7 @@ export function PanelComparisonPanel({
 
   useEffect(() => {
     setPayload(null)
+    setLoadError('')
     setStateFilter('')
     setPlatformFilter('')
     void load(false)
@@ -473,7 +510,7 @@ export function PanelComparisonPanel({
     return platformRows.filter((row) => row.state === stateFilter)
   }, [platformRows, stateFilter])
 
-  const rows = filteredRows
+  const rows = rowsForComparisonDisplay(filteredRows, payload?.remote_error || '')
 
   /** 该状态下该给哪些批量动作（纯函数在 lib 里，有测试）。 */
   const allowedActions = useMemo(() => actionsForState(stateFilter), [stateFilter])
@@ -595,7 +632,7 @@ export function PanelComparisonPanel({
   const runRemoteSync = useCallback(async () => {
     setRunning('sync-from-remote')
     const toastKey = 'panel-sync-from-remote'
-    message.loading({ content: '更新本地凭证中（拉取远端较新的凭证）...', key: toastKey, duration: 0 })
+    message.loading({ content: '正在拉回远端较新的凭据…', key: toastKey, duration: 0 })
     try {
       const syncParams = new URLSearchParams()
       if (platformFilter) syncParams.set('platform', platformFilter)
@@ -606,7 +643,7 @@ export function PanelComparisonPanel({
         method: 'POST',
       })) as { pulled: number; skipped: number; total: number; remote_error?: string }
       if (result.remote_error) {
-        message.error({ content: `更新本地失败：${result.remote_error}`, key: toastKey })
+        message.error({ content: `拉回凭据失败：${result.remote_error}`, key: toastKey })
       } else if (result.pulled) {
         message.success({
           content: `已从远端拉回 ${result.pulled} 个账号的凭证（其余 ${result.skipped} 个无需更新）`,
@@ -620,7 +657,7 @@ export function PanelComparisonPanel({
       }
       await load(true)
     } catch (e: unknown) {
-      message.error({ content: `更新本地失败：${e instanceof Error ? e.message : e}`, key: toastKey })
+      message.error({ content: `拉回凭据失败：${e instanceof Error ? e.message : e}`, key: toastKey })
     } finally {
       setRunning('')
     }
@@ -631,7 +668,7 @@ export function PanelComparisonPanel({
   const runRemotePush = useCallback(async () => {
     setRunning('push-to-remote')
     const toastKey = 'panel-push-to-remote'
-    message.loading({ content: '更新远程凭证中（推送本地较新的凭证）...', key: toastKey, duration: 0 })
+    message.loading({ content: '正在推送本地较新的凭据…', key: toastKey, duration: 0 })
     try {
       const params = new URLSearchParams({ delete_old: 'true' })
       if (platformFilter) params.set('platform', platformFilter)
@@ -642,7 +679,7 @@ export function PanelComparisonPanel({
         method: 'POST',
       })) as { pushed: number; deleted: number; failed: number; skipped: number; total: number; remote_error?: string }
       if (result.remote_error) {
-        message.error({ content: `更新远程失败：${result.remote_error}`, key: toastKey })
+        message.error({ content: `推送凭据失败：${result.remote_error}`, key: toastKey })
       } else if (result.pushed) {
         const deleted = result.deleted ? `，已清理 ${result.deleted} 条旧记录` : ''
         const failed = result.failed ? `，失败 ${result.failed} 个` : ''
@@ -654,7 +691,7 @@ export function PanelComparisonPanel({
         }
       } else if (result.failed) {
         // 推了但全失败（配置缺失/网络错误）—— 不能报「无需更新」。
-        message.error({ content: `更新远程失败：${result.failed} 个账号推送失败`, key: toastKey })
+        message.error({ content: `${result.failed} 个账号的凭据推送失败，请查看任务日志后重试。`, key: toastKey })
       } else {
         message.info({
           content: `没有需要推送的账号（${result.skipped} 个无需更新）`,
@@ -663,7 +700,7 @@ export function PanelComparisonPanel({
       }
       await load(true)
     } catch (e: unknown) {
-      message.error({ content: `更新远程失败：${e instanceof Error ? e.message : e}`, key: toastKey })
+      message.error({ content: `推送凭据失败：${e instanceof Error ? e.message : e}`, key: toastKey })
     } finally {
       setRunning('')
     }
@@ -673,16 +710,16 @@ export function PanelComparisonPanel({
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 10 }}>
         <Space wrap>
-          <Typography.Text strong>{panelLabel} · 本地 ↔ 远程对比</Typography.Text>
+          <Typography.Text strong>{panelLabel}：{remoteUnavailable ? '本地账号概览' : '账号与凭据对比'}</Typography.Text>
           {fetchTime ? (
             <Tooltip title={`数据拉取时间：${payload?.fetched_at}${payload?.cached ? '（来自缓存）' : ''}`}>
               <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                同步时间 {fetchTime}
+                获取于 {fetchTime}
               </Typography.Text>
             </Tooltip>
           ) : null}
           <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-            本地 {payload?.local_count ?? 0} · 远端 {payload?.remote_count ?? 0}
+            本地 {payload?.local_count ?? 0} 个，远端 {payload?.remote_count ?? 0} 个
           </Typography.Text>
           {/* 时区标注：时间列统一按浏览器本地时区显示（后端已归一）。 */}
           <Tooltip title="所有时间列均按浏览器本地时区显示（后端已把本地 UTC 与远端面板时间归一后比较）">
@@ -693,7 +730,17 @@ export function PanelComparisonPanel({
         </Space>
         {/* 按钮组要允许换行：窄屏下按钮一排超宽，不 wrap 会被容器裁掉。 */}
         <Space wrap>
-          {canSyncStatus && (syncAction || Object.keys(platformActions.sync || {}).length) ? (
+          {remoteUnavailable ? (
+            <>
+              <Button type="primary" icon={<SettingOutlined />} onClick={onConfigure}>
+                设置面板连接
+              </Button>
+              <Button icon={<SyncOutlined />} loading={syncing} onClick={() => void load(true)}>
+                重试读取
+              </Button>
+            </>
+          ) : null}
+          {!remoteUnavailable && canSyncStatus && (syncAction || Object.keys(platformActions.sync || {}).length) ? (
             <Tooltip title="读远端状态回写本地（含封禁/失效判定）">
               <Button
                 icon={<SyncOutlined />}
@@ -712,12 +759,12 @@ export function PanelComparisonPanel({
                 }}
                 data-hermes-action="sync-remote-status"
               >
-                同步远端状态
+                读取远端状态
               </Button>
             </Tooltip>
           ) : null}
           {/* 上传（登记）：只在「未上传」等需要补传的状态下给。 */}
-          {canUpload ? (
+          {!remoteUnavailable && canUpload ? (
             <Tooltip title="把当前筛选出的未上传账号推送到该面板，成功后登记并纳入同步范围">
               <Popconfirm
                 title={`把 ${uploadIds.length} 个未上传账号推送到 ${panelLabel}？`}
@@ -743,16 +790,16 @@ export function PanelComparisonPanel({
             </Tooltip>
           ) : null}
           {/* 更新远程凭证：未上传 + 本地较新的推上去（推送方向）。 */}
-          {canPush ? (
-          <Tooltip title="推送「未上传 + 本地较新」的凭证；远端较新的用「更新本地凭证」">
+          {!remoteUnavailable && canPush ? (
+          <Tooltip title="推送未上传和本地较新的凭据；远端较新的账号请使用「拉回远端凭据」。">
             <Popconfirm
               title={
                 pushIds.length
                   ? `把 ${pushIds.length} 个账号的凭证推送到 ${panelLabel}？`
                   : '按对比结果推送：只处理「未上传」与「本地较新」的账号'
               }
-              description="未上传的补传；本地较新的覆盖远端。同小时/无法判定时间的不动。"
-              okText="更新"
+              description="未上传的账号将完成登记；本地较新的凭据会覆盖远端。远端较新、同小时或无法判断时间的账号不处理。"
+              okText="推送"
               cancelText="取消"
               disabled={Boolean(running) || remoteUnavailable}
               onConfirm={() => void runRemotePush()}
@@ -764,22 +811,22 @@ export function PanelComparisonPanel({
                 disabled={Boolean(running) || remoteUnavailable}
                 data-hermes-action="push-to-remote"
               >
-                更新远程凭证{pushIds.length ? ` (${pushIds.length})` : ''}
+                推送本地凭据{pushIds.length ? ` (${pushIds.length})` : ''}
               </Button>
             </Popconfirm>
           </Tooltip>
           ) : null}
           {/* 更新本地凭证：远端较新的拉回来（拉回方向）。 */}
-          {canPull ? (
-          <Tooltip title="拉回「远端较新」的凭证（AT/RT）—— 覆盖本地凭证字段">
+          {!remoteUnavailable && canPull ? (
+          <Tooltip title="拉回远端较新的凭据（AT / RT），仅覆盖本地凭据字段，其他信息不变。">
             <Popconfirm
               title={
                 pullIds.length
                   ? `把 ${pullIds.length} 个「远端较新」账号的凭证拉回本地？`
                   : '按对比结果同步：只拉回「远端较新」的账号'
               }
-              description="会覆盖本地账号的 access_token / refresh_token 等凭证字段（其它字段保留）。"
-              okText="更新"
+              description="会覆盖本地账号的 Access Token、Refresh Token 等凭据字段，其他账号信息不变。"
+              okText="拉回"
               cancelText="取消"
               disabled={Boolean(running) || remoteUnavailable}
               onConfirm={() => void runRemoteSync()}
@@ -790,7 +837,7 @@ export function PanelComparisonPanel({
                 disabled={Boolean(running) || remoteUnavailable}
                 data-hermes-action="sync-from-remote"
               >
-                更新本地凭证{pullIds.length ? ` (${pullIds.length})` : ''}
+                拉回远端凭据{pullIds.length ? ` (${pullIds.length})` : ''}
               </Button>
             </Popconfirm>
           </Tooltip>
@@ -802,7 +849,7 @@ export function PanelComparisonPanel({
               onClick={() => void load(true)}
               data-hermes-action="sync-latest"
             >
-              重新拉取对比
+              刷新对比
             </Button>
           </Tooltip>
         </Space>
@@ -818,14 +865,14 @@ export function PanelComparisonPanel({
             color: 'var(--text-muted)',
           }}
         >
-          远端读取失败：{payload.remote_error} —— 下方只显示本地账号
+          无法读取远端账号：{payload.remote_error}。当前仅显示本地数据，请检查面板连接后重试。
         </div>
       ) : null}
 
       {/* 平台选择（只对多平台面板出现：CPA 同时托管 ChatGPT 与 Grok）。
           单平台面板不渲染 —— 只有「全部」一个选项的选择器是纯噪声。
           选中的平台**同时**作用于表格、下面的状态筛选计数与批量动作按钮。 */}
-      {shouldShowPlatformFilter(platforms) ? (
+      {shouldShowPlatformFilter(platforms) && payload ? (
         <Space wrap size={8}>
           <Segmented
             value={platformFilter}
@@ -842,21 +889,27 @@ export function PanelComparisonPanel({
         </Space>
       ) : null}
 
-      <Space wrap size={6}>
-        <FilterTag
-          label={`全部 ${summary.total ?? 0}`}
-          checked={stateFilter === ''}
-          onSelect={() => setStateFilter('')}
-        />
-        {STATE_ORDER.map((state) => (
+      {/* 首次加载时还没有 payload —— 这时渲染筛选条会先闪出一整套「0」：
+          「全部 0 / 已同步 0 / 未上传 0」，几秒后才跳成真实数字。一屏假零比
+          空白更误导（会读成「远端是空的」或「同步没生效」）。所以数据没到位
+          时整条不渲染，由下面的 Spin 表达「正在读」。 */}
+      {payload ? (
+        <Space wrap size={6}>
           <FilterTag
-            key={state}
-            label={`${stateLabels[state] || state} ${summary[state] ?? 0}`}
-            checked={stateFilter === state}
-            onSelect={() => setStateFilter(state)}
+            label={`全部 ${summary.total ?? 0}`}
+            checked={stateFilter === ''}
+            onSelect={() => setStateFilter('')}
           />
-        ))}
-      </Space>
+          {STATE_ORDER.map((state) => (
+            <FilterTag
+              key={state}
+              label={`${remoteUnavailable && state === 'local_only' ? '仅本地' : stateLabels[state] || state} ${summary[state] ?? 0}`}
+              checked={stateFilter === state}
+              onSelect={() => setStateFilter(state)}
+            />
+          ))}
+        </Space>
+      ) : null}
 
       <Spin spinning={loading}>
         {rows.length ? (
@@ -881,9 +934,14 @@ export function PanelComparisonPanel({
         ) : (
           <Empty
             description={
+              // 这个组件只在**已选中面板**时渲染 —— 所以「请先在左侧选择面板」
+              // 是永远不可能成立的提示（截图里它就出现在已选 Grok2API 的页面上）。
+              // 读失败要单独说，别退化成「没有账号」，那会被当成「面板是空的」。
               payload
-                ? '没有符合条件的账号'
-                : '用左侧「面板管理」下的子项切换面板查看对比'
+                ? (stateFilter || platformFilter ? '当前筛选没有匹配账号，请调整平台或对比状态。' : '本地与远端暂无可对比的账号。')
+                : loadError
+                  ? `读取对比数据失败：${loadError}。请刷新对比重试。`
+                  : '正在读取远端账号…'
             }
           />
         )}

@@ -1,0 +1,198 @@
+{
+  "lane": "L10-data-migrations",
+  "head": "fca2eec",
+  "dirty": true,
+  "reviewed_files": [
+    "core/db/migrations.py",
+    "core/db/base.py",
+    "core/db/merge.py",
+    "core/db/registry.py",
+    "core/db/__init__.py",
+    "core/db/models_account.py",
+    "core/db/models_infra.py",
+    "core/db/models_platform.py",
+    "core/paths.py",
+    "core/environment.py",
+    "core/secret_box.py",
+    "core/storage/__init__.py",
+    "migrations/env.py",
+    "migrations/versions/77cc4baded71_baseline_existing_schema.py",
+    "migrations/versions/b7c1e4a92d30_dedupe_accounts_and_add_unique_index.py",
+    "migrations/versions/c3f8a1d64b27_accounts_id_to_uuid.py",
+    "migrations/versions/d4e7f1a25b90_add_proxy_tags.py",
+    "migrations/versions/e5b2c8f71a34_sync_composite_indexes.py",
+    "alembic.ini",
+    "scripts/merge_platform_dbs.py",
+    "services/data_bundle.py (WAL handling only)"
+  ],
+  "findings": [
+    {
+      "id": "L10-1",
+      "title": "手写迁移链从不补 accounts.legacy_id —— 老库按「自动迁移」升级后首次查询即崩",
+      "severity": "P1",
+      "file": "core/db/migrations.py",
+      "line": 881,
+      "evidence": "`_run_one()` 的 14 个步骤里没有 legacy_id（`grep -n legacy_id core/db/migrations.py` 无输出）。实测：把应用自建库的 accounts.legacy_id 列删掉（模拟 UUID 改造前的老库），再跑 `DATA_DIR=<scratch> STORAGE_BACKEND=sqlite python -c \"from core.db import init_db; init_db(); ... select(AccountModel)\"` → `sqlalchemy.exc.OperationalError: (sqlite3.OperationalError) no such column: accounts.legacy_id`；SQL 为 `SELECT accounts.id, accounts.legacy_id, ... FROM accounts`。init_db() 本身返回成功，故障延迟到第一次 ORM 读。",
+      "impact": "2026-11-02 之前创建的库（无 legacy_id）按 README/MAINTENANCE 的「启动自动迁移」路径升级，服务能起来但第一个账号查询就 500/崩溃；唯一补救是手动跑 Alembic c3f8a1d64b27，而应用从不调用 Alembic。两条迁移链在这里直接分叉。",
+      "fix_hint": "在 `_run_one()` 里、`_ensure_account_email_unique()` 之前加一步幂等补列：PRAGMA 检查后 `ALTER TABLE accounts ADD COLUMN legacy_id INTEGER` + `CREATE UNIQUE INDEX IF NOT EXISTS ix_accounts_legacy_id`（与模型/ alembic 一致）；或让 init_db() 在检测到旧 schema 时调用 Alembic upgrade 而不是只跑手写链。",
+      "class": "functional"
+    },
+    {
+      "id": "L10-2",
+      "title": "应用自建库没有 alembic_version，`alembic upgrade head` 在真实安装上直接失败",
+      "severity": "P1",
+      "file": "core/db/__init__.py",
+      "line": 122,
+      "evidence": "`init_db()` 只做 create_all + run_migrations，全仓无任何写 alembic_version 的代码（`grep -rn alembic_version --include=*.py` 只命中 migrations/ 自身）。实测：用应用自身建库（`DATA_DIR=<scratch> STORAGE_BACKEND=sqlite python -c \"from core.db import init_db; init_db()\"`）→ `no such table: alembic_version`；随后 `ALEMBIC_DATABASE_URL=sqlite:///<该库> alembic upgrade head` → `INFO Running upgrade -> 77cc4baded71` 后 `sqlite3.OperationalError: table accounts already exists`，退出码 1。",
+      "impact": "文档要求老库先 `alembic stamp 77cc4baded71` 再 upgrade（docs/refactor/T0.4-PRODUCTION-STEPS.md:57），但用户面文档 docs/MAINTENANCE.md 未提 Alembic、migrations.py:773 的注释还写着「按文档升级是最常见场景」。任何按应用路径装出来的库都卡在第一步，UUID/唯一索引两条迁移永远不执行 —— 与 L10-1 组合即「老库升不上去」。",
+      "fix_hint": "init_db() 建表后若 alembic_version 缺失且 schema 已是当前形态，写入 stamp（head 或按实际能力判断）；或在 init_db() 里对 SQLite 直接 `command.upgrade(cfg,'head')`，让 Alembic 成为唯一入口，手写链只保留数据修复。",
+      "class": "contract"
+    },
+    {
+      "id": "L10-3",
+      "title": "邮箱池显式指向默认库时，启动迁移会把刚建好的池表删掉",
+      "severity": "P2",
+      "file": "core/db/migrations.py",
+      "line": 611,
+      "evidence": "`_drop_stale_pool_tables_from_default_db()` 只判「engine.url == DATABASE_URL」且表为空就 DROP。实测 `DATA_DIR=<scratch> STORAGE_BACKEND=sqlite DATABASE_URL_OUTLOOK=sqlite:///<scratch>/account_manager.db python -c \"...init_db()...\"` → init_db 里 register_schema 先建出 outlook_accounts，随后被删；最终 `tables: ['accounts','configs','proxies','task_logs','task_runs']`（无 outlook_accounts）。再查 `platform_session('outlook')` → `no such table: outlook_accounts`。",
+      "impact": "core/db/base.py:206-207 明确支持「显式配置可以覆盖或改指到别处」，把池与默认库同库是合法配置；该配置下每次启动都丢表，outlook 池页面/取号全挂。同理适用于 DATABASE_URL_ICLOUD。",
+      "fix_hint": "DROP 前加一条排除：`if platform_database_registry.url_for('outlook') == str(engine.url)` 或 `url_for('icloud') == ...` 时跳过对应表；或只删「不在 configured_platforms 里」的池表。",
+      "class": "data-integrity"
+    },
+    {
+      "id": "L10-4",
+      "title": "跨库 used 回填函数从未被调用，默认分库布局下邮箱池不会标记已用地址",
+      "severity": "P2",
+      "file": "core/db/migrations.py",
+      "line": 89,
+      "evidence": "`grep -rn sync_outlook_used_across_databases --include=*.py` 仅命中定义处与 __all__，无调用点。实测默认布局（accounts 在默认库、池在 data/platforms/outlook.db）：插入 account(shared@x.com) + outlook 池 available(shared@x.com)，跑 `run_migrations()` 后池状态仍是 `available`；手动调用 `sync_outlook_used_across_databases()` 后才变 `used`。原因：`_sync_outlook_used_status()` 要求同库同时有 accounts 与 outlook_accounts，两个库各缺一张表，双双 return。",
+      "impact": "分库后「已注册邮箱回写池」的兜底是死代码：历史 used 状态无法收敛，池会把已在 chatgpt/grok 用过的地址再次发出去，注册端撞「邮箱已被占用」白跑一轮。JSON 账号后端下同一函数也只读 SQL，同样看不到账号。",
+      "fix_hint": "在 init_db() 的 run_migrations() 之后调用一次 `sync_outlook_used_across_databases()`（它已做分批与去重）；或让 _sync_outlook_used_status 接受「外部邮箱集合」参数，由 run_migrations 汇总后传入。",
+      "class": "functional"
+    },
+    {
+      "id": "L10-5",
+      "title": "生产平台库缺模型声明的索引：source / consecutive_failures 三处全表扫",
+      "severity": "P2",
+      "file": "core/db/migrations.py",
+      "line": 426,
+      "evidence": "对真实库跑 PRAGMA 对比模型：`data/platforms/icloud.db` 的 icloud_accounts 缺 `ix_icloud_accounts_source`；icloud_aliases 缺 `ix_icloud_aliases_source`、`ix_icloud_aliases_consecutive_failures`（2339 行）。这些列由 `_migrate_icloud_remote_schema()`/`_migrate_icloud_aliases_schema()` 的 ALTER 补出（migrations.py:561-584、314-321），`_ensure_hot_query_indexes()` 的 wanted 表只覆盖 task_logs/accounts/icloud_aliases 的 4 条，不含上述三条；create_all 不改既有表，Alembic 又完全不管平台库。",
+      "impact": "`claim_alias` 的 `WHERE consecutive_failures < N`、远程同步的 `WHERE source='remote'` 在 2339 行上走全表扫；模型与真实库索引不一致，`alembic check` 永远发现不了（include_object 排除池表且只连默认库）。",
+      "fix_hint": "把这三条加进 `_ensure_hot_query_indexes()` 的 wanted（列存在才建，已是幂等写法），或在补列的同一函数里紧跟 CREATE INDEX IF NOT EXISTS。",
+      "class": "perf"
+    },
+    {
+      "id": "L10-6",
+      "title": "唯一索引两套定义：手写链建 (platform,email)，模型/Alembic 建 (platform,lower(email))",
+      "severity": "P2",
+      "file": "core/db/migrations.py",
+      "line": 417,
+      "evidence": "手写：`CREATE UNIQUE INDEX IF NOT EXISTS uq_accounts_platform_email ON accounts (platform, email)`（migrations.py:417-420）；模型 models_account.py:36-42 与 Alembic b7c1e4a92d30:59-64 都是 `(platform, lower(email))`。b7c1e4a92d30 的注释自己承认「老库可能已被手写迁移建过同名但不同定义的索引」。实测应用自建库索引列为 `(platform, email)`，Alembic 空库为 `(platform, lower(email))`。",
+      "impact": "只跑手写链的库拿到大小写敏感的约束：`USER@X.AI` 可以插到 `user@x.ai` 旁边（正是 b7c1e4a92d30 要修的 bug），而两条链谁先跑决定最终定义 —— 同一份代码在不同安装上约束强度不同。",
+      "fix_hint": "手写链改成表达式索引：先 `DROP INDEX IF EXISTS uq_accounts_platform_email`（仅当定义不匹配时）再建 `(platform, lower(email))`；或直接删掉手写这段，由 Alembic/模型单点负责。",
+      "class": "contract"
+    },
+    {
+      "id": "L10-7",
+      "title": "每次进程启动都全表重扫/重写 extra_json：1.7k 账号稳定态 3.6s",
+      "severity": "P2",
+      "file": "core/db/migrations.py",
+      "line": 787,
+      "evidence": "对生产库副本逐函数计时（_run_one 同参单跑）：_scrub_extra_passwords 0.966s、_encrypt_plaintext_extras 0.942s、_ensure_account_email_unique 0.518s、_migrate_used_platforms_columns 0.306s、_normalize_grok_token_column 0.117s；默认库合计约 2.9s。整体 run_migrations() 稳定态 3.59s，init_db() 冷启动 16.7s / 次启 14.5s（1734 账号、5353 日志）。两处都是 LIKE 全表扫（password / 冒号）+ 每命中行 json.loads/json.dumps。",
+      "impact": "main.py 与 services/turnstile_solver/api_solver.py:214 每个进程启动都付一次；账号上万后线性放大到几十秒，容器重启/多 worker 场景明显。且这些函数无「已迁移」标记，永远重复扫。",
+      "fix_hint": "加一张轻量 schema_meta(key,value) 记录每个一次性迁移已完成（或复用 alembic_version 的 revision 语义）；_scrub/_encrypt 至少先 count(*) WHERE extra_json LIKE ... 短路，或改为按需迁移。",
+      "class": "perf"
+    },
+    {
+      "id": "L10-8",
+      "title": "migrate_legacy_paths 只搬 .db，不搬 -wal/-shm：热 WAL 的提交留在旧路径",
+      "severity": "P2",
+      "file": "core/paths.py",
+      "line": 119,
+      "evidence": "_LEGACY_MOVES 仅三项：根目录 account_manager.db、.secrets/credential_key、solver.log；_migrate_path() 用 shutil.move(source,target) 单文件搬移，无 -wal/-shm 处理。本机实测该库确实在用 WAL：ls -la data/ → account_manager.db-wal 8,540,792 字节、-shm 32,768。",
+      "impact": "老布局（库在仓库根）且已开 WAL 的部署，升级后主库被搬到 data/，8MB 级的未 checkpoint 帧仍留在根目录 account_manager.db-wal：轻则新库缺最近写入（数据静默回退），重则旧 -wal 被后续以旧路径打开的程序重放到另一个文件。data_bundle.py:683-687 明确处理了同一问题，路径迁移这里漏了。",
+      "fix_hint": "_migrate_path 对 .db 源同时搬 <name>-wal/<name>-shm（存在才搬，目标同名已存在则按现有「不覆盖」策略跳过并报告）；或搬前用 sqlite3 backup API 做一次 checkpoint 快照再删源。",
+      "class": "data-integrity"
+    },
+    {
+      "id": "L10-9",
+      "title": "data/secrets/credential_key 权限 0644（全局可读），代码只在创建时设 0600",
+      "severity": "P2",
+      "file": "core/secret_box.py",
+      "line": 99,
+      "evidence": "stat -c '%a %n' data data/secrets data/secrets/* → 755 data / 755 data/secrets / 644 data/secrets/credential_key（700 只有 totp_journal）。代码 os.open(path, O_WRONLY|O_CREAT|O_TRUNC, 0o600) 只在文件不存在时生效，已存在的 0644 文件永远不会被收紧。",
+      "impact": "这把 AES-256-GCM 密钥解开账号的 AT/RT/SSO/cookies/密码；同机任意本地用户（或误挂卷进容器的其他进程）可直接读走全部凭据。属于凭据暴露，不是功能 bug。",
+      "fix_hint": "_load_or_create_key() 读到已有文件时 os.chmod(path, 0o600)（并对 SECRETS_DIR 设 0o700）；ensure_data_dirs 里给 SECRETS_DIR 显式 mode=0o700。",
+      "class": "credential-leak"
+    },
+    {
+      "id": "L10-10",
+      "title": "merge.py 的守恒断言不可达，_KEY_COLUMNS 是死常量",
+      "severity": "P3",
+      "file": "core/db/merge.py",
+      "line": 290,
+      "evidence": "_check_conservation() 比较 total 与 inserted+updated+skipped_older+duplicate_in_source，但 _merge_source()（merge.py:167-257）每个分支恰好自增其中一个计数器，等式恒成立；_insert 抛错时是异常传播而非计数缺口。_KEY_COLUMNS = (\"platform\",\"email\")（merge.py:45）全文件无引用。",
+      "impact": "docstring 宣称「任何一条不成立就是数据丢了」的保护实际不存在，运维会误以为合并有自校验；死常量增加阅读成本。真出问题时（如 _insert 中途 IntegrityError）没有任何报告，只有 traceback。",
+      "fix_hint": "要么在 _insert 失败时把该行记入 failed 计数并继续（守恒才有意义），要么删掉断言与常量，改为在 report 里输出 before/after 实际行数差。",
+      "class": "dead-code"
+    }
+  ],
+  "checked_and_clean": [
+    {
+      "item": "空库 alembic upgrade head",
+      "how": "`ALEMBIC_DATABASE_URL=sqlite:///<scratch>/empty.db alembic upgrade head` → 5 个 revision 全过，退出码 0，alembic_version=e5b2c8f71a34"
+    },
+    {
+      "item": "Alembic 链 vs 模型 schema 漂移",
+      "how": "空库 upgrade 后与 SQLModel.metadata.create_all 建出的库逐表比列/索引：0 差异（accounts/proxies/task_logs/task_runs/configs/icloud_*/outlook_accounts）"
+    },
+    {
+      "item": "生产库 alembic check",
+      "how": "`ALEMBIC_DATABASE_URL=sqlite:///<prod 副本> alembic check` → No new upgrade operations（仅 expression index 无法反射的 SAWarning）"
+    },
+    {
+      "item": "生产库 upgrade head",
+      "how": "副本 alembic_version 已是 e5b2c8f71a34，upgrade 为 no-op；accounts 1734 行不变"
+    },
+    {
+      "item": "降级不丢行",
+      "how": "副本 `alembic downgrade b7c1e4a92d30` → 1734 行、id 变 INTEGER；再 `upgrade head` → 仍 1734 行、legacy_id 无 NULL"
+    },
+    {
+      "item": "ALLOW_DESTRUCTIVE_DOWNGRADE 语义",
+      "how": "读 c3f8a1d64b27:110-123：DDL 前先 COUNT/COUNT(DISTINCT COALESCE(legacy_id,rowid))，撞主键即 raise，需 ALLOW_DESTRUCTIVE_DOWNGRADE=1；生产副本 legacy_id 1056/1734 非空但无碰撞，实测降级未触发（碰撞分支未构造，未验证）"
+    },
+    {
+      "item": "merge_accounts 行数守恒/幂等/dry-run",
+      "how": "读 merge.py:167-257：dry_run 与真跑同一套计算、最后才 commit；每行只落入 inserted/updated/skipped_older/duplicate_in_source 之一；未跑测试（不跑全量套件）"
+    },
+    {
+      "item": "merge.py 的 f-string 表名注入面",
+      "how": "`table` 仅由 scripts/merge_platform_dbs.py 默认值 'accounts' 传入，无 HTTP 路由暴露（grep merge_accounts 无 api/ 命中）—— 风险面为本地 CLI，非外部输入"
+    },
+    {
+      "item": "merge 目标库存在重复业务键时的主键冲突",
+      "how": "读 merge.py:193-197：existing 字典会折叠同键行、taken_ids 只含被保留行的 id；理论上后续插入可能撞 PK，未构造数据验证 → 未确认，不作为 finding"
+    },
+    {
+      "item": "registry 引擎缓存/释放",
+      "how": "读 registry.py:95-156：engine_for 先算 url 再取锁（注释明确避免 Lock 重入死锁），configure()/dispose_all() 清缓存与 _schema_ready；全仓仅 base.py 与 registry.py 调用 create_engine（grep 确认），不存在第二套引擎来源"
+    },
+    {
+      "item": "自定义 DATABASE_URL / DATA_DIR 相对路径",
+      "how": "paths.py:63-68 相对路径按 project_root() 解析；base.py:48-50 默认绝对路径；`DATA_DIR=<scratch>` 实测生成 <scratch>/account_manager.db 与 <scratch>/platforms/*.db，未落回仓库"
+    },
+    {
+      "item": "WAL 侧车文件在导出/导入中的处理",
+      "how": "services/data_bundle.py:136-160 用 sqlite3 backup API 做快照，683-687 导入前清 -wal/-shm（注释写明否则旧 WAL 帧会重放到新文件）—— 该路径已正确处理"
+    },
+    {
+      "item": "environment.py",
+      "how": "通读 237 行：只做 camoufox/node/geoip 预检与错误分类，无 DB/路径写入，与数据层无耦合"
+    },
+    {
+      "item": "JSON 后端选择",
+      "how": "core/storage/__init__.py:60-110：显式 STORAGE_BACKEND 优先，未配置时「已有库→sqlite，新部署→json」，显式 DATABASE_URL 时强制建表；init_db 在 all_tables_use_json() 时跳过建库与迁移（__init__.py:150-165）"
+    }
+  ]
+}

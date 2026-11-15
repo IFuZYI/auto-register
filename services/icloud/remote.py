@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +47,80 @@ SOURCE_LOCAL = "local"
 SOURCE_REMOTE = "remote"
 
 
+# --------------------------------------------------- 邮件摘要（preview）缓存
+
+class _PreviewCache:
+    """`message_id -> preview 摘要` 的有界缓存。
+
+    为什么要有：`fetch_inbox` 列表里的 `preview` 可能是空串，验证码正文得靠
+    `POST /api/inbox/previews` 批量补。实测（2026-11-13）这在健康态把收件
+    QPS 从 0.83 直接翻到 1.56 —— 每一轮轮询都在反复补**同一批**邮件的摘要。
+
+    缓存按「服务地址」再按「邮件 id」分层：不同远程服务的 id 可能重号，
+    混在一起会把 A 服务的验证码塞进 B 服务的信里。
+
+    **空摘要也缓存**（用一个哨兵值区分「没问过」和「问过但服务端也没有」）：
+    服务端解析不出正文的信，每轮都重问一次毫无意义 —— 那正是「同一批旧信
+    被反复补摘要」的来源之一。区分两者的意义在于：哨兵命中时**跳过**这次
+    POST，但调用方不会把哨兵当成验证码正文。
+    """
+
+    #: 「问过、但服务端也拿不到摘要」的占位值。不可能出现在真实邮件正文里。
+    EMPTY = "\x00empty"
+
+    def __init__(self, max_entries: int = 500):
+        self.max_entries = max(int(max_entries), 1)
+        self._lock = threading.Lock()
+        #: `service_key -> {message_id: preview}`；用 dict 保序做简易 LRU
+        self._data: dict[str, dict[str, str]] = {}
+
+    def get(self, service: str, message_id: str) -> str:
+        """返回摘要；未问过返回空串，问过但没有摘要返回 `EMPTY`。"""
+        with self._lock:
+            return self._data.get(str(service or ""), {}).get(str(message_id or ""), "")
+
+    def set(self, service: str, message_id: str, preview: str) -> None:
+        """记录一次查询结果（空摘要记成 `EMPTY`，避免每轮重问）。"""
+        if not str(message_id or "").strip():
+            return
+        text = str(preview or "").strip() or self.EMPTY
+        key = str(service or "")
+        with self._lock:
+            bucket = self._data.setdefault(key, {})
+            # 重新插入以刷新 LRU 顺序
+            bucket.pop(str(message_id), None)
+            bucket[str(message_id)] = text
+            while self._total() > self.max_entries:
+                self._evict_oldest()
+
+    def _total(self) -> int:
+        return sum(len(bucket) for bucket in self._data.values())
+
+    def _evict_oldest(self) -> None:
+        for key, bucket in self._data.items():
+            if bucket:
+                bucket.pop(next(iter(bucket)), None)
+                if not bucket:
+                    self._data.pop(key, None)
+                return
+
+    def __len__(self) -> int:
+        with self._lock:
+            return self._total()
+
+    def clear(self) -> None:
+        with self._lock:
+            self._data.clear()
+
+
+_PREVIEW_CACHE = _PreviewCache()
+
+
+def clear_preview_cache() -> None:
+    """清空摘要缓存（测试 / 手动重置用）。"""
+    _PREVIEW_CACHE.clear()
+
+
 # ------------------------------------------------------------------ 客户端
 
 
@@ -78,9 +153,14 @@ def remote_api_key(row: ICloudAccountModel) -> str:
 
 
 def remote_client(
-    row: ICloudAccountModel, *, proxy: str | None = None, timeout: int = 30
+    row: ICloudAccountModel, *, proxy: str | None = None, timeout: int | None = None
 ) -> RemoteHMEClient:
-    """按账号行构建远程客户端（地址 + 解密后的 API 秘钥 + 可选代理）。"""
+    """按账号行构建远程客户端（地址 + 解密后的 API 秘钥 + 可选代理）。
+
+    `timeout` 留空 = 用客户端的分层默认值（建连 5s / 读 50s）。**不要**在这里
+    写死一个更小的值：读预算一旦短于上游自己的（最高 45s），正常但慢的收件
+    就会被客户端先判死，并被记成一次上游失败。
+    """
     if str(getattr(row, "source", "") or "") != SOURCE_REMOTE:
         raise ICloudError("invalid_config", f"账号 {row.email} 不是远程账号")
     return RemoteHMEClient(
@@ -634,20 +714,40 @@ def _to_mail_message(item: dict[str, Any]) -> MailMessage:
     )
 
 
+#: 读信时默认回看的天数。
+#:
+#: 原先写死 3650 天（"远端默认 7 天窗口会漏掉旧验证码"）。那对**补 RT**（按
+#: 地址翻历史）是对的，但等验证码时是完全反向的选择：上游要为 10 年窗口做
+#: 一次 IMAP SEARCH，实测同一主号命中 1447 封，再本地分页 —— 直接把自己推过
+#: 上游 15s 的信封预算，触发「降级 Web API → 按收件人过滤失效 → count=0」。
+#:
+#: 等码只可能来自本轮（补发也只在前几分钟），给 2 天足够；需要翻旧信的场景
+#: 走 `days` 显式传大值。
+DEFAULT_READ_DAYS = 2
+
+
 def fetch_remote_messages(
     row: ICloudAccountModel,
     *,
     limit: int = 50,
     recipient: str = "",
     proxy: str | None = None,
+    days: int = DEFAULT_READ_DAYS,
 ) -> tuple[list[MailMessage], str, str]:
-    """读远端账号收件箱，返回 `(messages, method, warning)`。"""
+    """读远端账号收件箱，返回 `(messages, method, warning)`。
+
+    `method` / `warning` 来自上游：它把「IMAP 成功」与「IMAP 超时、降级
+    Web API」如实回报。**必须把这两个值传出去** —— 降级路径按收件人过滤
+    是不可靠的（真实服务只对 To/主题/发件人做子串匹配），返回 0 封可能只是
+    「没读成」而不是「没有信」。把它们压成固定的 "remote" 会让上面那层
+    把「读不到」当成「没收到码」，最后只剩一句「等码超时」。
+    """
     client = remote_client(row, proxy=proxy)
     data = client.fetch_inbox(
         row.remote_account_id,
         alias=recipient,
         limit=limit,
-        days=3650,  # 远端默认 7 天窗口会漏掉旧验证码；页面按时间筛，这里放宽
+        days=days,
     )
     raw_messages = data.get("messages") or []
     # 新接口（2026-11-02）列表里的 `preview` 可能是空串，验证码正文要靠
@@ -660,15 +760,48 @@ def fetch_remote_messages(
     ]
     missing_ids = [item for item in missing_ids if item]
     if missing_ids:
-        try:
-            previews = client.fetch_previews(row.remote_account_id, missing_ids)
-        except ICloudError:
-            previews = {}
+        service = str(getattr(row, "base_url", "") or "") or str(row.remote_account_id or "")
+        # 先用缓存命中，只向服务端问真正没见过的那些 —— 同一批旧信反复补摘要
+        # 是健康态请求翻倍的主因（实测 QPS 0.83 -> 1.56）。
+        cached: dict[str, str] = {}
+        still_missing: list[str] = []
+        for message_id in missing_ids:
+            hit = _PREVIEW_CACHE.get(service, message_id)
+            if not hit:
+                still_missing.append(message_id)
+            elif hit != _PreviewCache.EMPTY:
+                cached[message_id] = hit
+            # 命中 EMPTY：上一轮已经问过、服务端也拿不到摘要 —— 不再重问，
+            # 也不把它写进 preview（否则会把哨兵字符串当成验证码正文）。
+
+        previews: dict[str, str] = dict(cached)
+        if still_missing:
+            try:
+                fetched = client.fetch_previews(row.remote_account_id, still_missing)
+            except ICloudError:
+                fetched = {}
+            for message_id, text in (fetched or {}).items():
+                previews[str(message_id)] = text
+                _PREVIEW_CACHE.set(service, message_id, text)
+
         for item in raw_messages:
             if isinstance(item, dict):
                 item["preview"] = previews.get(str(item.get("id") or ""), item.get("preview") or "")
     messages = [_to_mail_message(item) for item in raw_messages]
-    return messages, "remote", ""
+    # `method` 是对本模块**接口**的承诺（这一读走的是远程分支），老调用方靠它
+    # 区分 imap / web_api / remote，不能换成上游内部的通道名。
+    #
+    # 上游的通道与降级原因放进 `warning`：`method != imap` 就是降级，而
+    # `WebClient.FindByAlias` 的按收件人过滤在降级路径上不可靠（实测同一封
+    # 存在的邮件，imap 读到 1 封、web_api 读到 0 封）。上层必须能看见这件事，
+    # 否则会把「读不到」当成「没收到码」，最后只剩一句「等码超时」。
+    upstream_method = str(data.get("method") or "").strip().lower()
+    upstream_warning = str(data.get("warning") or "").strip()
+    warning = upstream_warning
+    if upstream_method and upstream_method != "imap":
+        degraded = f"上游降级到 {upstream_method}（按收件人过滤不可靠，读到的 0 封不能当作没有邮件）"
+        warning = f"{degraded}：{upstream_warning}" if upstream_warning else degraded
+    return messages, "remote", warning
 
 
 def check_remote_account(account_id: int, *, proxy: str | None = None) -> dict[str, Any]:

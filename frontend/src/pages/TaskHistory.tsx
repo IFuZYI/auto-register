@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { App, Alert, Card, Table, Select, Button, Dropdown, Tag, Popconfirm, Typography } from 'antd'
+import { App, Alert, Card, Table, Select, Button, Dropdown, Tag, Popconfirm, Tooltip, Typography } from 'antd'
 import type { TableColumnsType } from 'antd'
 import { ReloadOutlined, DeleteOutlined, ClearOutlined, DownOutlined } from '@ant-design/icons'
 import {
@@ -108,7 +108,7 @@ export default function TaskHistory() {
 
   const handleCleanup = (days: number) => {
     modal.confirm({
-      title: `确认清理 ${retentionLabel(days)}的任务历史？`,
+      title: `清理${retentionLabel(days)}的注册记录？`,
       content: `保留期内的记录不受影响；清理覆盖全部平台（不受当前平台筛选限制）；清理后无法恢复。`,
       okText: '清理',
       cancelText: '取消',
@@ -131,6 +131,11 @@ export default function TaskHistory() {
         await load().catch(() => {})
       },
     })
+  }
+
+  const clearFilters = () => {
+    setPlatform('')
+    setSelectedRowKeys([])
   }
 
   const columns: TableColumnsType<TaskLogItem> = [
@@ -181,7 +186,9 @@ export default function TaskHistory() {
       // 而 2229 条记录根本翻不到头。截断 + `title` 悬停看全文。
       render: (text: string) =>
         text ? (
-          <span className="cell-ellipsis" title={text}>{text}</span>
+          <Tooltip title={text} trigger={['hover', 'focus', 'click']}>
+            <span className="cell-ellipsis" tabIndex={0}>{text}</span>
+          </Tooltip>
         ) : (
           '-'
         ),
@@ -191,8 +198,8 @@ export default function TaskHistory() {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
       <PageHeader
-        title="任务历史"
-        subtitle={`注册任务执行记录 · 共 ${total} 条`}
+        title="注册记录"
+        subtitle={`共 ${total} 条注册结果，可按平台查看成功记录与失败原因。`}
         actions={
           <>
             {selectedRowKeys.length > 0 && (
@@ -202,7 +209,8 @@ export default function TaskHistory() {
             )}
             {selectedRowKeys.length > 0 && (
               <Popconfirm
-                title={`确认删除选中的 ${selectedRowKeys.length} 条任务历史？`}
+                title={`删除选中的 ${selectedRowKeys.length} 条注册记录？`}
+                description="仅删除注册结果记录，不影响账号。删除后无法恢复。"
                 onConfirm={handleBatchDelete}
                 okText="删除"
                 cancelText="取消"
@@ -236,7 +244,7 @@ export default function TaskHistory() {
               }}
             >
               <Button icon={<ClearOutlined />} loading={cleaning}>
-                清理日志 <DownOutlined />
+                清理记录 <DownOutlined />
               </Button>
             </Dropdown>
             <Button icon={<ReloadOutlined spin={loading} />} onClick={load} loading={loading} aria-label="刷新记录" title="刷新记录" />
@@ -249,8 +257,8 @@ export default function TaskHistory() {
         <Alert
           type="error"
           showIcon
-          message={`任务历史加载失败：${loadError}`}
-          description="表格里可能是上一次成功加载的记录（或为空），不代表真的没有任务历史。点右上角刷新重试。"
+          message={`无法读取注册记录：${loadError}`}
+          description="列表可能仍是上次加载的内容，不代表没有注册记录。请使用右上角刷新按钮重试。"
         />
       ) : null}
 
@@ -261,6 +269,12 @@ export default function TaskHistory() {
           columns={withDataLabels(columns)}
           dataSource={logs}
           loading={loading}
+          locale={{ emptyText: (
+            <div className="table-empty">
+              <span>{loadError ? '注册记录加载失败，请重试。' : platform ? '当前平台没有注册记录。' : '还没有注册记录，开始一次注册后会显示在这里。'}</span>
+              {loadError ? <Button size="small" onClick={() => void load()}>重试</Button> : platform ? <Button size="small" onClick={clearFilters}>查看全部平台</Button> : null}
+            </div>
+          ) }}
           rowSelection={{
             selectedRowKeys,
             onChange: (keys) => setSelectedRowKeys(keys as number[]),

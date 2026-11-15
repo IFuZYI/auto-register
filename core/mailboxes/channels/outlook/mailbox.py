@@ -19,6 +19,59 @@ from .backends import (
 )
 
 
+#: OAuth 错误里表示「凭据本身失效，重试无意义」的标记。
+#:
+#: `invalid_grant` 是 OAuth2 的规范错误码（refresh_token 被撤销/过期/被改密）。
+#: 其余 4xx（如 400 + `invalid_request`）多半是我们拼错了 scope，也可视作
+#: 不可自愈；5xx / 408 / 429 / 网络错误则是**暂时**的。
+_PERMANENT_OAUTH_MARKERS = (
+    "invalid_grant",
+    "invalid_client",
+    "unauthorized_client",
+    "service abuse mode",
+    "revoked",
+)
+
+#: 明确「等一下再来」的 HTTP 状态。
+_RETRYABLE_OAUTH_STATUS = frozenset({408, 425, 429, 500, 502, 503, 504})
+
+
+def _is_permanent_oauth_error(lowered_body: str, status_code: int) -> bool:
+    """这次 OAuth 失败是「凭据坏了」还是「等一下就好」。
+
+    判据顺序要紧：**先看错误码**再看 HTTP 状态 —— 微软会用 400 同时返回
+    `invalid_grant`（永久）与 `invalid_request`（配置错），只看状态会混淆。
+    """
+    body = str(lowered_body or "").lower()
+    if any(marker in body for marker in _PERMANENT_OAUTH_MARKERS):
+        return True
+    try:
+        status = int(status_code or 0)
+    except (TypeError, ValueError):
+        status = 0
+    if status in _RETRYABLE_OAUTH_STATUS:
+        return False
+    # 4xx **不**一律判永久：微软常用 400 表达「这个 scope 不行」，
+    # 而调用方本就会换 endpoint / scope 再试（`_oauth_scope_candidates`）。
+    # 把它判成永久会让「换一种授权范围」这条自愈路径整条失效。
+    # 真正不可自愈的已由上面的错误码识别（invalid_grant / revoked …）；
+    # 401/403 表示凭据/权限本身被拒，也判永久。
+    return status in (401, 403)
+
+
+class OutlookOAuthError(RuntimeError):
+    """OAuth 换 token 失败，带「是否值得重试」的标记。
+
+    为什么要一个专门类型：上层 `_run_polling_wait` 靠 `is_transient(exc)`
+    决定「继续等」还是「当场失败」。裸 `RuntimeError` 无法区分，于是
+    一次 503 与一次 invalid_grant 同形 —— 前者白等、后者白试。
+    """
+
+    def __init__(self, message: str, *, retryable: bool = False) -> None:
+        super().__init__(message)
+        self.retryable = bool(retryable)
+
+
 class OutlookMailbox(BaseMailbox):
     """微软邮箱（Outlook / Hotmail）本地账号池（Graph / IMAP 策略）"""
 
@@ -117,6 +170,22 @@ class OutlookMailbox(BaseMailbox):
             return True
         return bool(str(extra.get("mailapi_url") or "").strip())
 
+    def _registered_emails_for_platform(self) -> set[str]:
+        """本平台已注册过的邮箱集合（小写规范化）。
+
+        单独成一个方法只为了**可测**：它必须走仓储（JSON 后端下没有
+        `accounts` 表），而 `_pop_account` 整条链会连 IMAP，单测跑不动。
+        """
+        from core.db import account_repository
+        from core.db.base import normalize_email
+
+        wanted_platform = str(getattr(self, "_platform_name", "") or "").strip().lower()
+        return {
+            normalize_email(str(getattr(row, "email", "") or ""))
+            for row in account_repository.list_all_accounts(platform=wanted_platform)
+            if str(getattr(row, "email", "") or "").strip()
+        }
+
     def _pop_account(self) -> dict:
         from sqlalchemy import func, or_
         from sqlmodel import Session, select
@@ -140,6 +209,17 @@ class OutlookMailbox(BaseMailbox):
         else:
             self._log("[微软邮箱] 号池筛选: 未指定导入类型，整池取号")
 
+        # 领号前先回收「领了但一直没落定」的号（任务崩掉/被 stop 在收尾前会留下）。
+        # iCloud 渠道在 `claim_alias` 前做同样的事（`modules/mail/icloud_remote.py:135`），
+        # Outlook 一直没有 —— 于是泄漏的 in_use 行会把池子慢慢吃干，
+        # 而 `find_claimable` 从不包含 in_use，这些号再也回不来。
+        try:
+            from core.db.outlook_repository import OutlookRepository
+
+            OutlookRepository().release_stale_claims()
+        except Exception as exc:  # noqa: BLE001 - 兜底失败不该挡住取号
+            self._log(f"[微软邮箱] 号池兜底清理失败（忽略）: {exc}")
+
         with OutlookMailbox._pop_lock:
             # 「这个平台已经用过的地址不再拿来建号」这条过滤必须**先查主库拿到
             # 名单**，不能写成子查询塞进下面这条 SQL。
@@ -152,19 +232,12 @@ class OutlookMailbox(BaseMailbox):
             # **按平台过滤**：只排除「本平台」已经注册过的地址。邮箱是一次性的，
             # 但只对用掉它的那个平台一次性 —— 一个地址注册过 ChatGPT 之后还能
             # 注册 Grok，所以不能把别的平台的账号也算进来（那会让池子迅速枯竭）。
-            from core.db import current_engine
-
+            #
+            # 走**仓储**而不是裸 `Session(current_engine())`：JSON 后端下默认库
+            # 里根本没有 `accounts` 表，裸查询直接 `no such table: accounts`
+            # → 取号 500（2026-11-15 全量检测 L06-1 实测复现）。
             wanted_platform = str(getattr(self, "_platform_name", "") or "").strip().lower()
-            registered_emails: set[str] = set()
-            with Session(current_engine()) as main_session:
-                query = select(AccountModel.email)
-                if wanted_platform:
-                    query = query.where(AccountModel.platform == wanted_platform)
-                registered_emails = {
-                    normalize_email(email)
-                    for email in main_session.exec(query).all()
-                    if str(email or "").strip()
-                }
+            registered_emails = self._registered_emails_for_platform()
 
             with mailbox_pool_session("outlook") as session:
                 # 导入记录永久保留，取号只筛 available 并标记 in_use；同时按
@@ -411,8 +484,8 @@ class OutlookMailbox(BaseMailbox):
 
         返回 `{changed, skipped, remaining_unpooled}` 供界面给准确提示。
         """
-        from sqlmodel import select
-        from core.db import OutlookAccountModel, _utcnow, mailbox_pool_session
+        from core.db import _utcnow
+        from core.db.outlook_repository import outlook_repository
 
         wanted = [int(i) for i in (account_ids or []) if str(i).strip().isdigit()]
         if not wanted:
@@ -420,28 +493,25 @@ class OutlookMailbox(BaseMailbox):
 
         changed = 0
         with OutlookMailbox._pop_lock:
-            with mailbox_pool_session("outlook") as session:
-                # SQLite 变量上限 32766：IN 查询分块（500 一批），界面全选
-                # 几千行也不会炸。与仓储层 get_many 同口径。
-                for i in range(0, len(wanted), 500):
-                    chunk = wanted[i : i + 500]
-                    rows = session.exec(
-                        select(OutlookAccountModel).where(OutlookAccountModel.id.in_(chunk))
-                    ).all()
-                    for row in rows:
-                        if str(getattr(row, "status", "") or "").strip().lower() != "unpooled":
-                            continue
-                        row.status = "available"
-                        row.updated_at = _utcnow()
-                        session.add(row)
-                        changed += 1
-                session.commit()
-
-                remaining = session.exec(
-                    select(OutlookAccountModel).where(
-                        OutlookAccountModel.status == "unpooled"
-                    )
-                ).all()
+            # 走**仓储**：`outlook_accounts` 表在 JSON 部署下不存在，裸
+            # `mailbox_pool_session` + `select(OutlookAccountModel)` 直接
+            # `no such table: outlook_accounts` → 导入动作 500（L06-2）。
+            # 仓储两条后端都有实现；号池是千级，一次 list_all + 内存筛选
+            # 比维护两条查询路径划算（与 `pool_status_summary` 同口径）。
+            rows = {str(row.get("id")): row for row in outlook_repository.list_all()}
+            for rid in wanted:
+                row = rows.get(str(rid))
+                if row is None:
+                    continue
+                if str(row.get("status") or "").strip().lower() != "unpooled":
+                    continue
+                outlook_repository.set_fields(rid, status="available", updated_at=_utcnow())
+                changed += 1
+            remaining = [
+                row
+                for row in outlook_repository.list_all()
+                if str(row.get("status") or "").strip().lower() == "unpooled"
+            ]
 
         return {
             "changed": changed,
@@ -548,6 +618,13 @@ class OutlookMailbox(BaseMailbox):
         import requests
 
         last_error = ""
+        #: 见过永久性错误吗（invalid_grant / 凭据被撤销等）？
+        #: 与「可重试」分开记：**只要任何一个尝试给出永久结论，就不该再重试** ——
+        #: 逐个端点/scope 重试的意义是「换一种授权范围可能行」，而凭据本身
+        #: 失效时换多少次都一样。
+        permanent_error = ""
+        #: 见过可重试错误吗（5xx / 网络 / 限流）？
+        retryable_error = ""
         for endpoint in self._token_endpoints():
             endpoint = str(endpoint or "").strip()
             if not endpoint:
@@ -577,8 +654,9 @@ class OutlookMailbox(BaseMailbox):
                     )
                 except Exception as exc:
                     last_error = str(exc)
+                    retryable_error = retryable_error or str(exc)
                     self._log(
-                        "[微软邮箱] OAuth token 请求异常: "
+                        "[微软邮箱] OAuth token 请求异常（可重试）: "
                         f"email={email} endpoint={endpoint} scope_label={scope_label} error={exc}"
                     )
                     continue
@@ -597,6 +675,14 @@ class OutlookMailbox(BaseMailbox):
                             "scope_label": scope_label,
                         }
                     last_error = body_text or f"HTTP {resp.status_code}"
+                    # 分类：凭据类错误是**永久**的，服务端/网络类是可重试的。
+                    # 这个区分决定上层是「换号」还是「等一会儿再来」——
+                    # 混成一种的话，503 会被当成账号坏了（白扔一个可用号），
+                    # 或 invalid_grant 被无限重试（永远等不到结果）。
+                    if _is_permanent_oauth_error(lowered, resp.status_code):
+                        permanent_error = last_error
+                    else:
+                        retryable_error = retryable_error or last_error
                     continue
 
                 try:
@@ -633,9 +719,13 @@ class OutlookMailbox(BaseMailbox):
                     )
                     continue
 
+        # 结论优先级：**永久错误优先** —— 见过 invalid_grant 就不要把它
+        # 标成「可重试」，否则调用方会一直重试一个已经失效的凭据。
+        retryable = bool(retryable_error) and not permanent_error
         return {
             "ok": False,
             "reason": "oauth_token_failed",
+            "retryable": retryable,
             "message": f"微软邮箱可用性检测未通过: {last_error or 'OAuth token 获取失败'}",
         }
 
@@ -660,8 +750,21 @@ class OutlookMailbox(BaseMailbox):
                 "expires_in": probe.get("expires_in", 0),
                 "endpoint": probe.get("endpoint", ""),
             }
-        self._log(f"[微软邮箱] OAuth token 获取失败，回退密码登录: {email}")
-        return {"reason": str(probe.get("reason") or "")}
+        # 把「可重试」透传出去：调用方据此决定是**等一会儿再来**还是**换号**。
+        # 不透传的话，5xx 与 invalid_grant 在上层完全同形，只能都当成
+        # 「回退密码登录」，而回填号通常没有密码 → 一次瞬时抖动被判死。
+        retryable = bool(probe.get("retryable"))
+        self._log(
+            f"[微软邮箱] OAuth token 获取失败（"
+            f"{'可重试' if retryable else '永久'}），"
+            f"{'稍后应重试' if retryable else '回退密码登录'}: {email} "
+            f"reason={probe.get('reason') or 'unknown'}"
+        )
+        return {
+            "reason": str(probe.get("reason") or ""),
+            "retryable": retryable,
+            "message": str(probe.get("message") or ""),
+        }
 
     def _fetch_oauth_token(
         self,
@@ -716,7 +819,10 @@ class OutlookMailbox(BaseMailbox):
         if not access_token:
             reason = bundle.get("reason", "")
             suffix = f" [{reason}]" if reason else ""
-            raise RuntimeError(f"微软邮箱 OAuth access token 获取失败{suffix}")
+            raise OutlookOAuthError(
+                f"微软邮箱 OAuth access token 获取失败{suffix}",
+                retryable=bool(bundle.get("retryable")),
+            )
 
         expires_in = bundle.get("expires_in")
         try:

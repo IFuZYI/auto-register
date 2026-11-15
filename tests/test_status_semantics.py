@@ -325,8 +325,16 @@ class FrontendStatusLabelContractTests(unittest.TestCase):
         src = self._src("pages/Dashboard.tsx")
         segments = self._segments(src)
         self.assertIn("banned", segments, "仪表盘缺「禁用」段")
-        self.assertIn("label: '禁用'", segments["banned"])
-        self.assertIn("by_status?.banned", segments["banned"])
+        # 2026-11-14 文案统一为「已禁用」：与「正常可用 / 待恢复」并列时，
+        # 「已禁用」比「禁用」更像一个状态名，而不是一条命令。
+        self.assertIn("label: '已禁用'", segments["banned"])
+        # 值来自 `stats.by_status.banned`。允许先提成局部变量再引用
+        # （`const banned = stats?.by_status?.banned ?? 0`）—— 那是更清楚的写法，
+        # 断言只要求「这一段确实读的是 banned 计数」，而不是必须内联取值。
+        self.assertTrue(
+            "by_status?.banned" in segments["banned"] or "value: banned" in segments["banned"],
+            "「已禁用」段没有读 banned 计数",
+        )
         self.assertIn("recover", segments, "仪表盘缺「待恢复」段")
         self.assertIn("label: '待恢复'", segments["recover"])
         self.assertNotIn(
@@ -334,12 +342,18 @@ class FrontendStatusLabelContractTests(unittest.TestCase):
             "「待恢复」把 banned 并进合计 —— 会和「禁用」双记",
         )
         self.assertIn("registered", segments)
-        self.assertIn("label: '正常'", segments["registered"])
+        self.assertIn("label: '正常可用'", segments["registered"])
 
     def test_dashboard_banned_segment_uses_theme_token(self):
-        """禁用的点/条走现有 token（不引新色板）。"""
+        """禁用的点/条走现有 token（不引新色板）。
+
+        2026-11-14 改色：禁用从紫色改为 `--danger`。紫色在账号台账里没有语义
+        —— 状态色固定为「emerald = 可用 / ochre = 待恢复 / brick = 禁用」，
+        紫既不在这个序列里，也会与「授权链」（AWS 橙 + Kiro 靛蓝）抢读法。
+        这条断言钉住的是「必须用现有 token」这个不变量。
+        """
         src = self._src("pages/Dashboard.tsx")
-        self.assertIn("var(--purple)", self._segments(src)["banned"])
+        self.assertIn("var(--danger)", self._segments(src)["banned"])
 
 
 class ActionWiringContractTests(unittest.TestCase):

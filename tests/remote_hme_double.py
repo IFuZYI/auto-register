@@ -28,6 +28,25 @@ class RemoteHMEDouble:
         self.inbox_messages: dict[str, list[dict]] = {}
         self.aliases: dict[str, list[dict]] = {}
         self.create_error: dict | None = None
+        #: `/check` 需要写级权限。只读档的秘钥会被拒成 403 PERMISSION_DENIED ——
+        #: 2026-11-14 线上实测：库里的 sk- 只能读，于是「检测」按钮恒 403。
+        self.check_error: dict | None = None
+        #: 别名列表的错误（用来验证「降级探测失败时不能假装成功」）。
+        self.aliases_error: dict | None = None
+        #: 账号列表的错误。降级探测要读它 —— 读不出来就必须报错。
+        self.accounts_error: dict | None = None
+        #: 模拟「IMAP 超时 → 降级 Web API → 按别名过滤失效（count=0）」。
+        self.degrade_to_web_api = False
+        #: 每个响应前的人为延迟（秒）。用来复现「上游活着但慢」，从而区分
+        #: 「慢」与「挂了」——读超时短于上游预算时，慢会被误判成挂。
+        self.delay_seconds = 0.0
+        #: 这些主号的请求**迟迟不返回**（模拟真实事故：连接是好的，只是这个
+        #: 主号的 IMAP 读得慢 → 客户端 `Read timed out`）。
+        #: 用来验证熔断按主号分键：一个信箱卡住不该封掉别的主号。
+        self.slow_accounts: dict[str, float] = {}
+        #: 整个服务连不上（连接被断 → 客户端 `ConnectionError`）。
+        #: 这是**服务级**故障，用来验证那时所有主号都该立刻被拦。
+        self.down = False
         self.last_create_label = ""
         self.created_aliases: list[tuple[str, str]] = []
         self.deleted_aliases: list[str] = []
@@ -64,6 +83,10 @@ class RemoteHMEDouble:
             # -------------------------------------------------- 工具
 
             def _json(self, status: int, payload: dict) -> None:
+                # 「上游活着但慢」：延迟放在写响应之前，模拟真实服务在 IMAP
+                # 上花掉的时间。读超时短于这个延迟 = 客户端先把正常请求判死。
+                if double.delay_seconds > 0:
+                    threading.Event().wait(double.delay_seconds)
                 body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
                 self.send_response(status)
                 self.send_header("Content-Type", "application/json")
@@ -88,6 +111,27 @@ class RemoteHMEDouble:
                     return False
                 return True
 
+            def _apply_fault(self) -> bool:
+                """模拟两种不同的上游故障，返回 True 表示这条请求已被消费。
+
+                - `down`：连接被断 → 客户端 `ConnectionError`。**服务级**故障。
+                - `slow_accounts[account]`：迟迟不返回 → 客户端 `Read timed out`。
+                  这是**主号级**故障（真实事故就长这样：连接完好，只是这个
+                  信箱的 IMAP 慢）。
+
+                两者必须分开，否则测不出「熔断该按什么粒度分键」。
+                """
+                if double.down:
+                    self.close_connection = True
+                    return True
+                parsed = urlparse(self.path)
+                account = (parse_qs(parsed.query).get("account_id") or [""])[0]
+                delay = double.slow_accounts.get(account)
+                if delay:
+                    # 睡到客户端读超时之后再回包：连接保持打开，不回 RST。
+                    threading.Event().wait(delay)
+                return False
+
             # -------------------------------------------------- 路由
 
             def do_POST(self):  # noqa: N802
@@ -97,6 +141,8 @@ class RemoteHMEDouble:
                 body = self._read_body()
                 double.requests.append(("POST", path, body))
 
+                if self._apply_fault():
+                    return
                 if not self._authed():
                     return
 
@@ -155,6 +201,9 @@ class RemoteHMEDouble:
                     return
 
                 if path.endswith("/check"):
+                    if double.check_error is not None:
+                        self._json(403, {"success": False, **double.check_error})
+                        return
                     self._json(200, {"success": True, "data": {"id": path.split("/")[-2], "status": "active"}})
                     return
 
@@ -166,10 +215,15 @@ class RemoteHMEDouble:
                 query = parse_qs(parsed.query)
                 double.requests.append(("GET", path, {k: v[0] for k, v in query.items()}))
 
+                if self._apply_fault():
+                    return
                 if not self._authed():
                     return
 
                 if path == "/api/accounts":
+                    if double.accounts_error is not None:
+                        self._json(502, {"success": False, **double.accounts_error})
+                        return
                     self._json(200, {"success": True, "data": double.accounts})
                     return
 
@@ -179,6 +233,9 @@ class RemoteHMEDouble:
 
                 if path == "/api/aliases":
                     account_id = query.get("account_id", [""])[0]
+                    if double.aliases_error is not None:
+                        self._json(500, {"success": False, **double.aliases_error})
+                        return
                     aliases = double.aliases.get(account_id, [])
                     self._json(
                         200,
@@ -196,6 +253,27 @@ class RemoteHMEDouble:
                 if path == "/api/inbox":
                     account_id = query.get("account_id", [""])[0]
                     messages = double.inbox_messages.get(account_id, [])
+                    # 模拟上游 IMAP 超时后降级 Web API：那条路**按收件人过滤不
+                    # 可靠**（真实服务只对 To/主题/发件人做子串匹配，收件人信息
+                    # 缺失时命中 0 封），响应里用 method=web_api + warning 标明。
+                    # 2026-11-14 实测：信明明在箱里，降级后 count=0，任务干等超时。
+                    if double.degrade_to_web_api:
+                        self._json(
+                            200,
+                            {
+                                "success": True,
+                                "data": {
+                                    "account_id": account_id,
+                                    "alias": query.get("alias", [""])[0],
+                                    "count": 0,
+                                    "method": "web_api",
+                                    "warning": "IMAP 不可用，已回退 Web API"
+                                    "（仅能按主题/发件人本地匹配，收件人信息缺失）",
+                                    "messages": [],
+                                },
+                            },
+                        )
+                        return
                     self._json(
                         200,
                         {
@@ -238,6 +316,8 @@ class RemoteHMEDouble:
                 parsed = urlparse(self.path)
                 path = parsed.path
                 double.requests.append(("DELETE", path, {}))
+                if self._apply_fault():
+                    return
                 if not self._authed():
                     return
                 if path.startswith("/api/aliases/"):

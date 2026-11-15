@@ -1,6 +1,6 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
-import { App, Button, Card, Space, Tooltip, Typography } from 'antd'
+import { App, Alert, Button, Card, Space, Tooltip, Typography } from 'antd'
 import {
   ApiOutlined,
   ExportOutlined,
@@ -119,7 +119,7 @@ function SelectedPanelCard({
           </Typography.Text>
         ) : (
           <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-            未配置
+            尚未设置面板地址
           </Typography.Text>
         )}
       </div>
@@ -134,7 +134,7 @@ function SelectedPanelCard({
           </Button>
         ) : (
           <Button icon={<SettingOutlined />} onClick={onConfigure}>
-            去配置
+            设置连接
           </Button>
         )}
       </Space>
@@ -150,23 +150,26 @@ export default function PanelManagement() {
   const { panelKey } = useParams<{ panelKey: string }>()
   const [panels, setPanels] = useState<PanelItem[]>([])
   const [loading, setLoading] = useState(false)
+  const [loadError, setLoadError] = useState('')
 
-  const load = async () => {
+  const load = useCallback(async () => {
     setLoading(true)
     try {
       const data = await apiFetch('/integrations/panels') as { items?: PanelItem[] }
       setPanels(Array.isArray(data.items) ? data.items : [])
+      setLoadError('')
     } catch (e: unknown) {
-      const detail = e instanceof Error ? e.message : '加载面板配置失败'
-      message.error(detail)
+      const detail = e instanceof Error ? e.message : '无法加载面板列表'
+      setLoadError(detail)
+      message.error(`面板列表加载失败：${detail}`)
     } finally {
       setLoading(false)
     }
-  }
+  }, [message])
 
   useEffect(() => {
     void load()
-  }, [])
+  }, [load])
 
   // 没带 panelKey 时落到第一个面板：侧栏一级项与「面板管理」入口都用一级路径，
   // 不兜底的话进来是空页。`replace` 保证回退不会卡在一级路径上反复跳。
@@ -181,19 +184,29 @@ export default function PanelManagement() {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--section-gap)' }}>
       <PageHeader
-        title="面板管理"
-        subtitle="用左侧「面板管理」下的子项切换面板；连接配置在「全局配置 → 面板配置」"
+        title="面板对接"
+        subtitle="核对本地与远端账号，再选择推送、拉回或登记。"
         actions={
           <Space>
             <Button icon={<SettingOutlined />} onClick={() => navigate(PANEL_CONFIG_PATH)}>
-              面板配置
+              连接设置
             </Button>
             <Button icon={<ReloadOutlined />} loading={loading} onClick={load}>
-              刷新
+              刷新列表
             </Button>
           </Space>
         }
       />
+
+      {loadError ? (
+        <Alert
+          type="error"
+          showIcon
+          message="无法读取面板列表"
+          description={`${loadError}。请检查服务连接后重试。`}
+          action={<Button size="small" onClick={() => void load()} loading={loading}>重试</Button>}
+        />
+      ) : null}
 
       {selectedPanel ? (
         <SelectedPanelCard
@@ -218,6 +231,7 @@ export default function PanelManagement() {
             upload: selectedPanel.upload_actions,
           }}
           syncAction={selectedPanel.sync_action || ''}
+          onConfigure={() => navigate(PANEL_CONFIG_PATH)}
         />
       ) : null}
     </div>

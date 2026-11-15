@@ -88,6 +88,31 @@ export default function Proxies() {
   const [region, setRegion] = useState('')
   const [newTags, setNewTags] = useState<string[]>([])
   const [checking, setChecking] = useState(false)
+  const [reactivating, setReactivating] = useState(false)
+
+  /**
+   * 一次性复活所有被自动停用的代理。
+   *
+   * `report_fail` 在「0 成功 + 5 次失败」时会拉黑代理，而那 5 次可能只是
+   * 走了不支持它的调用路径（实测：住宅代理 curl 直连正常，库里却躺着
+   * is_active=0）。没有这个按钮时，用户只能逐条点开关，或跑一遍串行探活
+   * （20 个代理约 160 秒）。
+   */
+  const reactivateAll = async () => {
+    setReactivating(true)
+    try {
+      const result = (await apiFetch('/proxies/reactivate', { method: 'POST' })) as {
+        revived?: number
+      }
+      const n = Number(result?.revived || 0)
+      message.success(n > 0 ? `已恢复 ${n} 个被停用的代理` : '没有被停用的代理')
+      await load()
+    } catch (error) {
+      message.error(`恢复失败：${error instanceof Error ? error.message : String(error)}`)
+    } finally {
+      setReactivating(false)
+    }
+  }
   const [loading, setLoading] = useState(false)
   const [selectedRowKeys, setSelectedRowKeys] = useState<Key[]>([])
   const [balanceMap, setBalanceMap] = useState<Record<string, BalanceRow>>({})
@@ -104,7 +129,7 @@ export default function Proxies() {
   const [balanceMax, setBalanceMax] = useState(0)
   const [balancing, setBalancing] = useState(false)
 
-  const load = async () => {
+  const load = async (options: { quiet?: boolean } = {}): Promise<ProxyRow[] | null> => {
     setLoading(true)
     try {
       const [rows, balance, cfg] = await Promise.all([
@@ -128,9 +153,15 @@ export default function Proxies() {
       setBalanceEnabled(!['0', 'false', 'off', 'no'].includes(enabledRaw))
       setBalanceMax(Number(conf.proxy_balance_max_per_proxy || 0) || 0)
       setBalanceLoaded(true)
+      return rows || []
+    } catch (error) {
+      if (!options.quiet) {
+        message.error({ content: `代理列表加载失败：${errMsg(error)}。请检查服务连接后重试。`, key: 'proxy-load-error' })
+      }
     } finally {
       setLoading(false)
     }
+    return null
   }
 
   useEffect(() => {
@@ -152,10 +183,10 @@ export default function Proxies() {
           body: JSON.stringify({ url: lines[0], region, tags: newTags }),
         })
       }
-      message.success('添加成功')
+      message.success(lines.length > 1 ? `已添加 ${lines.length} 个代理` : '代理已添加')
       setNewProxy('')
       setRegion('')
-      load()
+      void load()
     } catch (e: unknown) {
       message.error(`添加失败: ${errMsg(e)}`)
     }
@@ -164,7 +195,7 @@ export default function Proxies() {
   const del = async (id: number) => {
     try {
       await apiFetch(`/proxies/${id}`, { method: 'DELETE' })
-      message.success('删除成功')
+      message.success('代理已删除')
       setSelectedRowKeys((prev) => prev.filter((key) => key !== id))
       load()
     } catch (e: unknown) {
@@ -210,12 +241,71 @@ export default function Proxies() {
     load()
   }
 
+  /**
+   * 「检测全部」：后台串行探活，每条约 8 秒（`check_all` 在服务端逐条打）。
+   *
+   * 原来固定 3 秒后就刷新一次、把按钮恢复可点 —— 20 个代理要 160 秒，
+   * 用户看到的永远是**过期**结果，还以为检测完了。现在按真实进度轮询：
+   * 每 3 秒重新拉一次列表，直到 `last_checked` 不再变化（= 服务端跑完）。
+   *
+   * 不设上限会成为永久轮询，所以给一个宽松的上限（代理数 × 10 秒 + 30 秒），
+   * 到点就停并把按钮放开，用户可再点一次。
+   */
+  const checkPollTimer = useRef<number | null>(null)
+
+  const stopCheckPolling = () => {
+    if (checkPollTimer.current !== null) {
+      window.clearInterval(checkPollTimer.current)
+      checkPollTimer.current = null
+    }
+  }
+
+  // 卸载时清掉定时器，避免切页后仍在拉接口
+  useEffect(() => stopCheckPolling, [])
+
   const check = async () => {
+    stopCheckPolling()
     setChecking(true)
-    await apiFetch('/proxies/check', { method: 'POST' })
-    setTimeout(() => {
-      load()
+    try {
+      await apiFetch('/proxies/check', { method: 'POST' })
+    } catch (error) {
       setChecking(false)
+      message.error(`检测启动失败：${error instanceof Error ? error.message : String(error)}`)
+      return
+    }
+
+    // 轮询读接口**本次返回**的 rows，不能读闭包里的 state（那始终是启动时的旧数组）。
+    const snapshot = (rows: ProxyRow[]) => rows
+      .map((row) => `${row.id}:${String(row.last_checked || '')}`)
+      .join('|')
+    const baseline = snapshot(proxies)
+    let previous = baseline
+    let stablePolls = 0
+    let requestPending = false
+    const deadline = Date.now() + Math.max(60, (proxies.length || 1) * 10 + 30) * 1000
+
+    checkPollTimer.current = window.setInterval(() => {
+      if (requestPending) return
+      requestPending = true
+      void (async () => {
+        const rows = await load({ quiet: true })
+        if (!rows) {
+          stablePolls = 0
+          return
+        }
+        const next = snapshot(rows)
+        if (next === previous) stablePolls += 1
+        else stablePolls = 0
+        previous = next
+        // 全部探活后连续两次稳定才结束；最后一个代理完成前不会提前放行。
+        const completed = stablePolls >= 2
+        const timedOut = Date.now() > deadline
+        if (completed || timedOut) {
+          stopCheckPolling()
+          setChecking(false)
+          message.success(completed ? '所有代理检测已完成' : '检测等待已结束，可刷新查看当前结果；后台任务可能仍在运行。')
+        }
+      })().finally(() => { requestPending = false })
     }, 3000)
   }
 
@@ -407,7 +497,8 @@ export default function Proxies() {
             onClick={() => toggle(record.id)}
           />
           <Popconfirm
-            title="确认删除该代理吗？"
+            title="删除这个代理？"
+            description="删除后，使用它的账号将改为直连；也可以先为账号重新分配代理。"
             onConfirm={() => del(record.id)}
             okText="删除"
             cancelText="取消"
@@ -422,9 +513,9 @@ export default function Proxies() {
 
   const summary = useMemo(
     () =>
-      `共 ${proxies.length} 个代理 · 可绑定 ${balanceInfo.bindable_count} 个 · ` +
-      `已绑定 ${balanceInfo.bound_accounts} 个账号` +
-      (balanceInfo.orphan_accounts ? ` · ${balanceInfo.orphan_accounts} 个账号的代理已删除` : ''),
+      `管理注册与账号使用的网络出口。共 ${proxies.length} 个代理，` +
+      `${balanceInfo.bindable_count} 个可用于绑定，已绑定 ${balanceInfo.bound_accounts} 个账号` +
+      (balanceInfo.orphan_accounts ? `，${balanceInfo.orphan_accounts} 个账号的原代理已删除` : '') + '。',
     [proxies.length, balanceInfo],
   )
 
@@ -441,10 +532,13 @@ export default function Proxies() {
               loading={balancing}
               disabled={!balanceInfo.bindable_count}
             >
-              均衡绑定
+              分配绑定代理
             </Button>
             <Button icon={<ReloadOutlined spin={checking} />} onClick={check} loading={checking}>
-              检测全部
+              检测所有代理
+            </Button>
+            <Button loading={reactivating} onClick={() => void reactivateAll()}>
+              恢复已停用代理
             </Button>
           </Space>
         }
@@ -504,7 +598,7 @@ export default function Proxies() {
         />
       )}
 
-      <Card title="添加代理（每行一个）" className="app-card">
+      <Card title="添加代理" className="app-card" extra={<span className="form-note">每行一个代理地址</span>}>
         <Space direction="vertical" style={{ width: '100%' }} size={12}>
           <Input.TextArea
             value={newProxy}
@@ -522,7 +616,7 @@ export default function Proxies() {
             <Input
               value={region}
               onChange={(e) => setRegion(e.target.value)}
-              placeholder="地区标签 (如 US, SG)"
+              placeholder="地区（如 US、SG，可选）"
               style={{ width: 'var(--w-field)' }}
             />
             <Space size={4}>
@@ -539,7 +633,7 @@ export default function Proxies() {
               ))}
             </Space>
             <Button type="primary" icon={<PlusOutlined />} onClick={add}>
-              添加
+              添加代理
             </Button>
           </Space>
         </Space>
@@ -548,7 +642,7 @@ export default function Proxies() {
       <Card className="app-card">
         <div style={{ marginBottom: 14, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <div style={{ color: 'var(--text-muted)', fontSize: 13 }}>
-            已选中 {selectedRowKeys.length} 条
+            已选中 {selectedRowKeys.length} 个
           </div>
           <Popconfirm
             title={`确认删除选中的 ${selectedRowKeys.length} 条代理？`}

@@ -11,6 +11,27 @@ from typing import Any, Optional
 from ...base import BaseMailbox, MailboxAccount
 
 
+def _is_transient_poll_error(exc: BaseException) -> bool:
+    """轮询里这个异常值得「再等一个周期」吗？
+
+    与 OAuth 分类同源（`_is_permanent_oauth_error` 的反面），并收录网络层
+    临时故障。永久错误继续等到时限只是白等。
+    """
+    if bool(getattr(exc, "retryable", False)):
+        return True
+    if bool(getattr(exc, "permanent", False)):
+        return False
+    text = str(exc or "").lower()
+    for marker in ("timed out", "timeout", "connection reset", "connection aborted",
+                   "temporarily", "temporary failure", "502", "503", "504", "429"):
+        if marker in text:
+            return True
+    for marker in ("invalid_grant", "revoked", "401", "403", "unauthorized"):
+        if marker in text:
+            return False
+    return False
+
+
 class OutlookMailboxBackend(ABC):
     """Outlook 收信后端策略。"""
 
@@ -114,6 +135,7 @@ class OutlookImapMailboxBackend(OutlookMailboxBackend):
         keyword_lower = str(keyword or "").strip().lower()
 
         def poll_once() -> Optional[str]:
+            last_error: Exception | None = None
             for folder in self.mailbox._imap_folder_names:
                 imap_conn = None
                 try:
@@ -209,6 +231,7 @@ class OutlookImapMailboxBackend(OutlookMailboxBackend):
                     self.mailbox._log(
                         f"[微软邮箱][IMAP] folder={folder} IMAP 查询异常: {exc}"
                     )
+                    last_error = exc
                     continue
                 finally:
                     try:
@@ -216,12 +239,22 @@ class OutlookImapMailboxBackend(OutlookMailboxBackend):
                             imap_conn.logout()
                     except Exception:
                         logger.debug("忽略异常（保留原行为）", exc_info=True)
+            if last_error is not None:
+                # 整轮所有文件夹都失败 → 抛回轮询层，让错误预算生效。
+                # 不抛的话 `_run_polling_wait` 看不到异常，会一路陪跑到时限
+                # （实测 2026-11-15：60s 时限干等 62s）。
+                raise last_error
             return None
 
         return self.mailbox._run_polling_wait(
             timeout=timeout,
             poll_interval=5,
             poll_once=poll_once,
+            # 与 iCloud 渠道同一口径（`modules/mail/icloud_remote.py`）：
+            # 暂时性错误继续轮询，连续失败够多就放弃，避免服务真挂时
+            # 每个 worker 陪跑到时限。
+            is_transient=_is_transient_poll_error,
+            max_consecutive_errors=4,
         )
 
 
@@ -299,8 +332,31 @@ class OutlookGraphMailboxBackend(OutlookMailboxBackend):
                 code_pattern=code_pattern,
                 **kwargs,
             )
-        self.mailbox._get_oauth_access_token(account, preferred_backend=self.backend_name)
-        if str((account.extra or {}).get("_oauth_backend_capability") or "").strip().lower() != "graph":
+        # 预检 token：**可重试**的失败不要在这里抛死 —— 轮询循环每 5 秒会重新
+        # 取一次 token，一次 503 本可以自愈。这里抛出去等于「一次抖动定生死」，
+        # 而且连一次轮询都没发生（实测 2026-11-15）。
+        # 永久失败（invalid_grant）仍然立刻抛：重试无效，早点换号。
+        precheck_ok = True
+        try:
+            self.mailbox._get_oauth_access_token(
+                account, preferred_backend=self.backend_name
+            )
+        except Exception as exc:
+            if not bool(getattr(exc, "retryable", False)):
+                raise
+            precheck_ok = False
+            self.mailbox._log(
+                f"[微软邮箱][Graph] token 预检失败但可重试，继续进轮询: {exc}"
+            )
+        # **只有预检成功时才允许降级到 IMAP。**
+        #
+        # `_oauth_backend_capability` 是「这次拿到的 token 能读哪个协议」的记录，
+        # 由 `_get_oauth_access_token` 成功时写入。预检失败时它没被写 → 这里看到
+        # 空串就降级 IMAP —— 而 OAuth-only 账号（只有 client_id/refresh_token）
+        # **没有密码**，IMAP 的 AUTHENTICATE 必然失败：一次瞬时 503 就被放大成
+        # 「这个账号坏了」（实测 2026-11-15）。
+        # 预检失败时正确做法是留在 Graph 上让轮询重试 token。
+        if precheck_ok and str((account.extra or {}).get("_oauth_backend_capability") or "").strip().lower() != "graph":
             self.mailbox._log("[微软邮箱] Graph OAuth scope 不可用，当前 token 仅支持 IMAP，自动切换 IMAP")
             return self.mailbox._backends["imap"].wait_for_code(
                 account,
@@ -335,6 +391,9 @@ class OutlookGraphMailboxBackend(OutlookMailboxBackend):
 
         def poll_once() -> Optional[str]:
             nonlocal _token_refreshed
+            last_error: Exception | None = None
+            any_ok = False
+            nonlocal _token_refreshed
             access_token = self.mailbox._get_oauth_access_token(
                 account,
                 preferred_backend=self.backend_name,
@@ -346,6 +405,8 @@ class OutlookGraphMailboxBackend(OutlookMailboxBackend):
                         access_token=access_token,
                         folder=folder,
                     )
+                    # 只要有一个文件夹读成功，就不把本轮判成「整轮不可用」。
+                    any_ok = True
                     new_messages = []
                     for message in messages:
                         message_id = str(message.get("id") or "").strip()
@@ -442,13 +503,25 @@ class OutlookGraphMailboxBackend(OutlookMailboxBackend):
                     self.mailbox._log(
                         f"[微软邮箱][Graph] folder={folder} 查询异常: {exc}"
                     )
+                    # 记下这次失败：**整轮所有文件夹都失败**时要把错误抛回轮询层，
+                    # 否则 `_run_polling_wait` 的 `max_consecutive_errors` 永远
+                    # 收不到异常 —— 服务持续不可用时会一路陪跑到时限
+                    # （实测 2026-11-15：60s 时限里干等 62s，预算没生效）。
+                    last_error = exc
                     continue
+            if last_error is not None and not any_ok:
+                raise last_error
             return None
 
         return self.mailbox._run_polling_wait(
             timeout=timeout,
             poll_interval=5,
             poll_once=poll_once,
+            # 与 iCloud 渠道同一口径（`modules/mail/icloud_remote.py`）：
+            # 暂时性错误继续轮询，连续失败够多就放弃，避免服务真挂时
+            # 每个 worker 陪跑到时限。
+            is_transient=_is_transient_poll_error,
+            max_consecutive_errors=4,
         )
 
 
@@ -535,5 +608,7 @@ class MailApiUrlOtpBackend(OutlookMailboxBackend):
             timeout=timeout,
             poll_interval=3,
             poll_once=poll_once,
+            is_transient=_is_transient_poll_error,
+            max_consecutive_errors=4,
         )
 

@@ -563,13 +563,14 @@ class PanelSubmenuTests(unittest.TestCase):
             "子路径要返回 [父 key, 子 key] 两项，否则异步子项的父级高亮会丢",
         )
 
-    def test_submenu_starts_expanded(self):
-        """二级项默认展开 —— 与「平台管理」「邮箱服务」一致。"""
+    def test_active_submenu_follows_the_current_route(self):
+        """只展开当前管理对象的分组，用户手动展开的其它分组保持原样。
+
+        这是工作台的信息层级选择，不影响子项按 URL 选中与深链可达。
+        """
         src = self._app_src()
-        self.assertIn(
-            "defaultOpenKeys={['/accounts', '/mail', '/panel-management', '/authorized-accounts']}",
-            src,
-        )
+        self.assertIn("openKeys={compact ? undefined : openMenuKeys}", src)
+        self.assertIn("setOpenMenuKeys(keys => keys.includes(parentKey)", src)
 
 
 if __name__ == "__main__":

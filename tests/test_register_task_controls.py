@@ -554,3 +554,54 @@ class TaskFinishSurvivesLogFailureTests(unittest.TestCase):
 
         snapshot = _task_store.snapshot(task_id)
         self.assertNotEqual(snapshot["status"], "running", "任务永久 running")
+
+
+class FirstSnapshotFailureMustNotStrandTheTaskTests(unittest.TestCase):
+    """`persist_task_snapshot` 在**第一次**（函数开头那次）就抛错时，任务必须仍能收尾。
+
+    2026-11-15 实测（T1-1 Critical）：`services/task_runners.py:405` 与 `:974` 的
+    `persist_task_snapshot(task_id)` 位于函数体开头、**在 try 之外**。它一抛异常
+    （现实触发源就是同文件注释承认过的 `database is locked`），runner 直接逃逸，
+    `finish()` 永不执行 —— 任务永久 running：DELETE 409、stop 没人消费、
+    `has_active()` 恒真（备份导入据此拒绝）。
+
+    既有测试 `test_task_finishes_even_if_persist_snapshot_raises_at_the_end` 只让
+    **第 4 次起**的调用抛错，恰好跳过了开头这次，所以首帧无人守。
+    这里让**第一次**就抛。
+    """
+
+    def test_first_snapshot_failure_still_finishes_the_task(self):
+        from api.tasks import RegisterTaskRequest, _create_task_record
+
+        task_id = "task-first-persist-failure"
+        req = RegisterTaskRequest(
+            platform="chatgpt", count=1, concurrency=1, extra={"mail_provider": "fake"}
+        )
+        _create_task_record(task_id, req, "manual", None)
+        _FlakyPlatform.reset(0)
+
+        calls = {"n": 0}
+        real = __import__(
+            "services.task_runners", fromlist=["persist_task_snapshot"]
+        ).persist_task_snapshot
+
+        def _boom_once_first(tid):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("database is locked")
+            return real(tid)
+
+        with (
+            patch("core.registry.get", return_value=_FlakyPlatform),
+            patch("core.base_mailbox.create_mailbox", return_value=_FakeMailbox()),
+            patch("core.db.save_account", side_effect=lambda account: account),
+            patch("services.task_runners.persist_task_snapshot", side_effect=_boom_once_first),
+        ):
+            _run_register(task_id, req)
+
+        snapshot = _task_store.snapshot(task_id)
+        self.assertNotEqual(
+            snapshot["status"], "running",
+            "开头那次快照失败后任务永久 running（stop 救不回、备份导入被拒）",
+        )
+        self.assertEqual(snapshot["registered"], 1)

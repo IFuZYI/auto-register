@@ -210,8 +210,8 @@ class FrontendDateForwardingTests(unittest.TestCase):
 
     计数是**变更探测器**：新增一个 all_filtered 分支时它会红，逼你确认新分支
     也转发了日期（否则列表计数包含日期筛选、请求不带，处理数会大于显示数）。
-    2026-10-26 新增「上传到面板」分支时触发过一次 —— 那个分支确实漏了日期，
-    已补上。
+    2026-10-26 新增「上传到面板」分支时曾漏了日期。该入口现已统一收敛到
+    面板同步页，以真实对比行和平台筛选决定登记范围，不再从账号台账重复发起。
     """
 
     def _src(self):
@@ -219,7 +219,9 @@ class FrontendDateForwardingTests(unittest.TestCase):
 
     def test_handlers_forward_dates(self):
         src = self._src()
-        # 四个 all_filtered 分支（status-sync / backfill / refresh / 上传到面板）
+        # 账号台账的四个 all_filtered 分支：本地状态同步 / 补 RT / 刷新 /
+        # 批量补绑 2FA（2026-11-14 补的批量入口）。每新增一个都必须在
+        # `all` 分支转发日期筛选，否则「处理数会大于显示数」。
         occurrences = src.count("body.all_filtered = true")
         self.assertEqual(occurrences, 4, f"all_filtered 分支数变了: {occurrences}")
 

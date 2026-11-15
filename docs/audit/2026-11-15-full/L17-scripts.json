@@ -1,0 +1,258 @@
+{
+  "lane": "L17-scripts",
+  "head": "fca2eec",
+  "dirty": true,
+  "reviewed_files": [
+    "scripts/check_dead_tests.py",
+    "scripts/check_kiro_agent2api_export.py",
+    "scripts/check_no_secrets.py",
+    "scripts/dump_accounts.py",
+    "scripts/e2e_smoke.py",
+    "scripts/encrypt_existing_credentials.py",
+    "scripts/frozen_verify.py",
+    "scripts/grok_turnstile_mint.py",
+    "scripts/install_camoufox.py",
+    "scripts/merge_platform_dbs.py",
+    "core/db/merge.py",
+    "core/db/models_account.py",
+    "core/secret_box.py",
+    "core/credential_crypto.py",
+    "platforms/grok/turnstile_mint.py"
+  ],
+  "findings": [
+    {
+      "id": "L17-1",
+      "title": "dump_accounts 的密文名单与 SENSITIVE_EXTRA_KEYS 漂移，导出会把 client_secret 明文打进快照",
+      "severity": "P1",
+      "file": "scripts/dump_accounts.py",
+      "line": 36,
+      "evidence": "scripts/dump_accounts.py:36 手写 _SECRET_KEYS（15 键）；core/credential_crypto.py:41 SENSITIVE_EXTRA_KEYS（20 键）。`python3 -c` 对比两集合 → 缺失 8 键: clientSecret, client_secret, device_code, kiro_aws_access_token, kiro_aws_client_secret, kiro_aws_refresh_token, kiro_aws_sso, ssoToken。scripts/dump_accounts.py:87 调 row.get_extra()，core/db/models_account.py:169-197 get_extra 走 decrypt_extra 返回**明文**；scripts/dump_accounts.py:66-70 _redact_extra 只对 _SECRET_KEYS 内的键 _mask，其余原样。只读核对 data/account_manager.db：kiro 65 行 extra 含 client_secret/kiro_aws_client_secret（值前缀 v1: 即已加密），aws 70 行含 client_secret。",
+      "impact": "`python scripts/dump_accounts.py --platform kiro > /tmp/snap.json` 会把 65 个 kiro + 70 个 aws 账号的 client_secret、kiro_aws_refresh_token（可无限续 AT 的 bearer 凭据）以明文写进快照文件/终端，直接违反脚本 docstring 第 9 行「凭据字段打码」的承诺。",
+      "fix_hint": "删掉本地 _SECRET_KEYS，改为 `from core.credential_crypto import SENSITIVE_EXTRA_KEYS` 并集历史别名（sso_token/cookie_header）；加一条契约测试断言 dump 的脱敏集合 == SENSITIVE_EXTRA_KEYS，防止再次漂移。",
+      "class": "credential-leak"
+    },
+    {
+      "id": "L17-2",
+      "title": "存量加密脚本在密钥文件缺失时会静默新建密钥，把整库凭据加密成服务永远解不开的密文",
+      "severity": "P1",
+      "file": "scripts/encrypt_existing_credentials.py",
+      "line": 229,
+      "evidence": "scripts/encrypt_existing_credentials.py:229 只检查 `enabled()`；core/credential_crypto.py:84-89 enabled() 默认 True（只有显式写 0/false 才关）。core/secret_box.py:76-102 _load_or_create_key：密钥文件不存在时 `key = secrets.token_bytes(32)` 并落盘，只有一行 logger.warning（:91-96），无异常。脚本无 --key-file / --yes / 备份，直接 `with engine.begin()` 写 accounts（:52-99）。",
+      "impact": "在 DATA_DIR 指向生产库、但 CREDENTIAL_ENCRYPTION_KEY_FILE 未设/指到别处（例如宿主机直接跑而不是容器内）时，脚本会用一把新生成的密钥把全库明文密码/AT/SSO 加密；服务启动后读的是原密钥文件 → 全部 CredentialKeyError，凭据不可恢复（除非那把临时密钥文件还在）。",
+      "fix_hint": "写入前硬性要求密钥已存在：`if not os.getenv('CREDENTIAL_ENCRYPTION_KEY') and not key_file_path().exists(): abort`；启动时打印解析后的 DB URL 与密钥路径并要求 --yes；先做 sqlite backup 再写。",
+      "class": "data-integrity"
+    },
+    {
+      "id": "L17-3",
+      "title": "e2e_smoke 只隔离 DATA_DIR/PLATFORM_DATABASE_URLS，DATABASE_URL 与 DATABASE_URL_<PLATFORM> 仍可把写操作导到真库",
+      "severity": "P1",
+      "file": "scripts/e2e_smoke.py",
+      "line": 36,
+      "evidence": "scripts/e2e_smoke.py:35-47 设 DATA_DIR=mkdtemp、pop PLATFORM_DATABASE_URLS，但未 pop DATABASE_URL 与 DATABASE_URL_*。core/db/base.py:48 `DATABASE_URL = os.getenv('DATABASE_URL') or sqlite:///{DEFAULT_DB_FILE}` —— DATABASE_URL 优先于 DATA_DIR；core/db/registry.py:67/159 url_for 首次访问时 parse_platform_database_urls() 读 DATABASE_URL_<PLATFORM>。冒烟本身是写操作：:69 PUT /api/config(register_count=2)、:82 POST /api/accounts、:128 PATCH、:158 DELETE、:214 删代理、:165 POST /api/tasks/register（真起注册任务）。",
+      "impact": "`DATABASE_URL=sqlite:////runtime/account_manager.db python scripts/e2e_smoke.py`（或 shell 里残留 DATABASE_URL_GROK）会在生产库建/删 smoke 账号、覆盖配置项、起一个真实注册任务；测试通过与否都留下脏数据。",
+      "fix_hint": "在同一 import 前置块里 pop/覆盖 DATABASE_URL 与所有 DATABASE_URL_* 前缀键；跑之前断言 `current_engine().url` 落在 _TMP 下，否则 exit 2；加 --allow-non-temp 显式逃生阀。",
+      "class": "data-integrity"
+    },
+    {
+      "id": "L17-4",
+      "title": "密码/令牌用无盐 sha256 前 12 位「打码」，弱口令可离线爆破",
+      "severity": "P2",
+      "file": "scripts/dump_accounts.py",
+      "line": 57,
+      "evidence": "scripts/dump_accounts.py:57-63 `_mask` 返回 `sha256:{hexdigest()[:12]}:len{len(text)}`，无盐无迭代；:82-83 对 token/password 列直接套用。同文件 :76-81 还逐行输出 email/user_id/cashier_url 原值，无任何 PII 警告。",
+      "impact": "快照文件/CI 日志里的 48-bit 无盐哈希对 6-10 位口令是可离线字典验证的（Pw-123 级别秒破）；结合 email 列等于一份可用的凭据清单。",
+      "fix_hint": "改用 HMAC-SHA256(每次运行随机 key) 或只输出 `<set>/<empty>` 布尔；若要 diff 能力，用 keyed hash 并在退出时丢弃 key；输出前打印 PII 警告。",
+      "class": "credential-leak"
+    },
+    {
+      "id": "L17-5",
+      "title": "merge 直接对 --target 写库：无备份、无 live-service 检查",
+      "severity": "P2",
+      "file": "scripts/merge_platform_dbs.py",
+      "line": 71,
+      "evidence": "scripts/merge_platform_dbs.py:71 `merge_accounts(target, sources, dry_run=args.dry_run)`；core/db/merge.py:181 `sqlite3.connect(str(target))` 读写打开，:250 末尾一次 commit。脚本只有 --dry-run 开关，无 `.bak` 生成、无 `--backup`、不检查目标库是否被运行中的服务持有。",
+      "impact": "合并的胜负规则（updated_at 新者胜）一旦判错或 merge 逻辑有 bug，没有可回滚的快照；对着正在跑的服务合并还会撞 sqlite 写锁（默认 5s busy timeout）导致中途异常——虽然事务回滚不会写坏，但操作者没有任何恢复点。",
+      "fix_hint": "默认先 `sqlite3.Connection.backup()` 出 `<target>.bak-<ts>`（或要求 --no-backup 才跳过）；检测 `-wal` 有活跃读者/写者时提示先停服；把备份路径打进报告。",
+      "class": "data-integrity"
+    },
+    {
+      "id": "L17-6",
+      "title": "源库路径写错或没有 accounts 表时静默跳过并以 0 退出",
+      "severity": "P2",
+      "file": "core/db/merge.py",
+      "line": 202,
+      "evidence": "core/db/merge.py:202 `if not source.exists(): continue`、:207 `if not _has_table(src, table): continue` —— 两者都不设 stats.total，随后 :289-300 _check_conservation 对 0==0 判通过；scripts/merge_platform_dbs.py:78-99 仍打印「【已合并】」并 return 0。",
+      "impact": "`--source data/platforms/grok.dbb`（拼错）或源库是空 schema 时，输出「合计: 源 0 行」且退出码 0，cron/CI 把一次没合并任何东西的运行当成功，后续按文档清掉 PLATFORM_DATABASE_URLS 就会读到缺数据的库。",
+      "fix_hint": "显式 --source 不存在或无 accounts 表 → 抛错/exit 2；只有自动发现的源允许跳过，并在报告里列出 skipped 及原因。",
+      "class": "data-integrity"
+    },
+    {
+      "id": "L17-7",
+      "title": "camoufox 浏览器包只校验 zip 结构与 camoufox-bin 存在，无 checksum/签名",
+      "severity": "P2",
+      "file": "scripts/install_camoufox.py",
+      "line": 290,
+      "evidence": "scripts/install_camoufox.py:290 `_download(asset_url, archive_path)` → :292 `_extract_zip`；_validate_addon_zip（:195-203）只用于 uBlock；主资产没有任何 sha256/签名比对，URL 由 browser-pin.json 的 repo/version/build 拼出（:274-275）。",
+      "impact": "构建期从 GitHub Release 拉取的 camoufox-bin 会被直接 exec（:238-241 恢复 +x），供应链上任何一次 release 资产替换/MITM 都变成镜像内的任意代码执行，而构建日志显示「成功」。",
+      "fix_hint": "在 browser-pin.json 或同目录 checksums 文件里钉每个 (version,build,arch) 的 sha256，下载后先校验再解压；缺失校验和时 fail-closed（可用 --allow-unverified 显式跳过）。",
+      "class": "functional"
+    },
+    {
+      "id": "L17-8",
+      "title": "下载前先 rmtree 整个 camoufox 缓存目录，失败即毁掉可用安装",
+      "severity": "P2",
+      "file": "scripts/install_camoufox.py",
+      "line": 281,
+      "evidence": "scripts/install_camoufox.py:280-282 `if install_dir.exists(): shutil.rmtree(install_dir)` 发生在 :290 下载之前；下载/解压失败在 :293-294 直接 SystemExit，finally 只清 temp_dir。",
+      "impact": "在已有可用浏览器的开发机/构建缓存上重跑，一旦 GitHub 不可达或资产 404，旧安装已被删掉、新安装没装上 → Solver 直接不可用，且没有回退路径。",
+      "fix_hint": "先解压到 temp_dir 并校验，成功后用 rename 原子替换（旧目录改名 .old，成功后删除）；失败时保留旧目录。",
+      "class": "data-integrity"
+    },
+    {
+      "id": "L17-9",
+      "title": "四个 gate 脚本没有任何 CI/pre-commit 接线，只能靠人记得跑",
+      "severity": "P2",
+      "file": ".github/workflows/release.yml",
+      "line": 1,
+      "evidence": "`ls .github/workflows/` 只有 release.yml；`grep -rn \"check_no_secrets|check_dead_tests|frozen_verify|check_kiro\" .github/` 无命中；仓库根无 .pre-commit-config.yaml / tox.ini / Makefile。release.yml 只做 Release + GHCR 构建，不跑 pytest 也不跑脚本。",
+      "impact": "check_no_secrets.py（:110 命中返回 1）、check_dead_tests.py（:78）、check_kiro_agent2api_export.py（:135）、frozen_verify.py（:90 返回 2）都能失败，但没有任何自动化会调用它们 —— 密钥字面量或死测试可以静默进 main。",
+      "fix_hint": "加 ci.yml（push/PR）跑 `python scripts/check_no_secrets.py && python scripts/check_dead_tests.py tests && python scripts/check_kiro_agent2api_export.py`；check_no_secrets 再挂一个 pre-commit hook。",
+      "class": "contract"
+    },
+    {
+      "id": "L17-10",
+      "title": "encrypt 的 --verify 只看 v1: 前缀、不试解密，错密钥或坏信封一律判合格",
+      "severity": "P2",
+      "file": "scripts/encrypt_existing_credentials.py",
+      "line": 196,
+      "evidence": "scripts/encrypt_existing_credentials.py:196-200 `if str(extra[key]).strip() and not is_ciphertext(extra[key])`；:185-188 对 password/token 同样只判前缀；core/credential_crypto.py:92-93 `is_ciphertext = startswith('v1:')`。main() 在非 dry-run 结束时直接 return _verify()（:248）。",
+      "impact": "配合 L17-2（错密钥新建）时，脚本会把「全部密文但一把也解不开」判成成功并 exit 0；密钥文件被替换、密文被截断同样检不出。这是该脚本唯一的完工判据，却只验形状不验可用性。",
+      "fix_hint": "每张表抽样 N 行（或全量）做一次 decrypt_text 往返，journal 文件逐个 decrypt；CredentialKeyError 计数 >0 时 exit 1 并打印密钥路径。",
+      "class": "data-integrity"
+    },
+    {
+      "id": "L17-11",
+      "title": "代理口令与 --cookie 会话凭据经 argv 传递，ps//proc 与 shell history 可见",
+      "severity": "P2",
+      "file": "scripts/grok_turnstile_mint.py",
+      "line": 310,
+      "evidence": "scripts/grok_turnstile_mint.py:310-312 定义 `--proxy` / `--cookie`；platforms/grok/turnstile_mint.py:296-305 组 args 时把 `--proxy {proxy}` 放进 argv 交给 subprocess.run；同文件 :311-317 注释已承认 TimeoutExpired 的 str 会带完整 argv（含代理密码），只是把异常文本脱敏了，进程命令行本身没脱敏。",
+      "impact": "同机/同容器的任何进程可 `cat /proc/<pid>/cmdline` 读到 `http://user:pass@host`；手工跑 `--cookie 'sso=...'` 时 x.ai 会话 cookie 还会进 shell history —— 等于账号接管凭据。",
+      "fix_hint": "改为环境变量（GROK_MINT_PROXY / GROK_MINT_COOKIE）或 stdin/0600 临时文件传参；argv 只留非敏感开关。",
+      "class": "credential-leak"
+    },
+    {
+      "id": "L17-12",
+      "title": "merge 的 table 名用 f-string 拼进 SQL（PRAGMA/select/insert/update）",
+      "severity": "P3",
+      "file": "core/db/merge.py",
+      "line": 113,
+      "evidence": "core/db/merge.py:113 `PRAGMA table_info({table})`、:191/:195/:210 `select ... from {table}`、:276 `insert into {table}`、:285 `update {table} set`；table 是 merge_accounts 的关键字参数（:170，默认 \"accounts\"），CLI 未暴露。",
+      "impact": "当前不可从命令行注入；但这是公开库函数，未来任何调用方把用户输入接到 table 上就是 SQL 注入（列名来自目标 schema，值仍参数化）。",
+      "fix_hint": "table 用 `^[A-Za-z_][A-Za-z0-9_]*$` 白名单校验并加双引号，或直接只允许 'accounts'。",
+      "class": "data-integrity"
+    },
+    {
+      "id": "L17-13",
+      "title": "zipfile.extractall 解压下载包，未防 zip-slip",
+      "severity": "P3",
+      "file": "scripts/install_camoufox.py",
+      "line": 190,
+      "evidence": "scripts/install_camoufox.py:189-190 `with zipfile.ZipFile(archive) as zf: zf.extractall(dest)`；Python 的 extractall 只剥绝对路径/盘符，不剥 `..` 组件。",
+      "impact": "release 资产被替换时可用 `../../` 成员写到 version_dir 之外（构建期任意文件写）；来源是 GitHub 官方 release，概率低但和 L17-7 叠加。",
+      "fix_hint": "遍历 namelist，拒绝绝对路径与含 `..` 的成员后再 extract；或解压到 temp 并校验所有目标都在 dest 下。",
+      "class": "functional"
+    },
+    {
+      "id": "L17-14",
+      "title": "冻结指纹只覆盖 tracked 文件，gitignored 路径的变化看不见；子命令无超时",
+      "severity": "P3",
+      "file": "scripts/frozen_verify.py",
+      "line": 80,
+      "evidence": "scripts/frozen_verify.py:47 `git status --porcelain=v1 -z`（默认不列 ignored）、:48 `git ls-files -z` 只哈希 tracked 文件；:80 `subprocess.run(command, cwd=str(root))` 无 timeout。",
+      "impact": "测试若写 `data/`（.gitignore:18 已忽略）或 __pycache__，前后指纹相同 → 报「树没动」，而库已被改；命令挂死时 gate 永远不返回。",
+      "fix_hint": "status 加 `--ignored` 或额外哈希 data/ 下 mtime+size；给子命令 timeout（如 --timeout，默认 1800）并映射到独立退出码。",
+      "class": "contract"
+    },
+    {
+      "id": "L17-15",
+      "title": "check_dead_tests 在 tests 目录不存在时空转并以 0 退出",
+      "severity": "P3",
+      "file": "scripts/check_dead_tests.py",
+      "line": 61,
+      "evidence": "scripts/check_dead_tests.py:61 `root = Path(argv[1]) if len(argv) > 1 else Path(\"tests\")`；:63 `root.rglob(\"*.py\")` 对不存在的目录返回空迭代，无 is_dir 检查，:78 `return 1 if failures else 0`。",
+      "impact": "`python scripts/check_dead_tests.py test/`（少个 s）或从非仓库根运行都是绿色门禁，实际一个文件都没扫。",
+      "fix_hint": "`if not root.is_dir(): print(f'{root} 不存在', file=sys.stderr); return 2`。",
+      "class": "functional"
+    },
+    {
+      "id": "L17-16",
+      "title": "e2e 每次运行遗留 mkdtemp 目录（sqlite 库 + 日志）",
+      "severity": "P3",
+      "file": "scripts/e2e_smoke.py",
+      "line": 35,
+      "evidence": "scripts/e2e_smoke.py:35 `_TMP = tempfile.mkdtemp(prefix=\"e2e-smoke-\")`，main()（:289-327）与 _run 都没有清理，报告里还把路径写进 data_dir 字段。",
+      "impact": "反复跑（CI/本地对比重构前后）会在 /tmp 堆满完整账号库副本与日志，长期跑的小磁盘机器会被填满。",
+      "fix_hint": "`atexit.register(shutil.rmtree, _TMP, ignore_errors=True)`，或加 --keep 保留。",
+      "class": "perf"
+    }
+  ],
+  "checked_and_clean": [
+    {
+      "file": "scripts/encrypt_existing_credentials.py",
+      "note": "幂等性成立：encrypt_text 对已是 v1: 的值原样返回（core/credential_crypto.py:96-104），encrypt_extra 只覆盖 SENSITIVE_EXTRA_KEYS；重复跑不会双重加密。"
+    },
+    {
+      "file": "scripts/encrypt_existing_credentials.py",
+      "note": "单表原子性成立：_accounts（:52）与 _configs（:112）各自包在 `with engine.begin()` 里，中途异常/进程被杀整表回滚，不会留下半加密的表；_journal 用 tmp+chmod 600+replace（:164-167）原子替换。跨阶段（accounts→configs→journal）可能停在中途，但每阶段幂等，重跑可收敛。"
+    },
+    {
+      "file": "scripts/encrypt_existing_credentials.py",
+      "note": "损坏的 extra_json 不会被覆盖：json 解析失败时 extra={}，new_extra 也为 {}，extra_changed=False 直接跳过（:64-85）。"
+    },
+    {
+      "file": "core/db/merge.py",
+      "note": "行数守恒检查真实存在且会抛：_check_conservation（:289-300）对每个源断言 total == inserted+updated+skipped_older+duplicate_in_source，不成立抛 MergeConservationError；dry_run 与真实执行走同一套计算，只是不写。"
+    },
+    {
+      "file": "scripts/merge_platform_dbs.py",
+      "note": "--target 是 required（:58），没有默认生产库路径；--dry-run（:61）存在且报告口径与真实执行一致；源库发现用 `mode=ro` URI（:39）只读打开。"
+    },
+    {
+      "file": "scripts/check_no_secrets.py",
+      "note": "能失败：命中返回 1（:110）；只打印 `文件:行号: 规则名` 不回显密钥正文（:105）；git ls-files 取受控文件、无 git 时退化为目录遍历；--quiet 仍返回退出码。"
+    },
+    {
+      "file": "scripts/check_dead_tests.py",
+      "note": "检测逻辑正确：只把 __main__ 守卫内部（含嵌套 try/with/class）的 test_* 定义判死（:51-57），模块级守卫之后的定义不误报；有命中 exit 1。"
+    },
+    {
+      "file": "scripts/check_kiro_agent2api_export.py",
+      "note": "是真实契约断言而非空跑：校验 id/email 非空、无 uid、loginProvider 小写、method 合法、idc 用 AWS SSO clientId+RT、缺 AWS 快照必须 ValueError（:120-127），违规 exit 1。"
+    },
+    {
+      "file": "scripts/frozen_verify.py",
+      "note": "shell=False（subprocess.run 接 list，:80），命令来自 argv REMAINDER，无 shell 展开；非 git 仓库返回专用码 2。"
+    },
+    {
+      "file": "scripts/e2e_smoke.py",
+      "note": "不需要活服务：用 fastapi TestClient + main.lifespan（:59-63），不起端口；无硬编码外部凭据（proxy 是 socks5h://u:***@127.0.0.1:1080 占位，账号是 smoke@example.com/Pw-123 仅写临时库）；DATA_DIR 在 import main 之前就设好（:35-36）。"
+    },
+    {
+      "file": "scripts/grok_turnstile_mint.py",
+      "note": "成功只把 token 写 stdout（:344），错误走 stderr 且 exit 1；无 shell=True/os.system/eval；浏览器启动参数固定列表，site_key 来自配置。"
+    },
+    {
+      "file": "scripts/install_camoufox.py",
+      "note": "无 subprocess 调用（纯 urllib+zipfile），不存在 shell 注入面；版本不再硬编码，优先读包内 browser-pin.json（:110-131），两者都缺时 SystemExit 而不是猜一个版本。"
+    },
+    {
+      "file": "scripts/",
+      "note": "`grep -rn \"shell=True|os.system|os.popen|eval\\(|exec\\(\" scripts/*.py` → NONE：10 个脚本没有 shell 执行面。"
+    },
+    {
+      "file": "scripts/dump_accounts.py",
+      "note": "只读：仅调 account_repository.list_accounts/list_all_accounts（:102-106），不写库、不发网络请求；token/password 列确实被 _mask 处理（只是 extra 名单不全，见 L17-1）。"
+    }
+  ]
+}

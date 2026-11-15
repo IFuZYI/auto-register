@@ -9,15 +9,14 @@ export type ThemeMode = 'dark' | 'light'
 export const EASE_STANDARD = 'cubic-bezier(0.4, 0, 0.2, 1)'
 export const EASE_OUT = 'cubic-bezier(0.16, 1, 0.3, 1)'
 
-/** 系统字体栈：优先 SF Pro（苹果设备），中文回落到苹方。 */
+/** 中文优先使用清晰的人文黑体；数字与英文沿用同一字体，避免界面像两套产品拼接。 */
 const FONT_STACK = [
   '-apple-system',
   'BlinkMacSystemFont',
-  '"SF Pro Display"',
   '"SF Pro Text"',
-  '"Helvetica Neue"',
+  '"Noto Sans CJK SC"',
+  '"Source Han Sans SC"',
   '"PingFang SC"',
-  '"Hiragino Sans GB"',
   '"Microsoft YaHei"',
   'sans-serif',
 ].join(', ')
@@ -76,133 +75,129 @@ interface Palette {
   accentRing: string
   gradientFrom: string
   gradientTo: string
+  sidebarBg: string
+  sidebarText: string
+  sidebarMuted: string
+  sidebarBorder: string
+  sidebarSelected: string
 }
 
-/** 暗色：以纯黑打底 + 分层灰面，接近 macOS / iOS 深色观感。 */
+/** 暗色：低反差的苔绿灰阶。导航与工作区同族，但明度层级仍然明确。 */
 const darkPalette: Palette = {
-  bgLayout: '#000000',
-  bgContainer: '#1c1c1e',
-  bgElevated: '#2c2c2e',
-  bgSubtle: 'rgba(255,255,255,0.06)',
-  border: 'rgba(255,255,255,0.1)',
-  borderStrong: 'rgba(255,255,255,0.18)',
-  text: '#f5f5f7',
-  textSecondary: '#a1a1a6',
-  /* #8e8e93 在卡片底 #1c1c1e 上是 5.22:1，但压在浮层底 #2a2a2c 上只有
-     4.39:1（AA 需 4.5:1）—— 表头、空状态说明、副标题都吃这个色。
-     #98989d 在两处分别是 4.99:1 / 5.99:1，都过线。
-     （亮色主题此前出于同样原因把 #86868b 调成了 #6e6e73。） */
-  textMuted: '#98989d',
-  textQuaternary: 'rgba(245, 245, 247, 0.55)',
-  accent: '#2997ff',
-  accentHover: '#54aaff',
-  accentSoft: 'rgba(41,151,255,0.16)',
+  bgLayout: '#111714',
+  bgContainer: '#1b2420',
+  bgElevated: '#25302b',
+  bgSubtle: '#26312c',
+  border: '#34423b',
+  borderStrong: '#52645a',
+  text: '#edf2ee',
+  textSecondary: '#b2c0b7',
+  /* 辅助文字在卡片与浮层上保持可读，不与主内容争夺注意力。 */
+  textMuted: '#9eaea4',
+  textQuaternary: 'rgba(237, 242, 238, 0.60)',
+  accent: '#367d67',
+  accentHover: '#367d67',
+  accentSoft: '#29463a',
   /* 强调色作为**文字**时的取值（链接、菜单选中、Tab 选中、processing 标签）。
      与 `accent` 分开是因为用途不同：accent 多用于填充/描边（白字压在上面），
      而这一支是文字本身，必须压在各种浅色合成底上过 AA。
 
-     dark：#54aaff 最暗的底（Select 选中项 #2c3d4f）4.54:1。
-     light：#005bb5 最亮处 5.34:1（菜单选中底），白底 6.64:1。 */
-  accentText: '#54aaff',
+     两套主题分别选择浅青与深青，让文字在选中底与容器底上保持清晰。 */
+  accentText: '#8ed0b5',
   purple: '#c9a6ff',
   purpleSoft: 'rgba(201,166,255,0.15)',
-  /* 青色：任务类型「自动刷新」标签。卡片底 #1c1c1e 上 9.89:1、
-     soft 合成底上 7.15:1。 */
+  /* 青色用于自动刷新任务，与主操作色保持区分。 */
   cyan: '#64d2ff',
   cyanSoft: 'rgba(100,210,255,0.15)',
-  /* 品红：任务类型「凭证同步」标签。卡片底 8.95:1、soft 底 6.55:1。 */
+  /* 品红用于凭据流转类任务，不用于装饰。 */
   magenta: '#ff9ecf',
   magentaSoft: 'rgba(255,158,207,0.15)',
-  success: '#30d158',
-  successSoft: 'rgba(48,209,88,0.15)',
-  warning: '#ff9f0a',
+  success: '#8ac99e',
+  successSoft: '#294333',
+  warning: '#ddb36d',
   warningSoft: 'rgba(255,159,10,0.15)',
-  /* 危险色。antd 会从 seed 派生 palette[6] 当实际文字色（#ff453a → #dc3e34），
-     派生值在卡片底 #1c1c1e 上只有 3.87:1、在 error Tag 底 #2c1415 上 3.93:1，
-     两处都低于 AA 的 4.5:1 —— 而危险色承载的正是「清空」「删除」「错误」这类
-     必须看清的文字。改成 #ff7a70 后派生值为 #dc6b62：
-     卡片底 6.7:1、Tag 底 4.98:1，两处都过。 */
+  /* 危险色使用足够亮的暖红，保证删除与错误信息在深色底上可读。 */
   danger: '#ff7a70',
   dangerSoft: 'rgba(255,69,58,0.15)',
-  logBg: '#0a0a0b',
-  logBorder: 'rgba(255,255,255,0.08)',
-  logText: '#d1d1d6',
-  logMuted: '#7c7c81',
-  logSuccess: '#30d158',
-  logWarning: '#ff9f0a',
-  logDanger: '#ff453a',
-  selectionBg: 'rgba(41,151,255,0.35)',
+  logBg: '#101713',
+  logBorder: '#34423b',
+  logText: '#d6dfd8',
+  logMuted: '#9eaea4',
+  logSuccess: '#8ac99e',
+  logWarning: '#ddb36d',
+  logDanger: '#ff9b91',
+  selectionBg: 'rgba(142,208,181,0.28)',
   spotlightBg: '#3a3a3c',
-  shadowSm: '0 1px 2px rgba(0,0,0,0.5)',
-  shadowMd: '0 8px 24px rgba(0,0,0,0.55)',
-  shadowLg: '0 20px 56px rgba(0,0,0,0.65)',
-  glassBg: 'rgba(28,28,30,0.72)',
-  glassBorder: 'rgba(255,255,255,0.08)',
-  accentRing: 'rgba(41,151,255,0.4)',
-  /* 主按钮渐变（白字压在上面）。原 #0a84ff 最亮处白字只有 3.65:1 ——
-     渐变从左到右变暗，最差在起点。#0a6fd8 全段最差 4.91:1。 */
-  gradientFrom: '#0a6fd8',
-  gradientTo: '#5e5ce6',
+  shadowSm: '0 1px 2px rgba(0,0,0,0.16)',
+  shadowMd: '0 12px 32px rgba(0,0,0,0.24)',
+  shadowLg: '0 24px 64px rgba(0,0,0,0.36)',
+  glassBg: 'rgba(27,36,32,0.94)',
+  glassBorder: '#34423b',
+  accentRing: 'rgba(142,208,181,0.42)',
+  gradientFrom: '#367d67',
+  gradientTo: '#367d67',
+  sidebarBg: '#142e26',
+  sidebarText: '#edf4ee',
+  sidebarMuted: '#aec2b5',
+  sidebarBorder: '#334c41',
+  sidebarSelected: '#2a4c3e',
 }
 
-/** 亮色：浅灰打底 + 纯白卡面，苹果官网的经典配色。 */
+/** 亮色：冷白纸面 + 深青操作色，以细边界而不是浮起阴影组织信息。 */
 const lightPalette: Palette = {
-  bgLayout: '#f5f5f7',
+  bgLayout: '#f3f5f2',
   bgContainer: '#ffffff',
   bgElevated: '#ffffff',
-  bgSubtle: 'rgba(0,0,0,0.03)',
-  border: 'rgba(0,0,0,0.08)',
-  borderStrong: 'rgba(0,0,0,0.16)',
-  text: '#1d1d1f',
-  textSecondary: '#68686d',
-  /* #86868b 在 #f5f5f7 上只有 3.33:1（WCAG AA 正文要求 4.5:1），
-     而它承载的是副标题、卡片描述、表头这类高频阅读内容。
-     上一版用 #6e6e73（4.66:1）—— 但 antd 的默认标签底、表行底都比布局底深一点，
-     实测在 default 标签底 rgb(238,238,240) 上只有 4.38:1，仍不达标。
-     #68686d 在三处分别是 4.78 / 4.91 / 5.09，全部过线。 */
-  textMuted: '#68686d',
-  textQuaternary: 'rgba(29, 29, 31, 0.62)',
-  accent: '#0071e3',
-  accentHover: '#0077ed',
-  accentSoft: 'rgba(0,113,227,0.1)',
-  /* 强调色作为文字：见 darkPalette 同名注释。light 用 #005bb5 ——
-     菜单选中底 5.34:1、Select/Tab 选中底 5.35~5.80:1、白底 6.64:1。 */
-  accentText: '#005bb5',
+  bgSubtle: '#edf1ed',
+  border: '#dce3dd',
+  borderStrong: '#b7c5bb',
+  text: '#21322c',
+  textSecondary: '#50625a',
+  /* 辅助文字承担副标题、表头与说明，采用可读的中深灰绿而非浅灰。 */
+  textMuted: '#64736b',
+  textQuaternary: 'rgba(33, 50, 44, 0.64)',
+  accent: '#186454',
+  accentHover: '#105143',
+  accentSoft: '#e5f0e9',
+  /* 强调色作为文字：见 darkPalette 同名注释。 */
+  accentText: '#155b4c',
   purple: '#6b21a8',
   purpleSoft: 'rgba(107,33,168,0.1)',
-  /* 青色：任务类型「自动刷新」标签。白底 6.00:1、soft 合成底 5.18:1、
-     soft 压页面底 4.77:1。 */
+  /* 青色用于自动刷新任务，与主操作色保持区分。 */
   cyan: '#006b8f',
   cyanSoft: 'rgba(0,107,143,0.1)',
-  /* 品红：任务类型「凭证同步」标签。白底 7.28:1、soft 底 6.11:1。 */
+  /* 品红用于凭据流转类任务，不用于装饰。 */
   magenta: '#a30b7a',
   magentaSoft: 'rgba(163,11,122,0.1)',
-  success: '#17742c',
-  successSoft: 'rgba(52,199,89,0.12)',
-  /* 亮色警告色。antd 的 Tag 会把该色与白底混合当作徽章底色，
-     所以不能只按「白底」挑色 —— 实测合成底约 #e6ddcf，
-     #a54b00 在其上只有 4.33:1；#9c4700 为 4.71:1、白底 6.34:1，两处都过 AA。 */
-  warning: '#9c4700',
+  success: '#276a45',
+  successSoft: '#e7f2e9',
+  /* 暖琥珀只用于需要处理或等待的状态。 */
+  warning: '#835411',
   warningSoft: 'rgba(255,149,0,0.12)',
-  danger: '#d70015',
-  dangerSoft: 'rgba(255,59,48,0.1)',
-  logBg: '#fbfbfd',
-  logBorder: 'rgba(0,0,0,0.07)',
-  logText: '#3a3a3c',
-  logMuted: '#86868b',
-  logSuccess: '#248a3d',
-  logWarning: '#9c4700',
-  logDanger: '#d70015',
-  selectionBg: 'rgba(0,113,227,0.2)',
+  danger: '#a13e44',
+  dangerSoft: '#faebeb',
+  logBg: '#15231d',
+  logBorder: '#2e4237',
+  logText: '#d9e4dc',
+  logMuted: '#a8b8ad',
+  logSuccess: '#8ac99e',
+  logWarning: '#ddb36d',
+  logDanger: '#ff9b91',
+  selectionBg: 'rgba(24,100,84,0.18)',
   spotlightBg: '#1d1d1f',
-  shadowSm: '0 1px 3px rgba(0,0,0,0.06)',
-  shadowMd: '0 6px 20px rgba(0,0,0,0.08)',
-  shadowLg: '0 20px 48px rgba(0,0,0,0.14)',
-  glassBg: 'rgba(255,255,255,0.72)',
-  glassBorder: 'rgba(0,0,0,0.06)',
-  accentRing: 'rgba(0,113,227,0.3)',
-  gradientFrom: '#0071e3',
-  gradientTo: '#5e5ce6',
+  shadowSm: '0 1px 2px rgba(24,50,39,0.04)',
+  shadowMd: '0 10px 30px rgba(24,50,39,0.10)',
+  shadowLg: '0 24px 64px rgba(24,50,39,0.16)',
+  glassBg: 'rgba(243,245,242,0.94)',
+  glassBorder: '#dce3dd',
+  accentRing: 'rgba(24,100,84,0.28)',
+  gradientFrom: '#186454',
+  gradientTo: '#186454',
+  sidebarBg: '#173a30',
+  sidebarText: '#eff5ef',
+  sidebarMuted: '#b2c6b9',
+  sidebarBorder: '#365449',
+  sidebarSelected: '#2d5646',
 }
 
 function buildTheme(palette: Palette, algorithm: typeof theme.darkAlgorithm) {
@@ -229,18 +224,14 @@ function buildTheme(palette: Palette, algorithm: typeof theme.darkAlgorithm) {
       colorLink: palette.accentText,
       colorLinkHover: palette.accentText,
       colorLinkActive: palette.accentText,
-      // 占位符/禁用文字。antd 默认取 colorTextBase 的 0.25 alpha，压在深色底
-      // 上只有 2.19:1（#1c1c1e 卡片）—— 占位符是「这个框该填什么」的唯一提示，
-      // 看不清等于没有。实测 0.55 alpha 在三种深色底（#000 布局 / #1c1c1e 卡片 /
-      // #2c2c2e 浮层）上分别是 5.83 / 5.57 / 5.00，全部过 AA。
-      // 浅色主题同理（0.25 的深色文字在浅底上偏灰），统一按主题取 alpha。
+      // 占位符与禁用文字不能淡到无法辨认；分别按主题保留足够对比。
       colorTextQuaternary: palette.textQuaternary,
       colorBgSpotlight: palette.spotlightBg,
       controlOutline: palette.accentSoft,
-      // 圆角：卡面更大，控件收在中档，整体偏柔
-      borderRadius: 10,
-      borderRadiusSM: 8,
-      borderRadiusLG: 18,
+      // 控件适度圆润，数据面保持明确边界，不使用漂浮的大圆角卡片。
+      borderRadius: 8,
+      borderRadiusSM: 6,
+      borderRadiusLG: 12,
       // 控件高度略抬高，点击目标更从容
       controlHeight: 36,
       controlHeightLG: 44,
@@ -263,8 +254,8 @@ function buildTheme(palette: Palette, algorithm: typeof theme.darkAlgorithm) {
     components: {
       Layout: {
         siderBg: 'transparent',
-        triggerBg: palette.bgElevated,
-        triggerColor: palette.textSecondary,
+        triggerBg: palette.sidebarBg,
+        triggerColor: palette.sidebarMuted,
         bodyBg: palette.bgLayout,
         headerBg: 'transparent',
       },
@@ -277,22 +268,31 @@ function buildTheme(palette: Palette, algorithm: typeof theme.darkAlgorithm) {
         itemHeight: 42,
         itemMarginInline: 8,
         itemMarginBlock: 2,
-        itemBorderRadius: 10,
+        itemBorderRadius: 6,
         subMenuItemBg: 'transparent',
+        collapsedIconSize: 18,
+        collapsedWidth: 72,
+        darkItemBg: palette.sidebarBg,
+        darkItemColor: palette.sidebarMuted,
+        darkItemHoverBg: palette.sidebarBorder,
+        darkItemHoverColor: palette.sidebarText,
+        darkItemSelectedBg: palette.sidebarSelected,
+        darkItemSelectedColor: '#ffffff',
+        darkSubMenuItemBg: palette.sidebarBg,
         activeBarBorderWidth: 0,
         iconMarginInlineEnd: 12,
       },
       Card: {
         headerBg: 'transparent',
         colorBorderSecondary: palette.border,
-        borderRadiusLG: 18,
+        borderRadiusLG: 12,
         paddingLG: 24,
         headerFontSize: 14,
         headerHeight: 48,
       },
       Table: {
-        headerBg: 'transparent',
-        headerColor: palette.textMuted,
+        headerBg: palette.bgSubtle,
+        headerColor: palette.textSecondary,
         headerSplitColor: 'transparent',
         rowHoverBg: palette.bgSubtle,
         borderColor: palette.border,
@@ -305,11 +305,13 @@ function buildTheme(palette: Palette, algorithm: typeof theme.darkAlgorithm) {
         contentBg: palette.bgElevated,
         headerBg: palette.bgElevated,
         titleColor: palette.text,
-        borderRadiusLG: 20,
-        paddingContentHorizontalLG: 28,
+        borderRadiusLG: 12,
+        paddingContentHorizontalLG: 24,
       },
       Drawer: {
         colorBgElevated: palette.bgElevated,
+        colorIcon: palette.textMuted,
+        colorIconHover: palette.text,
       },
       Tag: {
         defaultBg: palette.bgSubtle,
@@ -317,14 +319,17 @@ function buildTheme(palette: Palette, algorithm: typeof theme.darkAlgorithm) {
         borderRadiusSM: 6,
       },
       Button: {
+        primaryColor: '#ffffff',
+        primaryHoverColor: '#ffffff',
+        primaryActiveColor: '#ffffff',
         primaryShadow: 'none',
         defaultShadow: 'none',
         dangerShadow: 'none',
         fontWeight: 500,
-        paddingInline: 18,
-        borderRadius: 10,
-        borderRadiusLG: 12,
-        borderRadiusSM: 8,
+        paddingInline: 16,
+        borderRadius: 8,
+        borderRadiusLG: 8,
+        borderRadiusSM: 6,
       },
       Segmented: {
         itemSelectedBg: palette.bgElevated,
@@ -375,19 +380,15 @@ function buildTheme(palette: Palette, algorithm: typeof theme.darkAlgorithm) {
         borderRadiusLG: 16,
       },
       Pagination: {
-        // 当前页码的文字色。antd 从 colorPrimary 派生得到 #2683dc，压在
-        // 布局底 #000 上只有 4.34:1（AA 需 4.5:1）—— 差一点点，但页码正是
-        // 用户要读的。直接用品牌蓝本身：#2997ff 在 #000 上 6.96:1。
-        itemActiveColor: palette.accent,
+        // 页码是正文信息，跟随主题中用于文字的操作色。
+        itemActiveColor: palette.accentText,
         itemActiveColorHover: palette.accentHover,
       },
       Switch: {
         trackHeight: 22,
         handleSize: 18,
-        // 轨道上用白字（"有 RT"/"无 RT"）。antd 的 track 取 colorPrimary，
-        // dark 算法把它调暗成 #2683dc → 白字只有 3.92:1。
-        // #005bb5 实测 6.64:1，且与品牌蓝同色系。
-        colorPrimary: '#005bb5',
+        // 开关与主按钮使用同一操作色；文字对比由全局最终渲染规则保证。
+        colorPrimary: palette.accent,
       },
     },
     algorithm,
@@ -396,6 +397,38 @@ function buildTheme(palette: Palette, algorithm: typeof theme.darkAlgorithm) {
 
 const darkTheme = buildTheme(darkPalette, theme.darkAlgorithm)
 const lightTheme = buildTheme(lightPalette, theme.defaultAlgorithm)
+/** 侧栏、抽屉和折叠弹出菜单的深色作用域，不泄漏到业务 Dropdown。 */
+const navigationTheme = {
+  components: {
+    Menu: {
+      itemColor: 'var(--sidebar-muted)',
+      itemHoverBg: 'var(--sidebar-border)',
+      itemHoverColor: 'var(--sidebar-text)',
+      itemSelectedBg: 'var(--sidebar-selected)',
+      itemSelectedColor: '#ffffff',
+      subMenuItemBg: 'transparent',
+      popupBg: 'var(--sidebar-bg)',
+      darkItemBg: 'var(--sidebar-bg)',
+      darkSubMenuItemBg: 'var(--sidebar-bg)',
+      darkPopupBg: 'var(--sidebar-bg)',
+      darkItemColor: 'var(--sidebar-muted)',
+      darkItemHoverBg: 'var(--sidebar-border)',
+      darkItemHoverColor: 'var(--sidebar-text)',
+      darkItemSelectedBg: 'var(--sidebar-selected)',
+      darkItemSelectedColor: '#ffffff',
+    },
+    Drawer: {
+      colorBgElevated: 'var(--sidebar-bg)',
+    },
+    Button: {
+      defaultColor: 'var(--sidebar-muted)',
+      defaultHoverColor: 'var(--sidebar-text)',
+      defaultHoverBg: 'var(--sidebar-border)',
+      textTextColor: 'var(--sidebar-muted)',
+      textHoverBg: 'var(--sidebar-border)',
+    },
+  },
+}
 
 const CSS_VAR_NAMES: Record<keyof Palette, string> = {
   bgLayout: '--bg-layout',
@@ -441,6 +474,11 @@ const CSS_VAR_NAMES: Record<keyof Palette, string> = {
   accentRing: '--accent-ring',
   gradientFrom: '--gradient-from',
   gradientTo: '--gradient-to',
+  sidebarBg: '--sidebar-bg',
+  sidebarText: '--sidebar-text',
+  sidebarMuted: '--sidebar-muted',
+  sidebarBorder: '--sidebar-border',
+  sidebarSelected: '--sidebar-selected',
 }
 
 /**
@@ -506,4 +544,4 @@ export function applyThemeVars(mode: ThemeMode) {
   root.style.colorScheme = mode
 }
 
-export { darkTheme, lightTheme, darkPalette, lightPalette, FONT_STACK }
+export { darkTheme, lightTheme, navigationTheme, darkPalette, lightPalette, FONT_STACK }

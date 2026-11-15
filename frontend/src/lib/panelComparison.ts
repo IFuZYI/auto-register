@@ -106,6 +106,18 @@ export function shouldShowPlatformFilter(platforms?: string[] | null): boolean {
   return unique.size > 1
 }
 
+/**
+ * 远端读取失败时，只说明这是本地账号，不能把它推断为「远端未上传」。
+ * 时间方向同样未知；原始 payload 不被修改，筛选和真实批量动作仍走原接口语义。
+ */
+export function rowsForComparisonDisplay<T extends { label?: string; time_relation?: string }>(
+  rows: T[],
+  remoteError: string,
+): T[] {
+  if (!remoteError) return rows
+  return rows.map(row => ({ ...row, label: '仅本地（未连接远端）', time_relation: '' }))
+}
+
 /** 方向筛选要读的最小形状。 */
 export interface DirectionFilterableRow extends PlatformFilterableRow {
   state?: string

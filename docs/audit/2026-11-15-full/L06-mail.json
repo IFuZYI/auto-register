@@ -1,0 +1,230 @@
+{
+  "lane": "L06-mail",
+  "head": "fca2eec",
+  "dirty": true,
+  "reviewed_files": [
+    "core/mailboxes/__init__.py",
+    "core/mailboxes/registry.py",
+    "core/mailboxes/base.py",
+    "core/mailboxes/channels/__init__.py",
+    "core/mailboxes/channels/outlook/__init__.py",
+    "core/mailboxes/channels/outlook/backends.py",
+    "core/mailboxes/channels/outlook/mailbox.py",
+    "core/base_mailbox.py",
+    "core/mail_import_sources.py",
+    "services/mail_imports/__init__.py",
+    "services/mail_imports/base.py",
+    "services/mail_imports/registry.py",
+    "services/mail_imports/schemas.py",
+    "services/mail_imports/import_source.py",
+    "services/mail_imports/providers.py",
+    "services/mail_imports/microsoft_import_rules.py",
+    "modules/mail/__init__.py",
+    "modules/mail/factory.py",
+    "modules/mail/icloud_local.py",
+    "modules/mail/icloud_remote.py",
+    "api/mail_imports.py",
+    "api/outlook.py",
+    "core/db/outlook_repository.py",
+    "core/db/__init__.py",
+    "core/storage/__init__.py",
+    "core/storage/json_table.py"
+  ],
+  "findings": [
+    {
+      "id": "L06-1",
+      "title": "Outlook 取号在 JSON 存储模式下 100% 失败（no such table: accounts）",
+      "severity": "P0",
+      "file": "core/mailboxes/channels/outlook/mailbox.py",
+      "line": 223,
+      "evidence": "DATA_DIR=<scratch> STORAGE_BACKEND=json .venv/bin/python -c 'from core.db import init_db; init_db(); from core.mailboxes.channels.outlook import OutlookMailbox; OutlookMailbox()._pop_account()' -> OperationalError: no such table: accounts [SQL: SELECT accounts.email FROM accounts]. 成因：accounts 由 JSON 后端覆盖（core/storage/__init__.py:117-119 把 accounts 计入 covered），all_tables_use_json() 为真时 init_db 整段跳过 SQLModel.metadata.create_all（core/db/__init__.py:150-165），默认库根本没有 accounts 表；_pop_account 却用 Session(current_engine()) 直接查 AccountModel。",
+      "impact": "全新部署默认后端就是 json（core/storage/__init__.py resolve_backend_name: 无库文件 -> DEFAULT_BACKEND=json），此时 Outlook 渠道 get_email() 的每一步都先炸在这里，一个号都发不出来，所有走微软号池的注册任务在建号阶段失败。作者在 211-214 行注释里记录过同一类跨库 no such table 事故，但只修了子查询，外层这条 accounts 查询仍在。",
+      "fix_hint": "用账号存储后端（account_repository / AccountStoreJson 的 list_emails）取 registered_emails，不要用 raw Session；与 pool_status_summary 改走仓储的做法一致。补一条 STORAGE_BACKEND=json 下 _pop_account 的单测。",
+      "class": "functional"
+    },
+    {
+      "id": "L06-2",
+      "title": "JSON 部署下「导入邮箱池」直接 500：import_accounts_to_pool 走裸 SQL",
+      "severity": "P1",
+      "file": "core/mailboxes/channels/outlook/mailbox.py",
+      "line": 492,
+      "evidence": "同一 JSON 探针：OutlookMailbox.import_accounts_to_pool([1,2]) -> OperationalError: no such table: outlook_accounts [SQL: SELECT outlook_accounts.id, ...]. outlook_accounts 在 JSON_TABLES 白名单里（core/storage/json_table.py:223），init_db 因此不建该表，而本方法用 session.exec(select(OutlookAccountModel)) 直连 SQLite 池库。",
+      "impact": "默认（json）部署里用户在预览表勾选后点「导入邮箱池」必 500，unpooled 行永远转不成 available，号池看起来「导入了但取不到号」；与 L06-1 叠加时整条 Outlook 链路不可用。",
+      "fix_hint": "改用 outlook_repository 的 JSON 感知接口（get_many/set_fields 或新增 set_status_for_ids），不要在本方法里直接 session.exec。",
+      "class": "functional"
+    },
+    {
+      "id": "L06-3",
+      "title": "IMAP 取码在第一个空行处截断正文，验证码落在首段时永远读不到",
+      "severity": "P1",
+      "file": "core/mailboxes/base.py",
+      "line": 237,
+      "evidence": ".venv/bin/python: _decode_raw_content('Your verification code is 481920\\r\\n\\r\\nThis code expires in 10 minutes...') -> 'This code expires in 10 minutes...'，_safe_extract -> None；同一输入 _yyds_decode_raw_content -> 'Your verification code is 481920 This code expires...'，_yyds_safe_extract -> '481920'。_decode_raw_content 无条件 split('\\r\\n\\r\\n',1)[1]，而修复版 _yyds_decode_raw_content（base.py:342-347）只在检测到邮件头时才切分。IMAP 路径 backends.py:194 调 _extract_message_text -> _decode_raw_content。",
+      "impact": "纯文本 OTP 邮件只要「码在第一段、后面跟空行」（'Your code is X\\n\\n...' 这种极常见模板），IMAP/密码账号就永远提取不到码，表现为等满 OTP 超时；Graph 路径只是因为 bodyPreview 排在正文前面才侥幸躲过。同一文件里已有正确实现，属实现/修复漂移。",
+      "fix_hint": "把 _extract_message_text / _graph_message_text 改用 _yyds_decode_raw_content（或让 _decode_raw_content 复用「仅在有邮件头时切分」的判断）。",
+      "class": "functional"
+    },
+    {
+      "id": "L06-4",
+      "title": "轮询容错把 HTTP 500 与连接层故障判成永久错误，一次抖动即终止等码",
+      "severity": "P2",
+      "file": "core/mailboxes/channels/outlook/backends.py",
+      "line": 25,
+      "evidence": "_is_transient_poll_error 实测：RuntimeError('Outlook Graph 请求失败: HTTP 500 Internal Server Error') -> False；RuntimeError(\"HTTPSConnectionPool(host='graph.microsoft.com'...): Max retries exceeded with url ... (Caused by NewConnectionError)\") -> False；而 HTTP 503 -> True、TimeoutError -> True。标记表（25-26 行）收了 502/503/504/429 与 timed out，唯独漏 500，也没有连接拒绝/重试耗尽类标记，未知错误一律 return False（32 行）。",
+      "impact": "is_transient=False 时 _run_polling_wait 立刻抛出（base.py:113），所以 Graph/IMAP 遇到一次 500 或一次连接池打满就结束整轮等码，而不是再等 5 秒重试——与 17 行注释「收录网络层临时故障」相反，OTP 等待被一次瞬时故障定生死。Graph token 预检（mailbox.py:345）同样只看 exc.retryable，普通 requests 超时没有该属性 -> 直接抛。",
+      "fix_hint": "按异常类型分类（requests.RequestException/TimeoutError/OSError 视为 transient），标记表补 500 与 connection refused/reset by peer/Max retries exceeded；未知异常默认 transient，只有明确的 invalid_grant/401/403 才永久。",
+      "class": "functional"
+    },
+    {
+      "id": "L06-5",
+      "title": "MailAPI 后端吞掉所有轮询异常，错误预算参数是死代码，坏 URL 干等满超时",
+      "severity": "P2",
+      "file": "core/mailboxes/channels/outlook/backends.py",
+      "line": 588,
+      "evidence": "MailApiUrlOtpBackend.wait_for_code.poll_once: try: text=self._fetch_mailapi_text(account) except Exception as exc: log; return None（586-590）。同方法 611-612 仍传 is_transient=_is_transient_poll_error、max_consecutive_errors=4，但 poll_once 从不抛异常，_run_polling_wait 的错误预算永远收不到信号；get_current_ids（560-566）同样 except Exception: return set()。对比 IMAP 242-246 / Graph 512-513 都显式 raise 让预算生效。",
+      "impact": "mailapi_url 配错/上游 404/500 时，每个账号都要空转到 otp_timeout（默认 120s）才失败，批量任务被串行拖死；get_current_ids 失败返回空集还会让 before_ids 为空，页面上的上一枚旧码会被当成本次新码返回（重复/错码）。",
+      "fix_hint": "记录日志后把异常抛回轮询层（或返回哨兵让上层计入失败），与 IMAP/Graph 一致；get_current_ids 失败时抛错或返回 None 表示「无基线」，不要静默返回空集。",
+      "class": "functional"
+    },
+    {
+      "id": "L06-6",
+      "title": "_safe_extract 把长数字串截成 6 位：8 位验证码会被截断成错码",
+      "severity": "P2",
+      "file": "core/mailboxes/base.py",
+      "line": 185,
+      "evidence": ".venv/bin/python: _safe_extract('Your code is 48219375') -> '482193'（模式 \\bcode\\b[^0-9]{0,12}(\\d{6}) 没有右边界，命中前 6 位就返回）；对照 _safe_extract('Your code is 4821') -> None（4 位不支持，属既定 6 位约定）。",
+      "impact": "使用 8 位码的服务、或正文里 'code ... 1234567890' 这类连写（订单号/时间戳紧邻）时，提交的是被截断的 6 位错码，注册必然失败并消耗重试轮与账号。",
+      "fix_hint": "捕获组改为 (\\d{6,8})(?!\\d) 或至少在 \\d{6} 后加 (?!\\d)；优先返回最长匹配。",
+      "class": "functional"
+    },
+    {
+      "id": "L06-7",
+      "title": "IMAP 取「最旧」的新邮件，Graph 取「最新」的——重发验证码时两者结论相反",
+      "severity": "P2",
+      "file": "core/mailboxes/channels/outlook/backends.py",
+      "line": 175,
+      "evidence": "IMAP: uid('search', None, 'ALL') 返回升序 UID，取 ids[-50:]（158-159）后按原序遍历 new_uids（175），因此同一轮多封命中时返回最旧那封；Graph: _graph_list_messages 用 \"$orderby\": \"receivedDateTime DESC\"（mailbox.py:950），返回最新那封。探针按两种顺序喂 ['111111'(old),'222222'(new)]，IMAP 顺序先得 111111，Graph 顺序先得 222222。",
+      "impact": "用户点「重新发送」后旧码立即失效，IMAP 账号若两封都还没被 seen 会先返回已被作废的旧码（只有调用方传了 exclude_codes 才躲过），表现为「验证码错误」；同一渠道两种后端行为不一致，难排查。",
+      "fix_hint": "IMAP 侧按 reversed(new_uids) 遍历，或用 Date 头排序后取最新；与 Graph 的「最新优先」对齐。",
+      "class": "functional"
+    },
+    {
+      "id": "L06-8",
+      "title": "IMAP 单文件夹异常即抛错（缺 Graph 的 any_ok 保护），一个坏文件夹终止整轮等码",
+      "severity": "P2",
+      "file": "core/mailboxes/channels/outlook/backends.py",
+      "line": 242,
+      "evidence": "IMAP poll_once 结尾：if last_error is not None: raise last_error（242-246），没有「至少一个文件夹成功」的判断；Graph 同一位置是 if last_error is not None and not any_ok: raise（512-513）。IMAP 在 139 行逐文件夹 try，任一文件夹 socket/select 抛异常都会写 last_error。",
+      "impact": "INBOX 已成功读到、只是 Junk/Trash 某个文件夹连接出错时，整轮仍被判失败；配合 L06-4（多数错误 is_transient=False）会在第一次轮询就结束等待，明明码马上就到。",
+      "fix_hint": "照 Graph 加 any_ok：任一文件夹成功就不抛，仅在全部失败时 raise。",
+      "class": "functional"
+    },
+    {
+      "id": "L06-9",
+      "title": "IMAP 每个文件夹每轮都重新登录一次（4 次 TLS+AUTH / 5 秒）",
+      "severity": "P2",
+      "file": "core/mailboxes/channels/outlook/backends.py",
+      "line": 143,
+      "evidence": "poll_once 内 for folder in self.mailbox._imap_folder_names（139）里调用 self.mailbox._open_imap(account)（143），finally logout（236-241）；_imap_folder_names 有 4 个（mailbox.py:124）。get_current_ids 则是单连接遍历全部文件夹（79-103），两处实现不一致。",
+      "impact": "每个等码账号约 48 次 IMAP 登录/分钟，Outlook 对频繁 AUTH 会限流甚至锁号；批量任务下放大为 N 倍，属明显可避免的上游压力。",
+      "fix_hint": "一次 poll 只开一条连接，在同一连接上循环 select 各文件夹；失败再重连。",
+      "class": "perf"
+    },
+    {
+      "id": "L06-10",
+      "title": "Graph 基线快照失败被吞成空集，且 Graph 路径没有 otp_sent_at 时间窗，可能返回上一轮的旧码",
+      "severity": "P2",
+      "file": "core/mailboxes/channels/outlook/backends.py",
+      "line": 286,
+      "evidence": "get_current_ids 对非 401 的 RuntimeError 直接 raise（312-313），但外层 mailbox.get_current_ids（mailbox.py:1043）整体 try/except 后 return set()；wait_for_code 只用 before_ids 去重（369），从不读 kwargs['otp_sent_at']（IMAP 在 130-134/195-206 有 cutoff，iCloud 在 chatgpt_otp_mailbox 放宽 30s）。",
+      "impact": "基线读取一旦失败（网络抖动/401 重试失败），收件箱里上一轮未清理的验证码会被当作本轮新码返回，提交后报「验证码错误」，并可能把失败归因到账号；同一号池两种渠道的时间窗策略不一致。",
+      "fix_hint": "get_current_ids 失败时抛错或返回 None 明确表示「无基线」，让 wait_for_code 拒答或改用 otp_sent_at-2 的 Date 窗口（与 IMAP 对齐）。",
+      "class": "data-integrity"
+    },
+    {
+      "id": "L06-11",
+      "title": "requeue_account 的「新建行」分支仍走裸 session.add，JSON 部署下回退失败",
+      "severity": "P2",
+      "file": "core/mailboxes/channels/outlook/mailbox.py",
+      "line": 412,
+      "evidence": "requeue_account: existing 走 outlook_repository.set_fields（JSON 感知，401-410），else 分支 session.add(OutlookAccountModel(...)) + session.commit()（412-426）。L06-2 的探针已证明 JSON 模式下该池库没有 outlook_accounts 表，因此这条分支必然 OperationalError。",
+      "impact": "任务失败回退一个池里已不存在的地址（被删/被外部清理）时，回退动作抛错，地址丢失且任务侧看到的是数据库异常；与 L06-2 同源。",
+      "fix_hint": "改用 outlook_repository.add(...)（仓储已按后端分派），不要直接 session.add。",
+      "class": "functional"
+    },
+    {
+      "id": "L06-12",
+      "title": "poll_once 里重复声明 nonlocal _token_refreshed",
+      "severity": "P3",
+      "file": "core/mailboxes/channels/outlook/backends.py",
+      "line": 396,
+      "evidence": "392-396: def poll_once(): nonlocal _token_refreshed; last_error=None; any_ok=False; nonlocal _token_refreshed —— 同一作用域声明两次，语法合法但第二行是纯冗余（疑似合并残留）。",
+      "impact": "无功能影响；读代码时容易误判有两个变量，属清理项。",
+      "fix_hint": "删掉 396 行。",
+      "class": "dead-code"
+    },
+    {
+      "id": "L06-13",
+      "title": "_normalize_backend_name 把 mailapi_url 折叠成 graph，已注册的第三个后端名无法通过配置选中",
+      "severity": "P3",
+      "file": "core/mailboxes/channels/outlook/mailbox.py",
+      "line": 135,
+      "evidence": "_normalize_backend_name 只保留 {'graph','imap'}，其余（含 'mailapi_url'）一律返回 'graph'；而 _backends 注册了 mailapi_url（129），前端 outlook_backend 下拉也只有 graph/imap（frontend/src/lib/configFields.ts:22-25）。实际路由靠 _is_mailapi_account（account_type/mailapi_url 非空）先命中，所以配置值这条入口是死的。",
+      "impact": "用户/运维在配置里写 outlook_backend=mailapi_url 会被静默改成 graph（无 OAuth 时再降级 IMAP），配置项与实现不一致；MailAPI 账号本身仍能走对，故仅属死面。",
+      "fix_hint": "要么把 mailapi_url 纳入 _normalize_backend_name 的白名单，要么删掉这个后端名并在文档里说明 MailAPI 由 account_type 决定。",
+      "class": "dead-code"
+    }
+  ],
+  "checked_and_clean": [
+    {
+      "item": "渠道注册表：已注册 provider 与别名",
+      "how": "`.venv/bin/python -c 'from core.mailboxes import available_providers; print(available_providers())'` -> ['outlook','microsoft','mail_import','icloud_local','icloud_remote']；未知名字抛 ValueError 并列出可用渠道（registry.py:107-109），重名注册 raise（57-58），旧版静默回落 Laoudo 的兜底已不存在。前端 mail_provider 下拉只有 microsoft/icloud_local/icloud_remote（configFields.ts:8-12），是已注册名的子集，无悬空值。",
+      "verdict": "clean"
+    },
+    {
+      "item": "可选渠道懒加载的 ImportError 处理",
+      "how": "逐个 import 验证：platforms.icloud.errors(ICloudError,is_recoverable)、services.icloud.upstream_gate(is_upstream_busy)、services.icloud_service、modules.mail.icloud_remote(ICloudRemoteMailbox,build)、modules.mail.icloud_local、core.mailboxes 全部 OK、无 missing symbol；registry._load_optional_providers 对 ImportError 会 print 而非静默（registry.py:88-92）。",
+      "verdict": "clean"
+    },
+    {
+      "item": "failover/熔断谓词能否真的触发",
+      "how": "`is_upstream_busy(UpstreamBusy('k',10))` -> True，`is_recoverable(UpstreamBusy(...))` -> False；base._run_polling_wait 先判 is_fatal_busy 再判 is_transient（base.py:110-113），所以熔断异常走 fatal 分支、不会因 is_recoverable=False 被误当永久错误。icloud_local/icloud_remote 的 is_upstream_busy 是模块级真实导入，不是 try 包裹的 stub。",
+      "verdict": "clean"
+    },
+    {
+      "item": "IMAP 连接释放 / 异常路径资源泄漏",
+      "how": "逐段读 backends.py:104-109、236-241 与 mailbox.py:838-883：所有 _open_imap 调用点都在 finally 里 logout；认证失败时 logout 在 except 内执行（构造器本身抛错时 logout 触发 UnboundLocalError，被同层 except Exception 吞掉，不改变原始 last_error）。BaseMailbox 无 close()，但也没有跨调用持有的长连接句柄。",
+      "verdict": "clean"
+    },
+    {
+      "item": "IMAP 文件夹名 UTF-7 问题",
+      "how": "mailbox.py:124 _imap_folder_names = ['INBOX','Junk','Deleted Items','Trash'] 全 ASCII，无需 IMAP UTF-7 编码；不存在的文件夹由 status!='OK' 分支跳过（backends.py:145-150），不抛异常。",
+      "verdict": "clean"
+    },
+    {
+      "item": "Graph 401 token 刷新有界性",
+      "how": "backends.py:377-378 _token_refreshed 每次 wait_for_code 只置一次，459 行 `and not _token_refreshed` 保证只强刷一次；get_current_ids 的 401 分支只重试一次（286-313），不会无限循环。",
+      "verdict": "clean"
+    },
+    {
+      "item": "OTP 时间窗与 exclude_codes",
+      "how": "IMAP 用 Date 头 vs otp_sent_at-2（backends.py:130-134、195-206）；三个后端都实现 exclude_codes（IMAP 221、Graph 447、MailAPI 597）；iCloud 放宽 30s 见 services/chatgpt_otp_mailbox.py:83。除 L06-10 指出的 Graph 缺口外一致。",
+      "verdict": "clean"
+    },
+    {
+      "item": "_run_polling_wait 的 elapsed/间隔调度",
+      "how": "base.py:65-130 逐行核算：elapsed = timeout_seconds - max(remaining,0) 正确，poll_interval 按 schedule 取值并 clamp 到 >=0.1，poll_once 返回空串/None 均继续，fatal busy 立即抛。",
+      "verdict": "clean"
+    },
+    {
+      "item": "mail_imports 快照分页上界",
+      "how": "schemas.py:11-12 DEFAULT_PREVIEW_LIMIT=100/MAX_PREVIEW_LIMIT=500，三个请求模型都用 Field(ge=1,le=500)；api/mail_imports.py:24 的裸 int 会被随后的模型校验挡住（pydantic ValidationError 是 ValueError 子类，落到 400 分支）。注意：只有 preview 截断、没有 offset 参数，第 500 行之后的条目在 UI 上不可达（未确认为缺陷，记为观察）。",
+      "verdict": "clean"
+    },
+    {
+      "item": "providers.py / microsoft_import_rules.py 的导入归一化与规则",
+      "how": "通读 services/mail_imports/providers.py、microsoft_import_rules.py、registry.py、base.py；provider 归一化只接受 microsoft（schemas.py:8 Literal），registry 额外挂 outlook 别名；未发现会导致导入静默丢行的确定缺陷（本 lane 未对删除幂等/别名展开做动态验证，留给后续 lane 复核）。",
+      "verdict": "clean"
+    }
+  ]
+}

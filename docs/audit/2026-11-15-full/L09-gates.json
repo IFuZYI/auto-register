@@ -1,0 +1,216 @@
+{
+  "lane": "L09-gates",
+  "head": "fca2eec",
+  "dirty": true,
+  "gate_numbers": {
+    "pytest_collected_total": 3929,
+    "pytest_collect_seconds_reported": 4.36,
+    "pytest_collect_wall_seconds": 9.8,
+    "pytest_test_files": 289,
+    "pytest_test_subdirs": 0,
+    "pytest_collect_note": "tests/ is flat - no top-level subdirectories; only tests/fixtures (non-test data). Per-dir count is therefore tests/ = 3929.",
+    "tsc_b_exit": 0,
+    "tsc_b_seconds": 36.92,
+    "tsc_b_mutation_exit": 2,
+    "tsc_b_mutation_error": "src/__probe_type_error.ts(2,7): error TS2322: Type 'string' is not assignable to type 'number'.",
+    "npm_check_exit": 0,
+    "npm_check_seconds": 15.15,
+    "npm_check_scripts": 30,
+    "npm_check_source_regex_only_scripts": 16,
+    "npm_check_assertions_captured": 232,
+    "npm_lint_exit": 1,
+    "npm_lint_seconds": 91.61,
+    "npm_lint_errors": 28,
+    "npm_lint_warnings": 4,
+    "npm_lint_problems": 32,
+    "npm_lint_files_with_findings": 8,
+    "check_no_secrets_exit": 0,
+    "check_no_secrets_seconds": 5.4,
+    "check_dead_tests_exit": 0,
+    "check_dead_tests_seconds": 4.0,
+    "frozen_verify_exit": 2,
+    "frozen_verify_seconds": 0.11,
+    "frozen_verify_note": "exit 2 = argparse usage error (needs `-- <command>`); it is a wrapper, not a standalone gate.",
+    "e2e_smoke_exit": 0,
+    "e2e_smoke_seconds": 10.39,
+    "e2e_smoke_steps": 21,
+    "e2e_smoke_failed": 0,
+    "check_kiro_agent2api_export_exit": 0,
+    "check_kiro_agent2api_export_seconds": 1.38,
+    "ci_workflow_files": 1,
+    "ci_workflows_running_tests": 0,
+    "test_funcs_without_assertions": 26,
+    "test_funcs_total_ast": 3841
+  },
+  "reviewed_files": [
+    "pytest.ini",
+    "tests/conftest.py",
+    "tests/test_maintenance_doc.py",
+    "tests/test_frontend_layout_contract.py",
+    "tests/test_frontend_running_tasks_cap.py",
+    "tests/test_dead_test_guard.py",
+    "tests/test_no_duplicate_definitions.py",
+    "tests/test_contrast_gate_contract.py",
+    "scripts/check_no_secrets.py",
+    "scripts/check_dead_tests.py",
+    "scripts/frozen_verify.py",
+    "scripts/e2e_smoke.py",
+    "scripts/check_kiro_agent2api_export.py",
+    "frontend/package.json",
+    "frontend/tsconfig.json",
+    "frontend/tsconfig.app.json",
+    "frontend/tsconfig.node.json",
+    "frontend/scripts/run_import_format_checks.mjs",
+    "frontend/scripts/run_grok_batch_default_checks.mjs",
+    "frontend/scripts/run_maintenance_keys_checks.mjs",
+    ".github/workflows/release.yml",
+    "Dockerfile",
+    "docs/MAINTENANCE.md"
+  ],
+  "findings": [
+    {
+      "id": "L09-1",
+      "title": "CI has no test/lint/typecheck job at all - every gate in the repo is local-only and unenforced",
+      "severity": "P1",
+      "file": ".github/workflows/release.yml",
+      "line": 12,
+      "evidence": "`ls .github/workflows/` -> `release.yml` only. Its trigger is `on: push: tags: [\"v*\"]` + workflow_dispatch; grep for `pytest|npm run|tsc|lint` in it returns nothing. The only build-time gate anywhere is Dockerfile:22 `RUN npm run build` (= tsc -b && vite build), and that runs only when a v* tag is pushed. No push/PR workflow exists, so `pytest tests/`, `npx tsc -b`, `npm run check`, `npm run lint` and all scripts/check_*.py are never executed by CI.",
+      "impact": "A commit that breaks 500 backend tests, fails tsc, or leaks a secret can be pushed to main and stay green on GitHub indefinitely. The repo's gate set is a set of local conventions; nothing enforces them. The single workflow that does exist (Release) can succeed with a completely broken build as long as `vite build` emits.",
+      "fix_hint": "Add .github/workflows/ci.yml: jobs backend (python -m pytest tests/ -q), frontend (npx tsc -b && npm run check), lint-ratchet (eslint --max-warnings with the 32-problem baseline). Trigger on push + pull_request.",
+      "class": "functional"
+    },
+    {
+      "id": "L09-2",
+      "title": "16 of 30 `npm run check` scripts are regex-over-source; mutation proves one passes with the behavior deleted",
+      "severity": "P1",
+      "file": "frontend/scripts/run_import_format_checks.mjs",
+      "line": 11,
+      "evidence": "Classification by `grep -c readFileSync` vs `grep -c 'rolldown|await import('` over scripts/run_*.mjs: 16 scripts have readFileSync>0 and exec==0 (pure text match on .tsx/.py source), 12 execute the module, 2 are mixed. Mutation test in a scratch copy outside the repo (/root/.hermes/cache/scratch/fe-probe, node_modules symlinked): replaced `source_format: importFormat === 'text' ? importSourceFormat : '',` (src/pages/Accounts.tsx:608) with `source_format: '',` and kept the original line as a comment -> `node scripts/run_import_format_checks.mjs` prints `{\"checked\":4,\"failures\":[]}` exit 0. The regex `/importFormat === 'text' \\? importSourceFormat : ''/` matches the comment.",
+      "impact": "`npm run check` reports 'all checks passed' for a tree where text-format import no longer sends source_format, i.e. the multi-column `----` parser silently gets no column mapping. The gate checks that an identifier appears in a file, not that the operation happens. Same shape in run_account_row_field_checks, run_accounts_list_token_checks, run_all_actions_are_tasks_checks, run_authorized_bulk_checks, run_batch_capability_checks, run_detail_completeness_checks, run_form_hint_checks, run_grok_batch_default_checks, run_kiro_derived_paging_checks, run_panel_action_mapping_checks, run_panel_filter_driven_checks, run_panel_upload_entry_checks, run_probe_task_checks, run_proxy_release_checks, run_silent_failure_checks.",
+      "fix_hint": "For each source-regex script, either bundle the module with rolldown and assert on the produced object/request body (the pattern already used by run_panel_filter_checks / run_task_kind_checks), or delete the script and let tsc catch the removal. A comment should never satisfy an assertion.",
+      "class": "functional"
+    },
+    {
+      "id": "L09-3",
+      "title": "`npm run lint` exits 1 on the current tree; the documented gate chain `tsc -b && npm run lint && npm run build` can never reach the build",
+      "severity": "P1",
+      "file": "docs/MAINTENANCE.md",
+      "line": 511,
+      "evidence": "`cd frontend && npm run lint` -> `✖ 32 problems (28 errors, 4 warnings)` exit 1, 91.61s. Rules: @typescript-eslint/no-explicit-any 25, react-hooks/exhaustive-deps 4 (warnings), react-refresh/only-export-components 1, react-hooks/set-state-in-effect 1, no-empty 1; 8 files, worst src/pages/Accounts.tsx (15 errors) and src/pages/Settings.tsx (10). docs/MAINTENANCE.md:511 states the baseline IS 32 problems, and §4.1 (line ~505) prescribes `cd frontend && npx tsc -b && npm run lint && npm run build` as the gate sequence.",
+      "impact": "The documented verification command short-circuits at lint (exit 1) so `npm run build` never runs - anyone following the doc gets a red gate every time and learns to ignore it. Because the exit code is always 1, lint cannot be used as a pass/fail gate at all; 28 real errors (25 `any`) are normalized as 'historical baseline' and a regression from 32 -> 33 is only caught by a regex on the doc string in tests/test_maintenance_doc.py.",
+      "fix_hint": "Split into `npm run lint:ratchet` (fails when problems > 32, passes otherwise) and `npm run lint` (informational). Fix the doc chain to use the ratchet. Ideally burn down the 25 `any` and set --max-warnings 0.",
+      "class": "doc-drift"
+    },
+    {
+      "id": "L09-4",
+      "title": "Collected-test-count gate is one-directional with 41% slack: asserts >=2300 while the suite collects 3929",
+      "severity": "P2",
+      "file": "tests/test_maintenance_doc.py",
+      "line": 151,
+      "evidence": "`test_collected_test_count_is_in_the_documented_ballpark` runs `pytest tests/ --collect-only -q`, parses `(\\d+) tests collected` (actual: 3929) then `self.assertGreaterEqual(collected, 2300)`. docs/MAINTENANCE.md:502 says '2300+ 用例' and pytest.ini:17 says 'pytest tests/ -> 3514 collected'.",
+      "impact": "1,629 tests (41% of the suite) can be deleted, skipped or made uncollectable and this gate still passes. The number is also stale in both docs (2300+/3514 vs 3929), so it no longer measures what the author thought.",
+      "fix_hint": "Pin `collected == 3929` (updated with the suite) or a floor within 2% (>=3850), and have it fail on a drop as well as a parse failure. Update MAINTENANCE.md and the pytest.ini comment.",
+      "class": "contract"
+    },
+    {
+      "id": "L09-5",
+      "title": "check_dead_tests.py only sees tests inside `if __name__ == \"__main__\"` and silently skips files that fail to parse",
+      "severity": "P2",
+      "file": "scripts/check_dead_tests.py",
+      "line": 70,
+      "evidence": "find_dead_tests() walks only `tree.body` guards matched by _is_main_guard (line 51-56). main() has `except SyntaxError: continue` (line 70-71) - a test file with a syntax error is dropped from the scan instead of reported. Nothing detects: @pytest.mark.skip/skipif, a TestCase class with __init__ (pytest warns and skips the whole class), a file renamed off the test_*.py glob, or a test shadowed by a duplicate class definition.",
+      "impact": "The gate's name and docstring promise 'no test can never be collected'; it covers exactly one of at least five ways a test becomes uncollectable. It reports exit 0 (4.00s) today, which is read as 'no dead tests'.",
+      "fix_hint": "Fail on SyntaxError rather than continue. Cross-check pytest's own `--collect-only` count against the number of `def test_*` in tests/ (AST) and report the delta - that catches every skip/shadow class at once.",
+      "class": "functional"
+    },
+    {
+      "id": "L09-6",
+      "title": "The pytest-side typecheck gate self-skips when node_modules is absent - '3929 passed' can mean tsc never ran",
+      "severity": "P2",
+      "file": "tests/test_frontend_layout_contract.py",
+      "line": 37,
+      "evidence": "`test_typescript_still_compiles` calls `self.skipTest(\"未安装 npx —— 跳过 tsc 编译检查\")` when shutil.which('npx') is None and again when frontend/node_modules is missing, before running `npx tsc -b`. Same pattern: 4 `@pytest.mark.skipif(not os.path.isdir(frontend/node_modules))` decorators in tests/test_frontend_running_tasks_cap.py:23,44,67,94. tests/test_maintenance_doc.py:108 has the same skip for the eslint baseline check.",
+      "impact": "On a clean CI checkout (no npm install) the only pytest-visible typecheck gate, the only eslint-baseline gate and 4 frontend contract tests all skip silently; the run is green and reports 'passed'. The skip is unconditional - it does not distinguish 'developer laptop' from 'CI'.",
+      "fix_hint": "Skip only when an explicit env var (e.g. ALLOW_MISSING_NODE=1) is set; otherwise fail with an actionable message. In CI, `npm ci` before pytest.",
+      "class": "functional"
+    },
+    {
+      "id": "L09-7",
+      "title": "`npm run check` discards every script's stdout to /dev/null and validates no script's `checked` count",
+      "severity": "P2",
+      "file": "frontend/package.json",
+      "line": 11,
+      "evidence": "`\"check\": \"for f in scripts/run_*.mjs; do node \\\"$f\\\" > /dev/null || exit 1; done && echo 'all checks passed'\"`. The 25 scripts that print `{checked, failures}` do so on stdout only, so on failure the operator sees exit 1 and zero diagnostics. No script is required to assert a minimum `checked`; e.g. run_dashboard_tasks_checks reports checked=2, run_kiro_derived_paging_checks checked=3 - a loop over an empty discovered list yields checked=0, failures=[] and exit 0.",
+      "impact": "A failing check is indistinguishable from a crashing one, and an empty-iteration check is indistinguishable from a thorough one. The only place a floor is asserted is tests/test_frontend_running_tasks_cap.py (`result['checked'] >= 13`), for one script.",
+      "fix_hint": "Drop the `> /dev/null` (or tee to a log and print the last line on failure). Add a shared helper that fails when `checked < N` for each script.",
+      "class": "functional"
+    },
+    {
+      "id": "L09-8",
+      "title": "Two 'frontend' check scripts assert on backend Python source text",
+      "severity": "P2",
+      "file": "frontend/scripts/run_grok_batch_default_checks.mjs",
+      "line": 13,
+      "evidence": "`readFileSync(new URL('../../platforms/grok/plugin.py', import.meta.url), 'utf8')` in run_grok_batch_default_checks.mjs:13, and `readFileSync(new URL('../../core/config_schema.py', ...))` in run_maintenance_keys_checks.mjs:18. Discovered when running `npm run check` in a scratch copy that contained only frontend/: it died with `path: '/root/.hermes/cache/scratch/platforms/grok/plugin.py'`.",
+      "impact": "A frontend gate red-lines on a Python refactor and vice versa; the coupling is invisible from either side, and the check is still only a substring match on the Python file (same weakness as L09-2).",
+      "fix_hint": "Move these assertions into the pytest suite where the Python symbol can be imported and called, and keep the frontend script to frontend inputs.",
+      "class": "contract"
+    },
+    {
+      "id": "L09-9",
+      "title": "check_no_secrets only scans git-tracked files and skips any match containing TEST/FAKE/DUMMY",
+      "severity": "P3",
+      "file": "scripts/check_no_secrets.py",
+      "line": 85,
+      "evidence": "_tracked_files() shells out to `git ls-files -z` (line 45) and falls back to a directory walk only when git is unavailable, so untracked files are never scanned. `if any(marker in value.upper() for marker in FAKE_MARKERS): continue` where FAKE_MARKERS = (FAKE, EXAMPLE, SAMPLE, PLACEHOLDER, DUMMY, REDACTED, TEST) - a live `sk-...TEST...` key is skipped. SKIP_DIRS also drops `data`, `static`, `reference`. Ran: exit 0, 5.40s, prints '未发现密钥字面量。'",
+      "impact": "The guard is run before `git add` in practice (it is a pre-commit style check), where new files are exactly the untracked ones it cannot see. It is a real regex scanner (would catch AKIA.../ghp_... in tracked files) but its coverage claim is broader than its reach.",
+      "fix_hint": "Scan `git ls-files -z --cached --others --exclude-standard` so new files are included; drop 'TEST' from FAKE_MARKERS (keep FAKE/EXAMPLE/DUMMY) or require the marker to be a whole token.",
+      "class": "credential-leak"
+    },
+    {
+      "id": "L09-10",
+      "title": "pytest.ini's own comment cites a stale collection count (3514 vs 3929)",
+      "severity": "P3",
+      "file": "pytest.ini",
+      "line": 17,
+      "evidence": "pytest.ini comment: '`pytest tests/` → 3514 collected + 0 error'. Actual: `pytest --collect-only -q` -> '3929 tests collected in 4.36s'.",
+      "impact": "Cosmetic, but it is the number a reviewer uses to decide whether a suite run lost tests; a 415-test gap reads as a collection regression that never happened.",
+      "fix_hint": "Update the comment, or delete the number and point at tests/test_maintenance_doc.py as the source of truth.",
+      "class": "doc-drift"
+    }
+  ],
+  "checked_and_clean": [
+    {
+      "item": "tsc -b actually type-checks (not a no-op / not an empty solution)",
+      "how": "Read the tsconfig graph: tsconfig.json is solution-style with files:[] and references to tsconfig.app.json (include:[\"src\"], strict, noUnusedLocals, noEmit) and tsconfig.node.json (include:[\"vite.config.ts\"]). Mutation-checked outside the repo: copied src+tsconfigs to /root/.hermes/cache/scratch/fe-probe with node_modules symlinked, baseline `npx tsc -b` exit 0, then added src/__probe_type_error.ts containing `const __probe: number = \"not a number\"` -> exit 2 with `error TS2322: Type 'string' is not assignable to type 'number'`. The unimported file was still checked, so include-based coverage is real. Clean run: exit 0, 36.92s cold."
+    },
+    {
+      "item": "e2e_smoke.py is a real black-box run",
+      "how": "`python scripts/e2e_smoke.py` -> exit 0, 10.39s, 21 steps, failed:0, ok:true, against a real FastAPI TestClient with a temp DATA_DIR. It asserts status<400 per named step and <500 for the --sweep route scan. Not wired into CI or into any pytest test (checked: no reference to e2e_smoke in .github/ or tests/)."
+    },
+    {
+      "item": "frozen_verify.py is a genuine tree-immutability gate",
+      "how": "Read scripts/frozen_verify.py: snapshot() hashes HEAD + `git status --porcelain=v1 -z` + every `git ls-files` blob; mismatch returns exit 2 with a distinct message. `python scripts/frozen_verify.py` alone exits 2 (argparse: needs `-- <command>`), so it is a wrapper, not a gate; no workflow or script invokes it."
+    },
+    {
+      "item": "check_kiro_agent2api_export.py asserts a built payload, not source text",
+      "how": "Read scripts/check_kiro_agent2api_export.py: builds AccountRecord + platforms.kiro.credentials.build_extra and inspects the exported dict (id non-empty, no `uid` identity fallback, loginProvider case). `python scripts/check_kiro_agent2api_export.py` -> exit 0, 1.38s."
+    },
+    {
+      "item": "Backend tests with no assertions",
+      "how": "AST scan of all 289 test files: 3841 test functions, 26 with no assert/raises/fail. All 26 read as 'must not raise' cases (test_console_broken_pipe, test_grok_browser_close_timeout, test_icloud_upstream_gate, test_task_store_io). Legitimate shape, not decoration."
+    },
+    {
+      "item": "Tests that patch the function they claim to test",
+      "how": "Heuristic scan of 754 patch()/patch.object() sites; 60 files patch an attribute of a module they also import. Spot-checked the highest-density ones (test_chatgpt_token_refresh_verification 15, test_panel_comparison 30, test_cliproxyapi_sync 19, test_environment_preflight 9, test_grok_exit_probe 9): every target is a collaborator (AuthFlow, _request_json, FETCHERS, engine, _camouflage_* probes, time.sleep), not the unit under test. No confirmed self-patch found. Not exhaustively verified for all 60."
+    },
+    {
+      "item": "pytest.ini collection isolation",
+      "how": "testpaths=tests + norecursedirs=.git .venv .worktrees reference node_modules dist build. `pytest --collect-only -q` -> 3929 collected, 0 errors in 4.36s; no import-mismatch errors, so the .worktrees/reference collision described in the comment is genuinely fixed."
+    },
+    {
+      "item": "conftest.py DB/data isolation",
+      "how": "tests/conftest.py sets DATA_DIR and DATABASE_URL to TemporaryDirectory before importing core.db, sets APP_ENABLE_SOLVER=0 and APP_TRUST_TEST_CLIENT=1, and disposes the engine in pytest_sessionfinish. No real data/platforms/ writes during collection."
+    }
+  ]
+}

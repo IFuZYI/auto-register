@@ -76,7 +76,7 @@ class AtLifecycleDisplayContractTests(unittest.TestCase):
         2026-11-01 起这一列**只给 ChatGPT**：Grok 从 2026-10-23 起注册只产 SSO、
         不产 AT，这一列对 Grok 每一行都是「无 AT」—— 占 132px 还让人以为号坏了。
         当初「两平台都要显示」的理由（Grok 的 AT 也是 JWT）随那个决定一起失效了；
-        Grok 换成自己的「2API 接入 / 探测」两列（见
+        Grok 只保留账号自身的「探测」列；外部面板接入在面板同步页查看（见
         `PlatformAwareAccountColumnsTests`）。
         """
         src = self._src()
@@ -859,28 +859,33 @@ class PanelTimeColumnsUseCredentialIssuedAtTests(unittest.TestCase):
 
 
 class UIScaleContractTests(unittest.TestCase):
-    """全站 90% 缩放（用户要求「UI按90%进行缩小一点」）。
+    """整屏高度补偿机制（CSS zoom 时代留下的不变量）。
 
-    实现走 CSS `zoom`（html 级）：布局级缩放、文字不模糊（transform: scale
-    会光栅化重采样），弹层/真实点击/媒体查询不受影响（Chrome 145 实测）。
+    历史上这里曾经是「全站 90% 缩放」。缩放在 2026-11 的视觉改版中去掉
+    （`--ui-scale: 1`）：90% 缩放让 13px 正文实际渲染成 11.7px，长时间读表
+    更吃力，而「一屏多放几行」的需求已由更紧的行高与表格密度解决。
 
-    实测坑（Chrome 145）：
-    * zoom 下 `100vh` 先按**物理视口**解析再被缩放 → 整屏高度比视口矮 10%
-      （577px 视口下渲染 519px，底部露出背景）。所有整屏高度必须走
-      `--app-vh: calc(100vh / var(--ui-scale))`（实测恰好填满视口）。
-    * `getBoundingClientRect` 在 zoom 下返回缩放后坐标，但 rc-trigger 的
-      弹层定位（Select/Popconfirm/Tooltip）与 CDP 真实点击均正确（实测）。
+    **机制本身保留**，因为它是正确的：
+    * 用 CSS `zoom` 而不是 `transform: scale` —— 布局级缩放，文字不模糊；
+    * zoom 下 `100vh` 先按物理视口解析再被缩放，整屏高度会短一截，所以
+      整屏容器一律走 `--app-vh: calc(100vh / var(--ui-scale))`。`--ui-scale: 1`
+      时它恰好等于 100vh，调回非 1 也无需改任何调用点。
 
-    form-grid 宽度类的修复：`flex: 0 0 auto` 下 max-width 不决定宽度，
-    控件按内容 intrinsic 排 —— 实测同档控件 98/82/286/187 各不相同。
+    这两条是**不依赖具体倍率**的不变量，所以测试断言机制存在，而不是
+    把倍率钉死成某个数 —— 否则调视觉参数就会误伤结构测试。
     """
 
     def _css(self) -> str:
         return (FRONTEND / "src" / "index.css").read_text(encoding="utf-8")
 
     def test_ui_scale_token_defined_and_applied(self):
+        """缩放 token 必须存在并被 html 消费（倍率本身不钉死）。
+
+        倍率属于视觉决策，可能随设计调整；删掉 token 或不再应用到 html，
+        才是结构退化 —— 那会让 `--app-vh` 的补偿失去依据。
+        """
         css = self._css()
-        self.assertIn("--ui-scale: 0.9", css, "index.css 缺 --ui-scale: 0.9")
+        self.assertRegex(css, r"--ui-scale:\s*[\d.]+", "index.css 缺 --ui-scale 定义")
         self.assertIn("zoom: var(--ui-scale)", css, "没有把 zoom 应用到 html 上")
 
     def test_app_vh_compensates_zoom(self):
@@ -895,13 +900,24 @@ class UIScaleContractTests(unittest.TestCase):
         self.assertIn("height: var(--app-vh)", css, "侧栏没有用 --app-vh")
 
     def test_tsx_full_height_uses_app_vh(self):
-        """App.tsx / Login.tsx 的整屏高度不许再用裸 100vh。"""
+        """整屏高度不许用裸 100vh；可以内联 --app-vh，也可以交给 CSS 类。
+
+        登录页改成 `.login-shell` 承载高度（`min-height: var(--app-vh)`）——
+        比内联 `minHeight: 'var(--app-vh)'` 更干净。所以这里接受两种接法，
+        只禁止真正有害的裸 100vh。
+        """
         app = (FRONTEND / "src" / "App.tsx").read_text(encoding="utf-8")
-        self.assertNotIn("'100vh'", app, "App.tsx 还有裸 100vh —— zoom 下会矮 10%")
+        self.assertNotIn("'100vh'", app, "App.tsx 还有裸 100vh —— zoom 下会矮一截")
         self.assertIn("'var(--app-vh)'", app, "App.tsx 没接 --app-vh")
+
         login = (FRONTEND / "src" / "pages" / "Login.tsx").read_text(encoding="utf-8")
         self.assertNotIn("'100vh'", login, "Login.tsx 还有裸 100vh")
-        self.assertIn("'var(--app-vh)'", login, "Login.tsx 没接 --app-vh")
+        self.assertIn("login-shell", login, "Login.tsx 整屏容器没有用 .login-shell 类")
+        self.assertIn(
+            ".login-shell { min-height: var(--app-vh)",
+            self._css(),
+            "`.login-shell` 没有用 --app-vh 设高度",
+        )
 
     def test_index_css_100vh_only_in_app_vh_token(self):
         """index.css 里 100vh 只允许出现在 --app-vh 定义行。
@@ -1087,11 +1103,16 @@ class PlatformAwareAccountColumnsTests(unittest.TestCase):
         self.assertIn("title: 'AT 到期'", self._chatgpt_branch(), "AT 列应该在 ChatGPT 分支里")
         self.assertNotIn("title: 'AT 到期'", self._grok_branch(), "Grok 不该再有 AT 列")
 
-    def test_grok_gets_its_own_two_columns(self):
+    def test_grok_keeps_account_probe_and_leaves_ingestion_to_the_panel(self):
+        """外部面板接入归面板页，账号页只保留账号自身的探测。
+
+        是否上传到 grok2api 由面板对比确认；把 ingested 标记复制到账号台账
+        会让「本地记录过上传」被误读为「远端当前存在」，也混淆两个页面职责。
+        """
         grok = self._grok_branch()
-        self.assertIn("title: '2API 接入'", grok, "Grok 要看 2API 接没接上")
+        self.assertNotIn("title: '2API 接入'", grok)
+        self.assertNotIn("grok2api_ingested", grok)
         self.assertIn("title: '探测'", grok, "Grok 要看探测结论")
-        self.assertIn("grok2api_ingested", grok)
         self.assertIn("probe_status", grok)
 
     def test_dead_region_column_is_gone(self):
@@ -1131,9 +1152,11 @@ class PlatformAwareAccountColumnsTests(unittest.TestCase):
         src = self._src()
         self.assertIn("Grok 用 SSO 走登录协议刷新，不需要 RT", src)
 
-    def test_grok_detail_has_its_own_group(self):
+    def test_grok_detail_keeps_account_context_not_remote_ingestion(self):
         src = self._src()
-        self.assertIn('title="Grok 接入"', src, "Grok 详情该有自己的一组")
+        self.assertIn('title="注册与探测"', src, "Grok 详情应保留注册来源与本地探测")
+        self.assertNotIn('title="Grok 接入"', src)
+        self.assertNotIn('label="2API"', src, "远端接入结果应在面板对比中查看")
         self.assertIn('title="本地真实状态"', src, "GPT 那组不能被顶掉")
 
 

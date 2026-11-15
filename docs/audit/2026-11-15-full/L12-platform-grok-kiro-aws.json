@@ -1,0 +1,230 @@
+{
+  "lane": "L12-platform-grok-kiro-aws",
+  "head": "fca2eec",
+  "dirty": true,
+  "reviewed_files": [
+    "platforms/__init__.py",
+    "platforms/grok/__init__.py",
+    "platforms/grok/plugin.py",
+    "platforms/grok/grok2api.py",
+    "platforms/grok/register_browser.py",
+    "platforms/grok/oauth_device.py",
+    "platforms/grok/oauth_browser.py",
+    "platforms/kiro/__init__.py",
+    "platforms/kiro/plugin.py",
+    "platforms/kiro/credentials.py",
+    "platforms/kiro/authorize.py",
+    "platforms/kiro/probe.py",
+    "platforms/aws/__init__.py",
+    "platforms/aws/plugin.py",
+    "platforms/aws/credentials.py",
+    "platforms/aws/probe.py",
+    "platforms/aws/client.py",
+    "core/base_platform.py",
+    "core/registry.py",
+    "api/platforms.py",
+    "services/grok_account_state.py",
+    "core/scheduler.py",
+    "api/accounts.py",
+    "services/action_execution.py",
+    "services/account_export.py",
+    "services/local_maintenance.py",
+    "core/credential_fields.py",
+    "core/credential_crypto.py",
+    "core/probe_credentials.py",
+    "core/executors/protocol.py",
+    "core/executors/factory.py",
+    "core/base_executor.py"
+  ],
+  "findings": [
+    {
+      "id": "L12-1",
+      "title": "registry.load_all() swallows ModuleNotFoundError raised *inside* a plugin, so a platform can vanish from the UI with no diagnostic",
+      "severity": "P2",
+      "file": "core/registry.py",
+      "line": 46,
+      "evidence": "`sed -n '37,48p' core/registry.py` -> `try: importlib.import_module(f\"{module_name}.plugin\")` / `except ModuleNotFoundError: pass`. The module has no logger at all (imports are only importlib/pkgutil/typing), so \"plugin.py does not exist\" and \"plugin.py imported a missing dependency\" are the same silent outcome.",
+      "impact": "If any transitive import inside platforms/<x>/plugin.py is missing (optional dep not installed, renamed module, partial deploy), that platform silently disappears from GET /api/platforms (api/platforms.py:9 returns _registry.values()) and get('x') raises KeyError \"平台 'x' 未注册，已注册: [...]\" (core/registry.py:54-55) - which reads as 'platform retired', not 'import failed'. No traceback is ever logged.",
+      "fix_hint": "Catch ImportError, `logger.exception(...)` and record failures in a module-level `_load_errors` surfaced by list_platforms(); only swallow when `exc.name` is exactly f\"platforms.{name}.plugin\".",
+      "class": "contract"
+    },
+    {
+      "id": "L12-2",
+      "title": "register() silently overwrites a duplicate platform name and silently drops non-enabled ones",
+      "severity": "P3",
+      "file": "core/registry.py",
+      "line": 33,
+      "evidence": "`sed -n '30,34p' core/registry.py` -> `if is_platform_enabled(cls.name): _registry[cls.name] = cls` - no duplicate check, no log. `load_all()` walks `pkgutil.iter_modules(platforms.__path__)` (line 41), i.e. filesystem order, so the winner between two modules declaring the same `name` depends on directory iteration order.",
+      "impact": "A copy-pasted plugin (e.g. platforms/kiro2/plugin.py with `name = \"kiro\"`) silently replaces the real Kiro class for the whole process; a typo'd name (`name = \"grok2\"`) registers nothing and the plugin never appears, with no warning in either case.",
+      "fix_hint": "Log/raise on `cls.name in _registry and _registry[cls.name] is not cls`; log-and-skip unsupported names instead of silently returning.",
+      "class": "contract"
+    },
+    {
+      "id": "L12-3",
+      "title": "`mailbox=` is a required constructor argument at the only call site but is not declared on BasePlatform",
+      "severity": "P2",
+      "file": "core/base_platform.py",
+      "line": 219,
+      "evidence": "Base: `def __init__(self, config: RegisterConfig = None)` (core/base_platform.py:219). Call site: `_platform = PlatformCls(config=_config, mailbox=_mailbox)` (services/task_runners.py:685). Every current plugin hand-rolls the extra kwarg: grok/plugin.py:187, aws/plugin.py:84, kiro/plugin.py:84, chatgpt/plugin.py:97.",
+      "impact": "The documented plugin contract is wrong: a new plugin written against BasePlatform.__init__ raises `TypeError: __init__() got an unexpected keyword argument 'mailbox'` on the first registration attempt, and the requirement is only discoverable by reading task_runners. It also means `self.mailbox` is not guaranteed to exist, so `BasePlatform.bind_task_control` (line 282) has to use getattr.",
+      "fix_hint": "Declare `def __init__(self, config: RegisterConfig = None, mailbox: BaseMailbox | None = None)` on BasePlatform (store self.mailbox, bind task control there) and delete the four per-plugin copies.",
+      "class": "contract"
+    },
+    {
+      "id": "L12-4",
+      "title": "AWS/Kiro status policies assign AccountStatus enum members instead of .value - downstream `str(status)` comparisons break",
+      "severity": "P2",
+      "file": "platforms/kiro/plugin.py",
+      "line": 597,
+      "evidence": "`account.status = AccountStatus.BANNED` at platforms/kiro/plugin.py:593/597/599 and platforms/aws/plugin.py:331/335/337, while every other writer stores the string (`setattr(account, \"status\", AccountStatus.BANNED.value)`, services/grok_account_state.py:101). `AccountStatus` is `class AccountStatus(str, Enum)` (core/base_platform.py:19), so on py3.11 `str(AccountStatus.BANNED)` == 'AccountStatus.BANNED', not 'banned'.",
+      "impact": "Concrete break: services/local_maintenance.py:463 `if revert_banned_mark and str(acc.status or \"\") == \"banned\" ...` never matches after the aws/kiro applier ran, so the '标记为禁用' off-switch is a no-op for AWS/Kiro (the ban mark is never reverted). Same mis-compare inside the policy itself (kiro/plugin.py:592 `str(getattr(account,'status','')).lower() != AccountStatus.REGISTERED.value`) makes an already-registered row report \"探测通过，恢复为正常\" on every probe. DB writes happen to stay correct only because sqlite binds the str subclass by its underlying value.",
+      "fix_hint": "Assign `.value` in both policies (or `AccountStatus.coerce(...)` then `.value`); add a regression test asserting `type(acc.status) is str` after apply_probe_status_policy for aws/kiro.",
+      "class": "functional"
+    },
+    {
+      "id": "L12-5",
+      "title": "Grok _sso_status can never return 'rejected' (Response has no url) yet still costs a live request on every check_valid",
+      "severity": "P2",
+      "file": "platforms/grok/plugin.py",
+      "line": 431,
+      "evidence": "`final = str(getattr(r, \"url\", \"\") or \"\")` (platforms/grok/plugin.py:431) but `Response` is `@dataclass class Response: status_code/text/headers/cookies` with no url field (core/base_executor.py:8-12) and `ProtocolExecutor._wrap` builds it without one (core/executors/protocol.py:25-32). The function's own docstring (plugin.py:391-404) records that `rejected` is unreachable.",
+      "impact": "For the default grok account shape (SSO only, no AT - `grok_oauth_exchange` defaults to \"0\", plugin.py:157-168) every `check_valid` performs an extra GET to https://accounts.x.ai whose verdict can only be `alive` or `unknown`; that value is then passed as `sso_rejected=(detail.get(\"sso_status\") == \"rejected\")` (plugin.py:318-323), so the 'SSO 被拒 -> invalid' branch in services/grok_account_state.py:106-107 is dead while still looking load-bearing.",
+      "fix_hint": "Delete `_sso_status` and the sso_status/sso_rejected plumbing (the 测活 action already refuses to use it), or add `url` to Response and judge on the final URL - do not keep a network call that cannot change the verdict.",
+      "class": "dead-code"
+    },
+    {
+      "id": "L12-6",
+      "title": "AccountStatus.is_active() restricts the scheduler probe to 'registered', making the expired/invalid -> registered recovery branch unreachable",
+      "severity": "P2",
+      "file": "core/base_platform.py",
+      "line": 84,
+      "evidence": "`is_active()` returns `{cls.REGISTERED.value}` only (core/base_platform.py:84-91) and is the sole selector for the batch probe: `accounts = [r for r in rows if AccountStatus.is_active(r.status)][:limit]` (core/scheduler.py:194). The recovery branch it feeds, `if fresh.status in (\"expired\", \"invalid\"): fresh.status = \"registered\"` (core/scheduler.py:210), can therefore never see those rows.",
+      "impact": "The scheduled 有效性检查 can only demote, never restore: expired/invalid accounts stay out of the pool until a human clicks 检测, while the code reads as if automatic recovery exists. It also means the scheduler never re-tests exactly the accounts whose credentials might have recovered.",
+      "fix_hint": "Select candidates as `status != banned` (or active|expired|invalid), keeping banned sticky; or delete the dead branch and document that recovery is manual.",
+      "class": "dead-code"
+    },
+    {
+      "id": "L12-7",
+      "title": "probe_account_detail()/last_probe_detail is a de-facto plugin contract (3 of 4 platforms) that BasePlatform never declares",
+      "severity": "P2",
+      "file": "core/base_platform.py",
+      "line": 252,
+      "evidence": "Base declares only `apply_probe_status_policy` (core/base_platform.py:252-261). `probe_account_detail` + `last_probe_detail` are implemented ad hoc by grok (plugin.py:325, 306), aws (plugin.py:298, 320) and kiro (plugin.py:559, 583) and absent on chatgpt; core reads them defensively - `detail = getattr(plugin, \"last_probe_detail\", {}) or {}` (core/scheduler.py:207, api/accounts.py:1031) - and falls back to `fresh.status = \"invalid\"` when the policy hook is the base no-op (core/scheduler.py:223-226).",
+      "impact": "A plugin that forgets either attribute gets its accounts marked invalid on any failed check with an empty detail dict, and there is no place in the base class that tells an author these two names exist. The 'indeterminate' semantics that aws/kiro rely on (usable=None) are likewise undocumented at the contract level.",
+      "fix_hint": "Declare `last_probe_detail: dict = {}` and `def probe_account_detail(self, account) -> dict: return {\"usable\": None, \"indeterminate\": True}` on BasePlatform; make the default check_valid a thin wrapper over it.",
+      "class": "contract"
+    },
+    {
+      "id": "L12-8",
+      "title": "BasePlatform._make_executor has no production caller and raises ValueError for the only executor Grok declares",
+      "severity": "P3",
+      "file": "core/base_platform.py",
+      "line": 331,
+      "evidence": "`grep -rn '_make_executor' --include=*.py .` returns only the definition (core/base_platform.py:331) and tests/test_reusable_modules.py:144. The factory it calls only knows protocol/headless/headed (core/executors/factory.py:20-28), so `create(\"browser\")` raises `ValueError: 未知执行器类型: browser` - and \"browser\" is Grok's sole declared executor (platforms/grok/plugin.py:143) and therefore the value BasePlatform.__init__ normalizes config.executor_type to.",
+      "impact": "Dead helper that is guaranteed to blow up for the platform whose config it would receive; a future generic caller (e.g. a shared captcha/oauth path) would break Grok at runtime instead of at import.",
+      "fix_hint": "Delete `_make_executor` (and `_make_captcha` if it has no callers), or teach the factory the platform-declared executor names.",
+      "class": "dead-code"
+    },
+    {
+      "id": "L12-9",
+      "title": "check_valid() reports every default (SSO-only) Grok account as invalid, so batch 有效性检查 counts the whole pool as failed",
+      "severity": "P3",
+      "file": "platforms/grok/plugin.py",
+      "line": 307,
+      "evidence": "`check_valid` returns `bool(detail.get(\"usable\"))` (platforms/grok/plugin.py:307) and `probe_account_detail` returns `{\"usable\": False, \"code\": None, \"summary\": \"SSO 探测：...\"}` whenever the account has no AT (plugin.py:344-365) - which is the default product of registration. `core/scheduler.check_accounts_valid` increments `results[\"invalid\"]` for those (core/scheduler.py:202-208).",
+      "impact": "A pool of healthy SSO-only Grok accounts reports N invalid on every scheduled check (account status is not written, because the grok policy returns \"\" for code=None). The operator's only aggregate signal is wrong, and it contradicts the aws/kiro convention where the same situation is `usable=None` / indeterminate.",
+      "fix_hint": "Return `usable: None, indeterminate: True` for the no-AT branch (matching aws/kiro) and let check_valid/consumers treat None as '测不了'; keep the explicit 测活 action message that tells the user to run 刷新 Token.",
+      "class": "functional"
+    },
+    {
+      "id": "L12-10",
+      "title": "platforms/grok/__init__.py imports .plugin, contradicting the package-level rule written in platforms/aws/__init__.py",
+      "severity": "P3",
+      "file": "platforms/grok/__init__.py",
+      "line": 21,
+      "evidence": "`from .plugin import GrokPlatform` (platforms/grok/__init__.py:21) vs platforms/aws/__init__.py:15-18: \"**不要在包 `__init__` 里 import `plugin`**：`core.registry.load_all()` 是按 `platforms.<name>.plugin` 逐个导入的，包级 import 会让「只想要 crypto 的测试」也被平台依赖拖起来（并制造循环导入）\".",
+      "impact": "`import platforms.grok.constants` (or any future tool that only wants the endpoints) drags in the full plugin module and its imports (core.base_mailbox, services.panel_status_sync, ...); two import paths to the same class make circular-import regressions more likely as the plugin grows.",
+      "fix_hint": "Drop the re-export from platforms/grok/__init__.py (keep the module map docstring); import `platforms.grok.plugin` explicitly where the class is needed.",
+      "class": "doc-drift"
+    },
+    {
+      "id": "L12-11",
+      "title": "AWS build_extra persists the spent OIDC device_code/user_code into account extra forever",
+      "severity": "P3",
+      "file": "platforms/aws/credentials.py",
+      "line": 35,
+      "evidence": "`CREDENTIAL_KEYS` contains `user_code` and `device_code` (platforms/aws/credentials.py:34-35), so `build_extra` writes the device grant returned by `device_authorization` (platforms/aws/client.py:1401-1402) into `extra` and nothing removes it after the token exchange. `device_code` is at least encrypted (core/credential_crypto.py:77) but has no reader anywhere (`grep -rn device_code` shows only producers and oauth flows).",
+      "impact": "Every AWS account permanently carries a stale single-use credential in extra_json: dead weight in every list/detail/backup payload, and one more secret to leak if the decryption key is compromised.",
+      "fix_hint": "Remove both keys from CREDENTIAL_KEYS (they are transient), or pop them from the account extra after `device_token` succeeds.",
+      "class": "data-integrity"
+    },
+    {
+      "id": "L12-12",
+      "title": "platforms/icloud/ is an empty package left behind after the iCloud platform was retired",
+      "severity": "P3",
+      "file": "platforms/icloud/__init__.py",
+      "line": 1,
+      "evidence": "`ls platforms/icloud` -> only `__init__.py` (no plugin.py, no code), while core/registry.py:11-17 documents that the iCloud platform was removed and SUPPORTED_PLATFORMS excludes it.",
+      "impact": "Dead package in the plugin discovery root; pkgutil still yields it on every load_all() and it is skipped only because of the name filter, so it invites confusion about whether iCloud is a platform or the mailbox channel.",
+      "fix_hint": "Delete platforms/icloud/ (the local mailbox provider lives in modules/mail/icloud_local.py).",
+      "class": "dead-code"
+    },
+    {
+      "id": "L12-13",
+      "title": "Kiro drops a freshly created AWS Builder ID when the address already has a Kiro row (raise before the source account is saved)",
+      "severity": "P2",
+      "file": "platforms/kiro/plugin.py",
+      "line": 172,
+      "evidence": "In `_register_aws_identity`, the duplicate guard runs after `aws_platform.register(...)` has already created a real Builder ID with a password: `if self.is_email_registered(account.email): raise RuntimeError(...)` at platforms/kiro/plugin.py:172-173, while the block that persists the source AWS account (and whose own comment says \"来源账号**立即落库**：Kiro 授权失败时 AWS 号已经真实存在…丢掉它就等于白烧一个号\") only starts at line 175 and calls `account_repository.upsert(source_record)` at line 192.",
+      "impact": "Trigger: the mailbox/auto path hands an address that already has a kiro row (retry after a task that saved Kiro but reported failure, or a reused mailbox). The AWS account has been created upstream (email consumed, password set) and is then thrown away - no `aws` row, no Kiro row, no log line - burning both the account and the mailbox while the only trace is a RuntimeError that talks about Kiro.",
+      "fix_hint": "Move the `is_email_registered` check before `aws_platform.register()` (the explicit-email path already does this at plugin.py:419), or save the source AWS row before raising so the burned account is at least recoverable.",
+      "class": "data-integrity"
+    }
+  ],
+  "checked_and_clean": [
+    {
+      "area": "AWS/Kiro 无 SSO 快照的导出（必须报错而不是写空）",
+      "how": "platforms/kiro/credentials.py:338-352：idc 账号缺 kiro_aws_client_id/client_secret/refresh_token 时 `raise ValueError('idc 账号缺少 AWS SSO 快照...')`；api/accounts.py:562-565 捕获 ValueError → HTTP 400 带原文。`render_auth_tokens` 里没有任何 except/空值兜底，单账号与多账号文档都不存在「写空凭据」的分支。"
+    },
+    {
+      "area": "探测/刷新后的 RT 轮换写回（AWS/Kiro）",
+      "how": "动作返回把探测细节嵌在 data['probe'] 下（aws/plugin.py:358-368, kiro/plugin.py:620-627），services/action_execution.py:277-289 的 `_apply_credential_writes` 只看顶层、会漏掉；但 `_apply_aws_kiro_status` 在 services/action_execution.py:386-401 用同一个 detail 调 `persist_probe_credentials(acc_model, detail, session)` 并保存，所以轮换后的 AT/RT 仍会落库。单账号检测路径同样处理（api/accounts.py:1044-1050）。"
+    },
+    {
+      "area": "client_id / client_secret 传播链",
+      "how": "写入：platforms/aws/credentials.py:25-57（CREDENTIAL_KEYS + build_extra）；导出/导入往返：core/credential_fields.py:120-141（EXPORT_ONLY_EXTRA_KEYS）+ 171-176（clientId/clientSecret 别名归一）；落盘加密：core/credential_crypto.py:58-70（client_secret、kiro_aws_client_secret 均在 SENSITIVE_EXTRA_KEYS）；列表裁剪：api/accounts.py:180-199 从 SENSITIVE_EXTRA_KEYS 派生，不手写清单。四段口径一致。"
+    },
+    {
+      "area": "idc 与 id_token（AWS/Kiro 的 token 形状）",
+      "how": "`grep -rn 'id_token\\|idToken' platforms/aws platforms/kiro` 零命中：两个平台只用 AT/RT/SSO，不存在把 id_token 当刷新凭据的分支。刷新统一走 IdC：clientId+clientSecret+refreshToken（platforms/aws/probe.py:53-67、platforms/kiro/probe.py:56-70），Kiro 授权只申请 authorization_code+refresh_token 两个 grant（platforms/kiro/authorize.py:113-128），与 reference/register/kirox/internal/core/kiro_auth.go 的 clientType=public 口径一致。"
+    },
+    {
+      "area": "凭据出口：运行日志 / 任务日志",
+      "how": "对 platforms/aws、platforms/kiro、platforms/grok 的全部 log/logger/print 行做 grep（含 token|secret|password|sso|cookie）：仅 platforms/aws/client.py:340 打印 user_code（展示码）、platforms/grok/register_browser.py:1217 打印 `SSO len={len(sso)}`（长度）、platforms/grok/oauth_device.py:246 打印 device user_code；无任何 AT/RT/SSO/client_secret/密码插值。grok2api 管理面密码只进请求体（platforms/grok/grok2api.py:184-213），不进日志。"
+    },
+    {
+      "area": "列表接口的凭据裁剪（/api/accounts）",
+      "how": "api/accounts.py:180-199：`_LIST_TOKEN_EXTRA_KEYS` 由 `SENSITIVE_EXTRA_KEYS` 派生（新增密文键自动覆盖），重型键 session_token/id_token/cookies/cpa_record 整段 pop，AT 正文换成 has_* 布尔 + at_iat/at_exp；totp_secret 只留 has_totp_secret。详情端点保留全量（设计如此，需鉴权）。"
+    },
+    {
+      "area": "Grok 的 SSO vs AT（token 列镜像）",
+      "how": "core/credential_fields.py:75-84 规定 grok 的 token 列镜像 sso；写侧统一走 `sync_token_column`（services/action_execution.py:269-271）；读侧 probe 只从 extra 取 AT（platforms/grok/plugin.py:340-346），导出用 `token_column_credential(..., 'access_token')` 而不是裸 `account.token`（services/account_export.py:89-98）。未发现把 SSO 当 AT 的路径。"
+    },
+    {
+      "area": "面板状态词表 vs grok remote_state（大小写/词表错配）",
+      "how": "services/panel_status_sync.py:47-75 的 _STATUS_MAP 产出 active/disabled/invalid/error/not_found，只写进 extra.sync_statuses（:159 起），不回灌账号状态；`apply_grok_status_policy(remote_state=...)` 只由 CPA 同步动作喂入（services/action_execution.py:242-245），取值是 access_token_invalidated/unauthorized（services/cliproxyapi_sync.py:387）。两套词表各自闭环，未发现跨表比较。"
+    },
+    {
+      "area": "注册表发现范围与重名",
+      "how": "core/registry.py:17 的 SUPPORTED_PLATFORMS=(chatgpt,grok,aws,kiro) 与 `ls platforms/` 下带 plugin.py 的目录一一对应；`grep -n 'name = \"' platforms/*/plugin.py` 只有 4 个互不相同的 name（chatgpt/grok/aws/kiro），当前无重名注册。platforms/__init__.py 为空文件，pkgutil.iter_modules 正常工作。"
+    },
+    {
+      "area": "Kiro 来源快照字段与导出需求的匹配",
+      "how": "platforms/kiro/plugin.py:49-62 的 `_source_snapshot` 产出 kiro_aws_client_id/client_secret/refresh_token/access_token/sso/region/email；platforms/kiro/credentials.py:338-352 恰好只要求前三个键，`_reuse_aws_account` 从 AWS 行 extra 喂入（plugin.py:383）。新注册（plugin.py:548）与复用两条路径都会写全，无「快照字段名对不上」的漂移。"
+    },
+    {
+      "area": "AWS/Kiro 半成品账号不会被写成失效",
+      "how": "AWS：缺 RT 时 probe 返回 usable=None/indeterminate（platforms/aws/plugin.py:303-311），策略对 indeterminate 直接 return \"\"（:322-327）。Kiro：social 账号缺 IdC 客户端时同样 usable=None/indeterminate（platforms/kiro/plugin.py:565-577），策略 :586-588 早退。网络错误（无 HTTP 码）在 platforms/aws/probe.py:116-121 与 platforms/kiro/probe.py:110-122 都判 indeterminate，不会落 banned/invalid。"
+    }
+  ]
+}

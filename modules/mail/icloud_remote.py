@@ -27,9 +27,27 @@ from typing import Optional
 
 from core.mailboxes.base import BaseMailbox, MailboxAccount
 from core.mailboxes.registry import register_mailbox_provider
+from platforms.icloud.errors import ICloudError, is_recoverable
+from services.icloud.upstream_gate import is_upstream_busy
 
 #: 「使用中」租约的续约最小间隔（秒）—— 与本地渠道同一口径。
 LEASE_RENEW_INTERVAL_SECONDS = 60
+
+#: 等验证码时一次读多少封。
+#:
+#: **不能太小。** 上游 `forEachByRecipientRange` 用 `need = offset + limit`
+#: 截候选（每个文件夹只取末尾 need 封再合并排序），limit 小于「该别名在
+#: 两个文件夹里的信数 + 跨文件夹排序需要」时，信会被截掉。2026-11-14 实测
+#: 同一别名同一时刻：`limit=5`→0 封、`limit=10`→0 封、`limit=15/20/25/30/50`
+#: →2 封（稳定复现，与 days 无关）。所以 5 会**丢信**，这是比慢更严重的错。
+#:
+#: 也不能太大：上游信封预算是 `max(15s, limit × 0.3s)`，`limit=50` 时预算
+#: 正好顶到 15s 悬崖，实测冷读中位 14.4s、峰值 34.5s，超过就降级 Web API
+#: （按收件人过滤不可靠，读成 0 封）。而实测 `limit=20` 冷读 3.4s、
+#: `limit=50` 3.8s —— 耗时主要由 SEARCH 与窗口决定，不是 limit。
+#:
+#: 20 = 实测能稳定读到信的最小档位，同时离 15s 悬崖还有余量。
+OTP_READ_LIMIT = 20
 
 
 class ICloudRemoteMailbox(BaseMailbox):
@@ -60,6 +78,8 @@ class ICloudRemoteMailbox(BaseMailbox):
         # 空串 —— 而空 platform 会让 `claim_alias` 跳过所有 `used` 状态的
         # 别名（保守策略），于是**一个现成号都领不到**、每次回落到新生成。
         self._platform_name = str(platform_name or "").strip().lower()
+        #: 首读收件箱失败过 = 基线不可信，等码时改用时间窗兜底。
+        self._baseline_degraded = False
 
     # ---------------------------------------------------------------- 内部
 
@@ -164,7 +184,9 @@ class ICloudRemoteMailbox(BaseMailbox):
             raise RuntimeError("远程 iCloud 邮箱账号缺少地址信息")
         return account_id_int, address
 
-    def set_account_status(self, account: MailboxAccount, status: str) -> None:
+    def set_account_status(
+        self, account: MailboxAccount, status: str, *, error: BaseException | None = None
+    ) -> None:
         """把注册结果记回号池（与本地渠道同一套生命周期钩子）。"""
         alias_id = (account.extra or {}).get("icloud_alias_id")
         try:
@@ -178,26 +200,69 @@ class ICloudRemoteMailbox(BaseMailbox):
             if normalized == "used":
                 service.mark_alias_used(alias_id_int, platform=self._platform_name)
             elif normalized == "failed":
-                service.release_alias_claim(alias_id_int)
+                # 把原因传下去：上游故障不该记成「这个地址失败」
+                # （见 `release_alias_claim` 的 error 参数）。
+                service.release_alias_claim(alias_id_int, error=error)
             elif normalized == "available":
                 service.set_alias_pool_status(alias_id_int, "available")
         except Exception as exc:  # noqa: BLE001 - 记账失败不该影响注册结果
             self._log(f"[iCloud 远程] 号池记账失败（忽略）: {exc}")
 
-    def _messages(self, account: MailboxAccount, limit: int = 50) -> list:
+    def _messages(self, account: MailboxAccount, limit: int = OTP_READ_LIMIT) -> list:
         account_id, address = self._resolve(account)
         return self._service().fetch_account_messages(
             account_id, limit=limit, recipient=address
         )
 
+    def _messages_detailed(self, account: MailboxAccount, limit: int = OTP_READ_LIMIT):
+        """读一次收件箱，带上「是不是降级了」。
+
+        返回 `(messages, degraded, reason)`。判据只有 `warning`：降级信息由
+        `services.icloud.remote.fetch_remote_messages` 归一后放进 warning
+        （上游 `method != imap` 时它才非空）。**不要**直接拿上游的 `method`
+        判定 —— 老版本服务端/测试双端不返回该字段，那会把正常读取误判成降级。
+        """
+        account_id, address = self._resolve(account)
+        detailed = getattr(self._service(), "fetch_account_messages_detailed", None)
+        if not callable(detailed):
+            return self._messages(account, limit=limit), False, ""
+        messages, _method, warning = detailed(
+            account_id, limit=limit, recipient=address
+        )
+        reason = str(warning or "").strip()
+        return messages, bool(reason), reason
+
     def get_current_ids(self, account: MailboxAccount) -> set:
-        """取当前收件箱里发给该别名的邮件标识集合。"""
+        """取当前收件箱里发给该别名的邮件标识集合。
+
+        读不到时**必须**把 `_baseline_degraded` 置起来：空集会被
+        `wait_for_code` 解读成「收件箱本来就没信」，于是收件箱里原有的历史
+        邮件会被当成本轮新到的信 —— 可能拿旧验证码去填，让失败原因变得
+        完全看不懂。置标记后上层改用时间窗兜底。
+        """
         try:
-            messages = self._messages(account, limit=50)
+            messages, degraded, reason = self._messages_detailed(account)
         except Exception as exc:  # noqa: BLE001 - 首轮探测失败不该打断注册
-            self._log(f"[iCloud 远程] 读取初始邮件失败（忽略）: {exc}")
+            self._baseline_degraded = True
+            self._log(
+                f"[iCloud 远程] 读取初始邮件失败，基线降级：本轮改按发信时间窗"
+                f"判断新邮件（收件箱里已有的信不会被当成本轮的码）: {exc}"
+            )
             return set()
 
+        if degraded:
+            # 降级 = 按收件人过滤不可靠，这一读**可能漏信**。不能把它当成
+            # 「收件箱本来就没信」（那会让历史邮件充当本轮新信），也不能
+            # 打断注册（首读失败历来不致命）。标记基线不可信，让等码改用
+            # 时间窗兜底；同时记一条能看懂的日志。
+            self._baseline_degraded = True
+            self._log(
+                f"[iCloud 远程] 上游降级，本轮收到的 0 封不能当作「没有邮件」；"
+                f"基线标为不可信: {reason}"
+            )
+            return set()
+
+        self._baseline_degraded = False
         ids = set()
         for message in messages:
             message_id = self._message_id(message)
@@ -279,9 +344,32 @@ class ICloudRemoteMailbox(BaseMailbox):
             except Exception as exc:  # noqa: BLE001 - 续约失败不该影响读码
                 self._log(f"[iCloud 远程] 租约续约失败（忽略）: {exc}")
 
+        # 基线不可信（首读收件箱失败）+ 没有发码时间窗 = 无法区分历史邮件与
+        # 本轮新到的信。这时宁可空等到超时，也不要拿旧码去填 —— 那会让
+        # 失败原因完全看不出是服务抖动。
+        baseline_untrusted = bool(getattr(self, "_baseline_degraded", False))
+        if baseline_untrusted and cutoff is None:
+            self._log(
+                "[iCloud 远程] 收件基线不可信且没有发码时间窗，本轮无法可靠判断新邮件；"
+                "保守起见不猜码（避免把历史验证码当本轮结果）"
+            )
+            # 直接放弃：宁可让上层看到「等码超时」，也不要返回一个来路不明的码。
+            raise TimeoutError(
+                "[iCloud 远程] 收件基线不可信（首读失败）且没有发码时间窗，"
+                "无法判断哪些信是本轮的；未猜码，请重试本轮"
+            )
+
         def poll_once() -> Optional[str]:
             _renew_lease()
-            messages = self._messages(account, limit=50)
+            messages, degraded, reason = self._messages_detailed(account)
+            if degraded:
+                # 降级路径按收件人过滤不可靠 —— 这一读的 0 封**不能**当作
+                # 「没有新邮件」。抛可恢复错误让容错循环继续等（错误预算与
+                # 熔断仍会兜住），日志里也能看出是上游降级而不是没收到码。
+                raise ICloudError(
+                    "upstream_error",
+                    f"上游降级，按收件人过滤不可靠: {reason}",
+                )
             for message in messages:
                 message_id = self._message_id(message)
                 if not message_id or message_id in seen:
@@ -308,9 +396,21 @@ class ICloudRemoteMailbox(BaseMailbox):
                     return code
             return None
 
-        # 远程收件每次都要打服务端（它那边再打上游），轮询间隔给大一点。
+        # 远程收件每次都要打服务端（它那边再打上游）。
+        # 分段退避：验证码多在前 20 秒到，后面的空转可以放慢。
         return self._run_polling_wait(
-            timeout=timeout, poll_interval=5, poll_once=poll_once
+            timeout=timeout,
+            poll_interval=5,
+            poll_once=poll_once,
+            # 上游暂时不可达不该判整轮失败（实测 2026-11-13：一次 30s 超时 =
+            # 丢一个号 + 一个邮箱 + 一轮重试，两批任务约 80% 的失败是这条）。
+            is_transient=is_recoverable,
+            # 但也不能无限陪跑：连续 4 次读不到就放弃，把原错误交回上层，
+            # 让「服务挂了」和「没收到码」在日志里能分辨。
+            max_consecutive_errors=4,
+            interval_schedule=((0, 5.0), (20, 8.0), (60, 15.0)),
+            # 熔断打开 = 服务现在不值得试，立刻放弃而不是空等冷却。
+            is_fatal_busy=is_upstream_busy,
         )
 
     @staticmethod

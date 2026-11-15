@@ -1,0 +1,245 @@
+{
+ "lane": "L05-icloud",
+ "head": "fca2eec",
+ "dirty": true,
+ "reviewed_files": [
+  "api/icloud.py",
+  "api/shared_mail.py",
+  "platforms/icloud/__init__.py",
+  "platforms/icloud/constants.py",
+  "platforms/icloud/errors.py",
+  "platforms/icloud/models.py",
+  "platforms/icloud/mailbox.py",
+  "platforms/icloud/web_client.py",
+  "platforms/icloud/web_mail.py",
+  "platforms/icloud/remote_client.py",
+  "platforms/icloud/credentials.py",
+  "platforms/icloud/transport.py",
+  "platforms/icloud/build_info.py",
+  "platforms/icloud/login.py",
+  "platforms/icloud/cookies.py",
+  "platforms/icloud/srp.py",
+  "platforms/icloud/delivery.py",
+  "core/db/icloud_alias_repository.py",
+  "core/db/icloud_account_repository.py",
+  "services/icloud_service.py",
+  "services/icloud/__init__.py",
+  "services/icloud/_locks.py",
+  "services/icloud/_facade.py",
+  "services/icloud/accounts.py",
+  "services/icloud/aliases.py",
+  "services/icloud/messages.py",
+  "services/icloud/remote.py",
+  "services/icloud/upstream_gate.py",
+  "frontend/src/api/icloud.ts",
+  "frontend/src/lib/icloud.ts",
+  "frontend/src/pages/ICloud.tsx (delete/share surfaces)"
+ ],
+ "findings": [
+  {
+   "id": "L05-1",
+   "title": "iCloud 登录落库绕过仓储：JSON 后端下主号写进 SQLite，登录成功后列表里看不到（并把全局后端静默切成 sqlite）",
+   "severity": "P1",
+   "file": "services/icloud/accounts.py",
+   "line": 253,
+   "evidence": "services/icloud/accounts.py:253-282 `import_session` 直接 `with platform_session(\"icloud\") as session:` 做 select/add/commit，不经过 `icloud_account_repository`；而 `icloud_accounts` 在 JSON 白名单里（core/storage/json_table.py:218 `\"icloud_accounts\"`），`get_account`/`list_accounts`（accounts.py:54,117）走仓储 → JSON。core/storage/__init__.py:44 `DEFAULT_BACKEND = BACKEND_JSON`，:69 `return BACKEND_SQLITE if db_exists else DEFAULT_BACKEND`。",
+   "impact": "全新部署（无 .db、未设 STORAGE_BACKEND）走 JSON：完成 Apple 登录后 `import_session` 把账号写进 SQLite，接口返回 200+账号 DTO，但 /api/icloud/accounts 读 JSON 永远看不到该行；再次登录会再插一行。更糟的是这次写会创建 account_manager.db，之后 `sqlite_db_exists()` 变 True，`resolve_backend_name` 返回 sqlite，所有仓储在运行中静默切库，用户此前存在 JSON 里的账号/代理/任务全部“消失”。",
+   "fix_hint": "给 `icloud_account_repository` 加 `upsert_local(email, credentials_cipher, ...)` 并让 import_session 走它（与 remote.py:257 的 add 同型）；禁止对 JSON 白名单表直接开 platform_session。",
+   "class": "data-integrity"
+  },
+  {
+   "id": "L05-2",
+   "title": "resolve_remote_account 显式 account_id 只查 SQLite，JSON 后端下远程账号永远“不存在”",
+   "severity": "P1",
+   "file": "services/icloud/remote.py",
+   "line": 469,
+   "evidence": "services/icloud/remote.py:469-486 `with platform_session(\"icloud\") as session:` → `session.get(ICloudAccountModel, int(raw))` / `select(... remote_account_id == raw)`；JSON 分支在 :488-526，只有 `raw` 为空时才走。",
+   "impact": "JSON 部署下注册任务带 account_id（或远端账号 id）时，`session.get` 读的是空/未建表的 SQLite → 抛 `account_not_found: 远程账号不存在`（或 no such table），而该账号在 JSON 里明明存在。远程渠道在默认后端下不可用。",
+   "fix_hint": "把 :493 的 `_store() is not None` 判定提前到 raw 分支之前，raw 非空时用 `icloud_account_repository.get(int(raw))` 再按 `remote_account_id` 过滤；SQLite 分支保留给测试注入点。",
+   "class": "functional"
+  },
+  {
+   "id": "L05-3",
+   "title": "远端 ALIAS_NOT_FOUND 被映射成 invalid_config(400)：远端已删的别名在本地永远删不掉",
+   "severity": "P1",
+   "file": "platforms/icloud/remote_client.py",
+   "line": 64,
+   "evidence": "platforms/icloud/remote_client.py:63-64 `\"ALIAS_NOT_FOUND\": \"invalid_config\"`；services/icloud/aliases.py:560-572 远端分支 `client.delete_alias(...)` 在 `icloud_alias_repository.delete(alias_id)` 之前，异常直接冒泡 → 本地行保留；api/icloud.py:34 的 `\"alias_not_found\": 404` 对远端行不可达。",
+   "impact": "用户在 iCloud/远端面板删过、或换过 base_url 的别名，本地行每次 DELETE 都返回 400 invalid_config，批量删除把它记进 failed 并保留该行 → 池里永久留一条删不掉的死行（且仍可能被当 available 领走）。错误语义也误导：看起来像配置错误而不是“已不存在”。",
+   "fix_hint": "远端错误表把 ALIAS_NOT_FOUND 映射为 `alias_not_found`；delete_alias 捕获该码视为“上游已删”，继续删本地行（幂等删除）。",
+   "class": "contract"
+  },
+  {
+   "id": "L05-4",
+   "title": "JSON 后端下 mirror_remote 建行不写 share_token，远程同步来的别名没有免登录邮件链接",
+   "severity": "P2",
+   "file": "core/db/icloud_alias_repository.py",
+   "line": 627,
+   "evidence": "core/db/icloud_alias_repository.py:627-636 JSON 分支 insert 的 payload 只有 account_id/address/label/status/provider_id/source/pool_status（无 share_token）；SQLite 分支 :670-676 用 `ICloudAliasModel` 的 default_factory 自动生成（core/db/models_platform.py:134）。对照 `upsert_from_sync` JSON 分支 :803 显式写了 `\"share_token\": new_alias_share_token()`。",
+   "impact": "JSON 部署里所有 `sync_remote_account`/`mirror_remote` 建出的别名 share_token 为 None → `_alias_to_dict` 返回空串，前端“邮件 URL”列整列为 '-'，/m/<token> 无法使用；同一份数据在 SQLite 后端却正常 —— 后端不一致。",
+   "fix_hint": "JSON payload 里补 `\"share_token\": new_alias_share_token()`（与 upsert_from_sync 一致），并给 JSON 存量行加一次回填。",
+   "class": "data-integrity"
+  },
+  {
+   "id": "L05-5",
+   "title": "连续失败 3 次即永久退池：唯一的清零路径是“领取成功”，而 find_candidates 已经不再返回它",
+   "severity": "P2",
+   "file": "core/db/icloud_alias_repository.py",
+   "line": 50,
+   "evidence": "core/db/icloud_alias_repository.py:50-55 `_too_many_failures` 在 find_candidates（:733 JSON / :761-766 SQL）里过滤 >=3 的行；services/icloud/aliases.py:209-215 只在 claim 成功时 `mark_failed(reset=True)`；`set_alias_pool_status`/`_set_pool_status_many`（aliases.py:430-470）只改 pool_status，不碰 consecutive_failures。",
+   "impact": "一个别名因上游抖动/读不到码累计 3 次失败后被静默跳过，之后即使完全正常也永远不会再被领取；面板仍显示“已入池/可领取”，用户无法判断为什么取不到号，也没有任何接口能清零。Apple 每小时只给 5 个新号，误杀成本高。",
+   "fix_hint": "给 `set_alias_pool_status`/入池接口加 `reset_failures`（或提供 POST /aliases/{id}/reset-failures）；出池再入池时清零。",
+   "class": "data-integrity"
+  },
+  {
+   "id": "L05-6",
+   "title": "公开 /m/<token> 每次访问都完整登录 IMAP 并拉 50 封全文，无缓存/限流",
+   "severity": "P2",
+   "file": "services/icloud/messages.py",
+   "line": 167,
+   "evidence": "services/icloud/messages.py:151-168 `fetch_latest_shared_message(..., limit=DEFAULT_MESSAGE_LIMIT)`（_locks.py:16 = 50）→ fetch_account_messages；platforms/icloud/mailbox.py:91-96 每次新建 IMAP 连接并 `_fetch_range(client, first, message_count)` 取 `BODY.PEEK[]` 全文，只用到第一封；api/shared_mail.py:149 无鉴权、无速率限制、无缓存（Cache-Control: no-store）。",
+   "impact": "一次匿名 GET 触发一次 TLS+IMAP 登录 + 最多 50 封全文下载（含附件正文解析）。令牌一旦外泄或被爬虫/转发链刷，单进程后端会被同步阻塞，并可能触发 Apple IMAP 限流/锁号，连带正常注册取码失败。",
+   "fix_hint": "公开页只取最新 1 封（limit=1，或 IMAP 按 UID 倒序取 HEADER+首封）；加短 TTL 缓存（token→(ts,message)）与按 IP/token 的简单限流。",
+   "class": "perf"
+  },
+  {
+   "id": "L05-7",
+   "title": "share_token 是 bearer 凭证，却会进 uvicorn access log；且没有任何轮换/吊销入口",
+   "severity": "P2",
+   "file": "main.py",
+   "line": 625,
+   "evidence": "main.py:625 `uvicorn.run(\"main:app\", host=host, port=port, reload=reload_enabled)` 未关 access log（默认开启）→ 每次 `GET /m/<token>` 的完整路径落日志；api/shared_mail.py:5 明确“链接本身就是权限”，docs/API_REFERENCE.md:379 要求“不得公开或记录完整共享链接”。全仓 grep 无 rotate/revoke share_token 的路由（api/icloud.py 只有 delete alias）。",
+   "impact": "拿到日志（运维、日志聚合、崩溃包）的人可直接读任意别名邮件；token 泄露后除删除整个别名外无法止损，而删除是不可逆的上游删除。",
+   "fix_hint": "`uvicorn.run(..., access_log=False)` 或对 /m/ 路径做日志脱敏；增加 POST /api/icloud/aliases/{id}/share-token/rotate 生成新 token。",
+   "class": "credential-leak"
+  },
+  {
+   "id": "L05-8",
+   "title": "删除主号只删本地别名行，Apple/远端上的 HME 别名继续存活并被静默遗弃",
+   "severity": "P2",
+   "file": "services/icloud/accounts.py",
+   "line": 323,
+   "evidence": "services/icloud/accounts.py:323-331 `delete_account` 只调 `icloud_alias_repository.delete_by_account()` + `icloud_account_repository.delete()`，没有任何 remote 分支/上游停用；对比 delete_alias 会先调 Apple/远端。api/icloud.py:303 也无 remote 参数或提示。",
+   "impact": "删主号后上游别名仍可收信、仍占用 Apple 每主号配额，但本地已无地址/provider_id 记录，无法再停用或删除；用户以为“删干净了”。重新导入同一主号同步回来时，这些别名会以 unpooled 重新出现（或与远端行 foreign 冲突）。",
+   "fix_hint": "删除主号时提供 `remote=true` 选项（逐条停用/删除上游别名，失败可跳过并回报），或至少在响应里返回“仍有 N 个别名留在上游”的告警。",
+   "class": "data-integrity"
+  },
+  {
+   "id": "L05-9",
+   "title": "删除接口默认 remote=true 且无 dry-run/无条数上限：一次请求可不可逆删光全部上游别名",
+   "severity": "P2",
+   "file": "api/icloud.py",
+   "line": 138,
+   "evidence": "api/icloud.py:136-138 `class BatchDeleteAliasRequest: ids: list[int]; remote: bool = True`；:431 `def delete_alias(alias_id: int, remote: bool = True)`；services/icloud/aliases.py:545,619 同样默认 True；前端 frontend/src/api/icloud.ts:292,310-314 传默认 true，`handleBatchDelete` 不校验 ids 数量。",
+   "impact": "任何拿到面板 token 的脚本（或误点/重放）用 ids=全部 + 默认 remote=true，即逐个调用 Apple `v1/hme/delete`，地址永久销毁且无回收站；没有 dry-run 预览、没有“只停用”的默认路径。",
+   "fix_hint": "批量删除默认 remote=false（只移除本地池）或要求显式 `confirm_count`；提供 dry-run 返回将影响的地址列表；ids 上限（如 200）。",
+   "class": "functional"
+  },
+  {
+   "id": "L05-10",
+   "title": "上游不可用/凭据解不开时，本地别名行删不掉（delete 先上游后本地，且 UI 固定 remote=true）",
+   "severity": "P2",
+   "file": "services/icloud/aliases.py",
+   "line": 566,
+   "evidence": "services/icloud/aliases.py:560-572：remote 分支先 `load_credentials(account)`（accounts.py:32-43 解密失败抛 credentials_unreadable）或 `remote_client(...)`（remote.py:127-152 秘钥解不开抛 invalid_config），异常在 :572 `icloud_alias_repository.delete(alias_id)` 之前冒泡 → 本地行保留；frontend/src/api/icloud.ts:292 `deleteICloudAlias(id, remote = true)` 无 UI 开关。",
+   "impact": "加密密钥变更、远端服务下线、Apple 会话过期后，用户无法从面板清理任何别名（单删 409/400，批量删 failed 且保留行），池页面永久脏数据；只能改库或传 `?remote=false`（UI 不暴露）。",
+   "fix_hint": "delete_alias 捕获上游失败时提供“仅删本地”选项（或 `force_local` 参数），前端在失败提示里给“仅从本地移除”按钮。",
+   "class": "functional"
+  },
+  {
+   "id": "L05-11",
+   "title": "HME 列表任一条目缺地址就整次同步失败，并把主号标成 error",
+   "severity": "P2",
+   "file": "platforms/icloud/web_client.py",
+   "line": 416,
+   "evidence": "platforms/icloud/web_client.py:409-419 循环里 `if not address: raise invalid_response(\"iCloud HME 列表包含无效邮箱地址\")`（:416）；services/icloud/aliases.py:525-527 捕获后 `_record_sync_error(account_id, str(exc))` → accounts.py:672-676 把 status 置 error。",
+   "impact": "Apple 返回的几百条里只要有一条 hme 字段为空/形态变化（历史遗留、已销毁条目），整次 sync 全失败：新别名一条都进不了池，主号在面板上变红，且每次重试同样失败。",
+   "fix_hint": "跳过无效条目并累计 `skipped` 计数（返回给调用方），只有“整个列表缺失/类型错误”才抛 invalid_response。",
+   "class": "functional"
+  },
+  {
+   "id": "L05-12",
+   "title": "IMAP 只取最后 N 封再按收件人过滤：主号收件箱一忙，别名的新验证码就读不到",
+   "severity": "P2",
+   "file": "platforms/icloud/mailbox.py",
+   "line": 88,
+   "evidence": "platforms/icloud/mailbox.py:88 `limit = min(max(int(limit or ...),1), MAX_SYNC_LIMIT)`（200），:95-96 只 fetch `message_count-limit+1 .. message_count`，:110-118 下载后才按 recipient 过滤；messages.py:151-167 分享页/别名读信默认 limit=50。",
+   "impact": "主号 INBOX 在验证码到达后又进了 >limit 封其他邮件（转发/垃圾邮件很常见），该别名的最新邮件落在窗口外 → 返回 0 封 → wait_for_code 超时 → release_alias_claim 记一次失败，累计 3 次触发 L05-5 的永久退池。",
+   "fix_hint": "用 IMAP SEARCH（`TO`/`Delivered-To`/`X-Original-To`）在服务端过滤收件人，或按 UID 倒序逐批回扫直到命中/到达时间窗下界。",
+   "class": "functional"
+  },
+  {
+   "id": "L05-13",
+   "title": "generate_remote_alias 无生产调用方，却保留“在远端创建别名”的能力，与既定策略相反",
+   "severity": "P3",
+   "file": "services/icloud/remote.py",
+   "line": 651,
+   "evidence": "grep -rn generate_remote_alias（排除 .worktrees/__pycache__）只命中 services/icloud/remote.py:651 定义、services/icloud/__init__.py:73 与 services/icloud_service.py:94 的导出；唯一相关测试 tests/test_icloud_remote_fixes.py:135 断言这条路“必须堵死”。services/icloud/aliases.py:492-497 明确远程账号不允许生成。",
+   "impact": "死代码 + 危险面：任何人日后从门面调到它就会在远端创建别名（用户明确禁止），且它依赖 `client.create_alias`（remote_client 中仍保留）。",
+   "fix_hint": "删除 generate_remote_alias 与 client.create_alias，或改为直接抛 invalid_config 的兼容桩。",
+   "class": "dead-code"
+  },
+  {
+   "id": "L05-14",
+   "title": "new_alias_share_token 两份实现，且注释把“唯一实现”指错方向",
+   "severity": "P3",
+   "file": "core/db/icloud_alias_repository.py",
+   "line": 42,
+   "evidence": "core/db/icloud_alias_repository.py:42-47 定义 `new_alias_share_token()`（secrets.token_urlsafe(16)），docstring 写“与 services/icloud/aliases.py 里的同名函数保持一致 —— 那边是唯一实现”；实际 services/icloud/aliases.py 没有定义，只从 core.db 导入（aliases.py:21），另一份实现在 core/db/base.py:35-37。",
+   "impact": "熵源目前一致（128-bit），无安全差异；但注释误导后续维护者，改一处熵/长度时另一处不会跟着变（分享令牌强度是安全边界）。",
+   "fix_hint": "删掉仓储里的副本，统一 import core.db.base.new_alias_share_token；修正 docstring。",
+   "class": "doc-drift"
+  }
+ ],
+ "checked_and_clean": [
+  {
+   "item": "claim_alias 单进程并发（两个 worker 领到同一别名）",
+   "how": "读 services/icloud/aliases.py:146-208：候选查询 + set_fields(in_use) 全程在 `_facade._account_lock(account_id)`（_locks.py:33-41 RLock）内；tests/test_icloud_claim_holds_the_lock.py 用记录锁钉住该不变量；docs/MAINTENANCE.md:147-178 明确“必须单进程”，main.py:625 uvicorn.run 未开 workers。结论：单进程内无重复领取；多进程属已文档化部署约束。",
+   "residual": "claim 仍是读-改-写，未用仓储已有的 `update_where` 条件更新原语；若将来横向扩进程会静默重复发号（建议改成 `update_where(match={id,pool_status}, values={pool_status:in_use})` 且 hit==0 重试）。"
+  },
+  {
+   "item": "公开 /m/ 页能否读到“主号已删除”的别名邮件",
+   "how": "services/icloud/accounts.py:323-331 delete_account 先 delete_by_account 级联删别名 → 令牌查不到 → shared_mail.py:154-155 返回 404；若仅主号行缺失而别名行残留，messages.py:54 get_account 抛 account_not_found，shared_mail.py:156-157 只回 502 通用文案，不读信、不回显邮箱。结论：读不到，也不泄露主号地址。",
+   "residual": "停用（enabled=False）的主号仍可被 /m/ 读信 —— fetch_account_messages 不校验 enabled；按“分享链接是独立授权”的语义可接受，已在报告中记录。"
+  },
+  {
+   "item": "share_token 熵与枚举面",
+   "how": "core/db/base.py:35-37 与 icloud_alias_repository.py:42-47 均为 `secrets.token_urlsafe(16)`（128 bit）；repository.get_by_share_token 空串直接返回 None（:394-396），SQLite 用等值查询、无前缀/模糊匹配。结论：枚举不可行，无需常量时间比较。",
+   "residual": "share_token 列只有 index 无 unique（models_platform.py:134），重复 token 时 get_by_share_token 取任意一行；随机 128-bit 下不构成现实风险。"
+  },
+  {
+   "item": "读取面凭据脱敏",
+   "how": "services/icloud/accounts.py:125-154 `_account_to_dict` 只回 id/email/display_name/region/status/enabled/source/alias_count/sync_error/last_sync_at/created_at/credential_state/quota；remote.py:308-334 `_account_public_dict` 只回 `has_remote_api_key: bool`；两者都不含 credentials_cipher / remote_password_cipher / imap_password / API key 明文。前端 ICloudCredentialState（frontend/src/api/icloud.ts:5-17）也只有布尔位。结论：无凭据回显。",
+   "residual": "share_token 会随 /api/icloud/aliases 列表返回（设计如此，见 L05-7 的日志面）。"
+  },
+  {
+   "item": "解密失败行为",
+   "how": "accounts.py:32-43 → ICloudError(credentials_unreadable) → api/icloud.py:43 映射 409；remote.py:127-152 → invalid_config 且文案可行动（“请重新接入该账号”）。结论：不吞异常、不 500、不打印密文。"
+  },
+  {
+   "item": "重试/退避与超时",
+   "how": "web_client.py:51 `_RETRIABLE_HME_ACTIONS={v2/hme/list, v1/hme/generate}`，:263-274 只对这两类重试一次并 invalidate 构建号；reserve/delete 不重试。mailbox.py:141-156 IMAP 连接/登录 30s（constants.py:32 DEFAULT_TIMEOUT_SECONDS）；remote_client 分层 5s 建连/50s 读（services/icloud/remote.py:160-162 注释）。结论：无无限重试、无无超时调用。",
+   "residual": "IMAP 无重试（单次 30s），与“读信幂等”相比偏保守但可接受。"
+  },
+  {
+   "item": "仓储过滤是否会静默放宽（缺 account/owner 谓词）",
+   "how": "find_candidates（:718-727）含 eq(account_id)；find_available（:127-152）SQL 分支显式 `.where(account_id==)`；list_ids_for_pool（:427-440）用 any_of(account_id...) 且 core/storage/query.py:56-57 的 `any()` 对空 clause 返回 False（SQL 侧 or_() 空亦为 false）。结论：没有缺 owner 谓词的查询。",
+   "residual": "list_ids_for_pool 在 SQL 分支依赖 `clauses[2]` 的位置索引，若将来调整 clauses 顺序会错位（当前 only_available=False 时不访问，安全）。"
+  },
+  {
+   "item": "GET /api/icloud/aliases 无分页",
+   "how": "api/icloud.py 列表接口一次性返回全部别名（前端 ICloud.tsx 注释记录 1941 条仍可用，客户端筛选/分页）。结论：当前量级不构成缺陷，仅记录。",
+   "residual": "行数继续增长（>1 万）时单响应体积与前端渲染会变慢，建议服务端 limit/offset + 过滤参数。"
+  },
+  {
+   "item": "租约续约只在等码轮询里",
+   "how": "modules/mail/icloud_local.py:314-335 / icloud_remote.py:343 仅在 wait_for_code 轮询里调 renew_alias_claim；repository.release_stale 120 分钟阈值（:257-310）。结论：正常流程（等码 ≤ 数分钟）不会误回收。",
+   "residual": "若某平台在取号后 >2h 不进入等码（长浏览器流程），租约会过期并被另一任务领走同一别名；建议把续约挂到任务心跳而不是仅等码循环。"
+  },
+  {
+   "item": "错误码到 HTTP 的映射完整性",
+   "how": "api/icloud.py:32-56 覆盖 account_not_found/alias_not_found/account_disabled/invalid_config/session_expired/credentials_unreadable/permission_denied/provider_rate_limited(429)/upstream_rejected(422)/upstream_error(502)/upstream_unavailable(503)，未列出的落 502；shared_mail.py 单独处理 alias_not_found→404、其它→502。结论：无 500 泄漏栈的路径（除未捕获的非 ICloudError）。",
+   "residual": "远端 ALIAS_NOT_FOUND 被上游映射成 invalid_config（见 L05-3），使 404 分支对远端不可达。"
+  }
+ ]
+}

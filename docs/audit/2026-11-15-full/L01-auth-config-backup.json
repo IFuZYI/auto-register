@@ -1,0 +1,222 @@
+{
+  "lane": "L01-auth-config-backup",
+  "head": "fca2eec",
+  "dirty": true,
+  "reviewed_files": [
+    "main.py",
+    "api/auth.py",
+    "api/config.py",
+    "api/backup.py",
+    "api/shared_mail.py",
+    "core/net_utils.py",
+    "core/config_store.py",
+    "core/config_schema.py",
+    "services/data_bundle.py",
+    "api/__init__.py",
+    "frontend/src/lib/utils.ts",
+    "frontend/src/lib/secretConfig.ts",
+    "frontend/src/components/settings/DataBackupPanel.tsx",
+    "frontend/src/pages/Login.tsx",
+    "services/external_sync.py",
+    "api/contribution.py",
+    "docs/DEPLOYMENT.md"
+  ],
+  "findings": [
+    {
+      "id": "L01-1",
+      "title": "Auth middleware skips the whole /api/auth/ prefix: every route under it is unauthenticated by construction, and POST /api/auth/disable mutates config with no credentials",
+      "severity": "P2",
+      "file": "main.py",
+      "line": 224,
+      "evidence": "main.py:224 `if path.startswith(\"/api/auth/\") or not path.startswith(\"/api/\"): return await call_next(request)` is a PREFIX skip, not an allowlist of the 4 public routes (status/login/verify-totp/setup). Probe with TestClient against the real app (no password set): `remote POST /api/auth/disable: 200 body={\"ok\":true,\"revoked\":true}` — i.e. an unauthenticated caller wrote auth_password_hash=\"\", cleared auth_totp_secret and rotated auth_jwt_secret. Same run: `remote GET /api/auth/status: 200 body={\"has_password\":false,\"has_totp\":false}` while every other /api path returns 503. Command: `.venv/bin/python /root/.hermes/cache/scratch/l01_probe.py`.",
+      "impact": "The middleware gate does not apply to any /api/auth/* route; each such handler must remember its own guard. disable() only guards itself when a password already exists, so an unauthenticated caller can mutate auth state (and any future /api/auth/* route is born unauthenticated). status() also discloses has_password/has_totp to remote clients during the no-password 503 lockdown.",
+      "fix_hint": "Replace the prefix skip with an exact allowlist frozenset of public paths ({\"/api/auth/status\",\"/api/auth/login\",\"/api/auth/verify-totp\",\"/api/auth/setup\"}) and require the token for everything else under /api/auth/; make disable() always require a token or an explicit loopback+no-password precondition.",
+      "class": "functional"
+    },
+    {
+      "id": "L01-2",
+      "title": "Auth middleware re-reads the config store (2.7 ms blocking SQLite session) on every request, and verify_token does it a second time",
+      "severity": "P2",
+      "file": "main.py",
+      "line": 227,
+      "evidence": "main.py:227 `if not _cs.get(\"auth_password_hash\", \"\"):` runs per request; api/auth.py:36-45 `_jwt_secret()` -> `_cfg().get(\"auth_jwt_secret\")` runs again inside verify_token. core/config_store.py:287-288 `def get(): env_values = _runtime_env_values()` re-reads/parses .env on every call. Measured on this host: `config_store.get x300: 788.1 ms total, 2.627 ms each`; breakdown `_runtime_env_values: 0.364 ms each`, `bare sqlite session get: 2.657 ms each`. Both calls are synchronous inside an async middleware on a single-worker uvicorn.",
+      "impact": "~5 ms of blocking I/O added to every authenticated API call, on the event loop, so it serialises concurrent requests (SSE task-log streams, polling dashboards). With a .env file present the per-call cost is higher still.",
+      "fix_hint": "Cache the auth material in memory with an explicit invalidation hook on config writes (config_store.set/set_many), or at minimum hoist the password-hash check into a cached value refreshed on write; drop the .env re-read from the hot path.",
+      "class": "perf"
+    },
+    {
+      "id": "L01-3",
+      "title": "Backup import: manifest entry count is unbounded and every member is kept in memory — a 7 KB ZIP burns 4.3 s of CPU, and total uncompressed size has no cap",
+      "severity": "P2",
+      "file": "services/data_bundle.py",
+      "line": 428,
+      "evidence": "services/data_bundle.py:428-455 loops over `manifest.get(\"databases\")` and calls `zf.read(name)` + sha256 per entry with no dedupe and no cap on list length (MAX_MEMBERS at :422 only counts ZIP members); :455 keeps every payload in `verified[name] = {\"bytes\": data}`. Probe: same one-page SQLite member listed N times in the manifest -> `manifest_entries=1 verify=0.2 ms`, `500 -> 99.8 ms`, `5000 -> 761.8 ms`, `20000 -> 4318.7 ms` from a 7,983-byte ZIP. MAX_MANIFEST_BYTES is 4 MB, so ~10M entries are accepted. Command: `.venv/bin/python - <<EOF` building the zip and calling `data_bundle._verify_members`.",
+      "impact": "An authenticated (or no-password loopback / proxied) caller can pin the single worker's CPU for minutes with a few-KB upload, and a bundle with 2000 members of <=512 MB declared size (MAX_DB_BYTES) is held entirely in RAM at once — the size caps are per-member, not aggregate.",
+      "fix_hint": "Dedupe names before reading (`seen` set), cap len(manifest[\"databases\"]) at MAX_MEMBERS, track a running total of accepted bytes against a bundle-wide limit, and stream each member to the staging file instead of holding `bytes` in a dict.",
+      "class": "functional"
+    },
+    {
+      "id": "L01-4",
+      "title": "Imported credential key is never integrity-checked: manifest carries no sha256 for it, and it is applied even when the manifest does not declare it",
+      "severity": "P2",
+      "file": "services/data_bundle.py",
+      "line": 649,
+      "evidence": "services/data_bundle.py:315 `\"includes\": [arc for _, arc in others]` — a bare name list, no hashes, while databases get sha256 at :301. Import path :649 `if key_member in zf.namelist():` reads and applies the key regardless of `includes`, validating only size (:657) and shape (:667 `_decode_key_or_reject`). Probe export: `members: ['account_manager.db','platforms/icloud.db','platforms/outlook.db','secrets/credential_key','manifest.json']` and manifest `includes` is names only; re-import returned `{\"ok\":true,...,\"key_restored\":true}`.",
+      "impact": "A truncated/corrupted-but-32-byte key silently replaces the active key; every v1: credential then fails to decrypt (CredentialKeyError) and the old key is gone. An extra undeclared secrets/credential_key member in the ZIP is honoured even though nothing in the manifest vouches for it.",
+      "fix_hint": "Add `{\"name\":\"secrets/credential_key\",\"sha256\":...}` to the manifest (and to the other includes), require it before applying the key, and reject a key member that is present in the ZIP but absent from the manifest.",
+      "class": "data-integrity"
+    },
+    {
+      "id": "L01-5",
+      "title": "Import rollback restores the DB file but leaves the -wal/-shm created by the failed init_db(), so the stale WAL can be replayed onto the restored database",
+      "severity": "P2",
+      "file": "services/data_bundle.py",
+      "line": 557,
+      "evidence": "Forward path deliberately deletes sidecars before replacing (services/data_bundle.py:687-693, comment: '换库时若不清，SQLite 打开新文件会把旧 WAL 帧重放上去 —— 轻则导入前的数据串回来，重则库损坏'). `_restore_one` at :551-563 does `shutil.move(str(backup_file), str(target))` with no sidecar cleanup, and the rollback path is entered for exceptions raised inside init_db() (:586 runs after the new DBs are in place), i.e. after SQLite has opened the imported DB in WAL mode and possibly written -wal frames.",
+      "impact": "When an import fails after init_db() touched the new DB, the rollback leaves a -wal belonging to the imported DB next to the restored old DB; the subsequent init_db() (:583-586) can replay those frames onto the old file — resurrecting imported rows or corrupting the database the rollback was supposed to protect.",
+      "fix_hint": "In `_restore_one`, unlink `target.name + \"-wal\"` / `\"-shm\"` before moving the backup into place (same loop as :687), and dispose engines before touching the target.",
+      "class": "data-integrity"
+    },
+    {
+      "id": "L01-6",
+      "title": "A stored secret can never be cleared from the panel: the client deletes empty secret fields and the server treats \"\" as 'no change'; only null clears, and the client never sends null",
+      "severity": "P2",
+      "file": "api/config.py",
+      "line": 147,
+      "evidence": "api/config.py:143-148 drops any secret key whose submitted value is empty unless the raw body contained an explicit None; frontend/src/lib/secretConfig.ts:54 `if (key in payload && !String(payload[key] ?? '').trim()) delete payload[key]` removes exactly those keys before submit. Probe against the real app: `PUT {\"yescaptcha_key\":\"\"} -> {'ok': True, 'updated': []} stored: 'SECRET-A'`; `PUT {\"yescaptcha_key\":null} -> updated ['yescaptcha_key'] stored: ''`. The null path is unreachable from the UI (no component ever sends null for a secret).",
+      "impact": "Users cannot remove an API key / password from settings — the field silently keeps the old value while the UI shows an empty box and reports success. Stale credentials keep being used by tasks and stay in the config store and backups.",
+      "fix_hint": "Give the UI an explicit 'clear' action that submits null (or a dedicated DELETE /api/config/{key}), and document that empty means unchanged; add a test that the clear path reaches the store.",
+      "class": "contract"
+    },
+    {
+      "id": "L01-7",
+      "title": "GET /api/config fabricates a third-party default for contribution_server_url that the upload path does not use, so the UI shows a configured server while tasks report '未配置'",
+      "severity": "P2",
+      "file": "api/config.py",
+      "line": 83,
+      "evidence": "api/config.py:82-83 injects `http://new.xem8k5.top:7317/` into the GET response when the key is empty (and :86-87 injects `http://127.0.0.1:5000` for custom_contribution_url). The code that actually uploads reads the store directly and treats empty as an error: services/external_sync.py:243-247 `contribution_url = config_store.get(\"contribution_server_url\",\"\") ... if not contribution_url: msg = \"Contribution 服务器地址未配置\"`. api/contribution.py:48-51 instead falls back to the same hardcoded constant, so the three paths disagree.",
+      "impact": "Wrong result in a common path: the settings page shows a contribution server (and marks it configured), the contribution/redeem endpoints work against it, but account sync fails with '未配置'. Any subsequent Save persists the third-party URL the user never typed, silently pointing credential uploads at new.xem8k5.top.",
+      "fix_hint": "Pick one source of truth: either persist the default on first boot (config_store.set) and have every reader use config_store.get, or return \"\" from GET and let the UI show a placeholder; drop the per-endpoint fallback constants.",
+      "class": "contract"
+    },
+    {
+      "id": "L01-8",
+      "title": "client_ip() trusts the leftmost X-Forwarded-For entry, which the client controls behind nginx's default $proxy_add_x_forwarded_for — login backoff becomes bypassable",
+      "severity": "P2",
+      "file": "core/net_utils.py",
+      "line": 56,
+      "evidence": "core/net_utils.py:54-59: when APP_TRUST_PROXY=1, `for part in forwarded.split(\",\"): candidate = part.strip(); if candidate: return candidate` returns the FIRST segment. nginx's documented/default `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for` appends `$remote_addr` to whatever the client sent, so segment 0 is attacker-supplied. api/auth.py:237 keys `_login_failures[str(client)]` on this value and _login_retry_after() enforces the 5-attempts backoff.",
+      "impact": "With the documented APP_TRUST_PROXY=1 deployment, an attacker rotates the X-Forwarded-For header per request and gets a fresh failure counter each time — the per-IP password-guessing backoff (the only brute-force control on /api/auth/login) does not hold.",
+      "fix_hint": "Take the rightmost hop that is not in the trusted-proxy set (walk from the end, skipping trusted proxies), or ignore XFF for rate limiting and rely on the client address uvicorn's ProxyHeadersMiddleware already rewrote; make the trusted hop count configurable.",
+      "class": "functional"
+    },
+    {
+      "id": "L01-9",
+      "title": "Loopback trust is transport-only: behind a same-host reverse proxy (the documented deployment) every internet request is treated as local, voiding the no-password 503 lockdown and the first-run setup guard",
+      "severity": "P1",
+      "file": "core/net_utils.py",
+      "line": 41,
+      "evidence": "core/net_utils.py:37-45 decides `is_loopback_client` purely from `request.client.host in {127.0.0.1,::1,localhost}`; the docstring at :11-12 claims this is still correct behind a proxy ('反向代理在同一个 host 上连进来，源地址本来就是 127.0.0.1，判定依然成立'), and docs/DEPLOYMENT.md:29 recommends exactly that setup ('127.0.0.1:8000 只绑本机交给反代'). Probe against the real app with `TestClient(main.app, client=(\"127.0.0.1\", 4444))` and no password set: `loopback GET /api/config: 200` (full config) while `remote GET /api/config: 503`; `loopback POST /api/auth/setup: 200` returned an access_token. api/auth.py:355 uses the same predicate to allow first-run password setting.",
+      "impact": "Any same-host forwarder that does not inject X-Forwarded-For (minimal proxies, socat/stunnel, some tunnel clients, or a deployment started with --no-proxy-headers) makes every internet client 'local': the panel is fully readable/writable with no password, and an attacker can call /api/auth/setup first and claim the panel (then read every credential and export the backup with secrets/credential_key). uvicorn's default proxy-headers only mitigate this when the proxy actually sends XFF.",
+      "fix_hint": "Do not treat loopback as an authorization principal when a reverse proxy may front the app: gate the no-password bypass behind an explicit env flag (e.g. APP_TRUST_LOOPBACK=1, default off when HOST!=127.0.0.1), require a one-time setup token printed to the server console for first-run setup, and correct the net_utils docstring.",
+      "class": "functional"
+    },
+    {
+      "id": "L01-10",
+      "title": "Password verification costs ~1.5 s of CPU per attempt while the comment promises 'tens of milliseconds'; /api/auth/login is unauthenticated and the only throttle is the spoofable per-IP counter",
+      "severity": "P2",
+      "file": "api/auth.py",
+      "line": 115,
+      "evidence": "api/auth.py:113-115 comment: '迭代次数按 2023 年 OWASP 建议取 600k … 几十毫秒的代价'. Measured: `pbkdf2 hash cost: 1505 ms` on this host (`.venv/bin/python` calling `api.auth.hash_password(\"pw12345678\")`). The login route is under the /api/auth/ skip (L01-1) and its only guard is _login_failures keyed by client_ip (L01-8).",
+      "impact": "A handful of concurrent wrong-password requests saturate the single uvicorn worker's threadpool (~1.5 CPU-s each, no global concurrency cap), and with APP_TRUST_PROXY=1 the per-IP counter is bypassable, so an unauthenticated attacker can keep the panel unresponsive. Legitimate logins also take 1.5 s.",
+      "fix_hint": "Measure the KDF on the target hardware and lower the iteration count to the documented tens-of-ms budget (or make it configurable), cap concurrent verify calls with a semaphore, and enforce a global (not per-IP) login attempt budget.",
+      "class": "perf"
+    },
+    {
+      "id": "L01-11",
+      "title": "/api/backup/info (and the manifest inside every export) discloses absolute filesystem paths",
+      "severity": "P3",
+      "file": "services/data_bundle.py",
+      "line": 351,
+      "evidence": "services/data_bundle.py:351 `\"source\": str(source)` per database and :313 `\"data_dir\": str(DATA_DIR)` in the manifest. Probe: `GET /api/backup/info -> {\"data_dir\": \"/root/.hermes/cache/scratch/l01probe/data\", \"databases\": [{\"name\": \"account_manager.db\", \"source\": \".../probe.db\", ...}]}`.",
+      "impact": "Authenticated users (and anyone who obtains an exported ZIP) learn the deployment's absolute paths and DATA_DIR layout, which helps targeted follow-ups; not exploitable on its own.",
+      "fix_hint": "Return only the bundle-relative name and size from /api/backup/info; keep data_dir out of the manifest or record only a basename.",
+      "class": "credential-leak"
+    },
+    {
+      "id": "L01-12",
+      "title": "Unauthenticated share page: no Referrer-Policy/nosniff, iframe uses sandbox=allow-same-origin, and 502 echoes the upstream error text",
+      "severity": "P3",
+      "file": "api/shared_mail.py",
+      "line": 68,
+      "evidence": "api/shared_mail.py:68 headers are only `Cache-Control: no-store` + `X-Robots-Tag`; :84 `sandbox=\"allow-same-origin\"`; :157 `_error_page(\"暂时读不到邮件\", str(error), status_code=502)` echoes ICloudError text (HTML-escaped at :144). Probe: page renders, `X-Content-Type-Options`/`Referrer-Policy`/`Content-Security-Policy` absent from the response.",
+      "impact": "The share token is a bearer credential in the URL: without Referrer-Policy the full URL can leak to same-origin links, and allow-same-origin gives the (script-less) email document the panel's origin — a single sandbox mistake later turns into stored XSS on the panel origin. Upstream error strings are shown to unauthenticated visitors.",
+      "fix_hint": "Add `Referrer-Policy: no-referrer`, `X-Content-Type-Options: nosniff` and a page CSP (`default-src 'none'; style-src 'unsafe-inline'; frame-src 'self'`); use `sandbox=\"\"` plus postMessage for height; return a generic message for non-alias_not_found errors.",
+      "class": "functional"
+    },
+    {
+      "id": "L01-13",
+      "title": "Export builds the entire ZIP in memory and returns a second copy (BytesIO + getvalue), so peak RAM is ~2x the archive",
+      "severity": "P3",
+      "file": "services/data_bundle.py",
+      "line": 324,
+      "evidence": "services/data_bundle.py:324 `return buffer.getvalue(), filename` after writing every DB and the key into an in-memory `io.BytesIO`; api/backup.py:50-54 then wraps that bytes object in a Response. A 1 GB database therefore needs the snapshot + the ZIP + the returned copy resident at once.",
+      "impact": "Large installations can OOM the single worker during export (the same failure mode the import path guards against with MAX_BUNDLE_BYTES).",
+      "fix_hint": "Write the archive to a temp file under DATA_DIR and return a FileResponse (or stream it), deleting the temp file in a background task.",
+      "class": "perf"
+    },
+    {
+      "id": "L01-14",
+      "title": "_pending_2fa_attempts is never pruned when a temp token expires — unbounded dict growth",
+      "severity": "P3",
+      "file": "api/auth.py",
+      "line": 438,
+      "evidence": "api/auth.py:438 `_pending_2fa_attempts[body.temp_token] = attempts`; the only cleanup is `pop` on successful verification or on the 5th failure, and `_prune_pending_2fa()` (called from login/verify) only touches `_pending_2fa`. Expired temp tokens (5-minute TTL) therefore leave their attempt entry behind forever.",
+      "impact": "Anyone who knows the panel password but not the TOTP secret can mint temp tokens indefinitely (one login + one wrong code each) and grow the dict without bound — a slow memory leak on a long-running single-process panel.",
+      "fix_hint": "Prune `_pending_2fa_attempts` in the same sweep as `_pending_2fa` (delete keys whose token is no longer in `_pending_2fa`), or store the counter inside the `_pending_2fa` entry.",
+      "class": "functional"
+    }
+  ],
+  "checked_and_clean": [
+    {
+      "claim": "GET /api/config never returns secret plaintext and never returns auth internals (password hash / JWT secret / TOTP secret).",
+      "how_verified": "Probe: PUT yescaptcha_key=SECRET-A then GET -> `yescaptcha_key=''`, `yescaptcha_key_set=True`, 142 keys returned, `auth_password_hash in body: False`, `auth_jwt_secret: False`; api/config.py:97-103 filters to CONFIG_KEYS and blanks SECRET_CONFIG_KEYS."
+    },
+    {
+      "claim": "Null-vs-empty write semantics on PUT /api/config behave as documented (empty string = keep, explicit null = clear) and unknown keys are reported, not silently dropped.",
+      "how_verified": "Probe: `PUT {\"yescaptcha_key\":\"\"} -> {'ok': True, 'updated': []} stored: 'SECRET-A'`; `PUT {\"yescaptcha_key\":null} -> updated ['yescaptcha_key'] stored: ''`; `PUT {bogus_key:1, yescaptcha_key_set:true} -> {'ok':True,'updated':[],'ignored':['bogus_key','yescaptcha_key_set']}`."
+    },
+    {
+      "claim": "JWT verification is not vulnerable to alg=none / algorithm-confusion and forged signatures are rejected.",
+      "how_verified": "Code read of api/auth.py:84-111 (HMAC always computed over header.payload with the server secret, header.alg never consulted) plus probe: forged third segment -> `forged sig rejected: HTTPException`, `{\"alg\":\"none\"}` header -> `alg=none rejected: HTTPException`, real token -> verifies."
+    },
+    {
+      "claim": "ZIP-slip is blocked for both database and JSON members.",
+      "how_verified": "Probe of services/data_bundle.py:409-414: `'../etc/passwd'`, `'/abs/x.db'`, `'a/../../b.db'` all raise BundleError; `platforms/x.db` accepted; JSON members use `Path(arc).name` (:709-712)."
+    },
+    {
+      "claim": "Backup export -> import round-trip preserves all databases and the credential key.",
+      "how_verified": "Probe: export produced members [account_manager.db, platforms/icloud.db, platforms/outlook.db, secrets/credential_key, manifest.json]; POST /api/backup/import of that exact body returned `{\"ok\":true,\"imported\":[3 dbs],\"key_restored\":true,\"row_counts\":{...}}`."
+    },
+    {
+      "claim": "Import body size is bounded and chunked uploads are refused (no unbounded request.body()).",
+      "how_verified": "api/backup.py:70-95 pre-checks Content-Length against MAX_BUNDLE_BYTES and re-checks len(body); probe with a generator body and no Content-Length -> `411 {\"detail\":\"缺少 Content-Length …\"}`."
+    },
+    {
+      "claim": "401 vs 503 branches and the header hygiene the frontend relies on are correct.",
+      "how_verified": "Probe: no token -> `401 hdr_panel=1`; no password + non-loopback -> `503 {\"code\":\"password_not_set\"}`; frontend/src/lib/utils.ts:28-33 only redirects to /login on 401+header, so upstream 401s are not treated as logout."
+    },
+    {
+      "claim": "Every config key in core/config_schema.py is referenced by live code, and no live code reads a config key that is missing from the schema (no write-but-never-read / read-but-unwritable drift).",
+      "how_verified": "Scan of 260 live .py files (excluding tests/reference/.venv) for `config_store|_cfg()|cfg|store.get(\"key\")` compared against CONFIG_KEYS|INTERNAL_KEYS: `READ-BUT-NOT-IN-SCHEMA (live):` empty, `SCHEMA KEYS NEVER MENTIONED IN LIVE PY: 0`."
+    },
+    {
+      "claim": "The unauthenticated /m/{share_token} page escapes every interpolation (subject, sender, address, body) and does not leak data for unknown tokens.",
+      "how_verified": "Code read of api/shared_mail.py:58-146 (html.escape everywhere, srcdoc escaped with quote=True) and services/icloud/messages.py:151-168 (token lookup happens before any upstream call; unknown token -> ICloudError alias_not_found -> 404 '链接无效', no account info)."
+    },
+    {
+      "claim": "The login 2FA challenge is bounded (attempts + TTL) and temp tokens are single-use.",
+      "how_verified": "Code read of api/auth.py:400-460: `_pending_2fa` entries carry expires_at, `_prune_pending_2fa` drops expired ones, 5 attempts max, token popped before issuing the access token."
+    }
+  ]
+}

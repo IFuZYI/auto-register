@@ -125,6 +125,62 @@ class JsonStoreRoundTripTests(unittest.TestCase):
         # 临时文件不该残留
         self.assertEqual(list(self.root.glob("*.tmp")), [])
 
+    def test_concurrent_updates_from_separate_instances_do_not_lose_writes(self):
+        """多个实例并发改同一记录的不同字段 → 一个都不能丢。
+
+        生产代码 `AccountRepository._json_store()` **每次调用都新建**
+        `AccountStoreJson`，也就新建一个 `JsonStore`，而锁是实例级的 ——
+        等于没有锁。实测（2026-11-15）40 个线程并发 update 同一记录，
+        只有 11 个字段生效，并且会抛 `FileNotFoundError`（共用同一临时文件）
+        与 `JsonStoreError: Extra data`（读到半写内容）。
+
+        这条钉的是**行为**：不关心锁怎么实现，只要求零丢写。
+        """
+        import threading
+
+        from core.storage.json_backend import JsonStore
+
+        path = self.root / "race.json"
+        JsonStore(path).put("accounts", 1, {"probe": {}})
+        total = 40
+        errors: list[BaseException] = []
+
+        def worker(index: int):
+            try:
+                # 每次都新建实例 —— 复刻生产 _json_store() 的行为。
+                # 用 JsonStore.update（一次锁内完成读-判-写），而不是
+                # get() 后 put()：后者是两次独立加锁，竞态属于**调用方**而不是
+                # 存储层，生产代码用的也正是 update。
+                store = JsonStore(path)
+                for _ in range(20):
+                    store.update("accounts", 1, {f"probe_{index}": index})
+            except BaseException as exc:  # noqa: BLE001 - 收集起来断言
+                errors.append(exc)
+
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(total)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        self.assertEqual(errors, [], f"并发写抛异常: {errors[:3]}")
+        final = JsonStore(path).get("accounts", 1) or {}
+        missing = [i for i in range(total) if f"probe_{i}" not in final]
+        self.assertEqual(missing, [], f"并发丢写: 缺 {len(missing)}/{total} 个")
+
+    def test_tmp_file_is_unique_per_instance(self):
+        """临时文件名不能固定 —— 两个实例（或两个进程）写同一文件会互撞。"""
+        from core.storage.json_backend import JsonStore
+
+        a = JsonStore(self.root / "x.json")
+        b = JsonStore(self.root / "x.json")
+        self.assertNotEqual(
+            (a._tmp_path(), b._tmp_path()),
+            (a._tmp_path(), a._tmp_path()),
+            "两个实例用了同一个临时文件名",
+        )
+        self.assertNotEqual(a._tmp_path(), b._tmp_path(), "临时文件名固定 → 并发互撞")
+
     def test_corrupt_file_is_not_silently_emptied(self):
         """库文件损坏时不能当成空库覆盖 —— 那是数据丢失。"""
         from core.storage.json_backend import JsonStore

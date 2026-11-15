@@ -39,3 +39,32 @@ def _account_lock(account_id: int) -> threading.RLock:
     """
     with _ACCOUNT_LOCKS_GUARD:
         return _ACCOUNT_LOCKS.setdefault(int(account_id), threading.RLock())
+
+
+#: 同一主号的**读信**并发上限。
+#:
+#: `_account_lock` 只保护取号（`claim_alias` 及其生成分支），读信完全不受它
+#: 约束 —— 5 个 worker 若共用同一主号（常见：一个主号下有很多别名），
+#: 每轮轮询的 `fetch_account_messages` 会叠在同一个上游服务上。
+#:
+#: 用 Semaphore 而不是 Lock：读信是幂等只读操作，没必要串到一次一个；
+#: 限成 2 是为了「削峰」而不是「互斥」。上限取 2 是因为远程服务单账号的
+#: 收件本身也是串行 IMAP/Web 调用，再多并发只会排队。
+READ_CONCURRENCY_PER_ACCOUNT = 2
+
+_READ_SEMAPHORES: dict[int, threading.Semaphore] = {}
+_READ_SEMAPHORES_GUARD = threading.Lock()
+
+
+def read_semaphore(account_id: int) -> threading.Semaphore:
+    """取该主号的读信信号量（进程内唯一，惰性创建）。"""
+    with _READ_SEMAPHORES_GUARD:
+        return _READ_SEMAPHORES.setdefault(
+            int(account_id), threading.Semaphore(READ_CONCURRENCY_PER_ACCOUNT)
+        )
+
+
+def reset_read_semaphores() -> None:
+    """清空读信信号量（测试用：避免用例之间共享额度）。"""
+    with _READ_SEMAPHORES_GUARD:
+        _READ_SEMAPHORES.clear()

@@ -36,6 +36,7 @@ from .mailboxes.channels.outlook import (  # noqa: F401
     OutlookImapMailboxBackend,
     OutlookMailbox,
     OutlookMailboxBackend,
+    OutlookOAuthError,
 )
 
 __all__ = [
@@ -46,6 +47,7 @@ __all__ = [
     "OutlookImapMailboxBackend",
     "OutlookMailbox",
     "OutlookMailboxBackend",
+    "OutlookOAuthError",
     "available_providers",
     "build_mailbox",
     "create_mailbox",

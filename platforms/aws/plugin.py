@@ -256,25 +256,37 @@ class AwsPlatform(BasePlatform):
         except Exception as exc:  # noqa: BLE001 - 落库失败不该掩盖原始错误
             logger.debug("半成品账号落库失败（继续抛原始错误）: %s", exc)
 
+    #: AWS 验证码的最小等待秒数。
+    #:
+    #: 实测（2026-11-13）：AWS 验证码邮件约 **3 分钟**后才到，180s 会卡在边界上；
+    #: 超时后工作流状态丢失，只能整轮重来（白等一次发码）。
+    #: 2026-11-15 又实测到更糟的形态：生产配置 `mailbox_otp_timeout_seconds = 60`
+    #: 把等待压到 **60 秒**，现场日志是「验证码已发送」→ 53 秒后「等待验证码超时」。
+    #: 「以配置为准」在这里是错的：配置是**全局**的（所有邮箱渠道共用），而 AWS 必须
+    #: 经过「AWS 发码 → iCloud 转发 → 读信」三段，天然慢于纯 iCloud 注册。
+    #: 所以取 `max(配置, 下限)`：配置调大仍尊重，调得过小时按下限兜住。
+    OTP_TIMEOUT_FLOOR = 300
+
     def get_mailbox_otp_timeout(self, default: int = 300) -> int:
-        """AWS 的 OTP 等待默认 300s（覆盖基类的 180s）。
+        """AWS 的 OTP 等待：`max(配置值, 300)`。"""
+        configured = super().get_mailbox_otp_timeout(default=default)
+        return max(int(configured or 0), self.OTP_TIMEOUT_FLOOR)
 
-        实测（2026-11-13）：AWS 验证码邮件约 3 分钟后才到，180s 会卡在边界上 ——
-        超时后工作流状态丢失，只能整轮重来（白等一次发码）。
-        配置里显式给了 `mailbox_otp_timeout_seconds` 时以配置为准。
-        """
-        return super().get_mailbox_otp_timeout(default=default)
-
-    def _record_mailbox_status(self, mailbox, account, status: str) -> None:
+    def _record_mailbox_status(
+        self, mailbox, account, status: str, error: BaseException | None = None
+    ) -> None:
         """把注册结果记回邮箱渠道（号池记账钩子；渠道不支持时静默跳过）。"""
         recorder = getattr(mailbox, "set_account_status", None)
         if not callable(recorder) or account is None:
             return
         try:
-            recorder(account, status)
+            # 同 Grok：把失败原因传下去，上游故障才不会算成这个地址的错。
+            recorder(account, status, error=error)
         except TypeError:
+            # 渠道不支持 `error=`：退回旧形状。注意别把 `error=` 当成位置参数
+            # 传给「第三参是别的意思」的实现（老实现这里传的是空串）。
             try:
-                recorder(account, status, "")
+                recorder(account, status)
             except Exception as exc:  # noqa: BLE001
                 logger.debug("邮箱记账失败（忽略）: %s", exc)
         except Exception as exc:  # noqa: BLE001 - 记账失败不影响注册结论

@@ -1,0 +1,420 @@
+{
+ "lane": "L14-docs-deploy",
+ "head": "fca2eec",
+ "dirty": true,
+ "reviewed_files": [
+  "README.md",
+  ".env.example",
+  "docker-compose.yml",
+  "Dockerfile",
+  ".dockerignore",
+  ".gitignore",
+  "docker/entrypoint.sh",
+  "deploy/account-manager.service",
+  "requirements.txt",
+  "pytest.ini",
+  ".github/workflows/release.yml",
+  "docs/DEPLOYMENT.md",
+  "docs/DATA_DIRECTORY.md",
+  "docs/MAINTENANCE.md",
+  "docs/releases/v0.1.0.md",
+  "docs/releases/v1.0.0.md",
+  "docs/API_REFERENCE.md",
+  "docs/FEATURES.md",
+  "docs/REPORT_2026-11-13_AWS_KIRO.md",
+  "docs/audit/2026-11-15-full/gates-baseline.md",
+  "docs/audit/2026-11-15-full/README.md",
+  "docs/audit/2026-10-30/SUMMARY.md",
+  "docs/audit/2026-10-30/api-security.md",
+  "GLOSSARY.md",
+  "GLOSSARY-MAP.md",
+  "docs/GLOSSARY.md",
+  "main.py",
+  "api/auth.py",
+  "api/backup.py",
+  "api/accounts.py",
+  "core/net_utils.py",
+  "core/paths.py",
+  "core/db/base.py",
+  "core/db/__init__.py",
+  "core/db/migrations.py",
+  "core/storage/__init__.py",
+  "core/secret_box.py",
+  "core/config_store.py",
+  "core/browser_runtime.py",
+  "core/panel_tls.py",
+  "services/solver_manager.py",
+  "services/turnstile_solver/start.py",
+  "services/turnstile_solver/api_solver.py",
+  "services/data_bundle.py",
+  "services/chatgpt_two_factor.py",
+  "services/icloud/_locks.py",
+  "platforms/chatgpt/protocol/sentinel_quickjs.py",
+  "frontend/vite.config.ts",
+  "frontend/package.json"
+ ],
+ "findings": [
+  {
+   "id": "L14-1",
+   "title": "Release workflow sends literal `Bearer ***`; every tag push fails at the Release API and the image job is skipped",
+   "severity": "P1",
+   "file": ".github/workflows/release.yml",
+   "line": 112,
+   "evidence": "`sed -n '110,113p' .github/workflows/release.yml` -> `API=\"https://api.github.com/repos/${GITHUB_REPOSITORY}\"` / `AUTH=\"Authorization: Bearer ***\"` / `code=$(curl ... -H \"$AUTH\" ...)`. `GH_TOKEN` is exported only at line 93 and is never referenced. The literal token `***` yields HTTP 401; lines 127-131 then `echo \"::error::release API 返回 HTTP $rc...\"; exit 1`. The `image:` job has `needs: release` (line 144), so it is skipped. README.md:184-196 says a `v*` tag creates the Release and pushes the GHCR image.",
+   "impact": "No release or image can be published by CI; the documented `docker compose pull` path has no image producer, and every `v*` tag push leaves a failed workflow.",
+   "fix_hint": "Use `AUTH=\"Authorization: Bearer ${GH_TOKEN}\"` (or `gh release create/edit --notes-file`) and add a workflow dry-run; keep the image job gated on a successful release.",
+   "class": "functional"
+  },
+  {
+   "id": "L14-2",
+   "title": "Default compose image tag 1.0.0 has no matching git tag and no viable release path",
+   "severity": "P1",
+   "file": "docker-compose.yml",
+   "line": 18,
+   "evidence": "`sed -n '18p' docker-compose.yml` -> `image: ${APP_IMAGE:-ghcr.io/ifuzyi/auto-register:1.0.0}`. `git tag -l 'v1*'` -> `v1.0-refactored` only (no `v1.0.0`); `git status --porcelain docs/releases/` -> `?? docs/releases/v1.0.0.md` (untracked). release.yml:12-15 triggers only on `v*` tags, and its release job fails at L14-1, so `image` (`needs: release`) never runs. README.md:28/37 tells users to `docker compose pull` a published `1.0.0`.",
+   "impact": "A fresh `cp .env.example .env && docker compose pull && docker compose up -d` fails with `manifest unknown` for the default image unless 1.0.0 was pushed by hand out-of-band; the documented publishing path cannot produce it.",
+   "fix_hint": "Either tag v1.0.0 and fix the release workflow first, or keep the default image on the last actually published tag (0.1.0) until the 1.0.0 release is complete.",
+   "class": "contract"
+  },
+  {
+   "id": "L14-3",
+   "title": "Docker first-run password setup is blocked: compose omits APP_ALLOW_REMOTE_SETUP, setup route accepts loopback only",
+   "severity": "P1",
+   "file": "docker-compose.yml",
+   "line": 39,
+   "evidence": "`grep -n 'APP_ALLOW_REMOTE_SETUP' .env.example docker-compose.yml README.md docs/DEPLOYMENT.md` -> no matches. api/auth.py:355-362: `if not is_loopback_client(request) and os.getenv(\"APP_ALLOW_REMOTE_SETUP\", \"\") != \"1\": raise HTTPException(403, ...\"或显式设置 APP_ALLOW_REMOTE_SETUP=1（容器部署用）\")`. main.py:224-247 returns 503 for non-loopback `/api/*` when no password is set. DEPLOYMENT.md:50-55 tells users to use the panel or `curl -X POST http://127.0.0.1:8000/api/auth/setup` from the host; with Docker's default userland proxy a published port sees the bridge gateway (e.g. 172.17.0.1), not 127.0.0.1.",
+   "impact": "In the recommended Docker deployment the operator cannot set the first password through the panel or the documented curl (403/503). The only workaround is APP_ALLOW_REMOTE_SETUP=1, which opens first-setup to anyone who can reach the port; neither compose nor .env.example mentions it.",
+   "fix_hint": "Add `APP_ALLOW_REMOTE_SETUP: \"1\"` to compose environment (and the docker run example) with a warning to set the password before exposing the port, or document `docker exec account-manager curl -fsS -X POST http://127.0.0.1:8000/api/auth/setup ...`; add the key to .env.example and the DEPLOYMENT env table.",
+   "class": "functional"
+  },
+  {
+   "id": "L14-4",
+   "title": "README security table claims non-loopback is always rejected, but a same-host reverse proxy makes every request loopback",
+   "severity": "P1",
+   "file": "README.md",
+   "line": 85,
+   "evidence": "README.md:85: `| 面板密码 | **未设密码时拒绝一切非本机请求**（503），不是放行 |`. main.py:236 calls `_is_loopback_client(request)`; core/net_utils.py:30-45 only checks `request.client.host` (no proxy headers). DEPLOYMENT.md:29 recommends binding `127.0.0.1:8000` '交给反代'; nginx then connects from 127.0.0.1, so all public `/api/*` requests are treated as local and allowed when no password is set.",
+   "impact": "An operator who follows the documented reverse-proxy topology and has not set (or has disabled) the panel password exposes the full account/token/backup API to the internet; the documented 503 fallback never fires. This is credential exposure, not just wording.",
+   "fix_hint": "Document that a same-host reverse proxy defeats the loopback fallback and that the password must be set before any proxy exposure; optionally require a shared secret/header from the proxy or treat a proxy-forwarded request as remote.",
+   "class": "credential-leak"
+  },
+  {
+   "id": "L14-5",
+   "title": "Documented manual Solver start binds 0.0.0.0 (no auth), contradicting the loopback-only warning",
+   "severity": "P1",
+   "file": "docs/DEPLOYMENT.md",
+   "line": 190,
+   "evidence": "DEPLOYMENT.md:190: `python services/turnstile_solver/start.py --browser_type camoufox --port 8889` (no `--host`). start.py:45 calls `app.run(host=args.host, ...)`; api_solver.py:1366 `--host` default is `'0.0.0.0'`; solver_manager.py:67 shows the backend-managed default is `127.0.0.1`. DEPLOYMENT.md:136 and README.md:86 say the solver has no auth and is loopback-only.",
+   "impact": "The manual command exposes an unauthenticated browser service on every host interface (SSRF / anonymous proxy / pool exhaustion), exactly the exposure the docs warn about.",
+   "fix_hint": "Add `--host 127.0.0.1` to the documented command and/or change the start.py/api_solver.py `--host` default to 127.0.0.1.",
+   "class": "functional"
+  },
+  {
+   "id": "L14-6",
+   "title": "README still declares current version v0.1.0 while the app, compose, and release notes are 1.0.0",
+   "severity": "P2",
+   "file": "README.md",
+   "line": 205,
+   "evidence": "README.md:205: `当前版本：**v0.1.0**（首个公开版本）`. main.py:204: `version=\"1.0.0\"`; docker-compose.yml:18 defaults to image `1.0.0`; docs/releases/v1.0.0.md:1 is `v1.0.0 — 多平台账号管理`. `git tag -l 'v1*'` has no `v1.0.0`.",
+   "impact": "Users cannot tell which version is current; README contradicts the shipped app version and the release notes.",
+   "fix_hint": "Update the footer to v1.0.0 (or revert the other three to 0.1.0) and keep one version source.",
+   "class": "doc-drift"
+  },
+  {
+   "id": "L14-7",
+   "title": "v1.0.0 release notes ship an empty GATES placeholder that the release workflow never fills",
+   "severity": "P2",
+   "file": "docs/releases/v1.0.0.md",
+   "line": 24,
+   "evidence": "docs/releases/v1.0.0.md:23-25: `<!-- GATES:BEGIN -->` / `（门禁跑完后由发布流程填入：全量 pytest 计数 / tsc -b / npm run check / 结构门禁 / 真库凭据复核）` / `<!-- GATES:END -->`. release.yml:78-81 only does `cp \"$NOTES_FILE\" /tmp/notes.md`; there is no gate generation step anywhere in the workflow.",
+   "impact": "The 1.0.0 release notes will be published with an empty '本版验证' section, so the release has no recorded gate numbers (v0.1.0 at least recorded them).",
+   "fix_hint": "Fill the block before tagging (current pytest/tsc/npm run check/structural/credential-verify numbers) or add a job that renders the numbers into the notes file.",
+   "class": "doc-drift"
+  },
+  {
+   "id": "L14-8",
+   "title": "v0.1.0 release notes' eslint baseline is stale (33 errors/5 warnings vs current 28/4)",
+   "severity": "P2",
+   "file": "docs/releases/v0.1.0.md",
+   "line": 18,
+   "evidence": "docs/releases/v0.1.0.md:18: `eslint 33 errors / 5 warnings（与既有基线一致）`. docs/audit/2026-11-15-full/gates-baseline.md:25-26 records baseline fca2eec `33 errors / 5 warnings` and current worktree `28 errors / 4 warnings`; line 46 explicitly says the v0.1.0 note is stale and L14 should record it. MAINTENANCE.md:511 also states the current baseline is 32 problems (28E+4W).",
+   "impact": "The release note overstates current lint debt and contradicts MAINTENANCE; readers cannot tell which baseline is authoritative.",
+   "fix_hint": "Annotate the v0.1.0 note as historical (33/5 at that tag) and add the current 28/4 baseline where 'current' is claimed.",
+   "class": "doc-drift"
+  },
+  {
+   "id": "L14-9",
+   "title": "MAINTENANCE test-scale claim (2300+ cases / 150s) contradicts README (3500+ / ~5min) and pytest.ini (3514 collected)",
+   "severity": "P2",
+   "file": "docs/MAINTENANCE.md",
+   "line": 502,
+   "evidence": "MAINTENANCE.md:502: `# 后端全量（约 150 秒，2300+ 用例）`; README.md:137: `# 3500+ 条，约 5 分钟`; pytest.ini:12: `pytest tests/   → 3514 collected + 0 error`; docs/REPORT_2026-11-13_AWS_KIRO.md:11: `当前全量测试 3758 passed / 1 skipped`.",
+   "impact": "Two current docs disagree by >50% on suite size and by 2x on runtime; capacity/CI planning and 'is the suite complete?' checks use the wrong number.",
+   "fix_hint": "Measure once on fca2eec and put the same count/duration in README and MAINTENANCE (or make MAINTENANCE point at README instead of repeating).",
+   "class": "doc-drift"
+  },
+  {
+   "id": "L14-10",
+   "title": "workflow_dispatch re-run cannot publish the requested tag: image job ignores inputs.tag and builds github.ref",
+   "severity": "P2",
+   "file": ".github/workflows/release.yml",
+   "line": 154,
+   "evidence": "release.yml:16-21 declares `workflow_dispatch.inputs.tag`; the release job reads it (lines 48-52 `INPUT_TAG`), but the image job only reads `REF: ${{ github.ref }}` (lines 150-155) and derives `TAG=\"${REF#refs/tags/}\"`. On manual dispatch `github.ref` is `refs/heads/main` -> TAG=`main`, `docker/metadata-action` semver patterns (172-175) emit no tags, and `actions/checkout` (146) builds the branch, not the requested tag. The workflow header (line 8) advertises '手动重跑 ... 填 tag'.",
+   "impact": "Manual re-runs either fail with no tags for build-push-action or push an image built from the branch instead of the tagged commit; the advertised recovery path is broken.",
+   "fix_hint": "Pass the validated tag to the image job (`env: TAG: ${{ inputs.tag || github.ref_name }}`), set `actions/checkout` `ref: ${{ inputs.tag || github.ref }}`, and compute metadata tags from that value.",
+   "class": "functional"
+  },
+  {
+   "id": "L14-11",
+   "title": "Runtime image runs as root and creates /runtime root-owned; compose has no user/capability hardening",
+   "severity": "P2",
+   "file": "Dockerfile",
+   "line": 25,
+   "evidence": "`grep -n '^USER' Dockerfile` -> no matches; the runtime stage starts at Dockerfile:25, `COPY . .` at :83, `mkdir -p /runtime ...` at :89, `ENTRYPOINT [\"/usr/bin/tini\",\"--\",\"/app/docker/entrypoint.sh\"]` at :108. entrypoint.sh:21 does `chmod 700` on the key dir as root. `grep -n 'user:\\|read_only\\|cap_drop\\|security_opt' docker-compose.yml` -> no hardening keys.",
+   "impact": "A container compromise gives root in the container, and the bind-mounted ./data (DB + credential key) is owned by root on the host; a non-root runtime is a cheap extra boundary.",
+   "fix_hint": "Create a dedicated user in the runtime stage, chown /runtime, add `USER app`, and consider `read_only: true`, `cap_drop: [ALL]`, `security_opt: [no-new-privileges:true]` in compose.",
+   "class": "functional"
+  },
+  {
+   "id": "L14-12",
+   "title": "Dockerfile never installs the patchright browser, although chromium solver mode is documented and uses patchright",
+   "severity": "P2",
+   "file": "Dockerfile",
+   "line": 72,
+   "evidence": "Dockerfile:72 installs only `python -m playwright install --with-deps chromium firefox`; there is no `patchright install`. api_solver.py:20 imports `patchright.async_api`, and :413-416 selects it for `chromium/chrome/msedge`; .env.example:53-54 documents `SOLVER_BROWSER_TYPE=chromium`; deploy/account-manager.service:11 explicitly runs `python -m patchright install chromium`. Installed patchright 1.63 wants chromium revision 1243 while playwright 1.62 installs 1234 (`browsers.json`), i.e. separate browser revisions/caches.",
+   "impact": "Setting the documented `SOLVER_BROWSER_TYPE=chromium` in the image can fail at runtime with 'Executable doesn't exist' unless the two packages' browser revisions happen to coincide; only the camoufox default is guaranteed to work.",
+   "fix_hint": "Add `python -m patchright install --with-deps chromium` to the Dockerfile (and README bare-metal prerequisites), or drop the chromium option from .env.example if unsupported in the image.",
+   "class": "functional"
+  },
+  {
+   "id": "L14-13",
+   "title": ".dockerignore excludes only `.env`; `COPY . .` can bake `.env.*`, legacy DBs, and account/proxy files into the image",
+   "severity": "P2",
+   "file": ".dockerignore",
+   "line": 15,
+   "evidence": ".dockerignore:15 excludes `.env` only; .gitignore:12-18 ignores `*.db`, `data/`, and :47-52 ignores `.env.local`/`.env.*`; Dockerfile:83 `COPY . .`. The legacy default DB path is `./account_manager.db` (core/paths.py:120), and `accounts.txt`/`proxies.txt` are gitignored (`.gitignore:26-29`) but not dockerignored.",
+   "impact": "A local `docker compose up -d --build` from a working tree that still has a legacy root DB, `.env.local`, or account/proxy text files copies those secrets into an image layer; pushing that image (README advertises a public GHCR package) leaks credentials.",
+   "fix_hint": "Add `.env*` with `!.env.example`, `*.db`, `*.sqlite*`, `accounts.txt`, `proxies.txt`, `*.log` to .dockerignore; keep the `data/` and `.secrets/` exclusions.",
+   "class": "credential-leak"
+  },
+  {
+   "id": "L14-14",
+   "title": "Shipped systemd unit binds HOST=0.0.0.0, contradicting README's '本机自用请显式写 127.0.0.1'",
+   "severity": "P2",
+   "file": "deploy/account-manager.service",
+   "line": 27,
+   "evidence": "deploy/account-manager.service:1 describes the unit as `本机（非容器）systemd 单元`, but :27 sets `Environment=HOST=0.0.0.0`; README.md:60 warns `不带 HOST 会退回 0.0.0.0（对外监听），本机自用请显式写 127.0.0.1`.",
+   "impact": "Following the shipped unit exposes the panel on every host interface by default; after a password is set the login page is reachable from the LAN, and before that the only protection is the loopback heuristic (see L14-4).",
+   "fix_hint": "Default the unit to `HOST=127.0.0.1` and document changing it to 0.0.0.0 only behind a proxy/firewall.",
+   "class": "doc-drift"
+  },
+  {
+   "id": "L14-15",
+   "title": "DATA_DIRECTORY says the TOTP journal is plaintext; code now stores `totp_secret_cipher` encrypted",
+   "severity": "P3",
+   "file": "docs/DATA_DIRECTORY.md",
+   "line": 16,
+   "evidence": "docs/DATA_DIRECTORY.md:16 `2FA 绑定过程的明文密钥 journal` and :27 `写前密钥日志（明文；目录 0700 / 文件 0600）`; services/chatgpt_two_factor.py:222 `里面是**加密后**的密钥（T1.5）` and :258 writes `\"totp_secret_cipher\": encrypt_text(secret)` (legacy `totp_secret` plaintext is read only as fallback).",
+   "impact": "Security documentation understates the protection and misleads backup/secret-handling decisions; the journal is not plaintext for new entries.",
+   "fix_hint": "Change both lines to '加密后的密钥（totp_secret_cipher；旧格式可能为明文）' and keep the 0700/0600 note.",
+   "class": "doc-drift"
+  },
+  {
+   "id": "L14-16",
+   "title": "APP_TRUST_PROXY is read by code but absent from all deploy docs; behind nginx all clients share one backoff key",
+   "severity": "P2",
+   "file": "docs/DEPLOYMENT.md",
+   "line": 123,
+   "evidence": "DEPLOYMENT.md:123-146 env table has no `APP_TRUST_PROXY`; `grep -n APP_TRUST_PROXY .env.example docker-compose.yml README.md docs/DEPLOYMENT.md` -> no matches. core/net_utils.py:25-27 returns true only for `APP_TRUST_PROXY=1`, and :48-63 otherwise uses `request.client.host`; api/auth.py:274-279 uses that for login backoff. DEPLOYMENT.md:29/59 recommends a reverse proxy.",
+   "impact": "Without the variable every request behind nginx is keyed to 127.0.0.1, so one attacker's failed logins throttle every user (global 429 backoff), and logs/rate-limit decisions lose the real client IP. Setting it blindly without stripping inbound X-Forwarded-For allows spoofing, and the docs give no guidance.",
+   "fix_hint": "Add `APP_TRUST_PROXY` to .env.example and the DEPLOYMENT env table with the exact nginx requirement (`proxy_set_header X-Forwarded-For $remote_addr` / strip client-supplied headers).",
+   "class": "doc-drift"
+  },
+  {
+   "id": "L14-17",
+   "title": "README calls pytest/tsc/eslint '质量门禁' but release.yml has no test/lint job",
+   "severity": "P2",
+   "file": ".github/workflows/release.yml",
+   "line": 31,
+   "evidence": "release.yml has only jobs `release` (:32) and `image` (:141); `grep -n 'pytest\\|eslint\\|tsc\\|npm run' .github/workflows/release.yml` -> no matches. README.md:134-139 presents `.venv/bin/python -m pytest -q tests/` and `npx tsc -b && npx eslint .` under `## 测试与质量门禁`. L09-gates already records the same CI gap as L09-1.",
+   "impact": "A tag push publishes an image with zero automated tests/typecheck/lint; the 'gate' set is a local convention only, so a broken tree can be released.",
+   "fix_hint": "Add a CI job (push + pull_request) running pytest, tsc -b, npm run check, and an eslint ratchet; make `image` depend on it.",
+   "class": "contract"
+  },
+  {
+   "id": "L14-18",
+   "title": ".env.example image example still shows tag `:0.1` while the release convention is 1.0.0 / 1.0 / latest",
+   "severity": "P3",
+   "file": ".env.example",
+   "line": 14,
+   "evidence": ".env.example:14 `# 想钉住别的版本就改这里，例如 .../auto-register:0.1 或 :latest。`; :16 `# APP_IMAGE=ghcr.io/ifuzyi/auto-register:1.0.0`; docker-compose.yml:18 defaults to `1.0.0`; README.md:37 lists `1.0.0` / `1.0` / `latest`.",
+   "impact": "Stale example tag; users may pin a non-current 0.1 tag or think the naming scheme is inconsistent.",
+   "fix_hint": "Change the example to `:1.0` / `:1.0.0`.",
+   "class": "doc-drift"
+  },
+  {
+   "id": "L14-19",
+   "title": "DEPLOYMENT/FEATURES link to a nonexistent README anchor `#部署方式`",
+   "severity": "P3",
+   "file": "docs/DEPLOYMENT.md",
+   "line": 4,
+   "evidence": "docs/DEPLOYMENT.md:4 `[README 的部署方式](../README.md#部署方式)`; docs/FEATURES.md:4 same link. `grep -n '^#' README.md` lists `## 快速开始`, `### Docker Compose（推荐）`, `### 裸机部署`, but no `部署方式` heading; `grep -n '部署方式' README.md` only finds the doc-index table text.",
+   "impact": "The link lands at the top of README instead of the deployment section; minor navigation break.",
+   "fix_hint": "Link to `#快速开始` or add a `## 部署方式` heading above the two deployment subsections.",
+   "class": "doc-drift"
+  },
+  {
+   "id": "L14-20",
+   "title": "Dockerfile base images are floating tags, not digest-pinned",
+   "severity": "P3",
+   "file": "Dockerfile",
+   "line": 11,
+   "evidence": "Dockerfile:11-12 `ARG NODE_IMAGE=node:20-bookworm-slim` / `ARG PYTHON_IMAGE=python:3.12-slim`; no `@sha256:` anywhere (`grep -n 'sha256' Dockerfile` -> none). DEPLOYMENT.md:18 promises browser-version pinning (camoufox browser-pin), but the OS/Python/Node base layers still move with upstream tags.",
+   "impact": "Two builds of the same commit can differ (base packages, Node/Python patch levels, browser deps), making 'works on my build' reports irreproducible.",
+   "fix_hint": "Pin both images by digest (and optionally the apt snapshot), with a documented update PR.",
+   "class": "contract"
+  },
+  {
+   "id": "L14-21",
+   "title": "Dockerfile installs Playwright Firefox that no code path uses",
+   "severity": "P3",
+   "file": "Dockerfile",
+   "line": 72,
+   "evidence": "Dockerfile:72 `python -m playwright install --with-deps chromium firefox`; `grep -rn 'firefox' --include=*.py platforms services core` only finds fingerprint/UA strings (e.g. platforms/chatgpt/protocol/fingerprint.py:115-116), no `playwright.firefox.launch`; Grok uses camoufox (platforms/grok/register_browser.py:8) and the solver defaults to camoufox.",
+   "impact": "Adds a large unused browser (~90MB+) and build time; DEPLOYMENT.md:16 only promises Chromium + Camoufox, so the extra download is also undocumented.",
+   "fix_hint": "Drop `firefox` from the playwright install (keep chromium), or document the reason if a path needs it.",
+   "class": "perf"
+  },
+  {
+   "id": "L14-22",
+   "title": "requirements.txt declares five unused packages and relies on an undeclared transitive (platformdirs)",
+   "severity": "P3",
+   "file": "requirements.txt",
+   "line": 11,
+   "evidence": "requirements.txt:11-18 declares `jwcrypto`, `cbor2`, `aiofiles`, `httpx`, `selectolax`, `names`; an AST import scan of 253 .py files under main.py/core/api/services/platforms/modules/tools/scripts found none of them imported by app code. `httpx` is still needed by starlette's TestClient and `aiofiles` is already a quart dependency, but `jwcrypto`, `cbor2`, `selectolax` and `names` are unused anywhere in the tree (only occurrences are requirements.txt itself). `platformdirs` is imported at services/turnstile_solver/start.py:23 and scripts/install_camoufox.py but is not declared; it is currently present only as a camoufox dependency.",
+   "impact": "Image bloat from four genuinely unused packages plus a hidden dependency: a future camoufox change that drops platformdirs breaks the solver at import time.",
+   "fix_hint": "Remove jwcrypto/cbor2/selectolax/names (and optionally the redundant aiofiles/httpx lines if a dev requirements file is added); declare platformdirs explicitly or import it lazily with a fallback.",
+   "class": "dead-code"
+  },
+  {
+   "id": "L14-23",
+   "title": ".env.example says the solver pool defaults to 4 threads / 1.0 GiB, but solver_manager defaults to 1-2 threads",
+   "severity": "P3",
+   "file": ".env.example",
+   "line": 96,
+   "evidence": ".env.example:96-97 `池按 --thread（默认 4）预热后每个浏览器约 250 MiB，常驻不动实测占 1.0 GiB`; solver_manager.py:20-45 `_solver_threads()` returns 1 when RAM < 4GB else `min(2, cpu_count)`, and :119-121 always passes `--thread` to the solver. `SOLVER_THREADS` (the override) is absent from .env.example and DEPLOYMENT.md.",
+   "impact": "Users size hosts for 1 GiB when the backend-managed pool is ~250-500 MiB, and cannot find the tuning knob; the doc also hides that the solver's own default 4 only applies when started manually.",
+   "fix_hint": "Document the effective default and `SOLVER_THREADS`; keep the manual-start default note separate.",
+   "class": "doc-drift"
+  },
+  {
+   "id": "L14-24",
+   "title": "DEPLOYMENT env table calls STORAGE_BACKEND default 'sqlite' while code defaults fresh deployments to json",
+   "severity": "P3",
+   "file": "docs/DEPLOYMENT.md",
+   "line": 143,
+   "evidence": "DEPLOYMENT.md:143 row: `| STORAGE_BACKEND | 见下 | sqlite（默认）或 json。不填时：全新部署用 json...` (the row says sqlite is the default, then says fresh installs use json); core/storage/__init__.py:43-44 `DEFAULT_BACKEND = BACKEND_JSON`, :67-69 returns json when no DB exists and no explicit value.",
+   "impact": "The row contradicts itself and the code; a reader may assume a fresh install creates SQLite (it does not).",
+   "fix_hint": "Change the default cell to '全新=json；已有库=sqlite' and drop the parenthetical 'sqlite（默认）'.",
+   "class": "doc-drift"
+  }
+ ],
+ "checked_and_clean": [
+  {
+   "claim": "Compose and image healthchecks probe an endpoint that exists and is exempt from auth; curl is installed in the image.",
+   "how_verified": "docker-compose.yml:68 and Dockerfile:103-104 both use `curl -fsS http://127.0.0.1:8000/api/auth/status`; api/auth.py:312-318 defines `/status`; main.py:224 skips `/api/auth/*` in the auth middleware; Dockerfile:64 installs `curl`. Both compose `start_period: 30s` and Dockerfile `--start-period=30s` are valid."
+  },
+  {
+   "claim": "The single-process deployment constraint in README/MAINTENANCE/compose matches the code.",
+   "how_verified": "main.py:625 `uvicorn.run(\"main:app\", host=host, port=port, reload=reload_enabled)` has no `workers=`; docker-compose.yml has no `deploy.replicas`/`scale`/`command`; docker/entrypoint.sh:28 has one `exec xvfb-run ... python main.py`; services/icloud/_locks.py:19-41 uses a process-local `threading.RLock`; MAINTENANCE.md:147-179 cites the same files accurately."
+  },
+  {
+   "claim": "The one-volume /runtime layout and credential-key location in README/DEPLOYMENT/DATA_DIRECTORY match compose and core.paths.",
+   "how_verified": "docker-compose.yml:47-49 sets `DATA_DIR=/runtime`, `CREDENTIAL_ENCRYPTION_KEY_FILE=/runtime/secrets/credential_key`, and :64 mounts `${APP_RUNTIME_BIND:-./data}:/runtime`; core/paths.py:77-102 derives DEFAULT_DB_FILE/PLATFORM_DB_DIR/SECRETS_DIR/LOG_DIR from DATA_DIR; docker/entrypoint.sh:6-16 creates only logs/platforms/secrets; the documented `data/` tree matches."
+  },
+  {
+   "claim": "The 'Solver :8889 has no auth' warning is true.",
+   "how_verified": "services/turnstile_solver/api_solver.py has no auth middleware/token check; services/solver_manager.py:56-67 defaults the bind host to 127.0.0.1 and docker-compose.yml:61 publishes it as `127.0.0.1:8889:8889`; README.md:43/86 and DEPLOYMENT.md:136 match (the manual-start command is the exception, see L14-5)."
+  },
+  {
+   "claim": "`panel_tls_ca_bundle` / `panel_tls_insecure` are documented as lowercase env vars; they still work because config_store falls back to exact env/.env keys.",
+   "how_verified": "core/panel_tls.py:28-29 reads them as config keys; core/config_store.py:51-71 builds candidates including the raw/lower/upper/normalized key and :114-119 checks `os.environ`/`.env`; setting the lowercase name in `.env` is therefore picked up. Not a defect, just non-obvious."
+  },
+  {
+   "claim": "Compose setting `PLAYWRIGHT_HEADLESS: ${PLAYWRIGHT_HEADLESS:-}` to an empty string does not accidentally force headed mode.",
+   "how_verified": "core/browser_runtime.py:14-28 `parse_env_bool` returns None for an empty/whitespace value, so `resolve_browser_headless` (:31-47) falls through to the caller/default (headless)."
+  },
+  {
+   "claim": "`.env` is kept out of git and out of the Docker context (the broader `.env.*`/DB gap is L14-13).",
+   "how_verified": ".gitignore:47-52 ignores `.env`, `.env.local`, `.env.*` and un-ignores only `.env.example`; .dockerignore:15 excludes `.env`; no `.env` exists in the worktree (`ls -la .env*` -> only `.env.example`)."
+  },
+  {
+   "claim": "v1.0.0 release notes' '34 commits since v0.1.0' is accurate.",
+   "how_verified": "`git rev-list --count v0.1.0..HEAD` -> 34; v0.1.0 tag exists and points at 2026-11-05."
+  },
+  {
+   "claim": "DATA_DIRECTORY's legacy-move table matches core/paths.py.",
+   "how_verified": "docs/DATA_DIRECTORY.md:66-74 lists `./account_manager.db`, `./.secrets/credential_key`, `./services/turnstile_solver/solver.log`; core/paths.py:119-123 `_LEGACY_MOVES` has exactly those three entries and says it is the full list."
+  },
+  {
+   "claim": "Backup ZIP contents (DBs + JSON state + credential key; logs/import_backups excluded) and VACUUM INTO snapshot behavior match the docs.",
+   "how_verified": "services/data_bundle.py:1-32 documents and :240-321 implements `DATA_DIR/*.json` in `others`, `secrets/credential_key`, `_sqlite_snapshot` via `VACUUM INTO` (:139-154), and exclusion of logs/import_backups; docs/DATA_DIRECTORY.md:31-34 and DEPLOYMENT.md:160-176 match."
+  },
+  {
+   "claim": "README's credential-encryption and password-KDF claims match the code.",
+   "how_verified": "core/secret_box.py:1-19/106-116 uses AES-256-GCM; api/auth.py:113-145 uses PBKDF2-HMAC-SHA256 with 600_000 iterations and per-password salt; api/accounts.py:515/565/932 sets `Cache-Control: no-store`; list responses use `has_password`/`has_token` booleans (api/accounts.py:336-341)."
+  },
+  {
+   "claim": "README's pytest.ini claim is accurate.",
+   "how_verified": "pytest.ini:17 `testpaths = tests` and :20 `norecursedirs = .git .venv .worktrees reference node_modules dist build`; README.md:141-143 describes exactly that behavior."
+  },
+  {
+   "claim": "DEPLOYMENT's DATABASE_URL default (four slashes) matches the code.",
+   "how_verified": "core/db/base.py:48-49 `DATABASE_URL = ... or f\"sqlite:///{DEFAULT_DB_FILE}\"`; core/paths.py:81 `DEFAULT_DB_FILE = DATA_DIR / \"account_manager.db\"`; with DATA_DIR=/runtime the string is `sqlite:////runtime/account_manager.db`, as DEPLOYMENT.md:24 says."
+  },
+  {
+   "claim": "Dockerfile's frontend artifact copy path is correct for Vite.",
+   "how_verified": "frontend/vite.config.ts:12-14 `build.outDir: '../static'` with `emptyOutDir: true`; the frontend-builder WORKDIR is `/app/frontend` (Dockerfile:16), so the build lands in `/app/static`, matching `COPY --from=frontend-builder /app/static /app/static` (Dockerfile:84)."
+  },
+  {
+   "claim": "The Docker build context excludes the main secret/data directories.",
+   "how_verified": ".dockerignore:1-27 excludes `.venv/`, `frontend/node_modules/`, `.git/`, `data/`, `static/`, `reference/`, `.worktrees/`, `.secrets/`, `tests/`; Dockerfile:83 `COPY . .` therefore does not include those (the `.env.*`/legacy-DB gap is separately reported as L14-13)."
+  },
+  {
+   "claim": "The compose memory/PID/logging limits and `mem_limit` rationale are valid.",
+   "how_verified": "docker-compose.yml:74-90 uses `logging.options.max-size: 10m`/`max-file: 3`, `shm_size: 1gb`, `mem_limit: ${APP_MEMORY_LIMIT:-4g}`, `pids_limit: 4096`; the comment's claim that `deploy.resources.limits` is ignored outside Swarm is correct for `docker compose up`."
+  },
+  {
+   "claim": "The systemd unit's single-process/xvfb setup matches its description and MAINTENANCE §1.6.",
+   "how_verified": "deploy/account-manager.service:22-42 is `Type=simple` with one `ExecStart=/usr/bin/xvfb-run ... /home/Register/.venv/bin/python main.py`; `KillMode=control-group`, `Restart=always`; MAINTENANCE.md:169-175 cites the same unit. (HOST=0.0.0.0 is L14-14.)"
+  },
+  {
+   "claim": "The README `scripts/encrypt_existing_credentials.py --verify` claim is real.",
+   "how_verified": "scripts/encrypt_existing_credentials.py:221 defines `--verify` and :226-227 calls `_verify()`; the file exists."
+  },
+  {
+   "claim": "The release workflow's permissions and GHA cache claims match the file.",
+   "how_verified": "release.yml:23-25 declares `contents: write` + `packages: write`; :185-186 uses `cache-from: type=gha` / `cache-to: type=gha,mode=max`; :172-175 generates semver `version`/`major.minor`/`latest` tags. The AUTH bug is separately L14-1."
+  },
+  {
+   "claim": "The manual solver command's `--browser_type`/`--port` flags exist (only the host binding is wrong).",
+   "how_verified": "services/turnstile_solver/api_solver.py:1360 defines `--browser_type`, :1367 defines `--port`; start.py:32/45 passes them to `create_app`/`app.run`."
+  },
+  {
+   "claim": "The tini/xvfb PID-1 setup described in DEPLOYMENT matches the image and entrypoint.",
+   "how_verified": "Dockerfile:63-64 installs `tini`; :108 `ENTRYPOINT [\"/usr/bin/tini\",\"--\",\"/app/docker/entrypoint.sh\"]`; docker/entrypoint.sh:28 `exec xvfb-run -a --server-args=\"-screen 0 1920x1080x24\" python main.py`; docker-compose.yml:32 `init: true`; DEPLOYMENT.md:92-95 describes exactly this double-init arrangement."
+  },
+  {
+   "claim": "The three glossary files and their cross-references exist.",
+   "how_verified": "GLOSSARY-MAP.md:7-9 links `./GLOSSARY.md`, `docs/GLOSSARY.md`, `docs/refactor/GLOSSARY.md` (all exist); GLOSSARY.md:29-35 references `services/panel_sync.py`, `services/external_sync.py`, `core/credential_fields.py` (all exist)."
+  },
+  {
+   "claim": "API_REFERENCE endpoint paths used by the deploy docs exist in the app.",
+   "how_verified": "docs/API_REFERENCE.md:88-91 lists `/api/auth/status`, `/api/auth/setup`, `/api/auth/login`; api/auth.py:18 router prefix `/auth` + main.py:284 prefix `/api` gives those paths. docs/API_REFERENCE.md:642 `/api/backup/export` matches api/backup.py:37 `@router.get(\"/export\")` + main.py:290 prefix `/api`."
+  },
+  {
+   "claim": "GHCR image availability, a real `docker build`/`docker compose up`, and a live GitHub Actions run were NOT verified.",
+   "how_verified": "This lane is read-only and the environment forbids docker/build/network; conclusions about 1.0.0 publication, image contents, and CI behavior are static (git tags, workflow YAML, Dockerfile). The concrete static evidence is in L14-1/L14-2/L14-13."
+  }
+ ]
+}

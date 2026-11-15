@@ -10,7 +10,8 @@ from typing import Optional
 from sqlalchemy.exc import SQLAlchemyError
 from sqlmodel import Session, select
 
-from .db import ProxyModel, current_engine
+from .db import ProxyModel
+from .db import proxy_repository
 from .models.proxy import TAG_BIND, TAG_REGISTER, parse_proxy_tags
 from .proxy_utils import build_requests_proxy_config, normalize_proxy_url
 
@@ -20,8 +21,14 @@ class ProxyPool:
         self._index = 0
         self._lock = threading.Lock()
 
-    def _find_by_url(self, session: Session, url: str) -> ProxyModel | None:
-        p = session.exec(select(ProxyModel).where(ProxyModel.url == url)).first()
+    def _find_by_url(self, url: str, session: Session | None = None) -> ProxyModel | None:
+        """按 URL 找池里的那一行（三级回退：精确 → 归一化 → 逐条归一化比对）。
+
+        走 `proxy_repository` 而不是自己开会话 —— `proxies` 在 `JSON_TABLES`
+        里，JSON 部署下根本没有对应的 SQLite 表（`init_db` 刻意不建）。
+        自己开 `Session(current_engine())` 会直接 `no such table: proxies`。
+        """
+        p = proxy_repository.find_by_url(url, session=session)
         if p:
             return p
 
@@ -30,13 +37,11 @@ class ProxyPool:
             return None
 
         if normalized != url:
-            p = session.exec(
-                select(ProxyModel).where(ProxyModel.url == normalized)
-            ).first()
+            p = proxy_repository.find_by_url(normalized, session=session)
             if p:
                 return p
 
-        for candidate in session.exec(select(ProxyModel)).all():
+        for candidate in proxy_repository.list_all(session=session):
             if normalize_proxy_url(candidate.url) == normalized:
                 return candidate
         return None
@@ -50,57 +55,51 @@ class ProxyPool:
         `tags` 全是空的，硬按标签过滤会让注册任务直接「没有可用代理」。
         回退是有意的：标签是「优先」，不是「唯一」。
         """
-        with Session(current_engine()) as s:
-            q = select(ProxyModel).where(ProxyModel.is_active == True)
-            if region:
-                q = q.where(ProxyModel.region == region)
-            proxies = s.exec(q).all()
-            if tag:
-                tagged = [p for p in proxies if tag in parse_proxy_tags(getattr(p, "tags", ""))]
-                if tagged:
-                    proxies = tagged
-                elif proxies:
-                    logger.info(
-                        "没有带 %r 标签的活跃代理，回退到全部活跃代理（%d 个）", tag, len(proxies)
-                    )
-            if not proxies:
-                return None
-            proxies.sort(
-                key=lambda p: p.success_count / max(p.success_count + p.fail_count, 1),
-                reverse=True,
-            )
-            with self._lock:
-                idx = self._index % len(proxies)
-                self._index += 1
-            return proxies[idx].url
+        proxies = [
+            p for p in proxy_repository.list_all()
+            if p.is_active and (not region or getattr(p, "region", "") == region)
+        ]
+        if tag:
+            tagged = [p for p in proxies if tag in parse_proxy_tags(getattr(p, "tags", ""))]
+            if tagged:
+                proxies = tagged
+            elif proxies:
+                logger.info(
+                    "没有带 %r 标签的活跃代理，回退到全部活跃代理（%d 个）", tag, len(proxies)
+                )
+        if not proxies:
+            return None
+        proxies.sort(
+            key=lambda p: p.success_count / max(p.success_count + p.fail_count, 1),
+            reverse=True,
+        )
+        with self._lock:
+            idx = self._index % len(proxies)
+            self._index += 1
+        return proxies[idx].url
 
     def report_success(self, url: str) -> None:
-        with Session(current_engine()) as s:
-            p = self._find_by_url(s, url)
-            if p:
-                p.success_count += 1
-                p.is_active = True
-                p.last_checked = datetime.now(timezone.utc)
-                s.add(p)
-                s.commit()
+        p = self._find_by_url(url)
+        if p:
+            p.success_count += 1
+            p.is_active = True
+            p.last_checked = datetime.now(timezone.utc)
+            proxy_repository.save(p)
 
     def report_fail(self, url: str) -> None:
-        with Session(current_engine()) as s:
-            p = self._find_by_url(s, url)
-            if p:
-                p.fail_count += 1
-                p.last_checked = datetime.now(timezone.utc)
-                if p.fail_count > 0 and p.success_count == 0 and p.fail_count >= 5:
-                    p.is_active = False
-                s.add(p)
-                s.commit()
+        p = self._find_by_url(url)
+        if p:
+            p.fail_count += 1
+            p.last_checked = datetime.now(timezone.utc)
+            if p.fail_count > 0 and p.success_count == 0 and p.fail_count >= 5:
+                p.is_active = False
+            proxy_repository.save(p)
 
     # ── 标签与绑定池 ────────────────────────────────────────────────
 
     def list_bindable(self) -> list[ProxyModel]:
         """当前**可绑定**的代理（活跃 + 带 `bind` 标签）。"""
-        with Session(current_engine()) as s:
-            rows = s.exec(select(ProxyModel).where(ProxyModel.is_active == True)).all()
+        rows = [row for row in proxy_repository.list_all() if row.is_active]
         return [
             row for row in rows if TAG_BIND in parse_proxy_tags(getattr(row, "tags", ""))
         ]
@@ -333,15 +332,13 @@ class ProxyPool:
         normalized = normalize_proxy_url(url)
         if not normalized:
             return
-        with Session(current_engine()) as s:
-            row = self._find_by_url(s, normalized)
-            if row is None:
-                return
-            row.fail_count += 1
-            row.last_checked = datetime.now(timezone.utc)
-            row.is_active = False
-            s.add(row)
-            s.commit()
+        row = self._find_by_url(normalized)
+        if row is None:
+            return
+        row.fail_count += 1
+        row.last_checked = datetime.now(timezone.utc)
+        row.is_active = False
+        proxy_repository.save(row)
 
     def is_available(self, url: str) -> bool:
         """这个代理当前可用吗（在池里且没被停用）。
@@ -355,8 +352,7 @@ class ProxyPool:
         normalized = normalize_proxy_url(url)
         if not normalized:
             return False
-        with Session(current_engine()) as s:
-            row = self._find_by_url(s, normalized)
+        row = self._find_by_url(normalized)
         if row is None:
             return True
         return bool(row.is_active)
@@ -447,23 +443,20 @@ class ProxyPool:
         这个方法是给「我知道代理没问题、想直接恢复」的场景用的。
         """
         count = 0
-        with Session(current_engine()) as s:
-            for p in s.exec(select(ProxyModel)).all():
-                if not p.is_active:
-                    p.is_active = True
-                    p.fail_count = 0
-                    p.last_checked = datetime.now(timezone.utc)
-                    s.add(p)
-                    count += 1
-            s.commit()
+        for p in proxy_repository.list_all():
+            if not p.is_active:
+                p.is_active = True
+                p.fail_count = 0
+                p.last_checked = datetime.now(timezone.utc)
+                proxy_repository.save(p)
+                count += 1
         return count
 
     def check_all(self) -> dict:
         """Probe all configured proxies against a neutral endpoint."""
         import requests
 
-        with Session(current_engine()) as s:
-            proxies = s.exec(select(ProxyModel)).all()
+        proxies = proxy_repository.list_all()
         results = {"ok": 0, "fail": 0}
         for p in proxies:
             try:

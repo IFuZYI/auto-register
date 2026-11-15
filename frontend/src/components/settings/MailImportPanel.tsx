@@ -626,8 +626,8 @@ export default function MailImportPanel({ form, lockToProvider }: MailImportPane
       width: 90,
       render: (_: unknown, item: MailImportSnapshotItem) => (
         <Popconfirm
-          title="确认删除这个邮箱吗？"
-          description={item.email}
+          title={`删除 ${item.email}？`}
+          description="仅删除本地邮箱记录，不会注销上游邮箱。删除后无法恢复。"
           okText="删除"
           cancelText="取消"
           okButtonProps={{ danger: true, loading: deletingEmail === item.email }}
@@ -805,7 +805,8 @@ export default function MailImportPanel({ form, lockToProvider }: MailImportPane
                 {selectedRowKeys.length ? `导入邮箱池 ${selectedRowKeys.length} 个` : '导入邮箱池'}
               </Button>
               <Popconfirm
-                title={`确认删除已勾选的 ${selectedRowKeys.length} 个邮箱吗？`}
+                title={`删除已勾选的 ${selectedRowKeys.length} 个邮箱？`}
+                description="仅删除本地邮箱记录，不会注销上游邮箱。删除后无法恢复。"
                 okText="批量删除"
                 cancelText="取消"
                 okButtonProps={{ danger: true, loading: batchDeleting }}

@@ -1244,6 +1244,11 @@ def register_grok_via_browser(
 #: 验证码**只认大写**：x.ai 的码固定是 `ABC-123` 形式。
 #: 不能带 `re.IGNORECASE` —— 线上实测（2026-11-01，别名 535）营销信正文里的
 #: `for-ios` 会被大小写不敏感的 `[A-Z0-9]{3}-[A-Z0-9]{3}` 当成验证码填进页面。
+#: iCloud 读码连续失败多少次就熔断（上游故障专用）。
+#: 与 `modules/mail/icloud_local.py` 的 `max_consecutive_errors=4` 同一口径 ——
+#: 两个渠道面对的是同一个上游，容错阈值不该各说各话。
+_ICLOUD_MAX_CONSECUTIVE_ERRORS = 4
+
 _CODE_UPPER_RE = re.compile(r"\b([A-Z0-9]{3}-[A-Z0-9]{3})\b")
 
 #: 码信主题关键词（小写子串匹配）。x.ai 固定是 `Grok confirmation code: XXX-XXX`。
@@ -1423,6 +1428,26 @@ def _read_code(
                             f"[Grok] iCloud 读码失败 ×{consecutive_errors}: "
                             f"{type(exc).__name__}: {str(exc)[:100]}"
                         )
+                    # **熔断**：上游持续不可用时提前收手，不空等满 timeout。
+                    #
+                    # 与 `modules/mail/icloud_local.py` 的 `_run_polling_wait`
+                    # 同一口径（那里 `max_consecutive_errors=4`）。没有这条时，
+                    # iCloud 网关挂掉期间每个 Grok 号都要白等 240 秒、白烧一个
+                    # 别名领用，而日志只显示「未收到验证码」—— 与「上游挂了」
+                    # 完全无法区分（审计 2026-11-14）。
+                    #
+                    # 只在**上游故障**上熔断：DB 坏、别名不存在这类错误继续按
+                    # 原节奏重试（它们是本地状态问题，早退没有帮助）。
+                    if consecutive_errors >= _ICLOUD_MAX_CONSECUTIVE_ERRORS:
+                        from platforms.icloud.errors import is_upstream_outage
+
+                        if is_upstream_outage(exc):
+                            if log:
+                                log(
+                                    f"[Grok] iCloud 连续 {consecutive_errors} 次不可用，"
+                                    "提前结束等码（上游故障，非账号问题）"
+                                )
+                            return ""
                     msgs = []
                 for m in msgs:
                     # 属性名对齐 platforms/icloud/models.MailMessage：它只有

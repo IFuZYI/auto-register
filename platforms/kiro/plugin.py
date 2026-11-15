@@ -85,6 +85,46 @@ class KiroPlatform(BasePlatform):
         super().__init__(config)
         self.mailbox = mailbox
         self.last_registration_meta: dict[str, Any] = {}
+        self._source_claim = None
+        #: 本次复用尝试选中的来源邮箱（失败时用它记账）。
+        self._source_email: str = ""
+
+    #: Kiro 复用 AWS 时的最小等码秒数。
+    #:
+    #: Kiro 必须经过「AWS 发码 → iCloud 转发 → 读信」三段：AWS 侧实测约 3 分钟
+    #: 才发出（`platforms/aws/plugin.py` 的 OTP_TIMEOUT_FLOOR 记录了同一现象），
+    #: 再加转发延迟。而全局配置 `mailbox_otp_timeout_seconds` 是所有邮箱渠道
+    #: 共用的，生产上被设成 60 —— 于是「验证码已发送」53 秒后就判失败
+    #: （实测 task_1794677423301_8c4573）。这里取 `max(配置, 下限)`：
+    #: 配置调大仍尊重，调得过小时兜住。
+    OTP_TIMEOUT_FLOOR = 300
+
+    def get_mailbox_otp_timeout(self, default: int = 300) -> int:
+        """Kiro 的 OTP 等待：`max(配置值, 300)`。"""
+        configured = super().get_mailbox_otp_timeout(default=default)
+        return max(int(configured or 0), self.OTP_TIMEOUT_FLOOR)
+
+    def note_source_failure(self, email: str, reason: str = "") -> None:
+        """记住「本任务里这个来源失败了」，让后续轮次换下一个候选。
+
+        记在模块级、按任务分键（`source_claims._FAILED_SOURCES`）而不是实例
+        字段：每个 attempt 都新建 platform 实例，实例字段下一轮就没了。
+        也只在本任务内生效 —— 失败可能只是上游抖动，不该影响别的任务，
+        更不该写库把账号永久判死（候选池本来就很浅）。
+        """
+        from .source_claims import note_source_failure
+
+        note_source_failure(self._task_key(), email, reason)
+
+    def _task_key(self) -> str:
+        """本任务在失败记录里的键（无任务上下文时退回「无任务」）。"""
+        return str(getattr(self, "_task_attempt_token", "") or "").split(":")[0] or "no-task"
+
+    def release_registration_resources(self) -> None:
+        """本轮结束后释放复用的 AWS 来源；成功时由任务在落库后调用。"""
+        claim, self._source_claim = self._source_claim, None
+        if claim is not None:
+            claim.release()
 
     # ------------------------------------------------------------------
     # 日志
@@ -115,6 +155,23 @@ class KiroPlatform(BasePlatform):
         # password 列）；**不进** extra —— extra_json 会整段下发。
         identity["password"] = account.password
 
+        # 必须先认领，再把这个 AWS 发布到可复用列表。反过来的话，另一个
+        # worker 能在 upsert 与认领之间选走它，双方随后同时登录、读同一封 OTP。
+        from .source_claims import try_acquire
+
+        current = self._source_claim
+        if current is not None and current.email == account.email.strip().lower():
+            # 显式邮箱在进入 AWS 注册前已认领，不能重复 acquire（不是全局可重入锁）。
+            claim = current
+        else:
+            claim = try_acquire(account.email)
+            if claim is None:
+                raise RuntimeError(f"新建 AWS 账号已被其他任务认领，停止重复授权: {account.email}")
+            self.release_registration_resources()
+            self._source_claim = claim
+        if self.is_email_registered(account.email):
+            raise RuntimeError(f"该 AWS 账号已注册 Kiro，停止重复授权: {account.email}")
+
         # 来源账号**立即落库**：Kiro 授权失败时 AWS 号已经真实存在（密码也设过），
         # 丢掉它就等于白烧一个号 + 一个邮箱。落进 `aws` 平台库，Kiro 记录用
         # `source/source_email` 指回来。
@@ -142,13 +199,14 @@ class KiroPlatform(BasePlatform):
     # 来源选择：复用已有 AWS / 自动注册 AWS+Kiro
     # ------------------------------------------------------------------
     def _pick_unused_aws(self):
-        """挑一个「还没注册过 Kiro」的 AWS 账号（FIFO）。
+        """挑并**认领**一个「还没注册过 Kiro」的 AWS 账号（FIFO）。
 
         判定依据是 Kiro 账号的 `extra.source_email`：Kiro 记录里指回哪个 AWS
         邮箱，就说明那个 AWS 已经被用掉了。没有密码的（导入缺字段）跳过 ——
-        复用需要密码登录。
+        复用需要密码登录。已被其他 worker 认领但尚未落库的账号同样跳过。
         """
         from core.db import account_repository
+        from .source_claims import try_acquire
 
         aws_rows = account_repository.list_all_accounts(platform="aws")
         kiro_rows = account_repository.list_all_accounts(platform="kiro")
@@ -156,16 +214,58 @@ class KiroPlatform(BasePlatform):
             str((row.get_extra() or {}).get("source_email") or "").strip().lower()
             for row in kiro_rows
         }
+        from .source_claims import failed_sources
+
+        # 本任务里试过且失败的不再选中：否则 FIFO 会一直把它排在第一，
+        # 重试等于反复撞同一堵墙（实测 55 次全撞同一个号）。
+        avoided = failed_sources(self._task_key())
+        def _is_complete(row) -> bool:
+            """这个 AWS 号能否完成 SSO 登录（即有没有凭据）。
+
+            `needs_sso=True` 是 `_save_partial_account`（aws/plugin.py:231）打的
+            标记，原文写着「密码已设、凭据没拿到」——这类号**没有** refresh_token /
+            access_token / sso，SSO 授权从未完成。拿它去复用登录，
+            收码可能成功，但提交 OTP 会被 `HTTP 400 Please try signing in again`
+            拒掉（实测 2026-11-15 task_1794717139351_574351）。
+
+            生产上这直接把 Kiro 打成 0%：55 个 AWS 里 52 个完整号已被用掉，
+            **剩下 3 个全是半成品**，于是每一轮都选中必然失败的号。
+            """
+            extra = row.get_extra() if callable(getattr(row, "get_extra", None)) else {}
+            if isinstance(extra, dict) and extra.get("needs_sso"):
+                return False
+            return True
+
         candidates = [
             row
             for row in aws_rows
             if str(row.password or "").strip()
             and row.email.strip().lower() not in used
             and str(row.status or "").strip().lower() not in ("banned", "invalid")
+            and row.email.strip().lower() not in avoided
+            # 半成品（needs_sso）无法登录，不能当来源 —— 见 _is_complete 的注释。
+            and _is_complete(row)
         ]
         epoch = datetime.min.replace(tzinfo=timezone.utc)
         candidates.sort(key=lambda row: row.created_at or epoch)
-        return candidates[0] if candidates else None
+        for row in candidates:
+            claim = try_acquire(row.email)
+            if claim is None:
+                continue
+            # 先放掉上一次的认领再接手新的：直接赋值会让旧认领**泄漏**在
+            # `_CLAIMED_EMAILS` 里，此后那个号再也选不到（实测 2026-11-15：
+            # 连续挑两次后 release 只放回第二个，第一个永久卡住）。
+            # Kiro 候选池很浅（55 个 AWS 只剩 3 个可复用），一条泄漏足够把
+            # 「还能用」变成「永远选不到」—— 与「成功率低」是同一件事。
+            self.release_registration_resources()
+            self._source_claim = claim
+            # 候选是认领前的快照：等待认领期间另一个 worker 可能已经保存
+            # Kiro。必须重新判重，不能拿旧快照再登录同一个 AWS。
+            if self.is_email_registered(row.email):
+                self.release_registration_resources()
+                continue
+            return row
+        return None
 
     def _mailbox_account_for_reuse(self, mailbox, email: str):
         """复用登录时读码用的邮箱账号对象。
@@ -318,24 +418,56 @@ class KiroPlatform(BasePlatform):
         # 用户点名要注册某个邮箱 → 必须为这个邮箱新建 AWS，不能拿别的号复用。
         # （「补 Kiro」走的是 kiro_aws_email，不带 email；两者不会打架。）
         if str(email or "").strip() and not requested_aws:
-            return self._register_new_aws_and_kiro(
-                extra=extra, proxy=proxy, email=email, password=password, plan=plan
-            )
+            from .source_claims import try_acquire
+
+            claim = try_acquire(email)
+            if claim is None:
+                raise RuntimeError(f"该邮箱正由其他任务注册，请稍后重试: {email}")
+            self._source_claim = claim
+            try:
+                if self.is_email_registered(email):
+                    raise RuntimeError(f"该邮箱已注册 Kiro，跳过: {email}")
+                return self._register_new_aws_and_kiro(
+                    extra=extra, proxy=proxy, email=email, password=password, plan=plan
+                )
+            except BaseException as exc:
+                self.release_registration_resources()
+                raise
 
         if requested_aws:
             from core.db import account_repository
+            from .source_claims import try_acquire
 
             row = account_repository.find_by_email("aws", requested_aws)
             if row is None:
                 raise RuntimeError(f"指定的 AWS 账号不存在: {requested_aws}")
-            if self.is_email_registered(row.email):
-                raise RuntimeError(f"该 AWS 账号已注册 Kiro: {row.email}")
-            return self._reuse_aws_account(row, extra=extra, proxy=proxy, plan=plan)
+            claim = try_acquire(row.email)
+            if claim is None:
+                raise RuntimeError(f"该 AWS 账号正由其他任务复用，请稍后重试: {row.email}")
+            self._source_claim = claim
+            try:
+                if self.is_email_registered(row.email):
+                    raise RuntimeError(f"该 AWS 账号已注册 Kiro: {row.email}")
+                return self._reuse_aws_account(row, extra=extra, proxy=proxy, plan=plan)
+            except BaseException as exc:
+                self.release_registration_resources()
+                raise
 
         if source_mode == "reuse":
             row = self._pick_unused_aws()
             if row is not None:
-                return self._reuse_aws_account(row, extra=extra, proxy=proxy, plan=plan)
+                try:
+                    return self._reuse_aws_account(row, extra=extra, proxy=proxy, plan=plan)
+                except BaseException as exc:
+                    # 包括任务停止等协作式中断：失败必须释放，成功则等落库后释放。
+                    self.release_registration_resources()
+                    # 让本任务的下一轮换一个来源。手动停止不是「这个号坏了」，
+                    # 不能记进去（否则同一个号在别的任务里也会被躲开）。
+                    from core.task_runtime import TaskInterruption
+
+                    if not isinstance(exc, TaskInterruption):
+                        self.note_source_failure(row.email, str(exc))
+                    raise
             if not auto_register:
                 raise RuntimeError(
                     "没有未注册 Kiro 的 AWS 账号；如需自动新建 AWS + Kiro，"
@@ -345,9 +477,14 @@ class KiroPlatform(BasePlatform):
         elif source_mode != "auto":
             raise RuntimeError(f"未知的 kiro_source: {source_mode}")
 
-        return self._register_new_aws_and_kiro(
-            extra=extra, proxy=proxy, email=email, password=password, plan=plan
-        )
+        try:
+            return self._register_new_aws_and_kiro(
+                extra=extra, proxy=proxy, email=email, password=password, plan=plan
+            )
+        except BaseException as exc:
+            # 新建 AWS 会在授权前认领来源；失败时与复用路径一样及时释放。
+            self.release_registration_resources()
+            raise
 
     def _register_new_aws_and_kiro(
         self,

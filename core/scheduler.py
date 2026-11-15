@@ -173,7 +173,11 @@ class Scheduler:
                 continue
             try:
                 job.runner()
-                job.last_run_at = now
+                # 间隔从**跑完**算，不是从本轮 tick 的 `now` 算。
+                # 用 `now` 会让「耗时 > 间隔」的任务（全量探活约 600s、间隔下限
+                # 300s）跑完立刻又到期 → back-to-back 连轴转，正是那个 5 分钟
+                # 下限想避免的上游限流场景。界面与文档承诺的都是「距上次跑完」。
+                job.last_run_at = time.time()
             except Exception as e:
                 # 失败时**不**推进 last_run_at：下一次循环 tick（默认 60s）就重试，
                 # 而不是等满一个 interval。这是刻意的重试策略——维护类任务

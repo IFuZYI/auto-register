@@ -645,3 +645,60 @@ if __name__ == "__main__":
     runner = unittest.TextTestRunner(verbosity=2)
     result = runner.run(suite)
     sys.exit(0 if result.wasSuccessful() else 1)
+
+
+class MailboxFailureCarriesTheCauseTests(unittest.TestCase):
+    """渠道记 `failed` 时必须把**失败原因**传下去，否则上游抖动被记成地址的错。
+
+    2026-11-15 实测（T5-2）：`platforms/grok/plugin.py:962` 与
+    `platforms/aws/plugin.py:274` 调 `set_account_status(account, status)` 时
+    **不传 `error`**，而 `modules/mail/icloud_remote.py::set_account_status`
+    与 `icloud_local` 都支持 `error=` 并把转发给 `release_alias_claim(alias_id, error=...)`。
+
+    `release_alias_claim` 的判据（`services/icloud/aliases.py:269`）：
+    - 有 error 且 `is_upstream_outage(error)` → 只放回 available，**不计失败**；
+    - 无 error → 照旧累加 `consecutive_failures`；累计 3 次后 `find_candidates`
+      永久跳过该地址（`consecutive_failures < 3`），而 `mark_failed(reset=True)`
+      的唯一调用点在 `claim_alias` 里 —— 候选集已排除该行，**没有任何 API/UI 能复位**。
+
+    对照：`platforms/chatgpt/registration_engine.py:246` 是**正确**的（传了 error=exc）。
+    """
+
+    def test_grok_passes_the_cause_to_the_mailbox(self):
+        from platforms.grok.plugin import GrokPlatform
+
+        platform = GrokPlatform.__new__(GrokPlatform)
+        seen: dict = {}
+
+        class _Mailbox:
+            def set_account_status(self, account, status, *, error=None):
+                seen["status"] = status
+                seen["error"] = error
+
+        boom = RuntimeError("upstream 503")
+        # Grok 的签名是 `(mailbox, account, status, log, error=None)` ——
+        # log 是第 4 位，error 是关键字参数。
+        platform._record_mailbox_status(_Mailbox(), object(), "failed", lambda *_: None, boom)
+        self.assertIs(
+            seen.get("error"), boom,
+            "Grok 记 failed 时没传原因 → 上游故障会被算成这个地址连续失败，"
+            "累计 3 次后永久跳过且无 API 复位",
+        )
+
+    def test_aws_passes_the_cause_to_the_mailbox(self):
+        from platforms.aws.plugin import AwsPlatform
+
+        platform = AwsPlatform.__new__(AwsPlatform)
+        seen: dict = {}
+
+        class _Mailbox:
+            def set_account_status(self, account, status, *, error=None):
+                seen["status"] = status
+                seen["error"] = error
+
+        boom = RuntimeError("upstream 503")
+        platform._record_mailbox_status(_Mailbox(), object(), "failed", boom)
+        self.assertIs(
+            seen.get("error"), boom,
+            "AWS 记 failed 时没传原因 → 同上",
+        )

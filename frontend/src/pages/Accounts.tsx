@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, useMemo } from 'react'
 import { useParams } from 'react-router-dom'
 import {
   DetailGroup,
@@ -51,14 +51,20 @@ import {
   PlusOutlined,
   DownloadOutlined,
   UploadOutlined,
-  CloudUploadOutlined,
   MoreOutlined,
   DeleteOutlined,
   SyncOutlined,
+  SafetyCertificateOutlined,
   KeyOutlined,
   FileAddOutlined,
   SearchOutlined,
   ClearOutlined,
+  CalendarOutlined,
+  CheckCircleFilled,
+  ClockCircleOutlined,
+  MailOutlined,
+  SaveOutlined,
+  UserOutlined,
 } from '@ant-design/icons'
 import { AccountExportModal } from '@/components/AccountExportModal'
 import { ChatGPTBind2faSwitch } from '@/components/ChatGPTBind2faSwitch'
@@ -252,23 +258,20 @@ export default function Accounts() {
   const [registerModalOpen, setRegisterModalOpen] = useState(false)
   const [addModalOpen, setAddModalOpen] = useState(false)
   const [importModalOpen, setImportModalOpen] = useState(false)
-  // 「上传到面板」：把筛选/勾选的账号推送到指定面板。
-  //
-  // 需求变更（2026-10-26）：此前上传按钮被**刻意**移到了「面板管理」页
-  // （那里的注释写着「上传就在同一页发」）。用户现在要求回到账号页，因为
-  // 他要在**账号的上下文里**按筛选挑号上传。面板页保留对比与双向更新。
-  const [panelUploadOpen, setPanelUploadOpen] = useState(false)
-  const [panelUploadTarget, setPanelUploadTarget] = useState('chatgpt2api')
-  const [panelUploadRunning, setPanelUploadRunning] = useState(false)
   const [exportModalOpen, setExportModalOpen] = useState(false)
   const [detailModalOpen, setDetailModalOpen] = useState(false)
   // AT 默认按「只读 + 复制」展示，点「替换」才展开成可编辑的文本框。
   const [editingToken, setEditingToken] = useState(false)
   const [currentAccount, setCurrentAccount] = useState<any>(null)
+  const [detailLoading, setDetailLoading] = useState(false)
+  const [detailLoadError, setDetailLoadError] = useState('')
+  const [detailSaving, setDetailSaving] = useState(false)
+  const [detailDirty, setDetailDirty] = useState(false)
 
   const [registerForm] = Form.useForm()
   const [addForm] = Form.useForm()
   const [detailForm] = Form.useForm()
+  const detailStatus = Form.useWatch('status', detailForm)
   const { plan: chatgptTokenPlan, setPlan: setChatgptTokenPlan } =
     usePersistentChatGPTTokenPlan()
   const { registerFlow: chatgptRegisterFlow, setRegisterFlow: setChatgptRegisterFlow } =
@@ -331,11 +334,13 @@ export default function Accounts() {
     if (!detailModalOpen || !currentAccount) return
     detailForm.setFieldsValue({
       status: currentAccount.status,
-      token: currentAccount.token,
+      // AT 正文可能在 extra.access_token，不能只读 token 镜像列。
+      token: currentAccount.token ?? rowExtra(currentAccount).access_token,
     })
     // 换一个账号就退回只读：否则上一号点开的「替换」会带到下一个号上，
-    // 一保存就把旧号的 AT 写进新号。
+    // 一保存就把旧号的 AT 写进新号。初始化本身不算用户修改。
     setEditingToken(false)
+    setDetailDirty(false)
   }, [detailModalOpen, currentAccount, detailForm])
 
   const load = useCallback(async () => {
@@ -387,9 +392,13 @@ export default function Accounts() {
       })
   }, [currentPlatform])
 
-  const copyText = (text: string) => {
-    navigator.clipboard.writeText(text)
-    message.success('已复制')
+  const copyText = async (text: string) => {
+    try {
+      await navigator.clipboard.writeText(text)
+      message.success('已复制')
+    } catch {
+      message.error('复制失败，请在账号详情中手动复制')
+    }
   }
 
   /**
@@ -510,6 +519,8 @@ export default function Accounts() {
    */
   const openDetail = async (record: { id: string; platform?: string }) => {
     setDetailModalOpen(true)
+    setDetailLoading(true)
+    setDetailLoadError('')
     setCurrentAccount(normalizeAccount(record))  // 先用列表行占位，避免抽屉空白
     try {
       const full = await apiFetch(
@@ -520,8 +531,11 @@ export default function Accounts() {
       // 从 `extra_json` 解出来。直接塞原始响应 → 那些字段全是 undefined →
       // 详情里看不到 2FA 密钥、代理、本地状态（实测 2026-10-28）。
       if (full && typeof full === 'object') setCurrentAccount(normalizeAccount(full))
-    } catch {
-      // 拉不到就继续用列表行：抽屉里其它字段仍可用，只是 token 部分为空
+    } catch (error) {
+      // 列表行不含凭据正文，必须明确降级，不能把未加载误显示为「无」。
+      setDetailLoadError(error instanceof Error ? error.message : String(error))
+    } finally {
+      setDetailLoading(false)
     }
   }
 
@@ -530,7 +544,7 @@ export default function Accounts() {
     await apiFetch(`/accounts/${id}?platform=${encodeURIComponent(currentPlatform)}`, {
       method: 'DELETE',
     })
-    message.success('删除成功')
+    message.success('账号已删除')
     load()
   }
 
@@ -538,19 +552,27 @@ export default function Accounts() {
     if (selectedRowKeys.length === 0) return
     // 单次最多删 1000 条且**不可恢复**，原来一点即删（全量检测 F-04）。
     Modal.confirm({
-      title: `确认删除选中的 ${selectedRowKeys.length} 个账号？`,
-      content: '删除后无法恢复（账号凭据、任务历史里的关联记录都会一起消失）。',
+      title: `删除选中的 ${selectedRowKeys.length} 个账号？`,
+      content: '账号及本地凭据将被永久删除，远端面板中的记录不会自动删除。此操作无法撤销。',
       okText: '删除',
       okButtonProps: { danger: true },
       cancelText: '取消',
       onOk: async () => {
-        await apiFetch('/accounts/batch-delete', {
-          method: 'POST',
-          body: JSON.stringify({ ids: Array.from(selectedRowKeys), platform: currentPlatform }),
-        })
-        message.success('批量删除成功')
-        setSelectedRowKeys([])
-        load()
+        // 失败时**保留勾选**并说明原因：删除不可恢复，静默失败会让用户以为
+        // 已经删掉（勾选框还在，却不再检查），下次再点就删了另一批。
+        try {
+          await apiFetch('/accounts/batch-delete', {
+            method: 'POST',
+            body: JSON.stringify({ ids: Array.from(selectedRowKeys), platform: currentPlatform }),
+          })
+          message.success(`已删除 ${selectedRowKeys.length} 个账号`)
+          setSelectedRowKeys([])
+          load()
+        } catch (error) {
+          message.error(
+            `批量删除失败：${error instanceof Error ? error.message : String(error)}（勾选已保留，可重试）`,
+          )
+        }
       },
     })
   }
@@ -561,7 +583,7 @@ export default function Accounts() {
       method: 'POST',
       body: JSON.stringify({ ...values, platform: currentPlatform }),
     })
-    message.success('添加成功')
+    message.success('账号已添加')
     setAddModalOpen(false)
     addForm.resetFields()
     load()
@@ -658,25 +680,77 @@ export default function Accounts() {
 
   const handleDetailSave = async () => {
     const values = await detailForm.validateFields()
+    // 没改动时不发请求，避免把「查看详情」误当作一次保存。
+    if (!detailDirty && !editingToken) return
+    setDetailSaving(true)
     // `token` 只在点了「替换」之后才挂载。没挂载就不提交 —— 否则会用
     // `initialValues` 里的旧值覆盖掉别处刚写进去的新 AT。
     const payload: Record<string, unknown> = { status: values.status }
     if (values.token !== undefined) payload.token = values.token
-    await apiFetch(`/accounts/${currentAccount.id}?platform=${encodeURIComponent(currentPlatform)}`, {
-      method: 'PATCH',
-      body: JSON.stringify(payload),
-    })
-    message.success('保存成功')
-    setDetailModalOpen(false)
-    load()
+    // 失败必须说清：这个 Promise 是 Modal 的 onOk，抛出去只会让弹窗停着不关
+    // —— 没有 toast、没有原因，用户只会以为是自己没点到，反复按保存。
+    try {
+      await apiFetch(`/accounts/${currentAccount.id}?platform=${encodeURIComponent(currentPlatform)}`, {
+        method: 'PATCH',
+        body: JSON.stringify(payload),
+      })
+      message.success('账号更改已保存')
+      setDetailModalOpen(false)
+      load()
+    } catch (error) {
+      message.error(`保存失败：${error instanceof Error ? error.message : String(error)}`)
+    } finally {
+      setDetailSaving(false)
+    }
+  }
+
+  /**
+   * 解除账号的代理绑定（此后直连）。
+   *
+   * 后端 `PATCH /accounts/{id}/proxy` 传空串 = 解绑。这个方向此前完全不存在：
+   * `resolve_for_account` 在没有更好选择时「保留原值」，所以绑错之后只能靠
+   * `rebalance` 挪到另一个带 bind 标签的代理 —— 没有可绑定代理时永久卡死，
+   * 也没法恢复成直连。
+   */
+  const [releasingProxy, setReleasingProxy] = useState(false)
+
+  const handleReleaseProxy = async () => {
+    if (!currentAccount?.id) return
+    setReleasingProxy(true)
+    try {
+      await apiFetch(
+        `/accounts/${currentAccount.id}/proxy?platform=${encodeURIComponent(currentPlatform)}`,
+        { method: 'PATCH', body: JSON.stringify({ proxy: "" }) },
+      )
+      message.success('已解除代理绑定，该账号此后直连')
+      // 详情里显示的 registerProxy 来自列表行，刷新列表并重新取详情
+      // 只用「清掉 registerProxy」这一种更新，不引入新的类型面：
+      // eslint 不许显式 `any`，tsc 又不许隐式 any，所以用函数式更新但
+      // 把参数类型交给 `useState<any>` 推断（显式标注会撞 eslint，
+      // 完全不标注会撞 tsc 的 noImplicitAny —— 这里用 `unknown` 收窄最稳）。
+      setCurrentAccount((prev: unknown) =>
+        prev && typeof prev === "object" ? { ...(prev as object), registerProxy: "" } : prev,
+      )
+      load()
+    } catch (error) {
+      message.error(`解除绑定失败：${error instanceof Error ? error.message : String(error)}`)
+    } finally {
+      setReleasingProxy(false)
+    }
   }
 
   const handleBatchStatusSync = async (kind: 'probe' | 'plus', scope: 'selected' | 'all') => {
-    if (currentPlatform !== 'chatgpt') return
+    // `plus` 是 ChatGPT 专有能力（Plus 试用资格）；`probe` 由各平台自己声明。
+    const action = kind === 'probe' ? batchCapabilities.probe : undefined
+    if (kind === 'plus' && currentPlatform !== 'chatgpt') return
+    if (kind === 'probe' && !action) {
+      message.warning('该平台没有声明可批量执行的检测动作')
+      return
+    }
 
     const loadingKey = `${kind}_${scope}` as typeof statusSyncLoading
-    const actionId = kind === 'probe' ? 'probe_local_status' : 'check_plus_trial'
-    const actionLabel = kind === 'probe' ? '本地状态同步' : 'Plus 试用检测'
+    const actionId = kind === 'probe' ? String(action?.id || '') : 'check_plus_trial'
+    const actionLabel = kind === 'probe' ? String(action?.label || '检测') : 'Plus 试用检测'
     const scopeLabel = scope === 'selected' ? '所选账号' : '当前筛选账号'
     const toastKey = `status-sync:${loadingKey}`
 
@@ -710,7 +784,7 @@ export default function Accounts() {
 
     // 批量动作跑成**任务**（用户要求「整个项目大部分功能都统一基于任务」）：
     // 每个号都要打一次上游请求，几百个号同步跑会把请求挂住几分钟且界面无
-    // 反馈。走通用任务端点后能在「任务运行」页看实时日志、可停止/跳过。
+    // 反馈。走通用任务端点后能在「任务中心」页看实时日志、可停止/跳过。
     //
     // 用**通用**端点（`/tasks/batch-action`）而不是逐个动作写专用端点：
     // 新增动作时前端不需要再改。
@@ -726,7 +800,7 @@ export default function Accounts() {
           }),
         })) as { task_id: string; total: number }
         message.success({
-          content: `${scopeLabel}${actionLabel}已开始（${created.total} 个），可在「任务运行」查看进度`,
+          content: `${scopeLabel}${actionLabel}已开始（${created.total} 个），可在「任务中心」查看进度`,
           key: toastKey,
         })
         await load()
@@ -745,62 +819,6 @@ export default function Accounts() {
   }
 
   const missingRtCount = accounts.filter((item) => !getRefreshToken(item)).length
-
-  /** 可选的上传目标面板 → 对应的动作 id（与后端 `_UPLOAD_ACTIONS` 同名）。 */
-  const PANEL_UPLOAD_TARGETS = [
-    { value: 'chatgpt2api', label: 'chatgpt2api' },
-    { value: 'cpa', label: 'CPA 面板' },
-    { value: 'sub2api', label: 'Sub2API' },
-  ] as const
-
-  const handlePanelUpload = async () => {
-    // 与「批量补 RT」同一套 scope 约定：勾了就传勾选的，没勾就传筛选结果。
-    const scope = selectedRowKeys.length > 0 ? 'selected' : 'all'
-    const actionId = `upload_${panelUploadTarget}`
-
-    const body: Record<string, unknown> = {}
-    if (scope === 'selected') {
-      body.account_ids = Array.from(selectedRowKeys)
-        // 账号主键是 UUID 字符串。原来 `Number(uuid)` → NaN → 被下面的
-        // `Number.isInteger` 全部过滤掉，于是「同步/补RT/刷新/上传（所选）」
-        // 永远提示「请先选择」、导出退化成「全部筛选结果」（全量检测 F-01/F-02）。
-        .map((value) => String(value))
-        .filter((value) => value.length > 0)
-    } else {
-      body.all_filtered = true
-      if (search) body.email = search
-      if (filterStatus) body.status = filterStatus
-      if (filterPlusStatus) body.plus_status = filterPlusStatus
-      // 日期筛选**必须转发**：列表上的计数包含它，请求不带的话「处理数会大于
-      // 显示数」（本仓既有约定，见 tests/test_batch_scope_consistency.py）。
-      if (createdAtStart) body.created_at_start = createdAtStart
-      if (createdAtEnd) body.created_at_end = createdAtEnd
-    }
-
-    setPanelUploadRunning(true)
-    try {
-      // 上传也跑成**任务**：一次可能推几百个账号，同步跑会把请求挂住几分钟
-      // 且界面无反馈。走通用任务端点后可在「任务运行」看实时日志、可停止。
-      const created = (await apiFetch('/tasks/batch-action', {
-        method: 'POST',
-        body: JSON.stringify({
-          ...body,
-          platform: currentPlatform,
-          action_id: actionId,
-          action_label: `上传到 ${panelUploadTarget}`,
-        }),
-      })) as { task_id: string; total: number }
-      message.success(
-        `已开始上传 ${created.total} 个账号到 ${panelUploadTarget}，可在「任务运行」查看进度`,
-      )
-      setPanelUploadOpen(false)
-      load()
-    } catch (error) {
-      message.error(error instanceof Error ? error.message : '上传失败')
-    } finally {
-      setPanelUploadRunning(false)
-    }
-  }
 
   const handleBackfillRt = async () => {
     const values = await backfillRtForm.validateFields()
@@ -850,6 +868,59 @@ export default function Accounts() {
     backfillRtForm.resetFields()
   }
 
+  /**
+   * 批量补绑 TOTP 2FA。
+   *
+   * `/tasks/bind-2fa` 早就实现了（串行 + 间隔，因为要连着打 OpenAI 的
+   * 登录/enroll 接口），但界面上只有单行菜单里逐号触发 —— 几百个号补 2FA
+   * 得一个个点。`batchCapabilities.bind2fa` 之前算出来也没人用。
+   */
+  const [bind2faLoading, setBind2faLoading] = useState(false)
+  const [bind2faConfirmOpen, setBind2faConfirmOpen] = useState(false)
+  const [bind2faTaskId, setBind2faTaskId] = useState<string | null>(null)
+
+  const handleBatchBind2fa = async () => {
+    const scope = selectedRowKeys.length > 0 ? 'selected' : 'all'
+    const body: Record<string, unknown> = {
+      concurrency: 1,
+      delay_seconds: 5,
+      only_missing_2fa: true,
+      allow_login: true,
+    }
+    if (scope === 'selected') {
+      const ids = Array.from(selectedRowKeys)
+        .map((value) => String(value))
+        .filter((value) => value.length > 0)
+      if (ids.length === 0) {
+        message.warning('请先选择要补绑的账号')
+        return
+      }
+      body.account_ids = ids
+    } else {
+      body.all_filtered = true
+      if (search) body.email = search
+      if (filterStatus) body.status = filterStatus
+      if (filterPlusStatus) body.plus_status = filterPlusStatus
+      if (createdAtStart) body.created_at_start = createdAtStart
+      if (createdAtEnd) body.created_at_end = createdAtEnd
+    }
+
+    setBind2faLoading(true)
+    try {
+      const result = (await apiFetch('/tasks/bind-2fa', {
+        method: 'POST',
+        body: JSON.stringify(body),
+      })) as { task_id: string; total: number }
+      setBind2faConfirmOpen(false)
+      setBind2faTaskId(result.task_id)
+      message.success(`已开始为 ${result.total} 个缺少 2FA 的账号补绑`)
+    } catch (error) {
+      message.error(`补绑 2FA 启动失败：${error instanceof Error ? error.message : String(error)}`)
+    } finally {
+      setBind2faLoading(false)
+    }
+  }
+
   const handleRefreshToken = async () => {
     const values = await refreshTokenForm.validateFields()
     const scope = selectedRowKeys.length > 0 ? 'selected' : 'all'
@@ -877,10 +948,24 @@ export default function Accounts() {
 
     setRefreshTokenLoading(true)
     try {
-      const result = await apiFetch('/tasks/refresh-token', {
-        method: 'POST',
-        body: JSON.stringify(body),
-      })
+      // ChatGPT 有专用端点（session → OAuth → 登录链兜底，带更多参数）。
+      // 其它平台没有专用端点，但都声明了 refresh 动作，走平台无关的
+      // `/tasks/batch-action` —— 同一个 `_run_batch_action` 骨架，可看日志、可停。
+      const dedicated = currentPlatform === 'chatgpt'
+      const result = dedicated
+        ? await apiFetch('/tasks/refresh-token', {
+            method: 'POST',
+            body: JSON.stringify(body),
+          })
+        : await apiFetch('/tasks/batch-action', {
+            method: 'POST',
+            body: JSON.stringify({
+              ...body,
+              platform: currentPlatform,
+              action_id: String(batchCapabilities.refresh?.id || 'refresh_token'),
+              action_label: String(batchCapabilities.refresh?.label || '刷新 Token'),
+            }),
+          })
       setRefreshTokenTaskId(result.task_id)
       message.success(`已开始刷新 ${result.total} 个账号的 Token`)
     } catch (e) {
@@ -1030,6 +1115,36 @@ export default function Accounts() {
   const narrow = screens.md === false
 
   const isChatgptPlatform = currentPlatform === 'chatgpt'
+
+  /**
+   * 批量动作由**平台声明的能力**决定，不由平台名决定。
+   *
+   * 后端 `/tasks/batch-action` 一直是平台无关的，Grok / Kiro / AWS 也都实现了
+   * `probe` 与 `refresh_token`；此前界面把入口锁在 `currentPlatform === 'chatgpt'`，
+   * 于是这些平台只剩行内的单账号操作 —— 能力在后端，入口却不存在。
+   *
+   * `scope: 'panel'` 的动作目标在外部面板，归「面板同步」页，这里排除。
+   */
+  const batchCapabilities = useMemo(() => {
+    const usable = platformActions.filter((a) => a?.scope !== 'panel' && a?.capability)
+    /**
+     * 同一能力有多个动作时，平台可以用 `batch_default` 指定批量该走哪个。
+     *
+     * Grok 就是这种情况：`probe` 走 CPA 探活，没有 AT 直接失败（注册默认不产
+     * AT，只有 SSO），而 `probe_refresh` 才是真正判定有效性的那个。选错会让
+     * 整批新号显示失败 —— 比没有入口更糟。没有标记时仍取声明顺序第一个。
+     */
+    const byCapability = (capability: string) => {
+      const candidates = usable.filter((a) => a.capability === capability)
+      return candidates.find((a) => a.batch_default === true) || candidates[0]
+    }
+    return {
+      probe: byCapability('probe'),
+      refresh: byCapability('refresh'),
+      backfill: byCapability('backfill'),
+      bind2fa: byCapability('bind_2fa'),
+    }
+  }, [platformActions])
   const monospaceStyle: React.CSSProperties = {
     fontFamily: 'SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace',
     fontSize: 12,
@@ -1192,7 +1307,7 @@ export default function Accounts() {
         // 原来两个平台共用这一列，可是 grok 的 AT 早就不产了（注册只留 SSO），
         // 于是 Grok 每一行的这格都是「无 AT」—— 一个恒定为空、只在说「我没有」
         // 的列，占着 132px 还让人以为号是坏的。Grok 真正该看的两件事
-        // （2API 有没有接上、探测结论）另开一列，见下面 `isChatgptPlatform` 分支。
+        // （账号本身的探测结论）另开一列；外部面板接入归「面板同步」页。
         //
         // 日期只显示 `MM-DD`：完整年份在这张表里没有信息量（都在今年），
         // 而 `到期 2026-11-09` 需要 95px、该列内容宽只有 ~92px，实测被截断成
@@ -1304,34 +1419,14 @@ export default function Accounts() {
       },
     })
   } else {
-    // Grok 看它自己的两件正事 —— 取代原来的「AT 到期」空列和恒为 `-` 的「地区」列
-    // （用户 2026-11-01：Grok 的信息和 GPT 不一样）。
+    // Grok 只展示账号自身的凭据与探测；grok2api 的当前接入、差异和登记
+    // 统一在「面板同步」页查看，那里能用远端清单验证，而不是读历史 ingested 标记。
     //
-    // - 2API 接没接上，是 grok 号「能不能用」的直接判据（库里 362/390 有值）；
-    // - 探测结论只有真跑过才有（390 行里 9 行），没有就**什么都不渲染** ——
+    // 探测结论只有真跑过才有，没有就**什么都不渲染** ——
     //   不写「未检测」，那和「没有这个信息」是同一件事。
     // - 「地区」列删掉：两个平台都是 0/1080 有值，而且编辑表单里根本没这一项，
     //   永远显示 `-` 的一列只是占 90px。
     columns.push(
-      {
-        title: '2API 接入',
-        key: 'grok2api',
-        width: 104,
-        // 只用到 `extra_json` —— 直接声明出来，不用 `any`（eslint 会拦）。
-        render: (_: unknown, record: { extra_json?: string }) => {
-          const extra = rowExtra(record)
-          // 老账号可能根本没有这个键（2026-10-23 之前注册的）—— 那就是未接入。
-          const ingested = extra.grok2api_ingested === true
-          const result = String(extra.grok2api_result || '')
-          return (
-            <Tooltip title={result || (ingested ? '已接入' : '未接入')}>
-              <Tag color={ingested ? 'green' : 'default'} style={{ marginInlineEnd: 0 }}>
-                {ingested ? '已接入' : '未接入'}
-              </Tag>
-            </Tooltip>
-          )
-        },
-      },
       {
         // `probe_status` 是 HTTP 码或 `refresh_ok` 这种短标记，`probe_summary`
         // 是那句人话 —— 两个都给：光看码不知道上游到底怎么了。
@@ -1414,7 +1509,8 @@ export default function Accounts() {
             详情
           </Button>
           <Popconfirm
-            title="确认删除该账号吗？"
+            title="删除这个账号？"
+            description="账号及其本地凭据将被永久删除，远端面板中的记录不会自动删除。"
             onConfirm={() => handleDelete(record.id)}
             okText="删除"
             cancelText="取消"
@@ -1434,40 +1530,43 @@ export default function Accounts() {
   // 只在这里包一次：在创建时包、push 后再包，会把 onCell 套三层。
   const tableColumns = withDataLabels(columns)
 
-  // 只留账号自身的动作：本地状态探测、Plus 试用检测。
-  // 「同步 CLIProxyAPI 状态」已移到「面板管理」页（用户要求平台管理只管账号）——
-  // 那个动作的目标是外部面板，和账号本身的状态不是一回事。
+  // 只留账号自身的动作：探测、刷新，以及 ChatGPT 专有的补 RT / 2FA / Plus。
+  // 外部面板动作（`scope: 'panel'`）归「面板同步」页。
   const statusSyncMenuItems: MenuProps['items'] = [
-    {
-      key: `probe:${getStatusSyncScope()}`,
+    ...(batchCapabilities.probe ? [{
+      key: `probe:${getStatusSyncScope()}` as const,
       label:
         getStatusSyncScope() === 'selected'
-          ? `同步所选本地状态 (${selectedRowKeys.length})`
-          : `同步当前筛选本地状态 (${total})`,
+          ? `批量检测所选账号 (${selectedRowKeys.length})`
+          : `批量检测当前筛选 (${total})`,
       disabled: getStatusSyncScope() === 'selected' ? selectedRowKeys.length === 0 : total === 0,
-    },
-    {
-      key: `plus:${getStatusSyncScope()}`,
+    }] : []),
+    ...(isChatgptPlatform ? [{
+      key: `plus:${getStatusSyncScope()}` as const,
       label:
         getStatusSyncScope() === 'selected'
           ? `检测所选 Plus 试用资格 (${selectedRowKeys.length})`
           : `检测当前筛选 Plus 试用资格 (${total})`,
       disabled: getStatusSyncScope() === 'selected' ? selectedRowKeys.length === 0 : total === 0,
-    },
+    }] : []),
   ]
 
   return (
-    <div>
+    <div className="accounts-page">
       <PageHeader
         title={getPlatformLabel(currentPlatform)}
-        subtitle={`${total} 个账号${selectedRowKeys.length > 0 ? ` · 已选 ${selectedRowKeys.length} 个` : ''}`}
+        subtitle={`共 ${total} 个账号${selectedRowKeys.length > 0 ? `，已选 ${selectedRowKeys.length} 个` : ''}。查看凭据、维护状态或导出账号。`}
         actions={
           <Space wrap>
             {/* 主操作单独突出，其余低频动作收进「更多」。
                 之前 8 个按钮平铺、除「注册」外全是同权重描边按钮，没有视觉层级；
                 且「新增」与「注册」共用同一个 + 图标。 */}
-            <Button type="primary" icon={<PlusOutlined />} onClick={() => setRegisterModalOpen(true)}>注册</Button>
-            {currentPlatform === 'chatgpt' && (
+            <Button type="primary" icon={<PlusOutlined />} onClick={() => setRegisterModalOpen(true)}>注册账号</Button>
+            {/* 批量入口由平台声明的能力决定：Grok / Kiro / AWS 都实现了
+                probe 与 refresh_token，后端 `/tasks/batch-action` 也一直
+                是平台无关的。此前这里写死 chatgpt，这几个平台只能在行内
+                逐个点 —— 能力在后端，入口却不存在。 */}
+            {(batchCapabilities.probe || isChatgptPlatform) && (
               <Dropdown
                 trigger={['click']}
                 menu={{
@@ -1482,7 +1581,7 @@ export default function Accounts() {
                 }}
               >
                 <Button icon={<SyncOutlined />} loading={statusSyncLoading !== ''} disabled={total === 0}>
-                  状态同步
+                  批量检测
                 </Button>
               </Dropdown>
             )}
@@ -1494,17 +1593,34 @@ export default function Accounts() {
               trigger={['click']}
               menu={{
                 items: [
-                  ...(currentPlatform === 'chatgpt' ? [{
+                  ...(batchCapabilities.backfill ? [{
                     key: 'rt',
                     icon: <KeyOutlined />,
                     label: selectedRowKeys.length > 0 ? `补 RT (${selectedRowKeys.length})` : '补 RT',
                     disabled: total === 0,
-                  }, {
+                  }] : []),
+                  ...(batchCapabilities.refresh ? [{
+                    // 每个平台用它自己声明的 refresh 动作 id。ChatGPT / Grok /
+                    // Kiro / AWS 的 id 都叫 `refresh_token`，但各插件的
+                    // execute_action 是各自的实现（OAuth 轮换 / OIDC 刷新）。
                     key: 'refresh_token',
                     icon: <SyncOutlined />,
-                    label: selectedRowKeys.length > 0 ? `刷新 Token (${selectedRowKeys.length})` : '刷新 Token',
+                    label: selectedRowKeys.length > 0
+                      ? `${batchCapabilities.refresh.label} (${selectedRowKeys.length})`
+                      : String(batchCapabilities.refresh.label || '刷新 Token'),
                     disabled: total === 0,
-                  }, {
+                  }] : []),
+                  ...(batchCapabilities.bind2fa ? [{
+                    key: 'bind_2fa',
+                    icon: <SafetyCertificateOutlined />,
+                    label: bind2faLoading
+                      ? '批量补绑 2FA（运行中）'
+                      : selectedRowKeys.length > 0
+                        ? `批量补绑 2FA (${selectedRowKeys.length})`
+                        : '批量补绑 2FA',
+                    disabled: total === 0 || bind2faLoading,
+                  }] : []),
+                  ...(isChatgptPlatform ? [{
                     // 「恢复异常账号」与「刷新 Token」的区别：前者按状态自动挑
                     // （invalid/expired/limited），失败的累计退避、用尽自动落禁用。
                     key: 'recover',
@@ -1513,14 +1629,6 @@ export default function Accounts() {
                     disabled: recoverLoading,
                   }] : []),
                   { key: 'import', icon: <UploadOutlined />, label: '导入' },
-                  ...(currentPlatform === 'chatgpt' ? [{
-                    key: 'panel_upload',
-                    icon: <CloudUploadOutlined />,
-                    label: selectedRowKeys.length > 0
-                      ? `上传到面板 (${selectedRowKeys.length})`
-                      : '上传到面板',
-                    disabled: total === 0,
-                  }] : []),
                   { key: 'export', icon: <DownloadOutlined />, label: selectedRowKeys.length > 0 ? `导出 (${selectedRowKeys.length})` : '导出', disabled: total === 0 },
                   ...(currentPlatform === 'kiro' ? [{
                     key: 'kiro_export',
@@ -1533,7 +1641,7 @@ export default function Accounts() {
                   { type: 'divider' as const },
                   // 「手工新增」= 手动录一条，与「注册」（自动跑流程）不是一回事，
                   // 换个图标避免和「注册」的 + 混淆。
-                  { key: 'add', icon: <FileAddOutlined />, label: '手工新增' },
+                  { key: 'add', icon: <FileAddOutlined />, label: '手动添加账号' },
                   ...(selectedRowKeys.length > 0 ? [{
                     key: 'delete',
                     icon: <DeleteOutlined />,
@@ -1544,9 +1652,9 @@ export default function Accounts() {
                 onClick: ({ key }) => {
                   if (key === 'rt') setBackfillRtModalOpen(true)
                   else if (key === 'refresh_token') setRefreshTokenModalOpen(true)
+                  else if (key === 'bind_2fa') setBind2faConfirmOpen(true)
                   else if (key === 'recover') void startRecover()
                   else if (key === 'import') setImportModalOpen(true)
-                  else if (key === 'panel_upload') setPanelUploadOpen(true)
                   else if (key === 'export') setExportModalOpen(true)
                   else if (key === 'kiro_export') void exportKiroCredentials()
                   else if (key === 'add') setAddModalOpen(true)
@@ -1571,7 +1679,7 @@ export default function Accounts() {
         }}
       >
         <Input.Search
-          placeholder="搜索邮箱..."
+          placeholder="搜索邮箱"
           allowClear
           // 受控 + onChange 必须成对：只给 `value` 不给 `onChange`，输入会被
           // 立刻重置回 state 里的空串 —— 打字没反应（实测踩过，还以为是浏览器问题）。
@@ -1660,6 +1768,7 @@ export default function Accounts() {
         columns={tableColumns}
         dataSource={accounts}
         loading={loading}
+        locale={{ emptyText: listError ? '账号列表加载失败，请刷新重试。' : activeFilterCount > 0 ? '没有符合筛选条件的账号，可重置筛选后查看全部。' : '还没有账号，可注册、导入或手动添加。' }}
         size="middle"
         rowSelection={{
           selectedRowKeys,
@@ -1694,7 +1803,7 @@ export default function Accounts() {
             <Form.Item name="concurrency" label="并发数" initialValue={1} rules={[{ required: true }]}>
               <Input type="number" min={1} max={MAX_REGISTER_CONCURRENCY} />
             </Form.Item>
-            <Form.Item name="register_delay_seconds" label="每个注册延迟(秒)" initialValue={0}>
+            <Form.Item name="register_delay_seconds" label="账号启动间隔（秒）" initialValue={0}>
               <InputNumber min={0} precision={1} step={0.5} style={{ width: '100%' }} placeholder="0 = 不延迟" />
             </Form.Item>
             <Form.Item
@@ -1820,7 +1929,13 @@ export default function Accounts() {
                   ? `处理所选 ${selectedRowKeys.length} 个账号`
                   : `处理当前筛选的 ${total} 个账号`
               }
-              description="走 session token → OAuth → 登录链，并用 /backend-api/me 校验新 AT；AT 未到期时服务端返回原值，会如实显示「无需换发」。"
+              description={
+                isChatgptPlatform
+                  ? '走 session token → OAuth → 登录链，并用 /backend-api/me 校验新 AT；AT 未到期时服务端返回原值，会如实显示「无需换发」。'
+                  : currentPlatform === 'grok'
+                    ? '用现有凭证直接刷新；x.ai 每次刷新都会轮换 refresh_token，新值会写回本地。凭证已失效时提示重新授权。'
+                    : '用账号现有的 client_id / client_secret / refresh_token 走 OIDC 刷新；成功后写回新的 access_token 与 refresh_token。'
+              }
             />
             <Form form={refreshTokenForm} layout="vertical" onFinish={handleRefreshToken}>
               <Form.Item name="concurrency" label="并发数" initialValue={1}>
@@ -1847,6 +1962,40 @@ export default function Accounts() {
       </Modal>
 
       <Modal
+        title="确认批量补绑 2FA"
+        open={bind2faConfirmOpen}
+        onCancel={() => setBind2faConfirmOpen(false)}
+        onOk={() => void handleBatchBind2fa()}
+        okText="开始补绑"
+        cancelText="取消"
+        confirmLoading={bind2faLoading}
+        maskClosable={false}
+      >
+        <Alert
+          type="warning"
+          showIcon
+          message={selectedRowKeys.length > 0
+            ? `将处理所选 ${selectedRowKeys.length} 个账号中尚未绑定 2FA 的账号。`
+            : `将处理当前筛选的 ${total} 个账号中尚未绑定 2FA 的账号。`}
+          description="已有 2FA 密钥的账号会跳过。必要时使用账号密码重新登录，逐个处理，每个账号间隔 5 秒；任务创建后可在日志中查看结果。"
+        />
+      </Modal>
+
+      <Modal
+        title="批量补绑 2FA"
+        open={!!bind2faTaskId}
+        onCancel={() => { setBind2faTaskId(null); load() }}
+        footer={null}
+        width={720}
+        maskClosable={false}
+        destroyOnClose
+      >
+        {bind2faTaskId && (
+          <TaskLogPanel taskId={bind2faTaskId} kind="bind_2fa" onDone={() => { load() }} />
+        )}
+      </Modal>
+
+      <Modal
         title="恢复异常账号"
         open={!!recoverTaskId}
         onCancel={() => { setRecoverTaskId(null); load() }}
@@ -1869,7 +2018,7 @@ export default function Accounts() {
         open={addModalOpen}
         onCancel={() => { setAddModalOpen(false); addForm.resetFields(); }}
         onOk={handleAdd}
-        okText="确定"
+        okText="添加账号"
         cancelText="取消"
         maskClosable={false}
       >
@@ -1907,46 +2056,11 @@ export default function Accounts() {
       />
 
       <Modal
-        title="上传到面板"
-        open={panelUploadOpen}
-        onCancel={() => setPanelUploadOpen(false)}
-        onOk={handlePanelUpload}
-        okText="开始上传"
-        cancelText="取消"
-        confirmLoading={panelUploadRunning}
-        maskClosable={false}
-      >
-        <Space direction="vertical" size={10} style={{ width: '100%' }}>
-          <div>
-            <div style={{ marginBottom: 6, fontSize: 13 }}>目标面板</div>
-            <Select
-              value={panelUploadTarget}
-              onChange={setPanelUploadTarget}
-              style={{ width: 220 }}
-              options={PANEL_UPLOAD_TARGETS.map((t) => ({ value: t.value, label: t.label }))}
-            />
-          </div>
-          {/* 数量必须写在确认里：筛选条件写错会把几百个号一次推上去。 */}
-          <p style={{ margin: 0, fontSize: 12, color: 'var(--text-muted)' }}>
-            {selectedRowKeys.length > 0 ? (
-              <>将上传<strong>勾选的 {selectedRowKeys.length} 个</strong>账号。</>
-            ) : (
-              <>未勾选账号 —— 将上传<strong>当前筛选结果的全部 {total} 个</strong>账号。
-                想只传一部分就先勾选。</>
-            )}
-          </p>
-          <p style={{ margin: 0, fontSize: 12, color: 'var(--text-muted)' }}>
-            上传成功后这些账号会被<strong>登记</strong>到该面板，参与后续的凭证同步。
-          </p>
-        </Space>
-      </Modal>
-
-      <Modal
         title="批量导入"
         open={importModalOpen}
         onCancel={() => { setImportModalOpen(false); setImportText(''); }}
         onOk={handleImport}
-        okText="确定"
+        okText="导入账号"
         cancelText="取消"
         confirmLoading={importLoading}
         maskClosable={false}
@@ -1998,15 +2112,26 @@ export default function Accounts() {
       </Modal>
 
       <Modal
-        title="账号详情"
+        title={<span className="account-detail__heading"><UserOutlined />账号详情<span>{getPlatformLabel(currentPlatform)}</span></span>}
         open={detailModalOpen}
         onCancel={() => setDetailModalOpen(false)}
-        onOk={handleDetailSave}
-        okText="保存"
-        cancelText="取消"
+        className="account-detail-modal"
+        footer={[
+          <Button key="cancel" onClick={() => setDetailModalOpen(false)}>关闭</Button>,
+          <Button
+            key="save"
+            type="primary"
+            icon={<SaveOutlined />}
+            onClick={() => void handleDetailSave()}
+            loading={detailSaving}
+            disabled={!detailDirty && !editingToken}
+          >
+            保存更改
+          </Button>,
+        ]}
         maskClosable={false}
-        width={760}
-        styles={{ body: { maxHeight: '72vh', overflowY: 'auto' } }}
+        width={800}
+        styles={{ body: { maxHeight: 'calc(100dvh - 240px)', overflowY: 'auto' } }}
       >
         {currentAccount && (
           <>
@@ -2019,46 +2144,50 @@ export default function Accounts() {
               现在全部走 `DetailRow`（一行一个字段）与 `DetailGroup`（分组
               只用小标题 + 发丝线，不套盒子）。
             */}
-            <Form form={detailForm} layout="vertical" initialValues={currentAccount}>
-              <DetailGroup title="身份">
-                <DetailRow label="邮箱">
-                  <Text copyable={{ text: currentAccount.email, tooltips: ['复制邮箱', '已复制'] }}>
+            <Form form={detailForm} layout="vertical" initialValues={currentAccount} className="account-detail" onValuesChange={() => setDetailDirty(true)}>
+              <section className="account-identity" aria-label="账号摘要">
+                <div className="account-identity__icon" aria-hidden="true"><MailOutlined /></div>
+                <div className="account-identity__main">
+                  <Text className="account-identity__email" copyable={{ text: currentAccount.email, tooltips: ['复制邮箱', '已复制'] }}>
                     {currentAccount.email}
                   </Text>
-                </DetailRow>
-                <DetailRow label="注册时间">
-                  {(() => {
+                  <span className="account-identity__meta"><CalendarOutlined />注册于 {(() => {
                     const created = formatCreatedAt(currentAccount.created_at)
-                    return (
-                      <Text type="secondary">
-                        {[created.date, created.time].filter(Boolean).join(' ') || '—'}
-                      </Text>
-                    )
-                  })()}
-                </DetailRow>
-                <DetailRow
-                  label="状态"
-                  hint="这里改的是**本地标记**，不会去上游重新探测。真正的状态以「探测本地状态」的结果为准。"
-                >
-                  <Form.Item name="status" noStyle>
-                    <Select
-                      style={{ width: 180 }}
-                      options={[
-                        { value: 'registered', label: '正常' },
-                        { value: 'expired', label: '过期' },
-                        { value: 'invalid', label: '失效' },
-                        { value: 'limited', label: '限流' },
-                        { value: 'banned', label: '禁用' },
-                      ]}
-                    />
-                  </Form.Item>
-                </DetailRow>
-              </DetailGroup>
+                    return [created.date, created.time].filter(Boolean).join(' ') || '未知'
+                  })()}</span>
+                </div>
+                <Form.Item name="status" noStyle>
+                  <Select
+                    className="account-identity__status"
+                    aria-label="本地账号状态"
+                    suffixIcon={null}
+                    options={[
+                      { value: 'registered', label: '正常' },
+                      { value: 'expired', label: '过期' },
+                      { value: 'invalid', label: '失效' },
+                      { value: 'limited', label: '限流' },
+                      { value: 'banned', label: '禁用' },
+                    ]}
+                  />
+                </Form.Item>
+              </section>
+              <p className="account-identity__hint"><CheckCircleFilled />{accountStatusMeta(detailStatus).label}是本地标记；修改只影响管理台记录，不会重新探测上游账号。</p>
 
               <DetailGroup
-                title="凭据"
-                hint="列表接口不下发凭据正文（只给「有 / 无」），完整值只在这个弹窗里能看到。点右侧图标复制。"
+                title="登录凭据"
+                hint="完整凭据只从账号详情接口读取。点击复制按钮复制完整值；请仅在可信设备上查看。"
               >
+                {detailLoading ? <div className="account-detail__notice" role="status">正在安全读取完整凭据…</div> : null}
+                {detailLoadError ? (
+                  <Alert
+                    className="account-detail__error"
+                    type="warning"
+                    showIcon
+                    message="完整凭据读取失败"
+                    description={`${detailLoadError}。当前仅显示列表中的账号摘要，缺少的凭据不代表不存在。`}
+                    action={<Button size="small" onClick={() => void openDetail(currentAccount)}>重试</Button>}
+                  />
+                ) : null}
                 <DetailRow label="密码">
                   {currentAccount.password ? (
                     <SecretLine value={String(currentAccount.password)} />
@@ -2067,15 +2196,24 @@ export default function Accounts() {
                   )}
                 </DetailRow>
 
-                <DetailRow label={currentPlatform === 'grok' ? 'SSO' : 'Access Token'}>
+                <DetailRow label={currentPlatform === 'grok' ? 'SSO' : 'Access Token'} className={editingToken ? 'detail-row--editing' : undefined}>
                   {editingToken ? (
-                    <Form.Item name="token" noStyle>
-                      <Input.TextArea
-                        rows={4}
-                        autoFocus
-                        style={{ fontFamily: 'monospace', fontSize: 12 }}
-                      />
-                    </Form.Item>
+                    <div className="detail-token-editor">
+                      <Form.Item name="token" noStyle>
+                        <Input.TextArea
+                          rows={4}
+                          autoFocus
+                          aria-label={`替换${currentPlatform === 'grok' ? ' SSO' : ' Access Token'}`}
+                          style={{ fontFamily: 'monospace', fontSize: 12 }}
+                        />
+                      </Form.Item>
+                      <span>保存后替换本地凭据，不会同步到上游或远端面板。</span>
+                      <Button type="link" size="small" onClick={() => {
+                        detailForm.setFieldValue('token', currentAccount.token)
+                        setDetailDirty(detailForm.getFieldValue('status') !== currentAccount.status)
+                        setEditingToken(false)
+                      }}>取消替换</Button>
+                    </div>
                   ) : (
                     <SecretLine
                       // Grok 那一行装的是 SSO，用 AT 的取法读必然是空（实测：
@@ -2176,14 +2314,14 @@ export default function Accounts() {
                 if (at.status === 'invalid' && !at.issuedText && !at.expiresText) return null
                 return (
                   <DetailGroup title="Access Token 有效期">
-                    <DetailRow label="状态">
-                      <Tag color={at.color} style={{ marginInlineEnd: 8 }}>{at.label}</Tag>
-                      <Text type="secondary" style={{ fontSize: 12 }}>
-                        {at.issuedText ? `生成于 ${at.issuedText}` : '生成时间未知'}
-                        {at.expiresText ? ` · 到期 ${at.expiresText}` : ''}
-                        {at.remainingText ? ` · ${at.remainingText}` : ''}
-                      </Text>
-                    </DetailRow>
+                    <div className="account-expiry">
+                      <Tag color={at.color}>{at.label}</Tag>
+                      <div className="account-expiry__dates">
+                        <span><CalendarOutlined />生成时间<strong>{at.issuedText || '未知'}</strong></span>
+                        <span><ClockCircleOutlined />到期时间<strong>{at.expiresText || '未知'}</strong></span>
+                      </div>
+                      {at.remainingText ? <span className="account-expiry__remaining">{at.remainingText}</span> : null}
+                    </div>
                   </DetailGroup>
                 )
               })()}
@@ -2196,25 +2334,26 @@ export default function Accounts() {
                   <DetailRow label="出口">
                     <SecretLine value={currentAccount.registerProxy} />
                   </DetailRow>
+                  <DetailRow label="固定出口">
+                    <Popconfirm
+                      title="解除这个账号的代理绑定？"
+                      description="解除后该账号直连，不再走固定出口。下次复用时可能重新绑定一个新代理。"
+                      okText="解除绑定"
+                      cancelText="取消"
+                      onConfirm={handleReleaseProxy}
+                    >
+                      <Button size="small" danger loading={releasingProxy}>
+                        解除绑定
+                      </Button>
+                    </Popconfirm>
+                  </DetailRow>
                 </DetailGroup>
               ) : null}
 
               {currentPlatform === 'grok' ? (
-                // Grok 没有 AT/RT，也没有 ChatGPT 那套探测 —— 它有的是这两个：
-                // 有没有接进 grok2api、以及有没有跑过探测。原来这一块对 Grok
-                // 是**整段不存在**，抽屉看着比 GPT 短一截，像是少了什么。
-                <DetailGroup title="Grok 接入" collapsible defaultOpen={false}>
-                  <DetailRow label="2API">
-                    <Tag
-                      color={rowExtra(currentAccount).grok2api_ingested === true ? 'green' : 'default'}
-                      style={{ marginInlineEnd: 8 }}
-                    >
-                      {rowExtra(currentAccount).grok2api_ingested === true ? '已接入' : '未接入'}
-                    </Tag>
-                    <Text type="secondary" style={{ fontSize: 12 }}>
-                      {String(rowExtra(currentAccount).grok2api_result || '') || '（无详情）'}
-                    </Text>
-                  </DetailRow>
+                // 只保留账号来源与本地探测。grok2api 的当前接入情况与返回结果
+                // 归「面板同步」页，详情抽屉不重复展示外部系统的状态。
+                <DetailGroup title="注册与探测" collapsible defaultOpen={false}>
                   <DetailRow label="注册方式">
                     <Text>{String(rowExtra(currentAccount).register_mode || '') || '—'}</Text>
                   </DetailRow>

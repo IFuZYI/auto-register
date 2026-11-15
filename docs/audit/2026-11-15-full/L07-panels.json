@@ -1,0 +1,201 @@
+{
+  "lane": "L07-panels",
+  "head": "fca2eec",
+  "dirty": true,
+  "reviewed_files": [
+    "api/integrations.py",
+    "api/contribution.py",
+    "services/panel_sync.py",
+    "services/panel_push.py",
+    "services/panel_comparison.py",
+    "services/panel_comparison_cache.py",
+    "services/panel_registry.py",
+    "services/panel_status_sync.py",
+    "services/chatgpt_sync.py",
+    "services/chatgpt_account_state.py",
+    "services/cliproxyapi_sync.py",
+    "services/external_sync.py",
+    "services/panel_enrollment.py",
+    "services/panel_proxy_binding.py",
+    "core/panel_tls.py",
+    "frontend/src/lib/panelComparison.ts",
+    "frontend/src/components/settings/PanelComparisonPanel.tsx",
+    "frontend/src/pages/PanelManagement.tsx"
+  ],
+  "findings": [
+    {
+      "id": "L07-1",
+      "title": "chatgpt2api 推送 delete_old 在「上传被跳过」时删掉唯一远端记录",
+      "severity": "P1",
+      "file": "services/panel_push.py",
+      "line": 230,
+      "class": "data-integrity",
+      "evidence": "services/panel_push.py:230-247：`if ok and outcome.remote_id and delete_remote is not None:` 无条件删旧；platforms/chatgpt/chatgpt2api_upload.py:346-349 明确 `added=0, skipped=1` 也算成功（“幂等重传的正常结果”）。参考实现对账：reference/panel/chatgpt2api-v2/services/account_service.py:2795-2812 的 skipped 判定是 access_token 已存在，即**没有新建记录**。实测（PYTHONPATH=. .venv/bin/python /root/.hermes/cache/scratch/l07_probe.py）：`L07-1 pushed/deleted: 1 1 deleted_ids= ['only-id']` —— upload 返回 `上传成功（新增 0，跳过 1）` 仍把 only-id 删掉。前端每次推送都带 delete_old=true（PanelComparisonPanel.tsx:673）。",
+      "impact": "触发条件：远端已有同一 AT、但 RT/id_token 不同（本地刷新后只轮换了 RT）→ compare_credentials=credential_diff + local_newer → 推送 → 对端按 AT 去重 skipped=1（无新记录）→ delete_old 删掉那条唯一记录。账号从面板消失，下一次对比变成「未上传」，用户重传后循环。远端账号数据丢失。",
+      "fix_hint": "delete_old 只在上传确实新增了记录时执行：让 upload 返回结构化结果（added>0），或 skipped>0 时跳过删除；更稳的是推送前按 remote_id 校验该记录已被新记录取代（列表里同一 email 出现两条）再删。补一条测试：upload 返回 `(True, '新增 0，跳过 1')` 时 delete_remote 不得被调用。"
+    },
+    {
+      "id": "L07-2",
+      "title": "筛选后目标为 0 时推送/拉回退化成「全平台」——看到的≠被改的",
+      "severity": "P1",
+      "file": "frontend/src/components/settings/PanelComparisonPanel.tsx",
+      "line": 677,
+      "class": "functional",
+      "evidence": "PanelComparisonPanel.tsx:677 `if (pushIds.length) params.set('account_ids', ...)`（拉回同形：:640）；两个按钮的 disabled 只看 `running/remoteUnavailable`（:804,:811,:831,:837），0 个目标仍可点。后端把空串当「不过滤」：api/integrations.py:180 注释 + services/panel_comparison.py:1333-1337 `if not wanted: return list(rows)`。实测：`filter_rows_by_account_ids([{'id':1},{'id':2},{'id':3}], '') -> [1, 2, 3]`，`'2' -> [2]`。触发：状态筛选选「无法比对」（actionsForState 返回 push/pull/status，pushIds=pullIds=[]），点「推送本地凭据」→ 请求不带 account_ids → 后端推该平台全部 local_only+local_newer 行（含被状态筛选隐藏的行）。",
+      "impact": "用户在只看「无法比对」或「全部但当前 0 个目标」时点按钮，实际会改写/上传当前筛选之外的全部账号；拉回方向会用远端凭证覆盖这些账号的本地 AT/RT（本地凭据被不可见地替换）。正是该文件注释反复声明要避免的「看到的 ≠ 被改的」。",
+      "fix_hint": "目标为空时禁用按钮（pushIds.length===0 与 pullIds.length===0 分别禁用）；或前端始终发送 account_ids（空集合用一个哨兵如 `account_ids=` 显式表示空并在后端区分「未传」与「传了空」）。后端不要用空串表示「全部」，改用 Optional[str]=None。"
+    },
+    {
+      "id": "L07-3",
+      "title": "贡献模式把 CPA 管理口令发给贡献服务器（默认还是明文 HTTP 第三方地址）",
+      "severity": "P1",
+      "file": "services/external_sync.py",
+      "line": 251,
+      "class": "credential-leak",
+      "evidence": "services/external_sync.py:251-256：`upload_chatgpt_account_to_cpa(account, api_url=contribution_url, api_key=contribution_key or None)`；platforms/chatgpt/cpa_upload.py:229-231 `if not api_key: api_key = _get_config_value('cpa_api_key')` —— contribution_key 为空时回落到 CPA 管理口令并作为 `Authorization: Bearer` 发出。默认地址：api/config.py:82-83 `contribution_server_url = 'http://new.xem8k5.top:7317/'`（明文 HTTP）。触发：contribution_enabled=1 + contribution_mode=codex（默认）+ 未填 contribution_key。",
+      "impact": "全局唯一的 CPA 管理口令被送到第三方贡献服务器（且默认走明文 HTTP，可被同链路中间人截获），同时该请求还携带账号 AT/RT。口令泄露后可直接管理真实 CPA。与 prior 审计 T6-4 同类但路径不同（跨服务口令回落）。",
+      "fix_hint": "贡献模式禁止回落：`upload_to_cpa` 增加 `allow_config_fallback=False` 参数，或在 external_sync 里显式传 `api_key=contribution_key` 且为空时直接报「贡献 key 未配置」；默认 URL 改 https。补测试：contribution_key 为空时不得读取 cpa_api_key。"
+    },
+    {
+      "id": "L07-4",
+      "title": "远端读成功但解析为空 → 一次拉回静默撤销该面板全部登记",
+      "severity": "P2",
+      "file": "services/panel_sync.py",
+      "line": 248,
+      "class": "data-integrity",
+      "evidence": "services/panel_sync.py:240-257：`remote is None` 时对每个本地行 `reconcile_with_remote(present=False)` 并落库，没有「远端列表为空/被截断」的保护；services/panel_comparison.py:740-760 `_sub2api_extract_items` 对不认识的响应形状返回 `[]`（200 空体/网关错误页同样落这里），panel_comparison_cache.py:264-278 此时 `remote_error=''`。触发：面板升级改字段或反代返回 200 `{}` → POST /sync → 所有本地行的 `panel_uploads` 被删。",
+      "impact": "登记表被清空后这些账号不再参与拉回（plan_sync 早退 not_enrolled），恢复只能重新推送成功；用户看到的是「拉回 0 个」，日志里只有逐账号 warning。静默的数据破坏（prior 审计 T6-3 同点，工作树仍在）。",
+      "fix_hint": "`sync_local_from_remote` 只在 `remote_accounts` 非空且解析确认完整时执行撤销；解析层对未知形状抛错走 remote_error；或把撤销改成显式动作并在响应里回显 revoked 计数。"
+    },
+    {
+      "id": "L07-5",
+      "title": "CPA 注册表只声明 chatgpt，但对比/拉取包含 grok → Grok 行恒「未上传」且推送必失败",
+      "severity": "P2",
+      "file": "services/panel_registry.py",
+      "line": 72,
+      "class": "contract",
+      "evidence": "services/panel_registry.py:72-81 `platforms:['chatgpt']`、upload_actions 只有 chatgpt；services/panel_comparison_cache.py:143 `'cpa': ('chatgpt','grok')`；services/panel_comparison.py:686-687 缺省 allowed=codex+xai。结果：PanelComparisonPanel.tsx 的 `shouldShowPlatformFilter(['chatgpt'])` 为 false（平台选择器不渲染），Grok 行无法筛掉；services/panel_push.py:389-393 对 grok 行返回 `Grok 已不再支持 CPA 上传`，每次推送都计入 failed。",
+      "impact": "CPA 页面上 Grok 账号永远显示「未上传」，批量推送每次产生 N 条失败告警，用户无法通过筛选规避；两个页面（面板管理/账号页）对同一面板的能力声明互相矛盾。",
+      "fix_hint": "二选一对齐：`_PANEL_PLATFORMS['cpa']` 去掉 grok（与注册表一致），或注册表补 grok 并显式声明不可上传、由 push_local_rows 按声明过滤。加一致性测试 `set(_PANEL_PLATFORMS[k]) <= set(PANELS_BY_KEY[k]['platforms'])`。"
+    },
+    {
+      "id": "L07-6",
+      "title": "refresh=true 绕过锁内二次检查：并发刷新变成 N 次串行全量重建",
+      "severity": "P2",
+      "file": "services/panel_comparison_cache.py",
+      "line": 240,
+      "class": "perf",
+      "evidence": "services/panel_comparison_cache.py:236-248：进入 `_rebuild_lock` 后 `if not refresh:` 才做新鲜度复查，`refresh=True` 直接 `_rebuild_panel_comparison`。两个标签页同时点「刷新对比」→ 第一个重建完成后第二个仍会重建（等锁串行）。CPA 重建含最多 `_MAX_CREDENTIAL_FETCH=200` 次 download（panel_comparison.py:708，实测注释 ~94ms/次）。",
+      "impact": "刷新风暴时远端请求量 = 并发数 × 全量（最坏 200 次凭证下载），面板可能被限流；用户等待时间随并发线性增长，而结果完全相同。与「单飞重建」的初衷相反。",
+      "fix_hint": "refresh 也做锁内复查：记录 `entry['monotonic']`，若等锁期间已有**晚于本次请求开始时间**的重建完成，直接返回该结果；或用一个 per-panel 的 generation 计数做合并。"
+    },
+    {
+      "id": "L07-7",
+      "title": "贡献接口的 server_url 是请求体参数：任意地址 SSRF，且 X-Public-Key 会跟随跨域重定向",
+      "severity": "P2",
+      "file": "api/contribution.py",
+      "line": 48,
+      "class": "credential-leak",
+      "evidence": "api/contribution.py:48-51 `_resolve_server_url(body.server_url)` 只补 http:// 前缀，无白名单/私网校验；:84-110 `requests.request` 默认跟随重定向，自定义头 `X-Public-Key`（:84-86）不会被 requests 的 rebuild_auth 剥离（它只剥 Authorization）→ 302 到任意主机即转交 key；响应体原样回给调用方（:110-128）。端点均需 Bearer 登录（main.py:222-262），非匿名。",
+      "impact": "已登录用户/本机进程可借该接口探测内网（169.254.169.254、127.0.0.1 其它端口）并把响应带回；被劫持的贡献服务器可用 302 把贡献 key 转给第三方。属于权限放大 + 凭据外送面。",
+      "fix_hint": "server_url 只允许配置值（忽略请求体覆盖）或做 scheme+host 白名单/私网地址拒绝；`allow_redirects=False`（或同源才跟随）；错误详情里不要回显完整响应体。"
+    },
+    {
+      "id": "L07-8",
+      "title": "backfill 复用无过期时间的缓存同步状态：远端已删的账号永远「跳过上传」",
+      "severity": "P2",
+      "file": "services/chatgpt_sync.py",
+      "line": 402,
+      "class": "functional",
+      "evidence": "services/chatgpt_sync.py:402 `used_cached_sync = bool(cached_sync) and remote_state != 'unreachable'`，随后 :418-424 `_remote_auth_missing(initial_sync)` 为 False 就返回 `远端已存在 (...)，跳过上传`；cached_sync 来自 extra.sync_statuses.cliproxyapi，没有时间戳/新鲜度判断。api/integrations.py:220-225 的 `pending_only` 用同一份缓存判 `remote_state == 'not_found'`。",
+      "impact": "CPA 上被人工删除（或对端重置）的账号，在本地仍保留上次同步的 active 状态：补传接口报「远端已存在，跳过上传」，`pending_only` 也筛不出它 —— 补传功能对这类账号永久失效，除非用户先手动跑一次状态同步。",
+      "fix_hint": "缓存超过 N 分钟（或 remote_state 缺失）时强制重新探活；`pending_only` 不要依赖缓存状态，或在响应里带上状态时间让调用方判断。"
+    },
+    {
+      "id": "L07-9",
+      "title": "对比按 (平台,邮箱) 去重：重复远端记录被静默折叠，重传产生的重复不可见",
+      "severity": "P2",
+      "file": "services/panel_comparison.py",
+      "line": 509,
+      "class": "data-integrity",
+      "evidence": "services/panel_comparison.py:505-509 `remote_by_key[key] = item`（后写覆盖，重复记录只剩最后一条）；:518 `key in seen` 让同一 (平台,邮箱) 的第二条本地行整行消失。触发：CPA 同一邮箱存在 `a@x.com.json` 与重传后的 `a@x.com-1.json` 两条 auth file（本仓库推送/重传是常态），或本地重复注册同一邮箱。",
+      "impact": "用户看不到重复账号，无法清理；对比只针对其中一条，delete_old 删一条后另一条仍在，形成「已上传但显示未上传/仅远端」的循环；本地重复行中凭证更好的那条可能恰好被隐藏。",
+      "fix_hint": "把重复项显式建模（同一 key 保留列表，输出 `duplicates` 计数或额外行），或在对比 payload 里回显 remote_count 与去重后的行数差异并告警。"
+    },
+    {
+      "id": "L07-10",
+      "title": "grok2api 无 secret_key：/panels 的 secret_set 对它恒为 False",
+      "severity": "P3",
+      "file": "services/panel_registry.py",
+      "line": 96,
+      "class": "contract",
+      "evidence": "services/panel_registry.py:96-105 grok2api 项没有 `secret_key`（实际口令是 `grok2api_password`，见 core/config_schema.py:111 与 panel_comparison_cache.py:171-173）；api/integrations.py:57-62 由 secret_key 推导 `secret_set`，因此恒 False。",
+      "impact": "面板清单接口对 grok2api 声称「未设置口令」，与配置页（PanelConfigPanel 用 grok2api_password_set）口径不一致；当前面板管理页不消费该字段，属契约层错误。",
+      "fix_hint": "注册表补 `secret_key: 'grok2api_password'` 与 secret_label；补一条测试要求「需要口令的面板必须有 secret_key」。"
+    },
+    {
+      "id": "L07-11",
+      "title": "文档漂移：/panels 注释写「6 个面板」，实际 4 个；推送语义注释成了孤儿块",
+      "severity": "P3",
+      "file": "api/integrations.py",
+      "line": 50,
+      "class": "doc-drift",
+      "evidence": "api/integrations.py:50 `逐个面板取会把 6 个面板放大成 7 次读盘` —— services/panel_registry.py:52-123 的 PANELS 长度为 4（cpa/sub2api/grok2api/chatgpt2api）。api/integrations.py:145-163 是一整块讲 `overwrite`/`append` 的注释，但常量 `_PANEL_PUSH_KIND` 实际定义在 services/panel_push.py:345，注释与代码分居两个文件、中间隔 13 行空行。",
+      "impact": "维护者按注释找常量会找不到；「6 个面板」会让人以为漏注册了两个面板（本仓库历史上确实出现过 13 个面板的错误简报）。",
+      "fix_hint": "改成「4 个面板」或直接删除数字；把 `_PANEL_PUSH_KIND` 的说明搬到 panel_push.py 常量旁，integrations.py 只留一句引用。"
+    },
+    {
+      "id": "L07-12",
+      "title": "自定义贡献上传绕过面板 TLS 策略，且先解析 JSON 再看状态码",
+      "severity": "P3",
+      "file": "services/external_sync.py",
+      "line": 214,
+      "class": "credential-leak",
+      "evidence": "services/external_sync.py:214-225：`requests.post(... timeout=15)` 没有 `verify=verify_for(...)`（默认 True 所以不是不安全，但 `panel_tls_ca_bundle` 对自签贡献服务器无效）；:225 `data = resp.json()` 在 `if resp.status_code >= 400` 之前执行，HTML 错误页会抛 JSONDecodeError 被 :233 的宽 except 吞成「上传到自定义贡献系统失败」，丢失真实状态码/错误体。",
+      "impact": "自建自签贡献服务器无法使用（只能全局关校验，反而更不安全）；对端 4xx/5xx 的真实原因在 UI 上不可见，排障只能看日志。",
+      "fix_hint": "加 `verify=verify_for('contribution')`；先判 status 再尝试 json，非 JSON 时把 `resp.text[:200]` 放进错误消息。"
+    }
+  ],
+  "checked_and_clean": [
+    {
+      "area": "同步方向规则 plan_push/plan_sync",
+      "how": "逐分支读码并对照模块 docstring：remote 缺失→push(not_uploaded)；凭证相同→跳过；unknown_credential→跳过；仅 local_newer 推、仅 remote_newer 拉；两侧 iat 相同→time_synced 两向都不动；banned 在 plan 层早退。apply_pull 只写远端存在的字段（panel_sync.py:183-186），不会清空本地独有 RT。"
+    },
+    {
+      "area": "TLS 默认值",
+      "how": "core/panel_tls.py:53-72 配置读失败回落 True；grep 到 11 处 `verify=verify_for`（cpa/sub2api/chatgpt2api/grok2api/cliproxy/panel 对比/删除）。只有 contribution 两条路径未接入（见 L07-12）。"
+    },
+    {
+      "area": "对比缓存 TTL 与单飞",
+      "how": "panel_comparison_cache.py:29-31（60s/5s）、:65-73、:236-248：非 refresh 路径锁内二次复查成立；失败条目短 TTL 成立。并发 refresh 不合并另见 L07-6。"
+    },
+    {
+      "area": "_match_key 大小写/平台",
+      "how": "panel_comparison.py:440-448 邮箱 strip+lower、平台参与键；空邮箱行返回空键被 build_comparison 丢弃（不会误配）。未发现大小写导致的错配。"
+    },
+    {
+      "area": "登记写入时机",
+      "how": "panel_enrollment.py:59-87 只在 ok=True 写 panel_uploads；失败只更新 last_attempt_ok/last_message；revoke 空表时清理键。单测 tests/test_panel_enrollment.py 覆盖（未运行，仅读）。"
+    },
+    {
+      "area": "面板 key 归一与未知面板",
+      "how": "panel_registry.py:137-147 cliproxyapi→cpa；未知 key 原样返回，api/integrations.py:100-102 / panel_comparison_cache.py:230-232 统一 404/ValueError，未发现静默落到错误面板。"
+    },
+    {
+      "area": "状态同步分类",
+      "how": "panel_status_sync.py:20-60 classify_remote_status 与 build_status_update 逐分支读；disabled 优先于 error；只写 sync_statuses[panel]，不碰凭证字段。"
+    },
+    {
+      "area": "代理绑定",
+      "how": "panel_proxy_binding.py 读码：parse_proxy_url 对无 scheme 串返回 None；grok2api/sub2api 均按 host/port 查重后创建，失败只降级为提示，不影响账号上传。"
+    },
+    {
+      "area": "出站超时/重试",
+      "how": "grep 各客户端：cpa 60s、sub2api 30s、chatgpt2api 60s+连接类重试 4 次、cliproxyapi 有 _retry_sync_call、对比 fetcher 15-30s；未发现无超时调用。"
+    },
+    {
+      "area": "未运行项",
+      "how": "未跑全量 pytest（按指令）；仅运行只读探针 /root/.hermes/cache/scratch/l07_probe.py（输出见 L07-1/L07-2）。tests/test_panel_* 未执行。"
+    }
+  ]
+}

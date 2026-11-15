@@ -183,3 +183,67 @@ def test_import_to_pool_handles_ids_beyond_sqlite_variable_limit(client):
     assert result["changed"] == 1
     assert result["skipped"] == 33000
     assert result["remaining_unpooled"] == 0
+
+
+class TestStaleInUseReclamation:
+    """`in_use` 必须有超时回收，否则任务一崩就永久吃掉一个号。
+
+    2026-11-15 实测（邮箱鲁棒性专项，T7-4）：
+    - 领取时 `set_fields(id, status="in_use", last_used=now)`；
+    - 复位只发生在正常收尾（`set_account_status` / `requeue_account`）；
+    - `find_claimable` 的候选状态是 `available / used / NULL / ""` ——
+      **`in_use` 不在其中**，且没有任何按时间回收的逻辑；
+    - iCloud 渠道有 `release_stale_claims()`（2 小时租约）兜底，Outlook 没有。
+
+    后果：进程被 kill、任务在收尾前被 stop、或代码抛在复位之前 —— 这个号就
+    永久停在 `in_use`，池子只出不进。池子吃干后界面还提示「请先在设置页批量
+    导入」，把用户引向「再烧一批库存」。
+    """
+
+    @pytest.fixture()
+    def repo(self, tmp_path, monkeypatch):
+        import contextlib
+
+        from sqlmodel import Session
+
+        import core.db.outlook_repository as mod
+        from core.db.outlook_repository import OutlookRepository
+
+        engine = create_engine(f"sqlite:///{tmp_path}/pool.db")
+        SQLModel.metadata.create_all(engine)
+
+        monkeypatch.setattr(OutlookRepository, "_store", staticmethod(lambda: None))
+        monkeypatch.setattr(
+            mod, "mailbox_pool_session",
+            lambda _name="": contextlib.nullcontext(Session(engine)),
+            raising=False,
+        )
+        return OutlookRepository()
+
+    def test_stale_in_use_row_becomes_available_again(self, repo):
+        from datetime import datetime, timedelta, timezone
+
+        row = repo.add(
+            email="stale@outlook.com", password="pw", enabled=True,
+            status="in_use",
+            last_used=datetime.now(timezone.utc) - timedelta(hours=5),
+        )
+        assert row is not None
+
+        released = repo.release_stale_claims(lease_hours=2)
+        assert released.get("released", 0) >= 1, f"过期 in_use 没被回收: {released}"
+        assert (repo.get(row["id"]) or {}).get("status") == "available", (
+            "回收后状态应回到 available，否则这个号再也领不到"
+        )
+
+    def test_fresh_in_use_row_is_left_alone(self, repo):
+        from datetime import datetime, timezone
+
+        row = repo.add(
+            email="fresh@outlook.com", password="pw", enabled=True,
+            status="in_use", last_used=datetime.now(timezone.utc),
+        )
+        repo.release_stale_claims(lease_hours=2)
+        assert (repo.get(row["id"]) or {}).get("status") == "in_use", (
+            "还在租约内的号被回收了 —— 会导致同一个号被领两次"
+        )

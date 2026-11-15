@@ -42,6 +42,16 @@ class AccountUpdate(BaseModel):
     cashier_url: Optional[str] = None
 
 
+class AccountProxyBinding(BaseModel):
+    """账号的代理绑定。
+
+    `proxy` 传空串 = **解绑**（该账号此后直连）。这是此前完全缺失的方向：
+    `resolve_for_account` 在没有更好选择时「保留原值」，所以绑错之后只能靠
+    `rebalance` 挪到另一个带 `bind` 标签的代理 —— 没有可绑定代理时永久卡死。
+    """
+    proxy: str = ""
+
+
 class ImportRequest(BaseModel):
     platform: str
     lines: list[str]
@@ -52,7 +62,13 @@ class ImportRequest(BaseModel):
     #:
     #: `----` 分隔的行靠它决定「第 N 列是哪个字段」。默认 `email_pw`
     #: —— 导出侧最常见的那个，让「导出 → 粘贴 → 导入」无需额外选择。
-    #: 解析器本身**拒绝猜**（列数歧义会抛），这里是显式的产品默认。
+    #:
+    #: **已知风险（2026-11-15 实测）**：2 列同时对应 `email_pw` 与 `email_2fa`，
+    #: 而这个默认值会把 `email----TOTPSECRET` 的第二列当**密码**写进 password 列，
+    #: 覆盖真密码且不可恢复（导出再导入 → 200 {'updated': 1}）。
+    #: 解析器本身对空 source_format 会正确抛「2 列对应多个格式」—— 是默认值绕过了它。
+    #: 保留默认值是因为「导出 → 粘贴 → 导入」主流程依赖它（既有契约）；
+    #: 2 列且第二列是 2FA 密钥时，必须由调用方显式传 `email_2fa`。
     source_format: str = "email_pw"
 
 
@@ -941,6 +957,35 @@ def update_account(account_id: str, body: AccountUpdate, platform: str = ""):
     # 详情弹窗保存 100% 失败。`upsert` 按 (平台, 邮箱) 定位现有行并保留
     # 未提交字段，与导入路径同款）。
     return account_repository.upsert(acc)
+
+
+@router.patch("/{account_id}/proxy")
+def set_account_proxy(account_id: str, body: AccountProxyBinding, platform: str = ""):
+    """绑定 / 改绑 / **解绑**账号的出口代理。
+
+    `platform` 与 PATCH /accounts/{id} 同一套约定：带上才不会因 ID 撞号改到
+    别的平台的账号。
+    """
+    from core.db import account_repository
+    from core.proxy_utils import normalize_proxy_url
+
+    acc = account_repository.get(account_id, platform=platform)
+    if not acc:
+        raise HTTPException(404, "账号不存在")
+
+    # 只在**非空**时归一化：空串就是「解绑」，不能被 normalize 成 None 再写进去
+    # （那会让 extra 里留一个 None，`str(...)` 之后变成字符串 "None"）。
+    proxy = normalize_proxy_url(body.proxy) or "" if str(body.proxy or "").strip() else ""
+
+    extra = dict(acc.get_extra() or {})
+    if proxy:
+        extra["register_proxy"] = proxy
+    else:
+        extra.pop("register_proxy", None)
+    acc.set_extra(extra)
+    acc.updated_at = datetime.now(timezone.utc)
+    account_repository.upsert(acc)
+    return {"ok": True, "proxy": proxy}
 
 
 @router.delete("/{account_id}")

@@ -1,0 +1,224 @@
+{
+  "lane": "L02-accounts-storage",
+  "head": "fca2eec",
+  "dirty": true,
+  "reviewed_files": [
+    "api/accounts.py",
+    "core/db/repository.py",
+    "core/models/account.py",
+    "core/db/models_account.py",
+    "core/storage/__init__.py",
+    "core/storage/account_store_json.py",
+    "core/storage/json_backend.py",
+    "core/storage/json_table.py",
+    "core/storage/query.py",
+    "core/storage/coverage.py",
+    "core/storage/config_store_json.py",
+    "services/account_export.py",
+    "core/credential_fields.py",
+    "core/credential_crypto.py",
+    "core/secret_box.py",
+    "services/account_status.py",
+    "frontend/src/pages/Accounts.tsx (import/export handlers only)",
+    "frontend/src/components/AccountExportModal.tsx (default format only)"
+  ],
+  "findings": [
+    {
+      "id": "L02-1",
+      "title": "默认导出格式(3 列)与默认导入来源格式(2 列)不匹配，导出→粘贴→导入主流程必 400",
+      "severity": "P1",
+      "file": "api/accounts.py",
+      "line": 72,
+      "evidence": "api/accounts.py:72 `source_format: str = \"email_pw\"`（docstring 63-71 声称这个默认值就是为了让「导出 → 粘贴 → 导入」无需额外选择）；services/account_export.py:371 `DEFAULT_EXPORT_FORMAT = \"email_pw_2fa\"`，其 columns=('email','password','totp_secret') 共 3 列。前端同样两侧都是默认值：frontend/src/pages/Accounts.tsx:291 `useState('email_pw')`；frontend/src/components/AccountExportModal.tsx:90 用后端 `data.default`(=email_pw_2fa)。实测：`.venv/bin/python -c` 调 render_account_row(a, EXPORT_FORMATS['email_pw_2fa']) 得 `a@b.com----p@ss----word----JBSWY3DPEHPK3PXP`，再 parse_delimited_line(line, source_format='email_pw') 抛 `行有 4 列，与格式 email_pw 的 2 列不符`（该密码本身含 ----，见 L02-3；纯 3 列行同样报 `行有 3 列…`）。",
+      "impact": "用户按界面默认值「导出(email_pw_2fa) → 打开导入弹窗(默认 email_pw) → 粘贴」时每一行都被 /api/accounts/import 以 400 拒绝，导入整体失败；错误文案只说列数不符，用户无从知道要改下拉框。这正是 docstring 声称被保护的主流程。",
+      "fix_hint": "让导入默认值跟随导出默认值：`source_format: str = DEFAULT_EXPORT_FORMAT`（或空串，交给 formats_by_column_count 的歧义检测）；若坚持 email_pw 默认，则把 DEFAULT_EXPORT_FORMAT 改成 email_pw。两者必须同源，并加一条「默认导出→默认导入」的 round-trip 测试。",
+      "class": "contract"
+    },
+    {
+      "id": "L02-2",
+      "title": "默认 source_format=email_pw 把 2 列的 `email----TOTP` 当密码写入，静默覆盖真密码",
+      "severity": "P1",
+      "file": "api/accounts.py",
+      "line": 650,
+      "evidence": "api/accounts.py:72 默认 email_pw；:650 `existing.password = password or existing.password` 后直接 upsert。实测 `parse_delimited_line(\"a@b.com----JBSWY3DPEHPK3PXP\", source_format=\"email_pw\")` → `{'email': 'a@b.com', 'password': 'JBSWY3DPEHPK3PXP'}`。解析器本身在 source_format 为空时能识别 2 列歧义（`2 列对应多个格式（email_pw、email_2fa）`），是默认值绕过了这道保护（docstring 66-71 已自认此风险并保留）。",
+      "impact": "用户粘贴号商常见的 `email----2FA密钥` 两列格式，真密码被 TOTP 密钥覆盖且不可恢复（旧密码只存在于用户手里的原文件）；之后再登录/重放全部失败，且导出会把 TOTP 当密码再传播一次。",
+      "fix_hint": "2 列且第二列匹配 TOTP base32（^[A-Z2-7]{16,}$）时拒绝或按 email_2fa 处理并回报「已按 2FA 解析」；更彻底的做法是把默认值改成空串让歧义检测生效（与 L02-1 一并修）。",
+      "class": "data-integrity"
+    },
+    {
+      "id": "L02-3",
+      "title": "`----` 分隔符无转义：密码/凭据含 `----` 时文本导出无法回导（列数错位）",
+      "severity": "P1",
+      "file": "services/account_export.py",
+      "line": 439,
+      "evidence": "services/account_export.py:439 render_account_row 直接 `SEPARATOR.join(...)`（SEPARATOR=\"----\"，:24），:379 parse_delimited_line 直接 `split(SEPARATOR)`，全链路无引号/转义。实测密码 `p@ss----word`：email_pw 导出得 `a@b.com----p@ss----word`，回导抛 `行有 3 列，与格式 email_pw 的 2 列不符`；默认 email_pw_2fa 则变成 4 列。另外 parse_delimited_line 对每列 `strip()`，密码首尾空格也会被静默吃掉。",
+      "impact": "含 `----` 的密码（或 base64url 里出现 4 连字符的 token）无法通过文本格式迁移，且失败信息只提示列数，用户会以为是自己选错格式；带首尾空格的密码会被静默改写，属静默数据损坏。",
+      "fix_hint": "导出时对含分隔符的值做转义（如 `\\-` 或 URL-quote）并在导入端反转义；或改用 csv 模块 + 明确 quotechar 作为文本格式的底层编码，同时保留 `----` 作为「无引号时」的兼容解析。至少要在导出侧检测到值内含 `----` 时报错而不是产出不可回导的行。",
+      "class": "data-integrity"
+    },
+    {
+      "id": "L02-4",
+      "title": "11 个文本导出格式都不含 sso/client_id/client_secret 列，grok/kiro/aws 文本导出→导入静默丢主凭证",
+      "severity": "P1",
+      "file": "services/account_export.py",
+      "line": 123,
+      "evidence": "EXPORT_FIELDS 里定义了 sso(:123)、client_id(:127)、client_secret(:128) 并注释「grok 账号的主凭证是 SSO —— 导出/导入必须带上，否则换机器导入丢 SSO（整理前实测的真 bug）」，但 EXPORT_FORMATS 全部 11 个文本格式的 columns 都不引用它们：实测打印得 `email_pw | ('email','password')`、`email_pw_2fa | ('email','password','totp_secret')` … `totp | ('totp_secret',)`，`[f.id for f in EXPORT_FORMATS.values() if 'sso' in f.columns] == []`。只有 json(:226 _render_json 走 export_names()) 和 csv(:163 手写列) 带 sso。",
+      "impact": "grok(410 行)/kiro/aws 账号走界面默认的文本格式导出再导入时，SSO 与 OIDC client 对全部丢失（导入端 _IMPORT_EXTRA_KEYS 支持这些键，但导出侧根本没写出来），换机后账号直接不可用；注释声称已修的 bug 只修了 JSON/CSV 两个通道。",
+      "fix_hint": "在 EXPORT_FORMATS 里补 `email_pw_sso`（或给 email_pw_2fa 追加 sso 列）并同步前端；更稳的做法是加测试断言「EXPORT_FIELDS 中每个非空 read 的字段至少出现在一个可见格式里」，防止新增字段再次只定义不使用。",
+      "class": "data-integrity"
+    },
+    {
+      "id": "L02-5",
+      "title": "JSON 后端 AccountStoreJson.update 是 get+put 两个临界区，并发更新丢字段（实测 40 线程只剩 8 个）",
+      "severity": "P1",
+      "file": "core/storage/account_store_json.py",
+      "line": 128,
+      "evidence": "core/storage/account_store_json.py:128-137 `existing = self._store.get(...)` → 合并 → `self._store.put(...)`：两次独立加锁，中间窗口可被其它线程整体覆盖。这正是 core/storage/json_backend.py:33-43 注释里记录的故障（「40 个线程并发 update 同一记录，只有 11 个字段生效」），修在了 JsonStore.update(:146) 却没修这里。实测脚本（scratch 目录，40 线程各写一个字段，每线程新建 AccountStoreJson 模拟 AccountRepository._json_store()）：`threads: 40 fields kept: 8 lost: 32`；把 update 换成 JsonStore.update 后同样脚本得 `fields kept: 40 / 40`。",
+      "impact": "JSON 后端（全新部署的默认后端）下，并发写同一账号（注册线程回写 token + 面板同步写 sync_statuses + 维护任务写 probe_*）会互相覆盖整行：凭证/状态随机丢失，且无任何报错。SQLite 后端因整行 UPDATE 无此问题，两后端行为不一致。",
+      "fix_hint": "update 内改用 `self._store.update(TABLE, account_id, _to_storage(patch))`（单临界区 read-merge-write），或给 JsonStore 加 `mutate(table, key, fn)` 回调接口；补一个并发回归测试（≥20 线程）。",
+      "class": "data-integrity"
+    },
+    {
+      "id": "L02-6",
+      "title": "JSON 后端 upsert 是 find→insert 无唯一约束，并发可产生同 (platform,email) 重复行",
+      "severity": "P2",
+      "file": "core/db/repository.py",
+      "line": 607,
+      "evidence": "core/db/repository.py:607-611 `_json_upsert` 先 `store.find_by_email(platform,email)` 判存在，再 update/insert；AccountStoreJson.insert（core/storage/account_store_json.py:113）按 id 直接 put，JSON 文件里没有 (platform,email) 唯一索引（SQLite 侧有，见 tests/test_account_unique_index.py）。两个线程同时 upsert 同一邮箱时都读到 None → 各写一条不同 id 的记录。",
+      "impact": "JSON 后端下同一邮箱出现两条账号：列表显示重复、导出重复、面板上传重复；find_by_email 只返回排序后的第一条，另一条永远读不到但仍在库里。SQLite 靠唯一索引兜底，JSON 没有。",
+      "fix_hint": "给 AccountStoreJson 加进程内 (platform,email)→id 索引并在同一把共享锁内完成「查重+写入」；或在 JsonStore 上加 `put_unique(table, key_fn, record)`，冲突时合并而非新增。",
+      "class": "data-integrity"
+    },
+    {
+      "id": "L02-7",
+      "title": "JSON 导出不含 phone_number / bound_email，JSON 往返丢字段",
+      "severity": "P2",
+      "file": "services/account_export.py",
+      "line": 226,
+      "evidence": "services/account_export.py:226 _render_json 的字段表 = platform/email/password/totp_secret + export_names() + user_id/region/cashier_url/status/created_at；而 EXPORT_FIELDS 里的 phone_number(:129)、bound_email(:130) 不在 export_names() 里（core/credential_fields.py 的 EXPORT_ONLY_EXTRA_KEYS 未含这两个键）。实测 json.loads(render_accounts([a],'json'))[0]：`phone_number` False、`bound_email` False，而同一账号的 email_pw_2fa_phone 文本导出带手机号。导入端 _IMPORT_EXTRA_KEYS 也不列这两个键，仅靠 catch-all 收下。",
+      "impact": "JSON 导出→导入后手机号/绑定邮箱丢失；而文本格式 email_pw_2fa_phone 能带手机号 —— 同一份数据两种导出格式字段集不一致，用户按「JSON 是全字段」的界面文案迁移会静默丢数据。",
+      "fix_hint": "把 phone_number / bound_email 加进 EXPORT_ONLY_EXTRA_KEYS（export_names 自动覆盖导出+导入两端），并补一条 round-trip 断言「EXPORT_FIELDS 的所有 id 都能在 JSON 导出里找到」。",
+      "class": "contract"
+    },
+    {
+      "id": "L02-8",
+      "title": "CSV 导出标注「全字段」但缺 id_token/session_token/cookies/phone_number/bound_email/kiro_aws_*",
+      "severity": "P2",
+      "file": "services/account_export.py",
+      "line": 163,
+      "evidence": "_render_csv 的列是手写的 14 列（platform,email,password,status,region,user_id,totp_secret,access_token,refresh_token,cashier_url,created_at,client_id,client_secret,sso），与 EXPORT_FIELDS 的 19 个字段不同源。实测表头即上述 14 列，`id_token/session_token/phone_number/cookies` 均不在其中；kiro_aws_access_token / kiro_aws_refresh_token / kiro_aws_client_secret / profile_arn 也全部缺失。前端格式列表把 csv 描述为「全字段表格」（list_export_formats 的 label/description）。",
+      "impact": "用户拿 CSV 做备份/迁移时，Kiro 来源账号快照（kiro_aws_*）、id_token、session_token、cookies、手机号全部丢失，且 CSV 无法回导（导入只支持 text/json），只能人工补。文案与内容不符属契约漂移。",
+      "fix_hint": "让 _render_csv 从 EXPORT_FIELDS 派生列（保留前 11 列顺序做兼容，其余按注册表追加），或把描述改成「基础表格（不含 id_token/cookies/kiro_*）」。",
+      "class": "contract"
+    },
+    {
+      "id": "L02-9",
+      "title": "CSV 导出无公式注入前缀：以 = + - @ 开头的邮箱/密码在 Excel 中被当公式执行",
+      "severity": "P2",
+      "file": "services/account_export.py",
+      "line": 187,
+      "evidence": "_render_csv(:187) 与 api/accounts.py:470 的 GET /accounts/export 都直接把字段交给 csv.writer，无 `=+-@` 前缀转义。实测邮箱 `=HYPERLINK(\"http://evil\")`、密码 `=1+1` 导出为 `chatgpt,\"=HYPERLINK(\"\"http://evil\"\")\",=1+1,registered,...` —— 引号只处理逗号，不阻止公式。",
+      "impact": "导出的 CSV 本身就是一份全池明文凭据；用 Excel/WPS 打开即触发 DDE/HYPERLINK 外链（点一下就把同表其它单元格的密码拼进 URL 发出去），是「导出文件 → 凭据外泄」的现成通道。密码/邮箱由注册流程或号商文件决定，攻击者可控制。",
+      "fix_hint": "导出前对以 `= + - @ \\t \\r` 开头的值加 `'` 前缀（OWASP CSV injection 建议），或统一 `\"'\" + v`；两个 CSV 出口（_render_csv 与 GET /export）共用同一个 sanitize 函数。",
+      "class": "credential-leak"
+    },
+    {
+      "id": "L02-10",
+      "title": "count_all_accounts(platform=X) 只数平台库，list_all_accounts 还并默认库历史行 → 分页 total 少算",
+      "severity": "P2",
+      "file": "core/db/repository.py",
+      "line": 1145,
+      "evidence": "core/db/repository.py:1145-1151 指定 platform 且是分库平台时 `with platform_database_registry.session_for(keys[0])` 只在该库 COUNT(*)；而 list_all_accounts(:1196 起) 的 targets 是「平台库 + 默认库」，注释明说默认库含「分库平台的历史遗留行（去重后并入）」。count 的 docstring 却写「与 list_all_accounts 用同一组条件」，且只为池键做了兜底(:1140-1144)，漏了平台键这一支。",
+      "impact": "有历史遗留行的分库平台上，列表 total 小于实际 items：前端分页器少一页、`page=N` 仍能返回数据，导出「按筛选全部」与页面计数不一致。属于口径不一致的静默错误。",
+      "fix_hint": "platform 分支也走 `_distinct_keys(conds)` 的 (platform,email) 去重计数（或至少把默认库的同平台行加进来），使 count 与 list 共用同一 targets 列表。",
+      "class": "contract"
+    },
+    {
+      "id": "L02-11",
+      "title": "JSON 后端列表请求整库读两遍、find_by_email 每次全量解析 → 导入 O(N²)",
+      "severity": "P2",
+      "file": "core/db/repository.py",
+      "line": 1098,
+      "evidence": "core/db/repository.py:1098 count_all_accounts 的 JSON 分支直接 `return len(list_all_accounts(...))`，而 api/accounts.py:143 _count_accounts 与 :132 _filtered_accounts 各调一次 → 每个 GET /api/accounts 读并解析整个 accounts.json 两次、构造 2×N 个 AccountModel（本机库 1734 行 / extra_json 数十 MB）。AccountStoreJson.find_by_email(:151) 走 `list_all(platform)` → `JsonStore.all` 全表读 + Python 过滤；导入 N 行时每行一次 → O(N²)。实测在 scratch 造 2000 行后跑 200 次 find_by_email 的探针 180s 未跑完（timeout 124）。",
+      "impact": "JSON 后端（新部署默认）下账号页每次翻页/筛选都整库读两遍，库到几千行后列表明显卡顿；批量导入 1000+ 行时耗时呈平方增长，接口容易超时。",
+      "fix_hint": "count 分支改成只读 (platform,email) 两列计数（JsonStore 加 `count_keys`），或让 list 端点把 total 与 items 合成一次加载；find_by_email 在 AccountStoreJson 内建 (platform,email)→id 索引缓存（按文件 mtime 失效）。",
+      "class": "perf"
+    },
+    {
+      "id": "L02-12",
+      "title": "PATCH /accounts/{id} 返回 ciphertext extra_json + 明文 password/token，与 GET 详情(明文 extra)契约不一致",
+      "severity": "P3",
+      "file": "api/accounts.py",
+      "line": 959,
+      "evidence": "api/accounts.py:959 `return account_repository.upsert(acc)`：acc 来自仓储，extra_json 列落盘即 `v1:` 密文（core/db/models_account.py 的 set_extra 加密），而 GET 详情(:933-935) 特意 `model_copy(update={'extra_json': json.dumps(acc.get_extra())})` 解成明文；password/token 两个 computed_field 在两个端点都是明文。前端目前忽略 PATCH 响应（Accounts.tsx:693 只 await 后 load()），所以尚未爆出。",
+      "impact": "同一资源三个端点三种形状（list=slim+has_*、detail=明文 extra、PATCH=密文 extra）；任何按「PATCH 返回即最新对象」写的前端/脚本会把 v1: 密文当 AT 复制走。",
+      "fix_hint": "PATCH 复用 get_account 的序列化（model_copy + 解密 extra + no-store 头），或干脆只返回 `{\"ok\": true}` 让调用方重取详情。",
+      "class": "contract"
+    },
+    {
+      "id": "L02-13",
+      "title": "单账号/批量检测端点无前端调用方；且 chatgpt 分支被整段跳过，状态与探针新凭证都不落库",
+      "severity": "P3",
+      "file": "api/accounts.py",
+      "line": 1030,
+      "evidence": "api/accounts.py:1002 POST /accounts/{id}/check 与 :897 /check-all 在 frontend/src 下无任何调用（`grep -rn \"accounts/.*check\" frontend/src` 只命中 proxies 与 icloud）。且 _do_check:1030 `if fresh.platform != \"chatgpt\":` 把状态判定、persist_probe_credentials、mark_probe_checked 全包在非 chatgpt 分支里，chatgpt 只更新 updated_at；platforms/chatgpt/plugin.py:113-143 check_valid 只返回 bool、不改传入对象，所以 chatgpt 账号点「检测」既不改状态也不保存探测到的新 AT。core/scheduler.py:207 的批量路径有同样的 `if fresh.platform != \"chatgpt\"` 结构。",
+      "impact": "两个端点属死接口（UI 无入口）；若通过 API 直接调用，chatgpt 账号的检测是「跑一次网络请求然后什么都不写」，用户以为已测活。同时 AccountStatus 的 expired/invalid→registered 回迁对 chatgpt 永不触发。",
+      "fix_hint": "要么删掉这两个端点，要么给 chatgpt 分支接上 services/chatgpt_account_state.apply_chatgpt_status_policy + persist_probe_credentials（与 api/actions.py 的探测路径对齐）。",
+      "class": "dead-code"
+    }
+  ],
+  "checked_and_clean": [
+    {
+      "item": "列表端点不下发 password/token 正文",
+      "how": "api/accounts.py:_slim_account_row 用 jsonable_encoder(row, exclude={'password','token'})，两个 computed_field 被排除；password_cipher/token_cipher 是 Field(exclude=True)。实测 tests/test_list_payload_no_secrets.py + tests/test_accounts_list_payload.py 全绿（161 passed）。"
+    },
+    {
+      "item": "列表端点的 has_* 标志由密文集派生，非手写清单",
+      "how": "_LIST_TOKEN_EXTRA_KEYS 由 `sorted(SENSITIVE_EXTRA_KEYS)` 派生（api/accounts.py:186-192），只有 totp_secret 与 heavy 键被排除；新加敏感键自动覆盖。对照真库 1734 行 extra 键集合（sqlite3 mode=ro 枚举）：access_token/refresh_token/id_token/session_token/sso/cookies/client_secret/kiro_aws_* 全部在集合内。"
+    },
+    {
+      "item": "extra_json 里没有未注册的明文 bearer 凭证",
+      "how": "对真库 data/account_manager.db(只读) 全部 extra_json 递归扫描 `eyJ[A-Za-z0-9_\\-\\.]{20,}`：命中全部落在 v1: 密文内部（base64 偶然匹配），无明文 JWT；chatgpt_local/chatgpt_token_refresh/panel_uploads/plus_check/sync_statuses 只含时间戳/状态/文案。chatgpt_token_refresh.message 的 205 字符疑似 token，实为「新 AT 被服务端拒绝（HTTP 4xx）」错误文案，payload 解码失败。"
+    },
+    {
+      "item": "secret_box：密钥派生与信封",
+      "how": "core/secret_box.py: AES-256-GCM，32 字节密钥来自 CREDENTIAL_ENCRYPTION_KEY(base64/hex 校验长度) 或 0600 权限密钥文件；nonce 12 字节随机；信封 `v1:` + base64(nonce||ct)；解密失败抛 CredentialKeyError 并带键名，不静默返回空（core/credential_fields.decrypt_text 只对「不以 v1: 开头」的老明文原样放行，属有意兼容）。密钥文件新建时 logger.warning 留痕。"
+    },
+    {
+      "item": "解密失败不会让导出产出空凭据列",
+      "how": "services/account_export._extra_of 只吞非 CredentialKeyError 的异常，密钥错误会带账号标识抛到接口层（tests/test_export_must_not_silently_drop_credentials.py 通过）。"
+    },
+    {
+      "item": "json_backend 原子写与锁",
+      "how": "core/storage/json_backend.py: 写 `.tmp`(每实例 pid+uuid 唯一后缀) → flush → fsync → os.replace；`_lock_for(path)` 按 resolve 后的路径共享 RLock，跨实例生效；损坏 JSON 抛 JsonStoreError 而不是当空库（避免下一次写覆盖）。JsonStore.update/put/delete 均为单临界区 read-modify-write（AccountStoreJson.update 未复用它，见 L02-5）。"
+    },
+    {
+      "item": "SQLite 后端并发/唯一性",
+      "how": "core/db/repository.py save/upsert 用 Session 事务；accounts 表有 (platform,email) 唯一索引（tests/test_account_unique_index.py 通过）；upsert 在 IntegrityError 时回退到 merge 路径。"
+    },
+    {
+      "item": "API 鉴权覆盖凭据出口",
+      "how": "main.py:221-265 auth_middleware 拦截所有 /api/ 前缀（除 /api/auth/）；未设密码时只放行回环来源，否则 503；docs/openapi 已关闭。因此列表/详情/导出/导入都不是未认证可达。"
+    },
+    {
+      "item": "详情端点缓存头",
+      "how": "api/accounts.py:931-932 对返回明文凭据的 GET /accounts/{id} 设 Cache-Control: no-store（tests/test_account_detail_plaintext_extra.py 覆盖）。"
+    },
+    {
+      "item": "导入不会把明文写进 SQLite extra_json",
+      "how": "_import_text_accounts/_import_json_accounts 均通过 set_extra() 落库，AccountModel.set_extra 走 encrypt_extra；新建行用 AccountModel(extra_json=...) 时 __init__ 也会加密。tests/test_credential_write_paths_encrypted.py / test_json_backend_credentials_encrypted.py 通过。"
+    },
+    {
+      "item": "状态枚举无孤儿值",
+      "how": "AccountStatus 四个值 registered/expired/invalid/banned(+limited) 均在 api/tasks.py、services/local_maintenance.py、services/chatgpt_maintenance.py、services/action_execution.py 中被比较；banned 与 limited 的语义（不可恢复 vs 可恢复）在 RETRY_STATUSES/REFRESHABLE_STATUSES 中一致。AccountStatus.normalize 把已删除的 trial/subscribed 归一为 registered。"
+    },
+    {
+      "item": "sso 的 token 列兜底缺失（潜在，但当前无数据受影响）",
+      "how": "EXPORT_FIELDS['sso'] 只读 extra（_extra_key('sso','sso_token','ssoToken')），没有像 _access_token 那样用 token_column_credential 兜底。查真库 410 行 grok：token 列与 extra.sso 全部同时存在（token_only=0），因此当前不产生数据丢失，未列为 finding；若出现只在 token 列的遗留行，文本/JSON 导出会丢 SSO。"
+    },
+    {
+      "item": "导出/导入端点的分页与上限",
+      "how": "GET /accounts 的 page_size 有 200 上限；GET /accounts/export 硬上限 5000 行并在超限时 400；export-text 的 account_ids 走 normalize_account_ids 去重。"
+    }
+  ]
+}

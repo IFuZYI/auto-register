@@ -1,7 +1,7 @@
 // 添加远程 iCloud 仓库服务的弹窗。
 //
-// 两段式：填服务地址 + API 秘钥 → 「获取账号列表」→ 选一个远端账号接入。
-// 秘钥只用于远端鉴权与落库（AES 加密），绝不回显。
+// 两段式：填服务地址 + API 密钥 → 「获取账号列表」→ 选一个远端账号接入。
+// 密钥只用于远端鉴权与落库（AES 加密），绝不回显。
 import { useState } from 'react'
 import { Alert, App, Form, Input, Modal, Select, Typography } from 'antd'
 
@@ -31,7 +31,7 @@ export function AddRemoteServiceModal({
   const [options, setOptions] = useState<RemoteAccountOption[]>([])
 
   /**
-   * 用 API 秘钥拉取远端账号列表（只读探针，不落库）。
+   * 用 API 密钥拉取远端账号列表（只读探针，不落库）。
    *
    * 走「先接入再列账号」不划算：接入会落库，选错账号还得删。
    * 后端的 `/icloud/remote-accounts/discover` 就是为这个场景提供的：
@@ -100,13 +100,13 @@ export function AddRemoteServiceModal({
         message="远程仓库：主号凭据保存在独立的 icloud-hme 服务里"
         description={
           <Text type="secondary">
-            本机只保存服务地址与 API 秘钥（加密），别名生成与收件都经该服务完成。
+            本机只保存服务地址与 API 密钥（加密），别名生成与收件都经该服务完成。
             同一服务里的同一个账号只能接入一次；与本地主号同地址时会按「本地优先」去重。
           </Text>
         }
       />
       <Paragraph type="secondary" style={{ marginTop: 0 }}>
-        填写 icloud-hme 服务的地址与 API 秘钥，先「获取账号列表」，再选择要接入的远端账号。
+        填写 icloud-hme 服务的地址与 API 密钥，先「获取账号列表」，再选择要接入的远端账号。
       </Paragraph>
       <Form form={form} layout="vertical">
         <Form.Item
@@ -118,9 +118,9 @@ export function AddRemoteServiceModal({
         </Form.Item>
         <Form.Item
           name="api_key"
-          label="API 秘钥"
-          rules={[{ required: true, message: '请填写 API 秘钥' }]}
-          extra="管理台「秘钥」页创建的 API 秘钥；加密保存，绝不回显"
+          label="API 密钥"
+          rules={[{ required: true, message: '请填写 API 密钥' }]}
+          extra="管理台「密钥」页创建的 API 密钥；加密保存，绝不回显"
         >
           <Input.Password autoComplete="new-password" />
         </Form.Item>

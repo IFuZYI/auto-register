@@ -332,13 +332,14 @@ export default function RegisterTaskPage() {
   }, [form, platform])
 
   return (
-    <div style={{ maxWidth: 'var(--w-page)' }}>
+    <div className="register-page" style={{ maxWidth: 'var(--w-page)' }}>
       <PageHeader
-        title="注册任务"
-        subtitle="创建账号自动注册任务"
+        title="注册账号"
+        subtitle="配置并启动本次注册。这里的修改只影响本次任务。"
+        actions={<Button type="primary" htmlType="submit" form="register-task-form" disabled={polling} icon={polling ? <LoadingOutlined /> : <PlayCircleOutlined />}>{polling ? '正在注册' : '开始注册'}</Button>}
       />
 
-      <Form form={form} layout="vertical" onFinish={submit} className="register-form" initialValues={{
+      <Form id="register-task-form" form={form} layout="vertical" onFinish={submit} className="register-form" initialValues={{
         platform: 'chatgpt',
         // 执行器不设初值：它必须由平台的能力清单决定（各平台支持集合不同）。
         // 写死 'protocol' 会替 Grok 预选一个它没有的执行器。
@@ -353,7 +354,7 @@ export default function RegisterTaskPage() {
         register_delay_seconds: 0,
         solver_url: 'http://localhost:8889',
       }}>
-        <Card title="基本配置" style={{ marginBottom: 16 }}>
+        <Card title="任务设置" className="form-section">
           {/* 平台 / 执行器 / 验证码 是同一组「用什么跑」的选择，并排放一行。
               之前各占一整行、每个下拉都拉到 924px，一屏只看得见三个控件。 */}
           <div className="form-grid">
@@ -362,7 +363,7 @@ export default function RegisterTaskPage() {
             </Form.Item>
             <Form.Item
               name="executor_type"
-              label="执行器"
+              label="运行方式"
               rules={[{ required: true }]}
               className="form-field--md"
               // 选项由该平台的能力清单决定（`/api/platforms`）。加载前为空 ——
@@ -391,7 +392,7 @@ export default function RegisterTaskPage() {
               把「批量数量」这种一位数拉到 375px 宽。容器用 flex-wrap，
               窄屏下自动折行而不是挤出横向滚动。 */}
           <div className="form-grid">
-            <Form.Item name="count" label="批量数量" className="form-field--sm">
+            <Form.Item name="count" label="注册数量" className="form-field--sm">
               <Input type="number" min={1} max={MAX_REGISTER_COUNT} />
             </Form.Item>
             <Form.Item name="concurrency" label="并发数" className="form-field--sm">
@@ -405,11 +406,11 @@ export default function RegisterTaskPage() {
             >
               <InputNumber min={0} max={10} precision={0} style={{ width: '100%' }} placeholder="1" />
             </Form.Item>
-            <Form.Item name="register_delay_seconds" label="每个注册延迟(秒)" className="form-field--sm">
+            <Form.Item name="register_delay_seconds" label="账号启动间隔（秒）" className="form-field--sm">
               <InputNumber min={0} precision={1} step={0.5} style={{ width: '100%' }} placeholder="0" />
             </Form.Item>
           </div>
-          <Form.Item name="proxy" label="代理 (可选)" className="form-field--lg">
+          <Form.Item name="proxy" label="代理地址（可选）" className="form-field--lg">
             <Input placeholder="http://user:pass@host:port" />
           </Form.Item>
           {platform === 'kiro' && (
@@ -488,7 +489,7 @@ export default function RegisterTaskPage() {
         </Card>
 
         {usesMailbox && (
-        <Card title="邮箱配置" style={{ marginBottom: 16 }}>
+        <Card title="邮箱设置" className="form-section">
           <Form.Item
             name="mail_provider"
             label="邮箱服务"
@@ -532,13 +533,13 @@ export default function RegisterTaskPage() {
               <Form.Item
                 name="icloud_local_account_id"
                 label="主号"
-                tooltip="留空时用第一个启用的主号（主号在「邮箱服务」页登录）。"
+                tooltip="留空时用第一个启用的主号（主号在「邮箱管理」页登录）。"
               >
                 <Select
                   allowClear
                   placeholder="留空自动选第一个可用主号"
                   options={icloudAccounts.filter((item) => item.source !== 'remote')}
-                  notFoundContent="还没有已启用的主号，先到「邮箱服务」页登录"
+                  notFoundContent="还没有已启用的主号，先到「邮箱管理」页登录"
                 />
               </Form.Item>
               <Form.Item name="icloud_local_label" label="别名标签（可选）">
@@ -556,13 +557,13 @@ export default function RegisterTaskPage() {
               <Form.Item
                 name="icloud_remote_account_id"
                 label="远端账号"
-                tooltip="留空时用第一个可用的远程账号（在「邮箱服务」页接入）。"
+                tooltip="留空时用第一个可用的远程账号（在「邮箱管理」页接入）。"
               >
                 <Select
                   allowClear
                   placeholder="留空自动选第一个可用远程账号"
                   options={icloudAccounts.filter((item) => item.source === 'remote')}
-                  notFoundContent="还没有接入的远程账号，先到「邮箱服务」页点「添加远程服务」"
+                  notFoundContent="还没有接入的远程账号，先到「邮箱管理」页点「添加远程服务」"
                 />
               </Form.Item>
               <Form.Item name="icloud_remote_label" label="别名标签（可选）">
@@ -582,7 +583,7 @@ export default function RegisterTaskPage() {
               <Space size={6}>
                 <span>ChatGPT 手机接码</span>
                 {/* 说明进 tooltip：两行常驻文字会把卡片标题和第一个字段拉开。 */}
-                <Tooltip title="手机注册用它拿号；邮箱注册只在链路进入 add-phone 时用。平台与 API Key 在「设置 → 手机接码」配置，这里只覆盖本次任务参数。">
+                <Tooltip title="邮箱注册进入 add-phone 验证时，使用手机接码。服务商与 API Key 在「设置 → 手机接码」配置，此处仅覆盖本次任务参数。">
                   <span
                     aria-label="说明"
                     style={{ color: 'var(--text-muted)', cursor: 'help', fontSize: 13 }}
@@ -592,7 +593,7 @@ export default function RegisterTaskPage() {
                 </Tooltip>
               </Space>
             }
-            style={{ marginBottom: 16 }}
+            className="form-section"
           >
             <Form.Item name="sms_country" label="国家（可选）">
               <SmsCountrySelect placeholder="留空用设置里的默认国家" />
@@ -607,7 +608,7 @@ export default function RegisterTaskPage() {
         )}
 
         {usesCaptcha && captchaSolver === 'yescaptcha' && (
-          <Card title="验证码配置" style={{ marginBottom: 16 }}>
+          <Card title="验证码服务" className="form-section">
             <Form.Item name="yescaptcha_key" label="YesCaptcha Key">
               <Input />
             </Form.Item>
@@ -615,7 +616,7 @@ export default function RegisterTaskPage() {
         )}
 
         {captchaSolver === 'local_solver' && (
-          <Card title="本地 Solver 配置" style={{ marginBottom: 16 }}>
+          <Card title="本地验证码服务" className="form-section">
             {/* 启动命令进 label 的 tooltip：它是「怎么起这个服务」的操作提示，
                 不是要一直盯着看的字段说明。用 Form.Item 自带的 tooltip，
                 悬停标签即见，不占版面。 */}
@@ -629,8 +630,8 @@ export default function RegisterTaskPage() {
           </Card>
         )}
 
-        <Button type="primary" htmlType="submit" block disabled={polling} icon={polling ? <LoadingOutlined /> : <PlayCircleOutlined />}>
-          {polling ? '注册中...' : '开始注册'}
+        <Button className="register-submit" type="primary" htmlType="submit" disabled={polling} icon={polling ? <LoadingOutlined /> : <PlayCircleOutlined />}>
+          {polling ? '正在注册' : '开始注册'}
         </Button>
       </Form>
 
@@ -643,7 +644,7 @@ export default function RegisterTaskPage() {
               task.status === 'stopped' ? 'warning' :
               task.status === 'failed' ? 'error' : 'processing'
             }>
-              {task.status}
+              {task.status === 'done' ? '已完成' : task.status === 'stopped' ? '已停止' : task.status === 'failed' ? '失败' : task.status === 'pending' ? '等待中' : '运行中'}
             </Tag>
           </Space>
         } style={{ marginTop: 16 }}>

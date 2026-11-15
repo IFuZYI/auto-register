@@ -1,0 +1,228 @@
+{
+  "lane": "L04-proxies",
+  "head": "fca2eec",
+  "dirty": true,
+  "reviewed_files": [
+    "api/proxies.py",
+    "core/proxy_pool.py",
+    "core/proxy_utils.py",
+    "core/db/proxy_repository.py",
+    "core/models/proxy.py",
+    "modules/proxy/pool.py",
+    "modules/proxy/__init__.py",
+    "tools/resin_scan_default.py",
+    "tools/resin_scan_asn.py",
+    "tools/resin_pair_probe.py",
+    "tools/resin_default_isp.json",
+    "tools/resin_isp_candidates.json",
+    "frontend/src/pages/Proxies.tsx",
+    "frontend/src/lib/accountFormat.ts",
+    "frontend/src/components/account/AccountDetailParts.tsx",
+    "services/task_runners.py",
+    "services/action_execution.py",
+    "services/turnstile_solver/api_solver.py",
+    "api/accounts.py",
+    "tests/test_secret_leaks_in_api.py"
+  ],
+  "findings": [
+    {
+      "id": "L04-1",
+      "title": "线上代理口令以明文硬编码在受版本控制的文件里（tools/ + tests/）",
+      "severity": "P0",
+      "file": "tools/resin_pair_probe.py",
+      "line": 14,
+      "evidence": "`EXIT6 = \"socks5h://gobngawr:<12位口令>@9.142.37.16:5187\"` —— 口令是真实值，不是占位符；同目录另外两个脚本用的是占位符（tools/resin_scan_default.py:12 `RESIN = \"socks5h://{plat}.{acct}:***@127.0.0.1:2260\"`），说明本行是漏脱敏。该 user+host:port 与生产库 data/account_manager.db 的 proxies id=6（`socks5://gobngawr:***@9.142.37.16:5187`，success=386/fail=101，tags=bind）完全一致 → 是可用凭据，不是样例。`git ls-files tools/` 列出该文件，`git show HEAD:tools/resin_pair_probe.py | sed -n 14p` 仍是明文 → 已进历史。同一口令值还出现在 tests/test_secret_leaks_in_api.py:79（URL 夹具）与 :96（assertNotIn 的字面量），那里对的是生产 id=4（9.142.194.72:6740）。",
+      "impact": "任何能读仓库（含 fork、CI 日志、备份、历史克隆）的人直接拿到可用的住宅代理出口凭据，可白嫖/耗尽配额，并把该出口的 IP 声誉打脏（这些 IP 正被 1661 个账号绑定使用）。git 历史里的副本无法靠后续提交删除。",
+      "fix_hint": "立刻轮换 gobngawr 口令；脚本改为读环境变量（RESIN_PROXY / RESIN_PASS），测试夹具改用假口令（`s3cr3t` 即可，断言也改成假值）；tools/resin_pair_probe.py 整体移到 scripts/ 并加 `if __name__ == \"__main__\"` 守卫；用 git filter-repo 清理历史后再强制推送。",
+      "class": "credential-leak"
+    },
+    {
+      "id": "L04-2",
+      "title": "POST /api/proxies 回显未打码的 ProxyRecord（新建即把代理口令写进响应体）",
+      "severity": "P1",
+      "file": "api/proxies.py",
+      "line": 67,
+      "evidence": "`return proxy_repository.add(url=body.url, region=body.region, tags=body.tags, session=session)` —— 直接回 dataclass ProxyRecord，未过 `_public_proxy`（同文件 37-54 行，GET 列表走的就是它）。实测：`.venv/bin/python -c \"from fastapi.encoders import jsonable_encoder; from core.models.proxy import ProxyRecord; print(jsonable_encoder(ProxyRecord(url='socks5h://alice:<pw>@gate.example.com:1080')))\"` → url 字段原样（len=45，`== 输入` 为 True），只有终端显示被沙箱打码。对照 tests/test_secret_leaks_in_api.py:79-96 只钉了 list 接口，tests/test_api_proxies_and_auth.py:102 用的 url 无凭据（`dup-*.example:8000`），所以没有任何测试覆盖这条路径。",
+      "impact": "创建代理这一次请求的响应体里带明文口令：浏览器 devtools/network、任何记录响应体的反代或 APM、用户截图都会留存。与仓库自己定的口径（F5：列表不得回吐代理凭据）直接冲突，且前端 add() 根本不读返回值（Proxies.tsx:183-190 之后直接 load()），打码零成本。",
+      "fix_hint": "`return _public_proxy(proxy_repository.add(...))`；顺手在 tests/test_secret_leaks_in_api.py 增加 `POST /api/proxies` 的用例（断言 body 里不含口令）。",
+      "class": "credential-leak"
+    },
+    {
+      "id": "L04-3",
+      "title": "redact_proxy_url 对「无 scheme 的 user:pass@host:port」整串放行 —— 打码可被绕过",
+      "severity": "P1",
+      "file": "core/proxy_utils.py",
+      "line": 143,
+      "evidence": "143-145 行：`parts = urlsplit(value)` / `if not parts.scheme: return \"(configured proxy)\"`。但 `urlsplit(\"u:p@host:8080\")` 会把 `u` 当成 scheme（合法 scheme 只需字母开头+冒号），于是 scheme 非空、netloc 为空、username/password 为 None，函数走到 158 行 `urlunsplit((parts.scheme, ...))` 把 path 原样拼回。实测：`redact_proxy_url(\"u:p@host:8080\")` → `'u:p@host:8080'`（口令完整保留）；`redact_proxy_url(\"host:8080:u:p:ss\")` → 同样原样返回（该形态连 _parse_legacy_proxy 都不认，见 L04-9）。`user:pass@ip:port` 正是代理商后台最常见的粘贴格式。",
+      "impact": "GET /api/proxies（api/proxies.py:53）、/proxies/balance（:177、:217）、任务日志（services/task_runners.py:18）全都依赖这个函数；用户一旦按 `user:pass@host:port` 粘贴，列表接口就把口令明文回吐，打码等于没做。同一函数还被当成「日志侧唯一口径」，所以日志/截图同样泄漏。",
+      "fix_hint": "先判「有没有 `@`」再判 scheme：`if \"@\" in value and not parts.hostname:` → 按最后一个 `@` 切分，只保留 `***:***@` + 后半段；或在 urlsplit 之前强制补 `http://`（`if \"://\" not in value and \"@\" in value`）。加三条用例：`u:p@h:8080`、`h:8080:u:p:ss`、`[::1]:8080`。",
+      "class": "credential-leak"
+    },
+    {
+      "id": "L04-4",
+      "title": "打码不可逆到不可区分：同一 host:port 不同账号的代理打码后字符串相同，前端按 url 匹配绑定数会串行",
+      "severity": "P2",
+      "file": "api/proxies.py",
+      "line": 53,
+      "evidence": "`payload[\"url\"] = redact_proxy_url(...)` 把 user:pass 统一换成 `***:***`，于是不同凭据、同 host:port 的行得到完全相同的字符串。生产库实测（只读 sqlite）：`select id,url from proxies` 共 10 行，`len(set(redact_proxy_url(url)))` = **6**，其中 `socks5://***:***@us.1024proxy.io:3000` 命中 **5 行**（id 7-11，是同一网关不同 sid 的 5 条住宅代理）。前端 frontend/src/pages/Proxies.tsx:143 `map[item.url] = {...}` 与 :448 `balanceMap[record.url]` 正是按这个打码串做键。",
+      "impact": "这 5 行在「已绑定账号」列显示同一个数字（最后一条覆盖），用户看到 363/355/351/349/243 的分布被打平成一个值；/proxies/balance 的 items 同理。是当前生产数据的常态（5/10 行），不是边角。",
+      "fix_hint": "打码保留一个稳定且唯一的标识：`***:***@host:port#<id>` 或在前端改用 `id` 做键（`balanceMap[record.id]`，后端 items 增加 `id` 字段）。前者不改契约，后者更彻底。",
+      "class": "contract"
+    },
+    {
+      "id": "L04-5",
+      "title": "新增/批量新增只做精确串去重，归一化后相同的代理可重复入库；get_next 会把同一个物理出口当多个发出去",
+      "severity": "P2",
+      "file": "api/proxies.py",
+      "line": 65,
+      "evidence": "add 走 `proxy_repository.find_by_url(body.url)`（精确匹配：core/db/proxy_repository.py:68 `ProxyModel.url == wanted`、:62 `store.first(url=wanted)`），bulk 同样（api/proxies.py:79）。而池子内部有三级归一化回退（core/proxy_pool.py:24-47），两边口径不一致。只读实测：库里 id=2 存的是 `socks5://...`，其 `normalize_proxy_url` 结果是 `socks5h://...`，`select count(*) from proxies where url=<归一化值>` → **0 行**（`url=<原值>` → 1 行）→ 以 socks5h 形态再贴一次能通过查重并插入第二行。同理会分裂出 `http://h:8080` / `http://h:8080/`（尾斜杠不归一，proxy_utils.py:89-106 只处理 socks5 与 legacy）与 `HTTP://H:8080`（大写 scheme 不归一）。",
+      "impact": "同一物理出口在池里占多行：get_next 的轮转（core/proxy_pool.py:77-79）会把同一个 IP 连续发给多个并发注册，出口侧看到的并发翻倍（这正是「一号一 IP」想避免的）；report_fail 只打到其中一行，另外几行继续被发出去；/proxies/balance 的 bound_total 按归一化统计会把这几个重复行显示成同一个数字。",
+      "fix_hint": "add/bulk 改用 `proxy_pool._find_by_url`（或把归一化比对下沉到 `ProxyRepository.find_by_url`：先精确、再 `normalize` 后比对全表）；normalize 里补 `rstrip(\"/\")` 与 `scheme.lower()`；入库前统一存归一化形态（存量用一次性迁移）。",
+      "class": "data-integrity"
+    },
+    {
+      "id": "L04-6",
+      "title": "report_fail 只在「0 成功」时才停用 —— 一旦成功过一次，之后无限失败也不会被摘掉",
+      "severity": "P2",
+      "file": "core/proxy_pool.py",
+      "line": 94,
+      "evidence": "`if p.fail_count > 0 and p.success_count == 0 and p.fail_count >= 5: p.is_active = False`。生产库只读实测：`select id,success_count,fail_count,is_active from proxies` → id=7（socks5://mpwk…-sid-Caj9xDKv…@us.1024proxy.io:3000，tags=register）**success=144 / fail=948 / is_active=1**，仍在被 get_next 轮转发出；id=2..6 的 fail 也都在 298-357。`report_success`（:81-87）只把 is_active 置 True、从不重置 fail_count，所以失败率 87% 的出口永远活着。",
+      "impact": "死/半死出口不会被自动淘汰：注册任务持续把别名烧在这些出口上（每个出口 8 秒超时 + 一次 Turnstile 铸币），而 UI 上「成功率」列看起来只是「有点低」。reactivate_all 的设计又要求人工复活，两者叠加使「自动健康检查」形同虚设。",
+      "fix_hint": "改成滑窗/比率判据：`if fail_count >= 5 and success_count / (success+fail) < 0.2` 或连续失败计数（成功即清零）；把「连续失败」单独存一列，别用累计值。",
+      "class": "functional"
+    },
+    {
+      "id": "L04-7",
+      "title": "绑定分配是「读计数 → 选最轻 → 事后写回」，无预留/无锁：两个并发注册会拿到同一个代理",
+      "severity": "P2",
+      "file": "core/proxy_pool.py",
+      "line": 191,
+      "evidence": "`pick_bindable` 167-193 行：`candidates = self.list_bindable()` → `counts = self.bound_counts()` → `lightest = min(...)` → `random.choice(pool)`，全程无锁；`self._lock`（:22）只保护 get_next 的 `_index`。写回发生在调用方之后（services/task_runners.py:732 `account.extra[\"register_proxy\"] = bound_proxy`），两步之间没有任何「占位」。对照：仓库对同类「先查再建」竞态已经在 services/panel_proxy_binding.py:58 加了 `_ENSURE_LOCK = threading.Lock()` 并配了确定性交错测试（tests/test_panel_proxy_binding_concurrency.py），本地池这一处没跟上。",
+      "impact": "同一批并发注册（线程池 + 每号一个任务）会全部读到同一份计数、全部选中最轻的那个，于是 N 个号挤到同一个出口 —— 既违背均衡目标，也让这些号在出口侧呈现同一 IP 的高频注册。dry-run 预览与真实执行也会不一致（预览期间计数在变）。",
+      "fix_hint": "把「选 + 写回」收进一个方法并在锁内完成（或对 proxies 表做 `UPDATE … WHERE bound < cap` 的原子领取）；最简做法：`with self._lock:` 包住 pick_bindable 与调用方的 update_extra，锁粒度是单进程，够用（任务是同进程线程池）。",
+      "class": "data-integrity"
+    },
+    {
+      "id": "L04-8",
+      "title": "每次绑定/复用都全量扫账号并逐行解密 extra_json（1734 号实测 2.1s），且 resolve_for_account 一次调用扫两遍",
+      "severity": "P2",
+      "file": "core/proxy_pool.py",
+      "line": 119,
+      "evidence": "`bound_counts` 119-120 行：`for account in account_repository.list_all_accounts(): url = normalize_proxy_url(account.get_extra().get(\"register_proxy\"))` —— 全表读 + 每行 `get_extra()`（core/db/models.py 里会 decrypt SENSITIVE_EXTRA_KEYS，每号约 6 次 AES）。只读实测（同一份 extra_json，仅 json.loads，不含解密）：`.venv/bin/python` 扫 data/account_manager.db 的 1734 行 `extra_json` 用 **2096 ms**。调用点：`pick_bindable`（:170）、`resolve_for_account`（:400 `list_bindable()` + :405 `pick_bindable()` → 再 `list_bindable()` + `bound_counts()`），即每个「复用账号」动作（测活/补 RT/绑 2FA，services/action_execution.py:63、task_runners.py:1110）都付 2 秒级 CPU，且是在事件循环外的同步调用。",
+      "impact": "1734 号的库上，单个动作任务起手就阻塞 2-4 秒（两遍扫描）；账号数线性增长，2 核机器上并发几个任务就能把 CPU 打满，面板请求同时被拖慢（/proxies/balance 也调 bound_counts）。这是「打开代理页/点均衡」之外的热路径，docstring 里「不进热路径」的说法已不成立。",
+      "fix_hint": "给绑定关系建索引：`SELECT json_extract(extra_json,'$.register_proxy') … GROUP BY 1`（SQLite 侧），或维护一张 `account_proxy_bindings(account_id, url)` 小表；退一步至少在 `resolve_for_account` 里把 list_bindable/bound_counts 各算一次复用（当前算了 3 次表扫描），并加 60s 内存缓存 + 写回时失效。",
+      "class": "perf"
+    },
+    {
+      "id": "L04-9",
+      "title": "legacy 解析对「口令含冒号」的 host:port:user:pass 直接放弃 → 代理不可用且打码失效；纯数字口令还会被误判成 host:port",
+      "severity": "P2",
+      "file": "core/proxy_utils.py",
+      "line": 22,
+      "evidence": "`_parse_legacy_proxy` 只认 `len(fields) == 4 and fields[1].isdigit()`（:22）与 2 段（:20）。实测：`normalize_proxy_url(\"host:8080:u:p:ss\")` → `'host:8080:u:p:ss'`（原样返回，未转换），`redact_proxy_url(...)` → 同样原样（口令泄漏）；随后 `build_requests_proxy_config` 把它当代理串交给 requests，运行期才炸 InvalidURL，报错点离输入很远。另一侧：`normalize_proxy_url(\"john:12345678\")` → `'http://john:12345678'`（:20 的 2 段分支把「用户名:纯数字口令」当成 host:port），批量粘贴 `user:pass` 列表时会静默生成一堆指向主机名 `john` 的假代理。",
+      "impact": "含冒号口令的 4 段代理（代理商随机生成口令很常见）被静默收下、存成不可用串，任务失败信息只显示「代理异常」，排障要翻到最底层；反过来纯数字口令的账号行会被当成代理入库，池子里多出永远连不上的条目。",
+      "fix_hint": "4 段分支改为「前两段是 host + 数字端口，其余全部（可含冒号）当口令」：`host, port, user, *rest = fields`；2 段分支加 host 合法性校验（域名/IP 正则或 `socket.inet_aton`/含点），不合格就返回 None；解析失败时在 API 层直接 400 而不是入库。",
+      "class": "functional"
+    },
+    {
+      "id": "L04-10",
+      "title": "账号列表/详情接口下发明文 register_proxy，脱敏只在「读者」（前端）且前端其实不打码",
+      "severity": "P2",
+      "file": "api/accounts.py",
+      "line": 238,
+      "evidence": "`_slim_extra_for_list` 的 docstring 明说保留 `register_proxy`（:238），代码只 pop `_LIST_HEAVY_EXTRA_KEYS` 与 `SENSITIVE_EXTRA_KEYS` 派生的 token 键，`register_proxy` 不在 `core/credential_crypto.SENSITIVE_EXTRA_KEYS`（:41-61）里 → `GET /api/accounts` 每行 extra_json 带明文 `socks5h://user:pass@host:port`。前端 frontend/src/lib/accountFormat.ts:34 直接取出，Accounts.tsx:2335 用 `<SecretLine value={...} />` 渲染，而 SecretLine（components/account/AccountDetailParts.tsx:192-218）只是加了个锁图标 + `ellipsis`/`copyable`，**渲染的是原值**（tooltip 与复制都是全串）。对照：代理接口一侧刻意在生产者打码（api/proxies.py:37-54）。",
+      "impact": "一次账号列表请求就把 1661 个账号所绑代理的口令全量下发（生产库实测 1661 条绑定、5 个出口），落进浏览器 devtools/network、任何响应日志与截图；详情页则直接把口令显示在屏幕上。属于「同一个凭据，两个接口两套口径」。",
+      "fix_hint": "列表侧把 `register_proxy` 换成 `redact_proxy_url` 后的只读展示值 + 保留 `proxy_bound: true`；需要复制原串时走单独的 `GET /accounts/{id}/proxy`（显式、可审计）。SecretLine 至少默认掩码成 `***:***@host:port`，点「显示」才展开。",
+      "class": "credential-leak"
+    },
+    {
+      "id": "L04-11",
+      "title": "get_next 声称「偏向高成功率」，实际是排序后对整个列表做轮转 —— 排序对选择毫无影响",
+      "severity": "P3",
+      "file": "core/proxy_pool.py",
+      "line": 72,
+      "evidence": "docstring :50 `Return the next active proxy, biased toward higher success rate.`；实现 72-79 行 `proxies.sort(key=成功率, reverse=True)` 之后 `idx = self._index % len(proxies); self._index += 1; return proxies[idx].url`。因为 `_index` 会一直自增、遍历整个列表，每个元素都必然被返回，排序只是改变了返回顺序，不会让好出口被选中更多次。",
+      "impact": "与文档承诺不符（doc drift），也会误导后续调参：想「少用差出口」的人会以为已经生效。生产库里 id=7 成功率 13% 仍按 1/5 的份额被轮转到。",
+      "fix_hint": "要么删掉排序与 docstring 的「biased」说法，要么真做加权：按 `max(success,1)/(success+fail)` 做权重轮盘（random.choices 带 weights），并对成功率 < 阈值的直接跳过。",
+      "class": "doc-drift"
+    },
+    {
+      "id": "L04-12",
+      "title": "rebalance 文档承诺「每个代理相差不超过 1」，实际只搬不合规的号；生产库 363/355/351/349/243",
+      "severity": "P3",
+      "file": "core/proxy_pool.py",
+      "line": 276,
+      "evidence": "docstring :275-276 `每次分配都重新读一次计数，所以是逐号贪心，最终每个代理的账号数相差不超过 1`。两处不符：(a) 计数只在函数开头读一次（:287），之后靠本地 `counts[target][\"total\"] += 1` 累加，不是「每次重新读」；(b) 只处理「不合规」的号（:294-296 `if current and current in bindable: skipped += 1; continue`），已经在池里但分布很歪的号一个都不动。只读实测生产库：363 / 355 / 351 / 349 / 243（1661 个绑定，5 个出口），最大差 120。",
+      "impact": "用户点「均衡绑定」后看到分布几乎没变（只挪了孤儿号），会认为功能坏了；文档里的 ±1 承诺也无法用来验收。",
+      "fix_hint": "docstring 改成「只把不合规的号补到最轻的代理，不动已合规的号」；若真要拉平，加一个 `rebalance_all` 选项：对超过均值 +1 的代理迁出多余账号（需要搬号时同样写回 update_extra）。",
+      "class": "doc-drift"
+    },
+    {
+      "id": "L04-13",
+      "title": "Turnstile solver 的 debug 日志把完整代理串（含口令）打出来，同文件里已有 _redact 却没用",
+      "severity": "P3",
+      "file": "services/turnstile_solver/api_solver.py",
+      "line": 1028,
+      "evidence": "`logger.debug(f\"Browser {index}: Starting Turnstile solve for URL: {url} ... | Proxy: {proxy}\")` —— `proxy` 是原始串。同类：:966 `logger.debug(f\"Browser {index}: Creating context with proxy {proxy}\")`（3 段分支）与 :968 `\"server\": f\"{proxy}\"`。同文件 :207-216 定义了 `_redact()`（`***:***@host`）并在 :201 用了它。触发条件：`--debug` / `self.debug` 为真。",
+      "impact": "开 debug 排障时（恰恰是最容易把日志发给别人看的时候）代理口令进日志文件，且这个 solver 常被单独部署/容器化收集日志。",
+      "fix_hint": "三处统一改成 `self._redact(proxy)`；`\"server\"` 那处本应走 `build_playwright_proxy_config`（core/proxy_utils.py:169），顺便消掉手写的 `split(':')` 解析（它同样只认 3/5 段，见 L04-9）。",
+      "class": "credential-leak"
+    },
+    {
+      "id": "L04-14",
+      "title": "tools/resin_*.py 一次性脚本：不检查子进程返回码、走明文 HTTP 的 ip-api、写死绝对输出路径、模板里的口令是占位符",
+      "severity": "P3",
+      "file": "tools/resin_scan_default.py",
+      "line": 35,
+      "evidence": "35-40 行 `proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)` 之后直接 `ip = proc.stdout.strip()`，从不看 `proc.returncode` —— curl 失败时 stdout 为空/带错误文本，会被当成 IP 传给 `ip_info()`（`http://ip-api.com/json/{ip}`，明文 HTTP，无 key，免费额度 45/min）。输出路径写死 `OUT = \"/data/workspace/Register/tools/resin_default_isp.json\"`（仓库换路径即失效）。同族脚本 `resin_scan_asn.py:13`、`resin_scan_default.py:12` 的 RESIN 模板口令是字面量 `***`（照抄即连不上），只有 resin_pair_probe.py:14 是真实口令（见 L04-1）。subprocess 均为 list 参数、未用 shell=True（已逐文件确认，无注入面）。",
+      "impact": "扫描结果不可信（失败被当成 IP 写入 json），且这些 json 是「选哪个 ISP 出口」的决策依据；脚本无法在新机器上直接跑。",
+      "fix_hint": "`if proc.returncode != 0 or not ip: continue`；ip-api 换 https（免费版 https 需 key，或改用 ipinfo）；路径用 `pathlib.Path(__file__).parent`；占位符改 argparse/env 注入。",
+      "class": "functional"
+    },
+    {
+      "id": "L04-15",
+      "title": "均衡预览用 email 做 React key（跨平台重名必然重复），且 items 被截断到 200 而 changed 是全量",
+      "severity": "P3",
+      "file": "frontend/src/pages/Proxies.tsx",
+      "line": 368,
+      "evidence": "`{res.items.map((item) => (<div key={item.email}>…`）—— 同一邮箱同时存在于 chatgpt 与 grok 是常态（core/proxy_pool.py:206-209 的注释记录真库 670 个邮箱里 387 个跨平台重名），key 冲突会让 React 复用错行/告警。另一侧 api/proxies.py:213 `for item in result.get(\"changed\", [])[:200]` 只回 200 条，而 :222 `\"changed\": len(result.get(\"changed\", []))` 是全量 → 预览里「将调整 1200 个账号」但只列 200 条（UI 文案 :364 有说明「预览前 N 条」，属可接受，但契约上 items 与 changed 不等长）。",
+      "impact": "预览列表可能错行/漏渲染；对账时 changed 与 items 数量对不上容易被当成 bug 排查。",
+      "fix_hint": "key 改 `${item.platform}:${item.email}`；后端 items 里补 `account_id`（rebalance 的 changed 里已有 email/platform，加 id 即可），前端用它做 key。",
+      "class": "contract"
+    }
+  ],
+  "checked_and_clean": [
+    {
+      "item": "rebind 跨平台写错账号（原 P0-2）",
+      "how": "读 core/proxy_pool.py:195-266：有 account_id 时按 id 定位；只给 email 时走 platforms_by_email（core/db/repository.py:1017-1022，返回 dict[str, set[str]]，与 :225 的解包形状一致），命中 >1 平台直接 return (\"\",\"\") 并 warning。写回用 account_repository.update_extra（只改一个键），不是 upsert 整行快照。结论：已修好，未复现。"
+    },
+    {
+      "item": "打码后 UI 是否还能用（主机/端口/协议保留）",
+      "how": "probe：redact('http://u:p@host:8080')→'http://***:***@host:8080'；'socks5h://h:1080'→原样；'http://[::1]:8080'→保留方括号；'http://h:notaport'→'http://(configured proxy)'（ValueError 分支）。主机与端口在合法 URL 上都保留，前端按行匹配可用（唯一性问题见 L04-4）。"
+    },
+    {
+      "item": "playwright/requests 代理配置构造",
+      "how": "probe build_playwright_proxy_config：'socks5h://u:p@h:1080'→{server: http://h:1080, username, password}（认证 socks5 降级为 http，与 docstring 的实测记录一致）；'h:8080'→{server: http://h:8080}。build_requests_proxy_config：'host:8080'→{'http','https'} 双键，socks5→socks5h。均正确。"
+    },
+    {
+      "item": "除零 / 空池",
+      "how": "core/proxy_pool.py:73 `p.success_count / max(p.success_count + p.fail_count, 1)` 已防 0 除；:70-71 空池返回 None；pick_bindable :168-169/:177-178 空候选返回 None；rebalance :284-285 空 bindable 返回 reason。probe 未触发异常。"
+    },
+    {
+      "item": "标签解析与落库形态",
+      "how": "core/models/proxy.py:27-52：只认 register/bind，大小写归一、去重、按固定顺序出 csv；未知标签丢弃。读 api/proxies.py:136-145 与 core/db/proxy_repository.py:110-122，save 时统一走 proxy_tags_csv。正确。"
+    },
+    {
+      "item": "batch-delete 边界",
+      "how": "api/proxies.py:97-114：空列表 400、>1000 400、id 去重、返回 deleted/not_found/total_requested；delete 走 get_many 再删，404 语义正确。tests/test_api_proxies_and_auth.py:160-187 覆盖。未发现缺陷。"
+    },
+    {
+      "item": "_find_by_url 三级回退",
+      "how": "core/proxy_pool.py:24-47 精确→归一化→逐条归一化比对；report_success/report_fail 在 socks5 与 socks5h 两种写法下都能命中（tests/test_proxy_pool.py:7-46 已覆盖）。注意：api 层的查重没走它（L04-5）。"
+    },
+    {
+      "item": "tools 子进程注入面",
+      "how": "逐文件读 tools/resin_scan_default.py、resin_scan_asn.py、resin_pair_probe.py：subprocess.run 全部 list 形式传参、无 shell=True、无 os.system；外部输出只按行 strip 后拼进 URL（风险是可信度，见 L04-14），无命令拼接。"
+    }
+  ]
+}

@@ -444,7 +444,17 @@ class GrokPlatform(BasePlatform):
     def get_platform_actions(self) -> list:
         return [
             {"id": "probe", "label": "测活（CLI Proxy）", "params": []},
-            {"id": "probe_refresh", "label": "检测有效性（刷新凭证）", "params": []},
+            # 批量测活的默认动作。Grok 有两个探测能力，选错会整批报错：
+            # `probe` 走 CPA 探活，没有 AT 就直接失败 —— 而注册默认只产 Web SSO、
+            # 不产 AT，所以大多数新号根本没有 AT。`probe_refresh` 用 RT 换一次
+            # 凭证来判定有效性（并写回轮换后的新值），才是批量该走的路径。
+            # 单账号菜单仍两个都列，让用户按需选择。
+            {
+                "id": "probe_refresh",
+                "label": "检测有效性（刷新凭证）",
+                "params": [],
+                "batch_default": True,
+            },
             {"id": "refresh_token", "label": "刷新 Token（登录协议）", "params": []},
             # 已弃用：纯协议 device flow 被 CF 挡死（实测 403），从未成功过。
             # 保留 id 转发到 `refresh_token`（老任务/老脚本可能还引用）。
@@ -794,9 +804,11 @@ class GrokPlatform(BasePlatform):
         except TaskInterruption:
             # 用户主动停止/跳过不是失败 —— 记 failed 会把还好的别名放回池子
             raise
-        except Exception:
-            # 注册抛异常也必须把号放回去，否则别名永远停在 in_use（池子只出不进）
-            self._record_mailbox_status(mailbox, mailbox_account, "failed", log)
+        except Exception as exc:
+            # 注册抛异常也必须把号放回去，否则别名永远停在 in_use（池子只出不进）。
+            # **必须把 exc 传下去**：上游抖动与「地址本身不行」在号池里是两种
+            # 结局，判据见 `services/icloud/aliases.py::release_alias_claim`。
+            self._record_mailbox_status(mailbox, mailbox_account, "failed", log, exc)
             raise
         if not result.get("ok"):
             # 「地址已消耗」→ 标 used 而不是 failed：
@@ -927,7 +939,9 @@ class GrokPlatform(BasePlatform):
             extra=account_extra,
         )
 
-    def _record_mailbox_status(self, mailbox, account, status: str, log) -> None:
+    def _record_mailbox_status(
+        self, mailbox, account, status: str, log, error: BaseException | None = None
+    ) -> None:
         """把注册结果记回邮箱渠道（iCloud/Outlook 号池的记账钩子）。
 
         为什么必须有：`set_account_status` 之前**只有 ChatGPT 引擎调用**，
@@ -948,8 +962,20 @@ class GrokPlatform(BasePlatform):
         setter = getattr(mailbox, "set_account_status", None)
         if not callable(setter):
             return
+        # `error` 决定「这次失败算不算这个地址的错」：
+        # 上游故障（网关卡死、限流、会话过期）不是地址的问题，传下去后
+        # `release_alias_claim` 只把号放回 available、**不累加** consecutive_failures。
+        # 不传的话累计 3 次就永久跳过该地址，而复位入口只在 `claim_alias` 里
+        # （候选集那时已排除它）—— 等于这个好号被永久判死、无 API 可救。
         try:
-            setter(account, status)
+            setter(account, status, error=error)
+        except TypeError:
+            # 渠道不支持 error 关键字（老实现 / 测试替身）：退回旧调用形状。
+            try:
+                setter(account, status)
+            except Exception as exc:  # noqa: BLE001
+                if log:
+                    log(f"[Grok] 号池记账失败（忽略）: {type(exc).__name__}")
         except Exception as exc:  # noqa: BLE001 - 记账失败不该影响注册结果
             if log:
                 log(f"[Grok] 号池记账失败（忽略）: {type(exc).__name__}")

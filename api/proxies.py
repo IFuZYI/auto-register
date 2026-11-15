@@ -64,8 +64,12 @@ def add_proxy(body: ProxyCreate, session: Session = Depends(get_session)):
     # 读写都走仓储 —— 只接写不接读会「写 JSON、读 SQLite」看不到刚写的行
     if proxy_repository.find_by_url(body.url, session=session):
         raise HTTPException(400, "代理已存在")
-    return proxy_repository.add(
-        url=body.url, region=body.region, tags=body.tags, session=session
+    # 写入也要打码：原来直接回仓储的原始记录，`user:pass@` 整串进响应
+    # （列表接口打了、创建接口没打 —— 同一份凭据两个出口，只堵了一个）。
+    return _public_proxy(
+        proxy_repository.add(
+            url=body.url, region=body.region, tags=body.tags, session=session
+        )
     )
 
 
@@ -201,15 +205,45 @@ def run_proxy_balance(body: ProxyRebalanceRequest):
     默认 `dry_run=true` 只返回会发生什么。
     """
     from core.proxy_pool import proxy_pool
+    from core.proxy_utils import redact_proxy_url
 
     result = proxy_pool.rebalance(dry_run=body.dry_run)
+
+    # `from` / `to` 是代理 URL，里面带口令 —— 必须与列表接口（`_public_proxy`）
+    # 用同一个 `redact_proxy_url`。否则一次 dry-run 就把全部代理密码送进浏览器、
+    # 截图和日志（安全审查 F5 的同一条口径，这里当时漏了）。
+    # 打码保留主机与端口，前端仍能按行匹配。
+    items = []
+    for item in result.get("changed", [])[:200]:
+        masked = dict(item)
+        for key in ("from", "to"):
+            if key in masked:
+                masked[key] = redact_proxy_url(str(masked[key] or ""))
+        items.append(masked)
+
     return {
         "dry_run": body.dry_run,
         "changed": len(result.get("changed", [])),
         "skipped": result.get("skipped", 0),
         "reason": result.get("reason", ""),
-        "items": result.get("changed", [])[:200],
+        "items": items,
     }
+
+
+@router.post("/reactivate")
+def reactivate_proxies():
+    """一次性复活所有被自动停用的代理（`is_active=False` → `True`）。
+
+    为什么需要：`get_next()` 只取 active 的代理，而 `report_fail` 在「0 成功 +
+    5 次失败」时会把代理拉黑。那 5 次失败可能只是走了不支持它的调用路径
+    （实测：住宅代理 curl 直连正常，库里却躺着 is_active=0）。`reactivate_all()`
+    早就实现了，但没有 API 也没有按钮 —— 用户只能逐条点开关，或者跑一遍
+    串行探活（20 个代理约 160 秒）。
+    """
+    from core.proxy_pool import proxy_pool
+
+    revived = proxy_pool.reactivate_all()
+    return {"revived": revived}
 
 
 @router.post("/check")

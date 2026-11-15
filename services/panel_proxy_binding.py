@@ -225,18 +225,25 @@ def _ensure_sub2api_proxy_unlocked(
 
 
 def ensure_grok2api_egress(
-    api_url: str,
-    api_key: str,
+    client,
     proxy_url: str,
     *,
-    timeout: int = 20,
+    scope: str = "grok_web",
 ):
     """确保 Grok2API 里有一条对应这条代理的出口节点，返回 `(node_id, 说明)`。
 
     **串行**：整段「先查再建」在本模块的 `_ENSURE_LOCK` 之内（理由见那里）。
+
+    签名与 `_ensure_grok2api_egress_unlocked` 保持一致。原先是照抄 Sub2API 那版
+    写成了 `(api_url, api_key, proxy_url, *, timeout=20)`，但函数体把这三个值
+    转发给收 **client** 的实现 —— 任何调用都会 `TypeError`
+    （实测 2026-11-15）。唯一调用方 `platforms/grok/grok2api.py:423` 用的是
+    `(self, proxy_url)`，所以这条包装一直是死的；一旦被当成对外契约使用就 100%
+    失败，且异常被上层宽 except 吞成"接入失败"（表现为"代理永远绑不上面板"，
+    日志里看不到 TypeError）。
     """
     with _ENSURE_LOCK:
-        return _ensure_grok2api_egress_unlocked(api_url, api_key, proxy_url, timeout=timeout)
+        return _ensure_grok2api_egress_unlocked(client, proxy_url, scope=scope)
 
 
 def _ensure_grok2api_egress_unlocked(

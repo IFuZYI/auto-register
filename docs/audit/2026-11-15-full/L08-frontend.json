@@ -1,0 +1,171 @@
+{
+  "lane": "L08-frontend",
+  "head": "fca2eec",
+  "dirty": true,
+  "reviewed_files": [
+    "frontend/package.json",
+    "frontend/tsconfig.json",
+    "frontend/tsconfig.app.json",
+    "frontend/tsconfig.node.json",
+    "frontend/index.html",
+    "frontend/src/App.tsx",
+    "frontend/src/main.tsx",
+    "frontend/src/lib/utils.ts",
+    "frontend/src/pages/Accounts.tsx",
+    "frontend/src/pages/AuthorizedAccounts.tsx",
+    "frontend/src/pages/Dashboard.tsx",
+    "frontend/src/pages/Settings.tsx",
+    "frontend/src/pages/Proxies.tsx",
+    "frontend/src/pages/RunningTasks.tsx",
+    "frontend/src/pages/TaskHistory.tsx",
+    "frontend/src/pages/RegisterTaskPage.tsx",
+    "frontend/src/pages/PanelManagement.tsx",
+    "frontend/src/pages/Login.tsx",
+    "frontend/src/pages/ICloud.tsx",
+    "frontend/src/components/TaskLogPanel.tsx",
+    "frontend/src/components/AccountExportModal.tsx",
+    "frontend/src/components/settings/MailImportPanel.tsx",
+    "frontend/src/components/settings/DataBackupPanel.tsx",
+    "frontend/src/components/settings/PanelComparisonPanel.tsx",
+    "frontend/src/api/icloud.ts",
+    "frontend/src/lib/pollBackoff.ts",
+    "frontend/scripts/*.mjs (all 30)",
+    "static/index.html",
+    "static/assets/*"
+  ],
+  "findings": [
+    {
+      "id": "L08-1",
+      "title": "SecurityPanel renders “未启用” when /auth/status fails (catch {} swallows it) — false security statement",
+      "severity": "P1",
+      "file": "frontend/src/pages/Settings.tsx",
+      "line": 472,
+      "evidence": "loadStatus(): `try { const s = await apiFetch('/auth/status'); setStatus(s) } catch {}` (Settings.tsx:468-473). Render at :611-614: `{status?.has_password ? <Tag green>已启用</Tag> : <Tag>未启用</Tag>}` — `status===null` (never loaded) takes the same branch as `has_password===false`. Same pattern at :682-686 for 双因素认证.",
+      "impact": "If GET /api/auth/status fails (500/network blip/tunnel drop) the panel asserts password protection is OFF and shows the “设置密码” form. User believes the panel is unprotected (or tries to re-set a password, which then 400s with “修改密码需要提供当前密码” because /auth/setup requires old_password when a hash exists). A security-relevant state is reported as the opposite of truth on request failure.",
+      "fix_hint": "Keep an explicit tri-state (loading | loaded | failed): render “状态未知（读取失败）” + retry button on failure and only render 未启用 when `status && status.has_password === false`. Never let `null` mean “off”.",
+      "class": "doc-drift"
+    },
+    {
+      "id": "L08-2",
+      "title": "Proxy enable/disable toggle has no error handling — PATCH failure is an unhandled rejection with zero UI feedback",
+      "severity": "P2",
+      "file": "frontend/src/pages/Proxies.tsx",
+      "line": 240,
+      "evidence": "`const toggle = async (id: number) => { await apiFetch(`/proxies/${id}/toggle`, { method: 'PATCH' }); load() }` (Proxies.tsx:239-243), bound at :497 `onClick={() => toggle(record.id)}`. No try/catch anywhere on the path; contrast the sibling handlers `del`/`batchDel`/`toggleTag` which all catch + message.error.",
+      "impact": "When the PATCH fails (403/500/proxy row already deleted), nothing happens: no toast, no reload, button stays in its old state, and the promise rejects into the console. User cannot tell a failed toggle from a missed click and will retry blindly. Trigger: open /proxies, stop the backend (or delete the row in another tab), click the enable/disable icon.",
+      "fix_hint": "Wrap in try/catch → message.error(`切换失败：${errMsg(e)}`), and only call load() on success; disable the button while the request is in flight.",
+      "class": "functional"
+    },
+    {
+      "id": "L08-3",
+      "title": "Task log stream treats any non-2xx as terminal — one transient 5xx freezes the log panel for the rest of the task",
+      "severity": "P2",
+      "file": "frontend/src/components/TaskLogPanel.tsx",
+      "line": 205,
+      "evidence": "connectStreamOnce(): `if (!response.ok) { setError(`日志流连接失败 (${response.status})`); return true }` (TaskLogPanel.tsx:205-208). Its return value is the loop's “stop” flag: `const shouldStop = await connectStreamOnce(); if (shouldStop || cancelled) return` (:276-278). Retry/backoff (:275-284) is only reached for network errors (return false), never for an HTTP status.",
+      "impact": "A 502/500/503 from the SSE endpoint (backend restart, tunnel hiccup, worker busy) permanently stops streaming for that task: the panel keeps the last lines and shows “日志流连接失败 (502)” while the task keeps running and writing logs. User sees a dead log window and may assume the task died. Repro: open a running task's log modal, restart the backend once (or inject one 503 on /api/tasks/{id}/logs/stream) — panel never reconnects.",
+      "fix_hint": "Treat 5xx/408/429 as retryable (return false and let the existing exponential backoff run); only stop on 401/403/404 (deleted task). Show the retry countdown in the same error line.",
+      "class": "functional"
+    },
+    {
+      "id": "L08-4",
+      "title": "`npm run lint` is red: 28 errors + 4 warnings in 8 files (exit 1) — the repo's own lint gate cannot pass",
+      "severity": "P2",
+      "file": "frontend/package.json",
+      "line": 10,
+      "evidence": "`cd frontend && npx eslint .` → `✖ 32 problems (28 errors, 4 warnings)` exit 1. Error split: Accounts.tsx 15E, Settings.tsx 10E, RegisterTaskPage.tsx 1E, components/settings/ConfigPanels.tsx 1E, components/account/AccountDetailParts.tsx 1E = 28E. Warnings (4): Settings.tsx 1W (`react-hooks/set-state-in-effect` at :422), MailImportPanel.tsx 2W, PanelConfigPanel.tsx 1W. Confirms controller's 28E/4W, Accounts 15E, Settings 10E; adds that all 28 errors sit in 5 files and the 4 warnings in 3 others.",
+      "impact": "`npm run lint` (package.json:10, `eslint .`) fails on the working tree, so any CI/pre-commit step that runs it blocks the build, and the 28 errors are all real (empty block at Settings.tsx:472 — see L08-1; 6× no-explicit-any in Settings; 15 in Accounts). A permanently-red gate trains people to ignore it.",
+      "fix_hint": "Fix the empty catch (L08-1) and the `any`s; if `no-explicit-any` is intentional in the detail panels, scope an override in eslint.config.js rather than leaving the whole repo red.",
+      "class": "functional"
+    },
+    {
+      "id": "L08-5",
+      "title": "Data-driven URLs opened with window.open(..., '_blank') without noopener — reverse tabnabbing into the authenticated panel tab",
+      "severity": "P3",
+      "file": "frontend/src/pages/Accounts.tsx",
+      "line": 1465,
+      "evidence": "Accounts.tsx:1465 `<Button ... aria-label=\"打开试用链接\" ... onClick={() => window.open(url, '_blank')} />`; RegisterTaskPage.tsx:248 `t.cashier_urls.forEach((url: string) => window.open(url, '_blank'))` (cashier_urls comes from the task record / upstream). Both lack the `'noopener'` feature flag, unlike the three panel/GitHub links (PanelManagement.tsx:131,215; PanelConfigPanel.tsx:270,422) which pass it.",
+      "impact": "The opened page gets `window.opener` and can rewrite the panel tab to a look-alike login page (the panel tab is same-origin with the JWT-bearing app). Requires a hostile/compromised cashier URL, hence P3, but the mitigation is one string.",
+      "fix_hint": "`window.open(url, '_blank', 'noopener,noreferrer')` (or `const w = window.open(); w.opener = null; w.location = url`). Also validate scheme is http(s) before opening.",
+      "class": "functional"
+    },
+    {
+      "id": "L08-6",
+      "title": "16 of the 30 `npm run check` scripts are source-text regex gates, not behavioral assertions",
+      "severity": "P3",
+      "file": "frontend/scripts/run_silent_failure_checks.mjs",
+      "line": 1,
+      "evidence": "Classified all 30: 14 execute the real TS module through rolldown and assert on returned values (account_format, attention, chatgpt_token_plan, dashboard_data, dashboard_tasks, finished_cap, log_cleanup, maintenance_keys, panel_actions_by_state, panel_filter, panel_unavailable_display, poll_backoff, pool_status, task_kind). 16 only readFileSync + regex the source text: account_row_field, accounts_list_token, all_actions_are_tasks, authorized_bulk, batch_capability, detail_completeness, form_hint, grok_batch_default, import_format, kiro_derived_paging, panel_action_mapping, panel_filter_driven, panel_upload_entry, probe_task, proxy_release, silent_failure. Example: run_silent_failure_checks.mjs:25 `ok(/message\\.error/.test(detailBlock), ...)` — passes if the identifier appears anywhere in the sliced block, regardless of whether the branch is reachable.",
+      "impact": "These 16 gates cannot fail when behavior breaks — only when an identifier is renamed. They are counted in the same “all checks passed” line as the real ones, so the green output overstates coverage (e.g. the silent-failure gate does not cover L08-2's uncaught toggle).",
+      "fix_hint": "Port the 16 to the rolldown pattern (export the handler logic from the page/component, or extract the branch into lib/ and assert on it); at minimum label them “source-shape” in the check output so green ≠ behavioral coverage.",
+      "class": "doc-drift"
+    }
+  ],
+  "checked_and_clean": [
+    {
+      "item": "API contract — path & method for every call site",
+      "how": "Extracted all 116 `apiFetch(` call sites from frontend/src (path literal/template + `method:` within the next 8 lines) and all 114 route registrations from api/*.py + main.py (`@router.<verb>('<path>')` + APIRouter prefix, plus app.get/post in main.py), then matched them with a `{param}`→`[^/]+` regex. 116/116 resolve to an existing route with the same verb; 0 missing, 0 verb mismatches, 0 calls to a removed endpoint. Template artifacts (`/sms/${kind}` → /sms/balance|/sms/countries, `{query}` suffixes, `/actions/{platform}/{account_id}/{action_id}` unused by the UI) were resolved by hand.",
+      "result": "clean"
+    },
+    {
+      "item": "API contract — accounts list request/response field names and page_size cap",
+      "how": "Compared Accounts.tsx:355-372 params (platform, status, email, plus_status, created_at_start/end, page, page_size) with api/accounts.py:345-360 `list_accounts` signature — all present, same names; response reads `data.items` / `data.total`, both returned by api/accounts.py:399-403. UI pageSizeOptions are 20/50/100 (Accounts.tsx:1777) and the backend cap is 200 (api/accounts.py:352), so no silent truncation. DatePicker sends `value.toISOString()` (tz-aware ISO), accepted by `UtcDatetime = Annotated[datetime, AfterValidator(ensure_utc)]` (core/time_utils.py:31).",
+      "result": "clean"
+    },
+    {
+      "item": "API contract — task log stream `since` semantics",
+      "how": "Frontend seeds `nextSinceRef.current = snapshot.logs.length` and increments per received line (TaskLogPanel.tsx:176,248), then requests `/tasks/{id}/logs/stream?since=N`. Backend api/tasks.py:938-975 uses `sent = since` as an index into the logs array and emits `logs[sent]`, `sent += 1` — index semantics match. SSE frames parsed as `^data:` + JSON with line/done/status/success/registered/total, all of which the backend emits.",
+      "result": "clean"
+    },
+    {
+      "item": "State — selection keys / page / filters across platform switch",
+      "how": "Accounts holds selectedRowKeys (Accounts.tsx:254), page, filterPlusStatus in component state and never clears them when `platform` changes; but the router wrapper is `<div key={location.pathname}>` (App.tsx:591), so navigating /accounts/chatgpt → /accounts/grok remounts the subtree and resets every hook. Verified there is no in-place `setCurrentPlatform` path outside the URL (only Accounts.tsx:309, driven by the route param). Selection cannot leak across platforms.",
+      "result": "clean"
+    },
+    {
+      "item": "State — ID types / Number() coercion of UUIDs",
+      "how": "Grepped every `Number(` in src. Only numeric conversions are Proxies ids (numeric PKs; `selectedRowKeys.map(Number).filter(Number.isFinite)`, Proxies.tsx:214), counts, and pageSize. Account ids stay strings everywhere (`/accounts/${id}`, `row.id` used as React key and in `ids: Array.from(selectedRowKeys)`); no `Number(uuid)` anywhere, so no NaN-key class of bug.",
+      "result": "clean"
+    },
+    {
+      "item": "Error handling — `catch {}` inventory",
+      "how": "`grep -rnE 'catch\\s*\\{\\s*\\}|catch\\s*\\([^)]*\\)\\s*\\{\\s*\\}' src/` over all of frontend/src returns exactly one hit: Settings.tsx:472 (reported as L08-1). The other 123 catch blocks bind the error and either toast, set an error state, or re-throw. `handleCleanup`'s `load().catch(() => {})` (RunningTasks.tsx:207) is deliberate and commented (refresh after a successful cleanup).",
+      "result": "clean (one exception reported)"
+    },
+    {
+      "item": "Rendering safety — XSS sinks, secrets in DOM, console output",
+      "how": "`grep -rn 'dangerouslySetInnerHTML|innerHTML|document.write|eval('` over src/: no hits (the iCloud message viewer uses a sandboxed <iframe> in MessageDetail.tsx, not innerHTML). Only console.* is MailServicePage.tsx:164 `console.error('加载配置失败', err)` (error object, no credentials). localStorage holds only `auth_token` and UI prefs (theme, chatgpt flow/plan/2fa toggles); no secret is logged or persisted besides the auth token that the API client requires. TOTP secret is rendered in Settings only inside the authenticated 2FA setup flow, by design.",
+      "result": "clean"
+    },
+    {
+      "item": "Destructive flows — confirmations and disabled states",
+      "how": "Checked every DELETE/batch endpoint caller: Accounts row delete (Popconfirm, Accounts.tsx:2338) and batch delete (Modal.confirm with count + platform, :554), Proxies row delete (Popconfirm :499) and batch delete (Popconfirm :647 + result modal listing not_found), RunningTasks delete/cleanup (modal.confirm danger + `409 运行中的任务不允许删除` surfaced), ICloud alias/account deletes (Popconfirm :469), MailImportPanel deletes, auth disable and 2FA disable (modal.confirm danger with explicit consequence text). No optimistic-update path that cannot roll back: Proxies tag toggle mutates state only after the PATCH resolves; RunningTasks delete removes the row only after the API resolves. No fire-and-forget destructive call found (the one fire-and-forget *toggle* is L08-2, non-destructive).",
+      "result": "clean"
+    },
+    {
+      "item": "Perf — polling intervals and unfiltered render",
+      "how": "Dashboard: 15s active / 60s idle, skips when `document.visibilityState !== 'visible'` and when a request is in flight (Dashboard.tsx:119-133). RunningTasks: 2.5s active / 15s idle via pollIntervalMs, 1s clock only while a task is active, finished cards capped at 20 unless expanded (RunningTasks.tsx:143-175). TaskHistory paginates server-side (TaskHistory.tsx:58-82). Proxies check-all polls every 3s with a computed deadline and stops on two stable snapshots (Proxies.tsx:262-300).",
+      "result": "clean"
+    },
+    {
+      "item": "Gates — `npx tsc -b`",
+      "how": "`cd frontend && timeout 240 npx tsc -b > /tmp/tsc.out 2>&1` → exit 0, 0 bytes of output (clean build of tsconfig.app + tsconfig.node project references).",
+      "result": "PASS (exit 0)"
+    },
+    {
+      "item": "Gates — `npm run check` (the repo's 30 scripts)",
+      "how": "Ran all 30 `scripts/run_*.mjs` individually with node (the npm script itself redirects stdout to /dev/null): 30 passed / 0 failed, exit 0, 84.9s wall. Assertion counts summed from each script's `checked` field = 388 (account_format 53, attention 28, panel_filter 36, pool_status 35, dashboard_data 23, task_kind 20, panel_filter_driven 14, batch_capability 13, chatgpt_token_plan 13, maintenance_keys 13, form_hint 12, log_cleanup 12, silent_failure 11, authorized_bulk 9, panel_unavailable_display 9, poll_backoff 9, proxy_release 9, panel_upload_entry 8, accounts_list_token 7, finished_cap 7, panel_actions_by_state 7, all_actions_are_tasks 6, grok_batch_default 6, panel_action_mapping 6, detail_completeness 5, account_row_field 4, import_format 4, probe_task 4, kiro_derived_paging 3, dashboard_tasks 2).",
+      "result": "PASS 30/30"
+    },
+    {
+      "item": "Gates — `npm run lint`",
+      "how": "`cd frontend && npx eslint .` → exit 1, `✖ 32 problems (28 errors, 4 warnings)` in 8 files (91.6s per controller; my run reproduced the same counts). Confirms controller's numbers: Accounts.tsx 15E, Settings.tsx 10E, plus 3 single-error files; 4 warnings across Settings/MailImportPanel/PanelConfigPanel. Logged as finding L08-4.",
+      "result": "FAIL (exit 1, 28E/4W)"
+    },
+    {
+      "item": "Build output freshness — static/ vs frontend/src",
+      "how": "`stat` on static/index.html (2026-11-15 12:33) vs newest modified source in the working tree (frontend/src/pages/Accounts.tsx 2026-11-14 12:07, Settings.tsx 11-14 09:54, App.tsx 11-14 09:51): the bundle is newer than every source file. static/index.html references 6 hashed assets, all present in static/assets/ (index-Bn3QMpKb.js, index-3DYNHdz3.css, pages-YGLJM2J4.js, vendor-antd/vendor-react/rolldown-runtime). No stale-build drift.",
+      "result": "clean"
+    }
+  ]
+}

@@ -17,7 +17,9 @@
 from __future__ import annotations
 
 import json
+import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest import mock
 
@@ -366,14 +368,27 @@ class KiroSourceSelectionTests(unittest.TestCase):
             get_extra=lambda: {},
         )
 
+    def setUp(self):
+        # 失败记录是进程内、按任务分键的共享表；测试之间必须清干净，
+        # 否则前一个用例记下的来源会让后一个用例选不到它。
+        from platforms.kiro.source_claims import clear_source_failures
+
+        self._task_key = f"test-{self._testMethodName}"
+        clear_source_failures(self._task_key)
+        self.addCleanup(clear_source_failures, self._task_key)
+
     def _platform(self, **extra):
         from core.base_platform import RegisterConfig
         from platforms.kiro import plugin as kiro_plugin
 
-        return kiro_plugin.KiroPlatform(
+        platform = kiro_plugin.KiroPlatform(
             config=RegisterConfig(extra=extra),
             mailbox=_StubMailbox(),
         )
+        # 每个用例用一个独立任务键，避免互相串味
+        platform._task_attempt_token = self._task_key
+        self.addCleanup(platform.release_registration_resources)
+        return platform
 
     def test_pick_prefers_an_aws_not_yet_used_by_kiro(self):
         used_aws = self._row("used-aws@x.ai")
@@ -397,6 +412,153 @@ class KiroSourceSelectionTests(unittest.TestCase):
         ):
             picked = self._platform(kiro_source="reuse")._pick_unused_aws()
         self.assertEqual(picked.email, "ok@x.ai")
+
+    def test_a_failed_reuse_is_not_picked_again_in_the_same_task(self):
+        """同一个来源**本轮已经失败过**，就不该在下一轮继续选它。
+
+        2026-11-14 实测（task_1794681056848_7e900c）：候选池只剩 3 个 AWS 号
+        （55 个里 52 个已被 Kiro 用掉），而 FIFO 排第一的
+        `37roaring-altar@icloud.com` 在第一次复用时就等码超时。因为失败不留
+        任何标记（`source_email` 只在成功落库时写入），它被连续选中
+        **55 次**，任务 28 轮全部失败、一个号都没成。
+
+        约束：失败不该把账号永久判死（那是一次上游抖动），但同一任务里
+        不该反复撞同一个 —— 换下一个候选才有机会成功。
+        """
+        from datetime import datetime
+
+        first = self._row("first@x.ai", created=datetime(2026, 1, 1))
+        second = self._row("second@x.ai", created=datetime(2026, 1, 2))
+        platform = self._platform(kiro_source="reuse")
+
+        with mock.patch(
+            "core.db.account_repository.list_all_accounts",
+            side_effect=lambda platform: [first, second] if platform == "aws" else [],
+        ):
+            picked_first = platform._pick_unused_aws()
+            assert picked_first.email == "first@x.ai"
+            # 这一轮失败了：释放认领，但不该再选它
+            platform.release_registration_resources()
+            platform.note_source_failure(picked_first.email)
+
+            picked_second = platform._pick_unused_aws()
+
+        self.assertEqual(picked_second.email, "second@x.ai")
+
+    def test_reuse_failure_marks_that_source_for_this_task(self):
+        """`register()` 复用失败时必须把该来源记进本任务的失败表。
+
+        机制本身（`note_source_failure`）若没人调用就是死代码 —— 而它的失效
+        方式恰好又是「什么都不发生」：任务继续每轮选中同一个号，日志里只是
+        反复出现同一个邮箱，看不出是选择逻辑出了问题。
+        """
+        from datetime import datetime
+
+        first = self._row("first@x.ai", created=datetime(2026, 1, 1))
+        platform = self._platform(kiro_source="reuse")
+        platform.config.extra = {"kiro_source": "reuse", "kiro_auto_register": "0"}
+
+        def _boom(chosen, **kwargs):
+            raise TimeoutError("等待验证码超时 (60s)")
+
+        picked: list[str] = []
+
+        def _pick():
+            picked.append(first.email)
+            return first
+
+        with mock.patch.object(platform, "_pick_unused_aws", _pick), mock.patch.object(
+            platform, "_reuse_aws_account", _boom
+        ):
+            with self.assertRaises(TimeoutError):
+                platform.register()
+
+        from platforms.kiro.source_claims import failed_sources
+
+        assert first.email.lower() in failed_sources(platform._task_key()), (
+            "失败没有记进本任务"
+        )
+
+    def test_stop_does_not_mark_the_source_as_failed(self):
+        """手动停止不是「这个号坏了」—— 不该记进失败表（否则换个任务还会躲着它）。"""
+        from core.task_runtime import StopTaskRequested
+        from datetime import datetime
+
+        first = self._row("first@x.ai", created=datetime(2026, 1, 1))
+        platform = self._platform(kiro_source="reuse")
+        platform.config.extra = {"kiro_source": "reuse", "kiro_auto_register": "0"}
+
+        def _stop(chosen, **kwargs):
+            raise StopTaskRequested("用户停止")
+
+        with mock.patch.object(platform, "_pick_unused_aws", lambda: first), mock.patch.object(
+            platform, "_reuse_aws_account", _stop
+        ):
+            with self.assertRaises(StopTaskRequested):
+                platform.register()
+
+        from platforms.kiro.source_claims import failed_sources
+
+        self.assertNotIn(first.email.lower(), failed_sources(platform._task_key()))
+
+    def test_failure_memory_survives_per_attempt_platform_rebuild(self):
+        """失败记录必须跨 **attempt 重建** 存活 —— 否则这个修复根本不生效。
+
+        生产链路每个 attempt 都新建一次 platform 实例
+        （`services/task_runners.py:678`）。把失败表放在实例字段上，它会在
+        下一轮被清空：表面看机制存在，实际每轮都重新选中同一个号，正是
+        55 次重试那个现象。所以记录必须挂在「按任务 id 分键的进程内表」上。
+        """
+        from datetime import datetime
+
+        first = self._row("first@x.ai", created=datetime(2026, 1, 1))
+        second = self._row("second@x.ai", created=datetime(2026, 1, 2))
+
+        # 第 1 个 attempt：选中 first，失败
+        attempt1 = self._platform(kiro_source="reuse")
+        attempt1._task_attempt_token = "task-42-shared"
+        with mock.patch(
+            "core.db.account_repository.list_all_accounts",
+            side_effect=lambda platform: [first, second] if platform == "aws" else [],
+        ):
+            picked = attempt1._pick_unused_aws()
+            self.assertEqual(picked.email, "first@x.ai")
+            attempt1.release_registration_resources()
+            attempt1.note_source_failure(picked.email, "等码超时")
+
+        # 第 2 个 attempt：**全新实例**（同一任务）
+        attempt2 = self._platform(kiro_source="reuse")
+        attempt2._task_attempt_token = "task-42-shared"
+        with mock.patch(
+            "core.db.account_repository.list_all_accounts",
+            side_effect=lambda platform: [first, second] if platform == "aws" else [],
+        ):
+            should_skip_first = attempt2._pick_unused_aws()
+
+        self.assertEqual(should_skip_first.email, "second@x.ai", "实例重建后失败记录丢了")
+
+    def test_a_failed_reuse_does_not_poison_other_tasks(self):
+        """失败标记是**本任务内**的：别的任务仍可以试这个号。
+
+        记录按任务分键，所以换一个 task key 就应当照常选中它 —— 这保证
+        「一次抖动」不会把候选池里本就很浅的号永久躲开。
+        """
+        from datetime import datetime
+
+        row = self._row("only@x.ai", created=datetime(2026, 1, 1))
+        failed_task = self._platform(kiro_source="reuse")
+        failed_task._task_attempt_token = "task-A"
+        failed_task.note_source_failure("only@x.ai")
+
+        other_task = self._platform(kiro_source="reuse")
+        other_task._task_attempt_token = "task-B"
+        with mock.patch(
+            "core.db.account_repository.list_all_accounts",
+            side_effect=lambda platform: [row] if platform == "aws" else [],
+        ):
+            fresh = other_task._pick_unused_aws()
+
+        self.assertEqual(fresh.email, "only@x.ai", "一个任务的失败把别的任务也影响了")
 
     def test_reuse_uses_the_picked_account(self):
         row = self._row("free-aws@x.ai")
@@ -468,6 +630,177 @@ class KiroSourceSelectionTests(unittest.TestCase):
         with mock.patch("core.db.account_repository.find_by_email", return_value=None):
             with self.assertRaises(RuntimeError):
                 platform.register()
+
+    def test_concurrent_workers_never_reuse_the_same_aws_account(self):
+        """把选择锁删掉时，两个线程都会拿到第一个 AWS 邮箱。"""
+        rows = [self._row("first@x.ai"), self._row("second@x.ai")]
+        workers = [self._platform(kiro_source="reuse") for _ in range(2)]
+        for worker in workers:
+            worker._reuse_aws_account = lambda row, **kwargs: row.email
+        barrier = threading.Barrier(2)
+
+        def choose(worker):
+            barrier.wait(timeout=5)
+            return worker._pick_unused_aws().email
+
+        with mock.patch(
+            "core.db.account_repository.list_all_accounts",
+            side_effect=lambda platform: rows if platform == "aws" else [],
+        ):
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                chosen = list(pool.map(choose, workers))
+
+        self.assertCountEqual(chosen, ["first@x.ai", "second@x.ai"])
+        for worker in workers:
+            worker.release_registration_resources()
+
+    def test_manual_reuse_skips_an_aws_account_locked_by_another_worker(self):
+        """手动补凭据也不能和自动任务同时登录同一个 AWS 账号。"""
+        from platforms.kiro import source_claims
+
+        email = "busy@x.ai"
+        row = self._row(email)
+        platform = self._platform(kiro_aws_email=email)
+        platform._reuse_aws_account = mock.Mock(return_value="must not login")
+        with source_claims.try_acquire(email), mock.patch(
+            "core.db.account_repository.find_by_email", return_value=row
+        ), mock.patch.object(platform, "is_email_registered", return_value=False):
+            with self.assertRaisesRegex(RuntimeError, "其他任务复用"):
+                platform.register()
+        platform._reuse_aws_account.assert_not_called()
+
+    def test_successful_reuse_holds_the_claim_until_account_is_saved(self):
+        """register 返回与任务落库之间不能提前放开同一个 AWS 来源。"""
+        from platforms.kiro import source_claims
+
+        row = self._row("save-window@x.ai")
+        platform = self._platform(kiro_source="reuse")
+        platform._reuse_aws_account = lambda chosen, **kwargs: chosen.email
+        with mock.patch(
+            "core.db.account_repository.list_all_accounts",
+            side_effect=lambda *, platform: [row] if platform == "aws" else [],
+        ):
+            self.assertEqual(platform.register(), "save-window@x.ai")
+            competing = source_claims.try_acquire("save-window@x.ai")
+            self.assertIsNone(competing)
+            platform.release_registration_resources()
+        released = source_claims.try_acquire("save-window@x.ai")
+        self.assertIsNotNone(released)
+        released.release()
+
+    def test_stale_candidate_is_rechecked_after_claim(self):
+        """选中后被其他任务落库的 AWS，不能凭旧快照再次登录。"""
+        row = self._row("stale@x.ai")
+        platform = self._platform(kiro_source="reuse")
+        kiro_reads = 0
+
+        def accounts(*, platform):
+            nonlocal kiro_reads
+            if platform == "aws":
+                return [row]
+            kiro_reads += 1
+            used = self._row("stale@x.ai")
+            used.get_extra = lambda: {"source_email": "stale@x.ai"}
+            return [used] if kiro_reads > 1 else []
+
+        platform._reuse_aws_account = mock.Mock(return_value="must not login")
+        with mock.patch(
+            "core.db.account_repository.list_all_accounts", side_effect=accounts
+        ), mock.patch.object(platform, "is_email_registered", return_value=True), mock.patch.object(
+            platform, "_register_new_aws_and_kiro", return_value="new"
+        ):
+            self.assertEqual(platform.register(), "new")
+        platform._reuse_aws_account.assert_not_called()
+
+    def test_new_aws_source_is_claimed_before_kiro_authorization(self):
+        """新建 AWS 已落库但 Kiro 未落库时，不能被另一任务抢去复用。"""
+        from core.base_platform import Account
+        from platforms.aws.plugin import AwsPlatform
+        from platforms.kiro import source_claims
+
+        platform = self._platform()
+        created = Account(platform="aws", email="fresh-source@x.ai", password="Pw-1!")
+        with mock.patch.object(AwsPlatform, "register", lambda self, **kwargs: created):
+            platform._register_aws_identity(
+                mailbox=_StubMailbox(), email="", password="Pw-1!", extra={}
+            )
+            try:
+                self.assertIsNone(source_claims.try_acquire("fresh-source@x.ai"))
+            finally:
+                platform.release_registration_resources()
+
+    def test_new_aws_source_is_claimed_before_source_row_is_published(self):
+        """发布 AWS 行时若还未认领，另一个任务就能从列表抢走它。"""
+        from core.base_platform import Account
+        from platforms.aws.plugin import AwsPlatform
+        from platforms.kiro import source_claims
+
+        platform = self._platform()
+        created = Account(platform="aws", email="claim-first@x.ai", password="Pw-1!")
+        with mock.patch.object(AwsPlatform, "register", lambda self, **kwargs: created), mock.patch(
+            "core.db.account_repository.upsert",
+            side_effect=lambda row: self.assertIsNotNone(platform._source_claim),
+        ):
+            identity = platform._register_aws_identity(
+                mailbox=_StubMailbox(), email="", password="Pw-1!", extra={}
+            )
+        self.assertEqual(identity["email"], "claim-first@x.ai")
+        platform.release_registration_resources()
+
+    def test_explicit_email_is_claimed_before_aws_registration(self):
+        """指定邮箱新建也必须在进入 AWS 注册前独占，而不是事后才认领。"""
+        from core.base_platform import Account
+        from platforms.aws.plugin import AwsPlatform
+
+        platform = self._platform()
+        created = Account(
+            platform="aws", email="named-claim@x.ai", password="Pw-1!", extra={"sso": "sso-1"}
+        )
+
+        def aws_register(aws, **kwargs):
+            self.assertIsNotNone(platform._source_claim)
+            return created
+
+        with mock.patch.object(AwsPlatform, "register", aws_register), mock.patch(
+            "platforms.kiro.plugin.authorize_kiro", return_value={}
+        ):
+            platform.register(email="named-claim@x.ai", password="Pw-1!")
+
+    def test_direct_new_aws_failure_releases_the_source(self):
+        """不经任务 runner 的调用失败时，也不能把新来源锁到进程结束。"""
+        from core.base_platform import Account
+        from platforms.aws.plugin import AwsPlatform
+        from platforms.kiro import source_claims
+
+        platform = self._platform()
+        created = Account(
+            platform="aws", email="direct-failure@x.ai", password="Pw-1!", extra={"sso": "sso-1"}
+        )
+        with mock.patch.object(AwsPlatform, "register", lambda self, **kwargs: created), mock.patch(
+            "platforms.kiro.plugin.authorize_kiro", side_effect=RuntimeError("authorize failed")
+        ):
+            with self.assertRaisesRegex(RuntimeError, "authorize failed"):
+                platform.register()
+        released = source_claims.try_acquire("direct-failure@x.ai")
+        self.assertIsNotNone(released)
+        released.release()
+
+    def test_failed_reuse_releases_the_source_for_a_later_attempt(self):
+        """失败路径若没有释放锁，这个 AWS 来源会永久不可选。"""
+        from platforms.kiro import source_claims
+
+        row = self._row("retry@x.ai")
+        first = self._platform(kiro_source="reuse")
+        first._reuse_aws_account = mock.Mock(side_effect=RuntimeError("login failed"))
+        with mock.patch(
+            "core.db.account_repository.list_all_accounts",
+            side_effect=lambda platform: [row] if platform == "aws" else [],
+        ):
+            with self.assertRaisesRegex(RuntimeError, "login failed"):
+                first.register()
+            released = source_claims.try_acquire("retry@x.ai")
+            self.assertIsNotNone(released)
+            released.release()
 
 
 class KiroSourceSnapshotTests(unittest.TestCase):
@@ -1135,3 +1468,111 @@ class KiroPluginTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class KiroOtpTimeoutFloorTests(unittest.TestCase):
+    """Kiro/AWS 的等码时长不能被过小的全局配置压到秒级。
+
+    2026-11-15 实测（Kiro 成功率低的根因之一）：
+    - 生产配置 `mailbox_otp_timeout_seconds = 60`；
+    - `platforms/kiro/plugin.py:332` 与 `platforms/aws/plugin.py:264` 都调
+      `get_mailbox_otp_timeout(default=300)`，但**默认值只在配置缺失时生效** ——
+      配置成 60 就直接拿 60，比它们需要的短 5 倍；
+    - 而 `core/base_platform.py:125` 的注释自己写着「iCloud 转发有时要一两分钟才到，
+      120 会误判成收不到」。
+    - 现场（task_1794677423301_8c4573）：17:30:39「验证码已发送」→ 17:31:32
+      「等待验证码超时 (60s)」，AWS 验证码还没到就判死了。
+
+    Kiro 复用 AWS 必须经过「AWS 发码 → iCloud 转发 → 读信」三段，等待时间天然长于
+    纯 iCloud 注册。这里钉的行为：**这两个平台有 300s 下限**，配置更小时按 300 走。
+    """
+
+    def _platform(self, **extra):
+        from core.base_platform import RegisterConfig
+        from platforms.kiro import plugin as kiro_plugin
+
+        return kiro_plugin.KiroPlatform(config=RegisterConfig(extra=extra))
+
+    def test_kiro_otp_timeout_has_a_floor(self):
+        platform = self._platform(mailbox_otp_timeout_seconds=60)
+        self.assertGreaterEqual(
+            platform.get_mailbox_otp_timeout(default=300), 300,
+            "配置 60 把 Kiro 的等码压到 60s —— AWS→iCloud 转发根本来不及",
+        )
+
+    def test_kiro_honours_a_larger_configured_value(self):
+        """用户把它调更大时要尊重（下限不是上限）。"""
+        platform = self._platform(mailbox_otp_timeout_seconds=420)
+        self.assertEqual(platform.get_mailbox_otp_timeout(default=300), 420)
+
+    def test_aws_otp_timeout_has_a_floor(self):
+        from core.base_platform import RegisterConfig
+        from platforms.aws import plugin as aws_plugin
+
+        platform = aws_plugin.AwsPlatform(config=RegisterConfig(extra={"mailbox_otp_timeout_seconds": 60}))
+        self.assertGreaterEqual(
+            platform.get_mailbox_otp_timeout(default=300), 300,
+            "配置 60 把 AWS 的等码压到 60s",
+        )
+
+
+class PickUnusedAwsSkipsHalfBakedSourcesTests(unittest.TestCase):
+    """挑 AWS 来源时必须排除 `needs_sso` 半成品 —— 它们**无法完成 SSO 登录**。
+
+    2026-11-15 实测（Kiro 成功率低的直接原因）：
+    - 库里 AWS 号分两类：
+        * 完整号：带 `access_token` / `refresh_token` / `sso` / `device_code`；
+        * **半成品**：只有 `client_id`/`client_secret`/`needs_sso=True`，凭据全空
+          （`platforms/aws/plugin.py:231` 的 `_save_partial_account` 明确写
+          「密码已设、凭据没拿到」）。
+    - `_pick_unused_aws` 只检查 `password` 非空与 status 不是 banned/invalid，
+      **不排除 needs_sso** → 半成品被当成可复用来源。
+    - 现场（task_1794717139351_574351）：`37roaring-altar@icloud.com` 被选中
+      → 收码成功（证明等码已修好）→ 提交 OTP 却 `HTTP 400 Please try signing in again`
+      → 因为它的 SSO 授权从未完成，没有可用的登录会话。
+    - 生产上 55 个 AWS 里 52 个是完整号（已用掉），**剩下 3 个全是半成品** ——
+      于是任务永远失败，成功率 0/27、4/100。
+    """
+
+    def test_half_baked_source_is_not_picked(self):
+        from datetime import datetime
+        from types import SimpleNamespace
+        from unittest import mock
+
+        def _row(email, needs_sso: bool, day: int):
+            extra = {"needs_sso": True} if needs_sso else {
+                "refresh_token": "rt-x", "access_token": "at-x",
+            }
+            return SimpleNamespace(
+                email=email, password="Pw-1!", status="registered",
+                created_at=datetime(2026, 1, day), get_extra=lambda: dict(extra),
+            )
+
+        half = _row("half@x.ai", True, 1)
+        good = _row("good@x.ai", False, 2)
+
+        from core.base_platform import RegisterConfig
+        from platforms.kiro import plugin as kiro_plugin
+        from platforms.kiro.source_claims import _CLAIMED_EMAILS, clear_source_failures
+
+        _CLAIMED_EMAILS.clear()
+        clear_source_failures("half-test")
+        platform = kiro_plugin.KiroPlatform(
+            config=RegisterConfig(extra={"kiro_source": "reuse"})
+        )
+        platform._task_attempt_token = "half-test"
+        try:
+            with mock.patch(
+                "core.db.account_repository.list_all_accounts",
+                side_effect=lambda platform: [half, good] if platform == "aws" else [],
+            ):
+                picked = platform._pick_unused_aws()
+            self.assertIsNotNone(picked, "完整号没被选中")
+            self.assertEqual(
+                picked.email, "good@x.ai",
+                "半成品（needs_sso）被当成可复用来源 —— 它没有凭据，登录必然 400",
+            )
+        finally:
+            platform.release_registration_resources()
+            _CLAIMED_EMAILS.clear()
+            clear_source_failures("half-test")

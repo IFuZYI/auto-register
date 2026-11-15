@@ -28,6 +28,28 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT_SECONDS = 30
 
+#: 分层超时：建连与读分开。
+#:
+#: 用一个 30s 的单值超时会把两种故障混为一谈 ——「DNS/路由不通」本来 1 秒
+#: 就该失败，却要陪跑到 30s；而「服务活着但慢」需要的是耐心。分开之后，
+#: 出口挂掉时 worker 5 秒内就能拿到可重试失败、把别名放回池子。
+DEFAULT_CONNECT_TIMEOUT_SECONDS = 5
+
+#: 读超时**必须**长于上游自己的单请求预算，否则「慢」会被记成「挂」。
+#:
+#: 上游 icloud-hme 单次收件箱请求的预算是：信封阶段 `limit × 0.3s`，下限
+#: 15s、上限 45s（`imapEnvelopeBudget`），正文阶段整体 30s。原先这里是 20s
+#: —— 客户端**必然先于上游放弃**，把一次「上游还在正常读 IMAP」的请求记成
+#: 传输失败（2026-11-14 实测：51 次 Read timed out 就是这么来的），再以此
+#: 打开熔断，把 4 个主号一起封掉 9 分钟。
+#:
+#: 取 45s（上限）+ 余量：比上游最长预算还长一点，让上游先给出它自己的结论。
+DEFAULT_READ_TIMEOUT_SECONDS = 50
+
+#: 连接池大小。收信是 5 并发（注册任务的 concurrency）同时打同一个服务，
+#: 每个 worker 每次读信都新建 TCP+TLS 连接是纯浪费，也更容易撞上游限流。
+CONNECTION_POOL_SIZE = 8
+
 #: 服务端错误码 → 本项目惯用错误码。
 _ERROR_CODE_MAP = {
     "INVALID_API_KEY": "invalid_config",
@@ -63,21 +85,72 @@ class RemoteHMEClient:
         api_key: str = "",
         *,
         proxy: str = "",
-        timeout: int = DEFAULT_TIMEOUT_SECONDS,
+        timeout: int | None = None,
+        use_gate: bool = True,
+        gate=None,
     ) -> None:
         self.base_url = str(base_url or "").strip().rstrip("/")
         self._api_key = str(api_key or "").strip()
         self._proxy = str(proxy or "").strip() or None
-        self._timeout = int(timeout or DEFAULT_TIMEOUT_SECONDS)
+        # 不传 timeout = 用「一个请求最多能花多久」的默认值（= 读预算），
+        # 而不是把读预算再压回一个更小的数：那正是把「慢」判成「挂」的源头。
+        self._timeout = int(timeout) if timeout else DEFAULT_READ_TIMEOUT_SECONDS
+        # `use_gate=False` 给测试与探活用：那些场景要的是「这一次请求的真实
+        # 结果」，不该被进程内其它 worker 的失败记账影响。
+        self._use_gate = bool(use_gate)
+        self._gate_override = gate
         self._session = requests.Session()
+        # 连接池：同一服务反复读信时复用连接，省掉每轮的 TCP+TLS 握手。
+        from requests.adapters import HTTPAdapter
+
+        adapter = HTTPAdapter(
+            pool_connections=CONNECTION_POOL_SIZE,
+            pool_maxsize=CONNECTION_POOL_SIZE,
+        )
+        self._session.mount("http://", adapter)
+        self._session.mount("https://", adapter)
+
+    def timeout_pair(self) -> tuple[int, int]:
+        """返回 `(connect, read)` 二元组。
+
+        不传 `timeout` 时用两个各自的默认值：建连 5s、读 50s（长于上游 45s
+        预算）。显式传一个小的 `timeout` 时（测试、探活）两半都收敛到它 ——
+        没人希望传了 `timeout=3` 之后还要等 50 秒的读超时。
+        """
+        connect = min(DEFAULT_CONNECT_TIMEOUT_SECONDS, self._timeout)
+        read = min(DEFAULT_READ_TIMEOUT_SECONDS, self._timeout)
+        return connect, read
+
+    def _gate(self):
+        """取熔断器：显式注入的优先，否则用进程内单例。"""
+        if self._gate_override is not None:
+            return self._gate_override
+        from services.icloud.upstream_gate import global_gate
+
+        return global_gate()
 
     # ------------------------------------------------------------ 请求
 
-    def _request(self, method: str, path: str, **kwargs: Any) -> Any:
+    def _request(
+        self, method: str, path: str, *, account: str = "", **kwargs: Any
+    ) -> Any:
+        """发一次请求。
+
+        `account` 是这次请求**归属的主号**（收件/别名/创建都按主号发）。
+        熔断因此能分两级：这个主号的读不动只挡这个主号，多个主号一起坏或
+        连不上才当成整台服务不可用（见 `UpstreamGate` 的 docstring）。
+        """
         if not self.base_url:
             raise ICloudError("invalid_config", "未配置 iCloud 远程服务地址")
         if not self._api_key:
             raise ICloudError("invalid_config", "未配置 iCloud 远程服务 API 秘钥")
+
+        # 熔断检查放在**发请求之前**：服务已经判定不可用时，连建连都不该尝试
+        # —— 那 5 秒的 connect 超时也是白等。抛的是可重试失败，地址不消耗。
+        gate = self._gate() if self._use_gate else None
+        if gate is not None:
+            gate.check(self.base_url, account=account)
+
         url = f"{self.base_url}{path}"
         headers = dict(kwargs.pop("headers", {}) or {})
         headers["X-API-Key"] = self._api_key
@@ -85,15 +158,31 @@ class RemoteHMEClient:
             response = self._session.request(
                 method,
                 url,
-                timeout=self._timeout,
+                timeout=self.timeout_pair(),
                 headers=headers,
                 proxies={"http": self._proxy, "https": self._proxy} if self._proxy else None,
                 **kwargs,
             )
         except requests.RequestException as exc:
+            # 只把「连不上/读超时」记成失败。HTTP 4xx/5xx 是业务语义，
+            # 走到下面按错误码处理，不该把整个服务判成熔断。
+            if gate is not None:
+                if account:
+                    # 有主号上下文 → 记主号级。连不上（DNS/拒绝/断连）说明是
+                    # 整个服务的问题，两级都记；只是这个主号读得慢则只记主号。
+                    gate.note_account_failure(self.base_url, account)
+                    if not isinstance(exc, (requests.Timeout,)):
+                        gate.note_failure(self.base_url)
+                else:
+                    gate.note_failure(self.base_url)
             raise ICloudError(
                 "upstream_unavailable", f"iCloud 远程服务不可达：{exc}"
             ) from exc
+
+        if gate is not None:
+            gate.note_success(self.base_url)
+            if account:
+                gate.note_account_success(self.base_url, account)
 
         payload: dict[str, Any] = {}
         try:
@@ -131,10 +220,38 @@ class RemoteHMEClient:
         raise ICloudError("invalid_config", f"远程服务里不存在账号：{target}")
 
     def check_account(self, account_id: str) -> dict[str, Any]:
-        """探测远端账号登录态（低风险 validate）。"""
+        """探测远端账号登录态（低风险 validate）。
+
+        只读秘钥降级：`POST /accounts/:id/check` 需要**写级**权限，而注册用的
+        那把 sk- 通常只有只读档（2026-11-14 线上实测：`/api/accounts`、
+        `/api/inbox`、`/api/aliases` 全部 200，只有 `/check` 回 403
+        `PERMISSION_DENIED`）。检测是只读语义，不该因为「钥匙不能写」就恒失败
+        —— 前端只会显示一句「API 秘钥权限不足」，看着像上游挂了。
+
+        降级探测 = `GET /api/accounts` 里能读到这个账号且 `status` 不是错误态。
+        它比 `/check` 弱（不刷新远端 `last_validated`），所以**只在权限不足时**用；
+        其它错误（上游 5xx、账号不存在）照常抛，不能把「读不出来」说成正常。
+        """
         target = str(account_id or "").strip()
-        data = self._authed_request("POST", f"/api/accounts/{target}/check")
+        try:
+            data = self._authed_request(
+                "POST", f"/api/accounts/{target}/check", account=target
+            )
+        except ICloudError as exc:
+            if exc.code != "permission_denied":
+                raise
+            return self._read_only_probe(target)
         return data if isinstance(data, dict) else {}
+
+    def _read_only_probe(self, account_id: str) -> dict[str, Any]:
+        """只读探活：账号在列表里就算可用（`status` 原样回传，交给上层判定）。"""
+        summary = self.account_summary(account_id)
+        status = str(summary.get("status") or "").strip()
+        return {
+            "id": str(summary.get("id") or account_id),
+            "status": status or "active",
+            "read_only": True,
+        }
 
     # ------------------------------------------------------------ 别名
 
@@ -164,7 +281,10 @@ class RemoteHMEClient:
         chosen = chosen[:MAX_LABEL_LENGTH]
 
         data = self._authed_request(
-            "POST", "/api/create", json={"account_id": target, "label": chosen}
+            "POST",
+            "/api/create",
+            json={"account_id": target, "label": chosen},
+            account=target,
         )
         payload = data if isinstance(data, dict) else {}
         return {
@@ -176,7 +296,9 @@ class RemoteHMEClient:
 
     def list_aliases(self, account_id: str = "") -> list[dict[str, Any]]:
         target = str(account_id or "").strip()
-        data = self._authed_request("GET", "/api/aliases", params={"account_id": target})
+        data = self._authed_request(
+            "GET", "/api/aliases", params={"account_id": target}, account=target
+        )
         aliases = data.get("aliases") if isinstance(data, dict) else None
         return aliases if isinstance(aliases, list) else []
 
@@ -186,6 +308,7 @@ class RemoteHMEClient:
             "DELETE",
             f"/api/aliases/{anonymous_id}",
             json={"account_id": target},
+            account=target,
         )
 
     def set_alias_active(self, account_id: str, anonymous_id: str, active: bool) -> None:
@@ -195,6 +318,7 @@ class RemoteHMEClient:
             "POST",
             f"/api/aliases/{anonymous_id}/{action}",
             json={"account_id": target},
+            account=target,
         )
 
     # ------------------------------------------------------------ 邮件
@@ -234,7 +358,7 @@ class RemoteHMEClient:
             params["end"] = str(end).strip()
         if refresh:
             params["refresh"] = 1
-        data = self._authed_request("GET", "/api/inbox", params=params)
+        data = self._authed_request("GET", "/api/inbox", params=params, account=target)
         if not isinstance(data, dict):
             return {"account_id": target, "messages": [], "count": 0, "total": 0}
         return data
@@ -250,6 +374,7 @@ class RemoteHMEClient:
             "/api/inbox/previews",
             params={"account_id": target},
             json={"ids": ids},
+            account=target,
         )
         if not isinstance(data, dict):
             return {}
@@ -262,6 +387,7 @@ class RemoteHMEClient:
             "GET",
             f"/api/inbox/{message_id}",
             params={"account_id": target},
+            account=target,
         )
         return data if isinstance(data, dict) else {}
 

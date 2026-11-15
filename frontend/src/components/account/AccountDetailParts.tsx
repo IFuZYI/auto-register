@@ -2,7 +2,7 @@
 import { useState } from 'react'
 import type { ReactNode } from 'react'
 import { Typography, Alert, Button, Tag, Space, theme } from 'antd'
-import { RightOutlined } from '@ant-design/icons'
+import { LockOutlined, RightOutlined } from '@ant-design/icons'
 
 import {
   authStateMeta,
@@ -112,14 +112,16 @@ export function DetailSection({ title, children }: { title: string; children: Re
 export function DetailRow({
   label,
   hint,
+  className,
   children,
 }: {
   label: ReactNode
   hint?: ReactNode
+  className?: string
   children: ReactNode
 }) {
   return (
-    <div className="detail-row">
+    <div className={`detail-row${className ? ` ${className}` : ''}`}>
       <div className="detail-row__label">
         <span>{label}</span>
         {hint ? <HelpTip text={hint} /> : null}
@@ -203,6 +205,7 @@ export function SecretLine({
   }
   return (
     <div className="detail-secret">
+      <LockOutlined className="detail-secret__lock" aria-label="敏感凭据" />
       <Text
         className="detail-secret__text"
         style={{ fontFamily: MONO, fontSize: 12 }}
@@ -247,7 +250,7 @@ export function TotpSecretAlert({ secret }: { secret: string }) {
     <Alert
       type="warning"
       showIcon
-      message="TOTP 密钥只下发这一次，服务端取不回"
+      message="请立即备份 TOTP 密钥"
       description={
         <Space direction="vertical" size={4} style={{ width: '100%' }}>
           <Text
@@ -257,7 +260,7 @@ export function TotpSecretAlert({ secret }: { secret: string }) {
             {secret}
           </Text>
           <Text type="secondary" style={{ fontSize: 12 }}>
-            已随账号存库，之后可在账号详情或列表的「2FA 已绑」标签上再复制。
+            密钥已保存到本地账号，可在账号详情再次复制。任务日志也可能包含密钥，请妥善保管；丢失可能导致无法登录。
           </Text>
         </Space>
       }

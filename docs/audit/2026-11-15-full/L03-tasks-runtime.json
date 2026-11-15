@@ -1,0 +1,216 @@
+{
+  "lane": "L03-tasks-runtime",
+  "head": "fca2eec",
+  "dirty": true,
+  "reviewed_files": [
+    "api/tasks.py",
+    "api/actions.py",
+    "core/task_runtime.py",
+    "core/scheduler.py",
+    "services/task_runners.py",
+    "services/action_execution.py",
+    "core/db/task_repository.py",
+    "core/db/task_log_repository.py",
+    "services/task_service.py",
+    "services/task_store_io.py"
+  ],
+  "findings": [
+    {
+      "id": "L03-1",
+      "title": "删除任务只删 DB 行，内存记录仍在 → 下一次 GET /tasks/{id}（或收尾线程补写日志）把行重新 upsert 回来",
+      "severity": "P2",
+      "file": "api/tasks.py",
+      "line": 1022,
+      "evidence": "delete_task() 只做 s.delete(row)/s.commit()，从不碰 _task_store；而 _get_task_snapshot -> _persist_task_snapshot 对「内存里还有记录」的 id 无条件 upsert。探针（临时 SQLite）：\n$ .venv/bin/python /root/.hermes/cache/scratch/l03_probe_delete.py\nrow_in_db_before_delete = True\ndelete_task -> {'ok': True, 'task_id': 't_del'}\nrow_in_db_after_delete  = False\nGET /tasks/{id} after delete -> id=t_del status=done\nrow_in_db_after_GET     = True",
+      "impact": "「删除」不是持久删除：删掉一个已结束任务后，只要前端日志面板重连（TaskLogPanel.initSnapshot 每次重连都 GET /tasks/{id}）、用户点开详情，或 auto_upload_integrations 这类收尾线程再写一行日志，task_runs 行就被原样写回，任务在列表/历史里复活。用户会认为删除按钮失效。",
+      "fix_hint": "delete_task 里同时 _task_store.remove(task_id)（或写 tombstone 集合），并让 _persist_task_snapshot 对 tombstone/不存在于内存的 id 直接返回；删除顺序改成先删内存再删 DB。",
+      "class": "data-integrity"
+    },
+    {
+      "id": "L03-2",
+      "title": "RegisterTaskControl.sleep 在 _wake 被置位且无人消费时变成忙等（0.5s 睡眠烧 0.32s CPU）",
+      "severity": "P2",
+      "file": "core/task_runtime.py",
+      "line": 164,
+      "evidence": "sleep() 的循环 `if not self._wake.wait(timeout=left): break` 只靠 Event 被 set 来提前返回，而 _wake 只在 finish_attempt() 且 _active_attempt_ids 为空时才 clear（116-117）。并发>1 时「跳过当前账号」会把所有 active attempt 都塞进 skip 集合并 set _wake；先收尾的那个 worker 不清 _wake（还有别的 active），下一个 sleep 每次 wait 都立即返回 True、checkpoint 又不抛 → 紧循环。探针：\n$ .venv/bin/python /root/.hermes/cache/scratch/l03_probe_runtime.py\ncpu_seconds_baseline_sleep_0.5s = 0.000\ncpu_seconds_wake_set_sleep_0.5s = 0.323\nratio = 2486.2x",
+      "impact": "batch/register 任务 concurrency>=2 且 delay_seconds>0 时，点过一次「跳过当前账号」后，每个新账号的间隔睡眠都可能整段空转一个核；delay_seconds 设 60 就是 60s×N 次 100% CPU，同时拖慢同进程的 API 轮询。",
+      "fix_hint": "用 generation/序号代替裸 Event（记录 wake_seq，等待方记住自己已消费到的 seq），或在 wait 返回 True 后由消费方 clear 并重新 set 给其他人；最小改法：wait 返回 True 且 checkpoint 没抛时，把 left 重算并 sleep 一小段退避（如 0.05s），避免紧循环。",
+      "class": "perf"
+    },
+    {
+      "id": "L03-3",
+      "title": "每写一行任务日志都同步重写整行 task_runs（含全部 logs_json）：实测 33–66ms/行，200 行 13.2s",
+      "severity": "P2",
+      "file": "services/task_service.py",
+      "line": 95,
+      "evidence": "log() -> task_store.append_log() -> persist_task_snapshot(task_id) -> _upsert_task_run 整行 upsert（logs 全量序列化）。探针（临时 SQLite，80 字节/行）：\n$ .venv/bin/python /root/.hermes/cache/scratch/l03_probe_logperf.py | grep -E '^n=|^4x'\nn=  200  total= 13.161s  per_line= 65.80ms  logs_chars=19890\nn=  800  total= 26.227s  per_line= 32.78ms  logs_chars=79890",
+      "impact": "日志写入是 O(行数²) 字节量：一个 200 账号的注册任务（每号 ~5 行）要花 30–60s 纯写库，且这些写发生在 worker 线程的 try 块里（见 L03-13 相关风险）；并发 worker 全部串行在这条写路径上，还会和 /tasks 2.5s 轮询抢 SQLite 写锁。10000 账号上限时日志行数无上限，单行可达数 MB。",
+      "fix_hint": "日志改成 append-only 表（task_log_lines(task_id, seq, line)）或内存缓冲 + 定时/收尾批量 flush；至少把 persist 从 log() 里拿掉，改为每 N 行或每 0.5s 合并一次，并在 finish 时强制 flush。",
+      "class": "perf"
+    },
+    {
+      "id": "L03-4",
+      "title": "register_job 覆盖同名任务时把 last_run_at 重置为 0 → 下一次 tick 立刻触发，无视 interval",
+      "severity": "P2",
+      "file": "core/scheduler.py",
+      "line": 84,
+      "evidence": "register_job 用新的 _Job(...) 覆盖 _jobs[name]，新对象 last_run_at=0.0（62 行）；_run_due_jobs 里「首次见到」才把 last_run_at 顶到 now（164-169），而同名任务已在 _seen_jobs 中 → 直接 due(now)=now-0>=interval → 立刻跑。探针：\n$ .venv/bin/python /root/.hermes/cache/scratch/l03_probe_runtime.py\nre-registered job ran on next tick (interval=3600s): True",
+      "impact": "热重载/重复 import（services.local_maintenance、services.chatgpt_maintenance 都是 import 时自注册，共 11 个 job）时，被覆盖的 job 会在下一 tick 立刻执行一次：自动清理、自动探测、面板自动同步都会在启动/重载瞬间打一轮上游，正是 start() 注释里承诺「不会一启动就瞬间触发」要避免的行为。",
+      "fix_hint": "register_job 覆盖同名任务时继承旧 job 的 last_run_at（old = _jobs.get(name); job.last_run_at = old.last_run_at if old else 0.0），或保留旧对象只换 interval/runner。",
+      "class": "functional"
+    },
+    {
+      "id": "L03-5",
+      "title": "同一个 sync_*_status 动作：单账号路径会按远端状态改 account.status，批量路径只写 sync_statuses 不改状态",
+      "severity": "P2",
+      "file": "api/actions.py",
+      "line": 186,
+      "evidence": "_execute_batch_panel_status 拿到 build_status_update 的 patch 后直接 _merge_extra_patch(extra, patch)+save（services/panel_status_sync.py:170-187 的 patch 只有 sync_statuses），从不调用 _apply_action_result；而单账号/批量逐账号路径 _execute_platform_action -> _apply_action_result -> _apply_chatgpt_status 会 apply_chatgpt_status_policy(remote_sync=...)（services/chatgpt_account_state.py:263,280-281 把 remote_deactivated 落 banned）。对比：_execute_batch_cliproxy_sync 走的 update_account_model_cliproxy_sync 反而会 apply 状态策略（services/chatgpt_sync.py:282）。",
+      "impact": "「批量同步面板状态」是面板对比页的主按钮（PanelComparisonPanel 走 /actions/{platform}/{action_id}/batch），面板已把账号标为 deleted/deactivated 时，批量同步不会把本地号置 banned，下一次自动刷新/恢复还会拿它去打上游；只有逐个点单账号同步才会落状态。同一 action_id 两条路径结果不一致。",
+      "fix_hint": "批量路径对每个账号也调用 _apply_action_result(platform, action_id, acc_model, {\"ok\": True, \"data\": update}, session)（或至少 apply_chatgpt_status_policy(acc_model, remote_sync=update)），与单账号路径共用同一段落库逻辑。",
+      "class": "contract"
+    },
+    {
+      "id": "L03-6",
+      "title": "GET /tasks/logs 为算 total 把整表（含 detail_json）全部取回内存：len(s.exec(q).all())",
+      "severity": "P2",
+      "file": "api/tasks.py",
+      "line": 855,
+      "evidence": "get_logs(): `q = select(TaskLog)`（可带 platform 过滤）→ `total = len(s.exec(q).all())` → 再 `.offset().limit()` 取当页；JSON 后端同形（core/db/task_log_repository.py:78-87 先 store.all() 再切片）。行数越多每次翻页越慢，且 detail_json 正文全部反序列化后丢弃。",
+      "impact": "任务历史表是全项目增长最快的表（每条注册/动作都写一行，保留期清理前可达数万行）；TaskHistory 每次翻页/换平台都触发一次全表读 + ORM 实例化，翻到第 2 页和全量导出代价一样。",
+      "fix_hint": "用 `select(func.count()).select_from(TaskLog)`（带同样的 where）取 total；JSON 后端用 len(rows) 但只对过滤后的 id 列表排序，不做 _from_json 全量转换。",
+      "class": "perf"
+    },
+    {
+      "id": "L03-7",
+      "title": "SSE 日志流每 0.5s 无条件整行 upsert 一次 task_runs，每个客户端各写一份",
+      "severity": "P2",
+      "file": "api/tasks.py",
+      "line": 951,
+      "evidence": "stream_logs 的 async 生成器循环体：`await asyncio.sleep(0.5)` 之后无条件 `_persist_task_snapshot(task_id)`（951），不判断 logs 是否变化；该函数最终走 _upsert_task_run 整行写（含 logs_json）。",
+      "impact": "一个 30 分钟的注册任务、开 1 个日志面板 = 3600 次无意义全行写；开 3 个面板 = 3 倍，且与 log() 的写路径（L03-3）叠加抢同一把 SQLite 写锁。日志不变时这些写 100% 是冗余。",
+      "fix_hint": "只在 log_state 返回的行数与上次不同（或 status 变化）时才 persist；或干脆删掉这行（log() 已经 persist，SSE 只读）。",
+      "class": "perf"
+    },
+    {
+      "id": "L03-8",
+      "title": "批量执行时 instance.config.proxy 只在非空时覆盖 → 上一个账号的代理泄漏给下一个账号",
+      "severity": "P2",
+      "file": "api/actions.py",
+      "line": 125,
+      "evidence": "_execute_platform_action 里 `action_proxy = _resolve_action_proxy(acc_model); if action_proxy: instance.config.proxy = action_proxy`；批量循环（execute_batch_action 421 行附近）复用同一个 instance 处理所有账号。账号 A 有代理、账号 B 无代理（池空且未绑定 → resolve 返回 \"\"）时，B 仍带着 A 的 config.proxy 出网。",
+      "impact": "账号 B 的探测/刷新/上传走的是账号 A 的出口 IP：上游看到的是「A 的 IP 上登录 B」，正是本仓注释里反复强调要避免的异常登录信号；同时 A 的代理凭证被用在 B 的请求上。逐个账号单独调用（前端单账号动作）不受影响，只有批量端点中招。",
+      "fix_hint": "每次进 _execute_platform_action 都显式赋值：`instance.config.proxy = action_proxy or None`（无条件覆盖），或每个账号新建 instance。",
+      "class": "functional"
+    },
+    {
+      "id": "L03-9",
+      "title": "批量/绑定/刷新任务请求的 concurrency、delay_seconds 无上下界（RegisterTaskRequest 有，其它没有）",
+      "severity": "P2",
+      "file": "api/tasks.py",
+      "line": 118,
+      "evidence": "BatchActionTaskRequest.concurrency: int = 1 / delay_seconds: float = 5（118-119）；Bind2faTaskRequest（140-141）、RefreshTokenTaskRequest（160-161）、ProbeStatusTaskRequest（220-221）、BackfillRtTaskRequest（240-241）同样裸 int/float；只有 RecoverAccountsTaskRequest 用了 Field(ge=1, le=8)（190-191），RegisterTaskRequest 有 1..200/1..10000（74-78）。_run_account_batch_task 只做 max(1, min(concurrency, total))，不设上限。",
+      "impact": "concurrency=10000 会直接建 10000 个 worker 线程（ThreadPoolExecutor 按需起线程）→ 线程/内存耗尽、SQLite 写锁风暴；delay_seconds=-1 或 NaN 让 _wait_turn 行为不确定（负数在 sleep 里被夹到 0，但 NaN 会让 time.monotonic()+nan 的比较永远 False → 立即返回）。",
+      "fix_hint": "给这五个模型的 concurrency 加 Field(ge=1, le=8)（与 recover 一致），delay_seconds 加 Field(ge=0, le=3600)；在 _run_account_batch_task 里再夹一次兜底。",
+      "class": "functional"
+    },
+    {
+      "id": "L03-10",
+      "title": "TOTP 密钥写进任务日志 → 落 task_runs.logs_json，可被 GET /tasks/{id} 与 ?include_logs=1 反复取回",
+      "severity": "P2",
+      "file": "services/task_runners.py",
+      "line": 1714,
+      "evidence": "_run_bind_2fa 成功后 `_api.log(task_id, f\"  TOTP 密钥: {result.secret}\")`；log() 立刻 persist 到 task_runs（services/task_store_io.py 的 _upsert_task_run 存 logs），而 GET /tasks/{id} 返回 logs、GET /tasks?include_logs=1 返回所有任务的 logs+errors（api/tasks.py:990-1011，无分页）。注释说「密钥只下发这一次」，但实际是永久可读。",
+      "impact": "TOTP 种子是账号第二因素的完整凭证：任何拿到 API token 的客户端（或备份/导出、日志抓取）都能从任务详情/列表里把历史所有已绑定账号的 2FA 密钥批量拉走，绕过「只显示一次」的设计；task_runs 表也成了明文密钥库。",
+      "fix_hint": "不要把密钥写进任务日志：单独走一次性接口（读后即焚）或直接写账号 extra（已有 persist_secret 写前日志机制）；至少对 log 行做掩码（只留后 4 位），并给 include_logs 加白名单/分页。",
+      "class": "credential-leak"
+    },
+    {
+      "id": "L03-11",
+      "title": "task_logs 两种后端返回的键不一致：JSON 给 detail，SQLite 给 detail_json（docstring 声称已统一）",
+      "severity": "P3",
+      "file": "core/db/task_log_repository.py",
+      "line": 39,
+      "evidence": "_from_json 用 _FIELDS=(\"id\",...,\"detail\",\"created_at\") 返回 `detail`；_from_sqlite 返回 `detail_json`（34 行）。模块 docstring 第 7-11 行写「SQLite 版返回 TaskLog 模型、JSON 版返回 dict —— 这里统一成 dict，上层不必关心后端」，只统一了类型没统一键名。当前前端 TaskLogItem 不读这两个键，所以尚未炸。",
+      "impact": "任何按 detail_json 读的后端代码/脚本在 JSON 后端下永远拿到空值（反之亦然）；切换存储后端时是静默数据丢失，不是报错。",
+      "fix_hint": "两处都输出同一个键（建议 detail，值为解析后的 dict；detail_json 作为兼容别名同时给），并补一条契约测试断言两种后端 key 集合相同。",
+      "class": "contract"
+    },
+    {
+      "id": "L03-12",
+      "title": "_run_account_batch_task 的异常收尾没有 try 包裹：finish()/persist 再抛一次就把行留在 running",
+      "severity": "P3",
+      "file": "services/task_runners.py",
+      "line": 1183,
+      "evidence": "except Exception 分支里直接 `_api.task_store.finish(...)`（1183）然后 `_persist_task_snapshot(task_id)`（1192），都不在 try 里；对比 _run_register 的同一路径明确写了 try/except 并注释「收尾路径自己绝不能再抛」（907-930）。finish() 用 self._records[task_id]（KeyError 若记录已被 cleanup 摘掉），persist 可能撞 DB 锁。",
+      "impact": "收尾写失败 → 线程带着异常退出，DB 行仍是 running；要等下一次任意 /tasks 请求触发 _finalize_orphan_tasks 才会被标 stopped（多进程部署下永远不会）。属低频但正是「卡在 running 永远」的形状。",
+      "fix_hint": "照抄 _run_register 的收尾：finish 与 persist 各自 try/except 并 log，异常只记录不再抛。",
+      "class": "data-integrity"
+    },
+    {
+      "id": "L03-13",
+      "title": "has_active_register_task 的 docstring 说「注册入口用它做互斥」，实际唯一调用方是 data_bundle 导出",
+      "severity": "P3",
+      "file": "services/task_service.py",
+      "line": 61,
+      "evidence": "docstring：「注册入口用它做互斥：同一来源已经在跑时不再开第二个」。grep 全仓（排除 .worktrees）：唯一调用是 services/data_bundle.py:597-599（导出前判断能否打包）；api/tasks.py:31 只是 re-export，enqueue_register_task 里没有任何 has_active_register_task 检查。",
+      "impact": "读代码的人会以为「同来源不会并发两个注册任务」，据此推断锁存在；实际两个请求可以同时开两个注册任务抢同一批邮箱/代理（POST /tasks/register 无互斥）。这是文档承诺了不存在的控制。",
+      "fix_hint": "要么在 enqueue_register_task 里真的加检查（409），要么把 docstring 改成「仅供导出判断」，别让下一个人以为有锁。",
+      "class": "doc-drift"
+    }
+  ],
+  "checked_and_clean": [
+    {
+      "item": "停止/取消路径：stop 不会把行留在 running",
+      "how": "读了 _run_register(570-960) 与 _run_account_batch_task(956-1210)：每个账号边界都过 control.checkpoint()；pending future 被 cancel()，ThreadPoolExecutor.__exit__ 只等已在跑的；StopTaskRequested 在 _do_one_round/_handle 内被捕获并返回 stopped，最终 finish(status='stopped') 总会执行。未跑真实任务（无外呼）。"
+    },
+    {
+      "item": "进程崩溃/重启造成的孤儿行",
+      "how": "_finalize_orphan_tasks 在 list_tasks/get_task/stop/delete/stream_logs 入口都调用，把「DB 里 pending/running 但本进程内存没有」的行标 stopped（api/tasks.py 240-300 的 SQLite 与 JSON 两个分支都读）。单进程部署（main.py 单 uvicorn）下覆盖进程死亡；多 worker 部署会误杀活任务，但 Dockerfile/main.py 未见多 worker 配置，按潜在约束记录不单列。"
+    },
+    {
+      "item": "SSE 断连/重复行/分页",
+      "how": "stream_logs 是 async 生成器，客户端断开时 Starlette 取消生成器（CancelledError 在 asyncio.sleep 抛出即退出），无裸 socket/文件句柄；前端 TaskLogPanel.tsx 190-270 用 fetch+AbortController 并维护 nextSinceRef，重连带 since，不会重放或丢行。"
+    },
+    {
+      "item": "page_size 无上限",
+      "how": "get_logs 里 page_size 被夹到 1..500（api/tasks.py 838 附近），page 负数在 SQLite 当 0、JSON 分支 max(0,...)。未发现无界 page_size。"
+    },
+    {
+      "item": "upload_grok2api 不在 UPLOAD_SYNC_WRITERS（UPLOAD_ACTIONS 有它）",
+      "how": "grep 确认 grok 插件自己在 _action_upload_grok2api 里调用 record_grok2api_sync_result 写 sync_statuses.grok2api（platforms/grok/plugin.py:1027-1090），不依赖 api 层的补写表；不是漏写。"
+    },
+    {
+      "item": "未知 action_id 的处理",
+      "how": "core/base_platform.py:270 默认 raise NotImplementedError，chatgpt/grok/aws/kiro 的 execute_action 末尾同样 raise（chatgpt:715）；单账号端点转 400，批量/任务端点在建任务前用 get_platform_actions() 白名单 400。不会静默成功。"
+    },
+    {
+      "item": "任务日志里的代理凭证",
+      "how": "grep 全部 _api.log 调用点：register 走 _redact_proxy/_redact_proxy_url，batch 走 redact_proxy_url；core/proxy_utils.py:123 剥掉 userinfo。未在任务日志里找到明文代理账号密码。"
+    },
+    {
+      "item": "执行时账号存在性复检（deferred authority）",
+      "how": "_load_account_fields 在每个账号执行时按 id 重读行，None 即 skipped（task_runners.py 1040-1100）；_run_batch_action 对 UPLOAD_ACTIONS 额外用 _is_banned_status 挡已封禁号；补 RT/绑 2FA 目标在建任务时快照 id、执行时重读凭证。账号被删不会继续跑。"
+    },
+    {
+      "item": "JSON 后端 task_logs 保留期清理的时间比较",
+      "how": "core/storage/json_table.py:_from_storage 把 ISO 字符串还原成 datetime，cleanup_json 的 created < before 比较成立（TypeError 分支只是防御）。不是「一条都删不掉」。"
+    },
+    {
+      "item": "task_store 单例",
+      "how": "services/task_service.py:44 模块级唯一实例，api 与 runner 都 from services.task_service import task_store；无第二处 RegisterTaskStore(...) 构造（grep 确认）。"
+    },
+    {
+      "item": "显式指定邮箱时的重试双开",
+      "how": "_do_one_round 在 req.email 非空时先 account_already_registered 判重再注册（task_runners.py 707-712），重试不会重复建号；自动生成邮箱路径无此保护（见 L03-3/L03-12 的写失败风险，未单列重复注册为独立 finding，因为触发需要写库异常）。"
+    },
+    {
+      "item": "scheduler stop/start 双循环",
+      "how": "core/scheduler.py 的 _generation 令牌：join 超时后 start() 自增 generation，旧线程跑完当前 job 后在 while 条件处退出，不会长期双跑；start() 里把 last_run_at 顶到 now，正常启动不会瞬间触发。"
+    },
+    {
+      "item": "已结束任务的 stop/skip 幂等",
+      "how": "_ensure_task_mutable 对 done/failed/stopped 返回 409（api/tasks.py 700-740 附近），control.snapshot() 对已结束任务只读；不会把 done 改回 running。"
+    }
+  ]
+}

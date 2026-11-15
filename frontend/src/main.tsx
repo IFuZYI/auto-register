@@ -8,7 +8,7 @@ import App from './App.tsx'
 import { applyThemeVars } from './theme'
 
 // 登录页不在 AppContent 里，变量得在挂载前就落到 <html> 上
-applyThemeVars((localStorage.getItem('theme') as 'dark' | 'light') || 'dark')
+applyThemeVars((localStorage.getItem('theme') as 'dark' | 'light') || 'light')
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>

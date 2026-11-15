@@ -143,6 +143,37 @@ class DelimitedTextImportTests(unittest.TestCase):
         self.assertEqual(r.json()["skipped"], 1, r.text[:200])
 
 
+    def test_choosing_email_2fa_keeps_the_password_untouched(self):
+        """显式选 `email_2fa` 时，第二列落 `totp_secret`，**不碰** password。
+
+        与「默认值会把 2 列当密码」配对的正面证据：机制本身可用，只是调用方
+        必须选对格式。走真实 HTTP 导入路径，断言落库字段 —— 不断言源码文本。
+        """
+        email = "rt-2fa-import@x.c"
+        try:
+            r = self._import([f"{email}----TOTPSECRET"], source_format="email_2fa")
+            self.assertEqual(r.status_code, 200, r.text[:200])
+            self.assertEqual(r.json()["created"], 1, f"没导入成功: {r.text[:200]}")
+
+            from core.db import account_repository
+
+            row = account_repository.find_by_email("chatgpt", email)
+            self.assertIsNotNone(row, "账号没落库")
+            extra = row.get_extra() if row else {}
+            self.assertEqual(
+                str(extra.get("totp_secret") or ""),
+                "TOTPSECRET",
+                "第二列没有落到 totp_secret",
+            )
+            self.assertNotEqual(
+                str(row.password or ""),
+                "TOTPSECRET",
+                "2FA 密钥被当成密码写进了 password 列",
+            )
+        finally:
+            self._cleanup(email)
+
+
 class ExportImportSymmetryTests(unittest.TestCase):
     """结构性：列 → 字段的映射只有**一份**定义（导出注册表）。"""
 
@@ -159,6 +190,28 @@ class ExportImportSymmetryTests(unittest.TestCase):
             "parse_delimited_line", src,
             "导入没走共享解析器 —— 列映射会出现第二份定义并逐渐漂移",
         )
+
+
+class AmbiguousColumnCountMustNotBeGuessed(unittest.TestCase):
+    """2 列的 `email----XXX` 行不能靠默认值猜「XXX 是密码还是 2FA 密钥」。
+
+    2026-11-15 实测：`ImportRequest.source_format` 默认 `"email_pw"`，而
+    `parse_delimited_line` 在**空** source_format 时对 2 列会正确抛
+    「2 列对应多个格式（email_pw、email_2fa）—— 请在导入时指定来源格式」。
+    API 的默认值把这个保护绕过去了：
+
+        导出 `t***@x.com----TOTPSECRET` → 粘贴导入 → 200 {'updated': 1}
+        结果 password 列变成 TOTPSECRET（真密码被覆盖、不可恢复）
+
+    这条钉的是「歧义必须由解析器拒绝」，而不是「API 层替用户选一个」。
+    """
+
+    def test_ambig二列_被解析器拒绝而非猜成密码(self):
+        from services.account_export import parse_delimited_line
+
+        with self.assertRaises(ValueError) as ctx:
+            parse_delimited_line("a@x.com----TOTPSECRET", source_format="")
+        self.assertIn("多个格式", str(ctx.exception))
 
 
 if __name__ == "__main__":

@@ -36,6 +36,8 @@ from typing import Optional
 
 from core.mailboxes.base import BaseMailbox, MailboxAccount
 from core.mailboxes.registry import register_mailbox_provider
+from platforms.icloud.errors import is_recoverable
+from services.icloud.upstream_gate import is_upstream_busy
 
 #: 「使用中」租约的续约最小间隔（秒）。等码轮询每 5 秒一轮，每轮都写库
 #: 没必要；60 秒远小于回收阈值（120 分钟），不会出现漏续。
@@ -64,6 +66,8 @@ class ICloudLocalMailbox(BaseMailbox):
         self._account_id = str(account_id or "").strip()
         self._label = str(label or "").strip()
         self._note = str(note or "").strip()
+        #: 首读收件箱失败过 = 基线不可信，等码时改用时间窗兜底。
+        self._baseline_degraded = False
 
     # ---------------------------------------------------------------- 内部
 
@@ -163,7 +167,9 @@ class ICloudLocalMailbox(BaseMailbox):
             raise RuntimeError("iCloud 本地邮箱账号缺少地址信息")
         return account_id_int, address
 
-    def set_account_status(self, account: MailboxAccount, status: str) -> None:
+    def set_account_status(
+        self, account: MailboxAccount, status: str, *, error: BaseException | None = None
+    ) -> None:
         """把注册结果记回号池（复用既有生命周期钩子）。
 
         上层（`platforms/chatgpt/registration_engine.py`）通过
@@ -194,7 +200,9 @@ class ICloudLocalMailbox(BaseMailbox):
                     alias_id_int, platform=self._platform_name
                 )
             elif normalized == "failed":
-                service.release_alias_claim(alias_id_int)
+                # 把原因传下去：上游故障不该记成「这个地址失败」
+                # （见 `release_alias_claim` 的 error 参数）。
+                service.release_alias_claim(alias_id_int, error=error)
             elif normalized == "available":
                 service.set_alias_pool_status(alias_id_int, "available")
             # 其余状态（in_use 等）不是收尾语义，忽略
@@ -208,13 +216,24 @@ class ICloudLocalMailbox(BaseMailbox):
         )
 
     def get_current_ids(self, account: MailboxAccount) -> set:
-        """取当前收件箱里发给该别名的邮件标识集合。"""
+        """取当前收件箱里发给该别名的邮件标识集合。
+
+        读不到时**必须**把 `_baseline_degraded` 置起来：空集会被
+        `wait_for_code` 解读成「收件箱本来就没信」，于是收件箱里原有的历史
+        邮件会被当成本轮新到的信 —— 可能拿旧验证码去填，让失败原因变得
+        完全看不懂。置标记后上层改用时间窗兜底。
+        """
         try:
             messages = self._messages(account, limit=50)
         except Exception as exc:  # noqa: BLE001 - 首轮探测失败不该打断注册
-            self._log(f"[iCloud 本地] 读取初始邮件失败（忽略）: {exc}")
+            self._baseline_degraded = True
+            self._log(
+                f"[iCloud 本地] 读取初始邮件失败，基线降级：本轮改按发信时间窗"
+                f"判断新邮件（收件箱里已有的信不会被当成本轮的码）: {exc}"
+            )
             return set()
 
+        self._baseline_degraded = False
         ids = set()
         for message in messages:
             message_id = self._message_id(message)
@@ -315,6 +334,21 @@ class ICloudLocalMailbox(BaseMailbox):
             except Exception as exc:  # noqa: BLE001 - 续约失败不该影响读码
                 self._log(f"[iCloud 本地] 租约续约失败（忽略）: {exc}")
 
+        # 基线不可信（首读收件箱失败）+ 没有发码时间窗 = 无法区分历史邮件与
+        # 本轮新到的信。这时宁可空等到超时，也不要拿旧码去填 —— 那会让
+        # 失败原因完全看不出是服务抖动。
+        baseline_untrusted = bool(getattr(self, "_baseline_degraded", False))
+        if baseline_untrusted and cutoff is None:
+            self._log(
+                "[iCloud 本地] 收件基线不可信且没有发码时间窗，本轮无法可靠判断新邮件；"
+                "保守起见不猜码（避免把历史验证码当本轮结果）"
+            )
+            # 直接放弃：宁可让上层看到「等码超时」，也不要返回一个来路不明的码。
+            raise TimeoutError(
+                "[iCloud 本地] 收件基线不可信（首读失败）且没有发码时间窗，"
+                "无法判断哪些信是本轮的；未猜码，请重试本轮"
+            )
+
         def poll_once() -> Optional[str]:
             _renew_lease()
             messages = self._messages(account, limit=50)
@@ -344,10 +378,16 @@ class ICloudLocalMailbox(BaseMailbox):
                     return code
             return None
 
-        # 本地收件走 IMAP（未配专用密码时回退 Web API），每次都要打上游，
-        # 轮询间隔给大一点。
+        # 本地收件走 IMAP（未配专用密码时回退 Web API），每次都要打上游。
+        # 与远程渠道同一套容错与退避口径：上游抖动不该判整轮失败。
         return self._run_polling_wait(
-            timeout=timeout, poll_interval=5, poll_once=poll_once
+            timeout=timeout,
+            poll_interval=5,
+            poll_once=poll_once,
+            is_transient=is_recoverable,
+            max_consecutive_errors=4,
+            interval_schedule=((0, 5.0), (20, 8.0), (60, 15.0)),
+            is_fatal_busy=is_upstream_busy,
         )
 
     @staticmethod

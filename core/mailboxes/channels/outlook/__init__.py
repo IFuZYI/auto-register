@@ -19,7 +19,7 @@ from .backends import (
     OutlookImapMailboxBackend,
     OutlookMailboxBackend,
 )
-from .mailbox import OutlookMailbox
+from .mailbox import OutlookMailbox, OutlookOAuthError
 
 __all__ = [
     "MailApiUrlOtpBackend",
@@ -27,6 +27,7 @@ __all__ = [
     "OutlookImapMailboxBackend",
     "OutlookMailbox",
     "OutlookMailboxBackend",
+    "OutlookOAuthError",
     "build",
 ]
 

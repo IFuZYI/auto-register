@@ -12,7 +12,7 @@ from sqlmodel import select
 
 from core.db import ICloudAliasModel, platform_session
 from platforms.icloud import ICloudCredentials, ICloudError, MailMessage, fetch_inbox
-from services.icloud._locks import DEFAULT_MESSAGE_LIMIT
+from services.icloud._locks import DEFAULT_MESSAGE_LIMIT, read_semaphore
 from services.icloud._facade import _facade
 from services.icloud.accounts import get_account, load_credentials
 
@@ -46,8 +46,31 @@ def fetch_account_messages_detailed(
 
     远程账号（source=remote）走远程分支：收件由 icloud-hme 服务完成
     （它那边也是 IMAP 优先、Web API 兜底），本机只消费结果。
+
+    **同一主号的读信要限流**（`read_semaphore`）：取号的 `_account_lock` 只
+    保护生成/复用别名，读信完全不受它约束。一个主号下挂很多别名时，多个
+    worker 会同时读同一个收件箱，把请求叠在同一个上游服务上。
     """
     row = get_account(account_id)
+    with read_semaphore(account_id):
+        return _fetch_account_messages_locked(
+            row,
+            account_id,
+            limit=limit,
+            recipient=recipient,
+            proxy=proxy,
+        )
+
+
+def _fetch_account_messages_locked(
+    row,
+    account_id: int,
+    *,
+    limit: int,
+    recipient: str,
+    proxy: str | None,
+) -> tuple[list[MailMessage], str, str]:
+    """`fetch_account_messages_detailed` 的实际取信体（已持读信号量）。"""
     if str(getattr(row, "source", "") or "") == "remote":
         return _facade.fetch_remote_messages(
             row, limit=limit, recipient=recipient, proxy=proxy

@@ -40,6 +40,7 @@ from core.task_runtime import (
     SkipCurrentAttemptRequested,
     StopTaskRequested,
 )
+from platforms.icloud.errors import is_upstream_outage
 
 if TYPE_CHECKING:  # 仅类型标注用（from __future__ import annotations 下运行时不需要）
     from api.tasks import (  # noqa: F401
@@ -401,7 +402,14 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
 
     control = _api.task_store.control_for(task_id)
     _api.task_store.mark_running(task_id)
-    persist_task_snapshot(task_id)
+    # 首帧快照必须在保护里：它在 `try` 之外时，一次 `database is locked`
+    # 就让 runner 直接逃逸、`finish()` 永不执行 —— 任务永久 running
+    # （DELETE 409、stop 无人消费、`has_active()` 恒真让备份导入被拒）。
+    # 实测 2026-11-15：既有测试只让第 4 次起的快照抛错，恰好跳过这一次。
+    try:
+        persist_task_snapshot(task_id)
+    except Exception as exc:  # noqa: BLE001 - 快照失败不该终止任务
+        logger.exception("批量任务首帧快照失败（继续执行）: %s: %s", task_id, exc)
     success = 0
     skipped = 0
     errors = []
@@ -413,12 +421,8 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
         *,
         attempt_id: int | None = None,
     ) -> None:
-        remaining = max(float(wait_seconds or 0), 0.0)
-        while remaining > 0:
-            control.checkpoint(attempt_id=attempt_id)
-            chunk = min(0.25, remaining)
-            time.sleep(chunk)
-            remaining -= chunk
+        # 走控制器的 Event 唤醒：启动前延迟（可配到几十秒）不该拖慢停止响应。
+        control.sleep(wait_seconds, attempt_id=attempt_id)
 
     try:
         PlatformCls = get(req.platform)
@@ -591,6 +595,7 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
             _proxy = None
             current_email = req.email or ""
             attempt_id: int | None = None
+            _platform = None
             round_suffix = _round_log_suffix(round_no=round_no, rounds=rounds, label=label)
             try:
                 control.checkpoint()
@@ -738,6 +743,8 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
                                 f"注册完成，绑定代理: {_redact_proxy(bound_proxy)}",
                             )
                 saved_account = save_account(account)
+                # Kiro 的来源认领在 finally 中释放：覆盖登录、等码、换凭据和
+                # 落库全过程；保存成功后无须在这里重复释放。
                 if _proxy:
                     _proxy_pool.report_success(_proxy)
                 _api.log(task_id, f"[OK] 注册成功: {account.email}")
@@ -796,8 +803,15 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
                 # 环境类错误（浏览器/Node 缺失等）即使以字符串形态传上来
                 # （register_browser 的兜底 except 会把异常文本化）也判成
                 # 不可重试 —— 重开一轮是同样的结局。
-                non_retryable = isinstance(e, NonRetryableRegisterError) or (
-                    is_environment_error_message(e)
+                #
+                # 服务故障同理：实测（2026-11-13）两批任务里约 80% 的失败是
+                # `icloud-hme` 读超时，重开一轮只是再花一个邮箱别名和一轮
+                # 时间去换同一个结局。判成不可重试后，任务在日志里明确停住，
+                # 而不是把 200 个目标逐个烧完。
+                non_retryable = (
+                    isinstance(e, NonRetryableRegisterError)
+                    or is_environment_error_message(e)
+                    or is_upstream_outage(e)
                 )
                 return AttemptResult.failed(
                     str(e),
@@ -805,6 +819,10 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
                     email=current_email,
                 )
             finally:
+                # 成功、异常、手动停止、保存失败都必须释放本轮持有的资源。
+                release_resources = getattr(_platform, "release_registration_resources", None)
+                if callable(release_resources):
+                    release_resources()
                 control.finish_attempt(attempt_id)
 
         from concurrent.futures import CancelledError, ThreadPoolExecutor, as_completed
@@ -960,7 +978,11 @@ def _run_account_batch_task(
 
     control = _api.task_store.control_for(task_id)
     _api.task_store.mark_running(task_id)
-    persist_task_snapshot(task_id)
+    # 同 `_run_register`：首帧快照失败必须被吸收，否则任务永久 running。
+    try:
+        persist_task_snapshot(task_id)
+    except Exception as exc:  # noqa: BLE001 - 快照失败不该终止任务
+        logger.exception("批量任务首帧快照失败（继续执行）: %s: %s", task_id, exc)
 
     total = len(account_ids)
     success = 0
@@ -1041,11 +1063,9 @@ def _run_account_batch_task(
         with start_gate:
             control.checkpoint(attempt_id=attempt_id)
             remaining = max(0.0, next_start_time - time.time())
-            while remaining > 0:
-                control.checkpoint(attempt_id=attempt_id)
-                chunk = min(0.25, remaining)
-                time.sleep(chunk)
-                remaining -= chunk
+            # Event 唤醒：等轮次（受 register_delay_seconds 控制，可能几十秒）
+            # 期间点停止要立刻生效。
+            control.sleep(remaining, attempt_id=attempt_id)
             next_start_time = time.time() + delay_seconds
 
     def _do_one(index: int, account_id: str) -> AttemptResult:

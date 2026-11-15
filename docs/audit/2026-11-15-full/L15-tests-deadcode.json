@@ -1,0 +1,131 @@
+{
+ "lane": "L15-tests-deadcode",
+ "head": "fca2eec",
+ "dirty": true,
+ "reviewed_files": [
+  "tests/test_storage_backend.py",
+  "tests/test_grok_status_semantics.py",
+  "tests/test_frontend_delivery_perf.py",
+  "tests/test_storage_coverage_gate.py",
+  "tests/test_reusable_modules.py",
+  "tests/test_dead_test_guard.py",
+  "scripts/check_dead_tests.py",
+  "modules/__init__.py",
+  "modules/automation/pipeline.py",
+  "modules/verification/challenges.py",
+  "modules/platforms/icloud.py",
+  "modules/platforms/registration.py",
+  "modules/config/context.py",
+  "modules/execution/browser.py",
+  "tests/test_browser_runtime.py",
+  "tests/test_auth_fail_closed.py",
+  "tests/test_auth_flow_module_patching.py",
+  "tests/test_annotation_resolvability.py",
+  "docs/EXTENDING.md",
+  "main.py",
+  "services/grok_account_state.py",
+  "platforms/grok/migrate_sso_only.py",
+  "pytest.ini",
+  ".gitignore"
+ ],
+ "findings": [
+  {
+   "id": "L15-1",
+   "title": "ConfigStoreWorksOnBothBackendsAfterSwitchTests is a byte-identical copy of the previous class; 6 duplicate tests, and the 'AfterSwitch' name asserts nothing about switching",
+   "severity": "P2",
+   "file": "tests/test_storage_backend.py",
+   "line": 387,
+   "evidence": "Class at :387 has the same docstring, same setUp (only a TemporaryDirectory, lines 394-397) and the same 6 bodies as the class at :199 (test_config_roundtrip_on_json_backend :211 vs :399, test_missing_key_returns_default :219 vs :407, test_overwrite_is_idempotent :226 vs :414, test_delete :236 vs :424, test_persists_across_instances :244 vs :432, test_values_are_strings_like_the_sqlite_version :251 vs :439). AST-normalised bodies hash identical. Neither class touches STORAGE_BACKEND / resolve_backend_name, so 'AfterSwitch' never switches anything.",
+   "impact": "The suite reports 6 extra passing tests and a class name that implies post-switch coverage of the config store; deleting lines 399-446 would leave the suite exactly as green because 211-258 already pin the same JsonConfigStore behaviour. Real risk: a future regression specific to switching backends (the thing the name promises) is unpinned while the test count suggests it is covered.",
+   "fix_hint": "Delete ConfigStoreWorksOnBothBackendsAfterSwitchTests, or make it actually switch (set STORAGE_BACKEND=sqlite then json via core.storage.resolve_backend_name and assert the ConfigStore facade follows), and rename to what it proves.",
+   "class": "contract"
+  },
+  {
+   "id": "L15-2",
+   "title": "test_refresh_ok_recovers is a renamed copy of test_probe_ok_recovers: the refresh branch of apply_grok_status_policy is never exercised",
+   "severity": "P2",
+   "file": "tests/test_grok_status_semantics.py",
+   "line": 120,
+   "evidence": "tests/test_grok_status_semantics.py:120-123 is identical to :102-105: both build _Account(status='invalid'), call apply_grok_status_policy(account, usable=True) and assert status == 'registered'. The refresh-specific inputs are refresh_kind / refresh_error (services/grok_account_state.py:80-81), consumed only at services/grok_account_state.py:116 (_refresh_reason). The test passes neither. The success it observes comes from services/grok_account_state.py:146 (`if usable or probe_usable or remote == 'usable'`).",
+   "impact": "Deleting the whole refresh branch (services/grok_account_state.py:116-118) leaves this test green, so a regression where refresh_kind='permanent' stops marking the account invalid is not caught by the test named after it. The name overstates coverage and the duplicate inflates the count.",
+   "fix_hint": "Rewrite as apply_grok_status_policy(account, refresh_kind='permanent', refresh_error='invalid_grant') and assert AccountStatus.INVALID; keep a separate usable=True case.",
+   "class": "functional"
+  },
+  {
+   "id": "L15-3",
+   "title": "Whole gzip/ETag/Range delivery suite silently skips on any fresh clone or CI: static/ is gitignored and untracked",
+   "severity": "P2",
+   "file": "tests/test_frontend_delivery_perf.py",
+   "line": 30,
+   "evidence": "tests/test_frontend_delivery_perf.py:30-32 calls pytest.skip(..., allow_module_level=True) when static/assets is absent. `.gitignore:39` is `static/` and `git ls-files static` returns nothing, so the directory exists only after `npm run build`. The module is the ONLY test for main.py:334 `_accepts_gzip`, main.py:385 `class _GzipStatic`, the gzip branch at main.py:535, and the ETag/304/Range/Vary behaviour. Same pattern at tests/test_api_integration.py:156-157 (SPA fallback) skips via skipTest.",
+   "impact": "On a clean checkout `pytest tests/` collects 0 of these 13 tests, prints '1 skipped' and exits 0. A regression that removes gzip entirely (or re-breaks If-None-Match -> 304) ships green; the 1.57 MB uncompressed bundle the file's docstring complains about would come back unnoticed.",
+   "fix_hint": "Make the skip a failure in CI (env flag, e.g. REQUIRE_BUILT_ASSETS=1 -> pytest.fail), or commit a tiny fixture asset tree and point _GzipStatic/TestClient at it so the logic is testable without npm.",
+   "class": "contract"
+  },
+  {
+   "id": "L15-4",
+   "title": "modules/automation (217-line pipeline) + modules/verification have no production caller at all; the documented entry point from_application_defaults is called by nothing, not even a test",
+   "severity": "P3",
+   "file": "modules/automation/pipeline.py",
+   "line": 99,
+   "evidence": "`grep -rn 'modules\\.automation' --include=*.py` outside modules/ and tests/ returns only two comments (core/executors/factory.py:4, core/mailboxes/registry.py:23), no import. modules/verification is imported only by modules/automation/pipeline.py:14. RegistrationPipeline/RegistrationRequest/AutomationHooks/VerificationChallenge/ICloudAliasWorkflow/PlatformRegistrationService appear outside modules/ only in tests/test_reusable_modules.py (:6,9,12,15,184,215...). RegistrationPipeline.from_application_defaults (pipeline.py:99) has zero callers repo-wide, yet docs/EXTENDING.md:160 instructs users to call it.",
+   "impact": "~370 lines (pipeline.py 217, registration.py 77, icloud.py 38, challenges.py 32) are reachable only from one test file; the copy in .worktrees/dev/services/task_runners.py:41 still imports it, so the main tree lost the caller during the refactor and the module was left behind. The documented extension path is unexercised, so it can rot silently (it already depends on three lazily imported seams: modules.execution, modules.mail, modules.proxy).",
+   "fix_hint": "Either wire it back (task_runners) or delete modules/automation + modules/verification and the corresponding section of docs/EXTENDING.md; at minimum add one test that calls from_application_defaults() so the documented path is executed.",
+   "class": "dead-code"
+  },
+  {
+   "id": "L15-5",
+   "title": "Structural 'no raw account writes remain' gate scans only api/ + services/ and carries a dead exemption branch that can never trigger",
+   "severity": "P3",
+   "file": "tests/test_storage_coverage_gate.py",
+   "line": 100,
+   "evidence": "tests/test_storage_coverage_gate.py:100 defines `allow_row_files: set[str] = set()` and never adds to it, so the guard at :108 (`if pat == patterns[-1] and rel in allow_row_files`) is always False — dead branch. The scan at :101 walks only `api/` and `services/`; patterns at :95-99 match only `.add(acc)`, `.add(account)`, `.add(acc_model)` and not `.add(row)`. A raw account write at platforms/grok/migrate_sso_only.py:99 (`session.add(row)` on AccountModel, followed by commit at :103) is therefore invisible to the gate (currently harmless only because :84 `all_tables_use_json()` returns early on the JSON backend).",
+   "impact": "The test's message claims '仍有原生账号写' is impossible, but the checker cannot see core/ or platforms/ or any `.add(row)` form. The very split-brain bug the docstring describes (read JSON / write SQLite -> '新建的账号查不到') could reappear outside the two scanned packages and the gate stays green.",
+   "fix_hint": "Walk the repo root (excluding tests/, .worktrees/, reference/), match `session.add(<anything>)` where the argument is assigned from AccountModel, and delete the unused allow_row_files branch or populate it.",
+   "class": "dead-code"
+  },
+  {
+   "id": "L15-6",
+   "title": "Two browser-runtime tests assert nothing: they pass if the function body is replaced by `pass`",
+   "severity": "P3",
+   "file": "tests/test_browser_runtime.py",
+   "line": 6,
+   "evidence": "tests/test_browser_runtime.py:6-7 and :15-16 call ensure_browser_display_available(...) and have no assertion and no pytest.raises. Only :10-12 (`test_headed_browser_requires_display_on_linux`) pins behaviour. If core/browser_runtime.ensure_browser_display_available were reduced to `def ...: pass`, both tests stay green.",
+   "impact": "The Windows-without-DISPLAY and headless paths have no pinned behaviour beyond 'does not raise'; a regression that raises on win32 would be caught, but one that silently changes the decision would not. Low blast radius (the linux negative case is covered).",
+   "fix_hint": "Assert the return value (or assert it is None and add a companion test that a bogus platform raises ValueError) so the decision, not just the absence of an exception, is pinned.",
+   "class": "functional"
+  }
+ ],
+ "checked_and_clean": [
+  {
+   "item": "double collection (*_test.py vs test_*.py)",
+   "verdict": "clean",
+   "note": "290 test_*.py, 0 *_test.py; only non-test modules are conftest.py, remote_hme_double.py, route_harness.py. pytest.ini testpaths=tests, norecursedirs excludes .worktrees/reference, so the duplicate copies under .worktrees/*/tests are not collected."
+  },
+  {
+   "item": "__main__-guarded / unreachable test definitions",
+   "verdict": "clean",
+   "note": "`python scripts/check_dead_tests.py tests` exits 0. Guard logic (scripts/check_dead_tests.py:51-57) walks the guard body and is itself covered for the reversed guard and nested try (tests/test_dead_test_guard.py:44-61). Note tests/test_storage_coverage_gate.py:119 puts `unittest.main()` mid-file with a class after it — that class IS still collected (module-level defs execute at import), so it is not dead."
+  },
+  {
+   "item": "classes with test methods that pytest would not collect",
+   "verdict": "clean",
+   "note": "AST scan found 14 classes not named Test* (e.g. _HermeticBundleTest tests/test_data_bundle.py:50, _ModelTests tests/test_banned_discovery.py:201, _SelectionCase tests/test_sentinel_and_account_helpers.py:383); all subclass unittest.TestCase, so pytest's unittest plugin collects them."
+  },
+  {
+   "item": "empty / pass-only test bodies and tautological assertions",
+   "verdict": "clean",
+   "note": "No test body is `pass` or docstring+pass; no assertEqual(x, x), no assertTrue(True), no assertEqual(len(a), len(a)). The only same-both-sides comparison is a NotEq NaN-style guard at tests/test_login_chain_at_freshness.py:94."
+  },
+  {
+   "item": "try/except: pass swallowing the whole test",
+   "verdict": "clean",
+   "note": "18 matches; the only two that wrap an entire body are hand-rolled assertRaises idioms with an `else: raise AssertionError` (tests/test_api_proxies_and_auth.py:391-396, tests/test_reusable_modules.py:426-434) plus a following assertion on side effects, so both can fail. The rest are narrow cleanup guards (e.g. tests/test_solver_idle_reaping.py:315 around CancelledError)."
+  },
+  {
+   "item": "tests that patch the function they claim to test",
+   "verdict": "clean",
+   "note": "AST scan of every patch target whose tail appears in the test name (9 hits) found no test that calls the patched symbol itself; all are wiring tests asserting call args or side effects (e.g. tests/test_cliproxyapi_sync.py:65-88, tests/test_integrations_dispatch_gaps.py:78-88)."
+  }
+ ]
+}

@@ -810,7 +810,7 @@ export default function Settings() {
           SMS_BOOLEAN_KEYS.filter((key) => key in payload).map((key) => [key, payload[key]]),
         ),
       })
-      message.success('保存成功')
+      message.success('设置已保存')
       setSaved(true)
       setTimeout(() => setSaved(false), 2000)
     } finally {
@@ -823,8 +823,8 @@ export default function Settings() {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--section-gap)' }}>
       <PageHeader
-        title="全局配置"
-        subtitle="配置将持久化保存，注册任务自动使用"
+        title="设置"
+        subtitle="设置注册默认值、邮箱与面板连接，并管理访问安全。"
       />
 
       <div className="settings-layout" style={{ display: 'flex', gap: 28, alignItems: 'flex-start' }}>
@@ -853,21 +853,13 @@ export default function Settings() {
         <div style={{ flex: 1, minWidth: 0 }}>
           {/* 每个子菜单顶部一行「这一页管什么」+ ⓘ 展开更长背景。
               正文里不再铺解释文字 —— 那是这一页以前最大的噪音来源。 */}
-          {currentTab.summary ? (
-            <div
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: 6,
-                marginBottom: 18,
-                fontSize: 13,
-                color: 'var(--text-muted)',
-              }}
-            >
-              <span>{currentTab.summary}</span>
-              <HelpTip text={currentTab.hint} />
+          <div className="settings-section-intro">
+            <div className="settings-section-intro__copy">
+              <h2>{currentTab.label}</h2>
+              <p>{currentTab.summary}</p>
             </div>
-          ) : null}
+            <HelpTip text={currentTab.hint} />
+          </div>
 
           {activeTab === 'security' ? (
             <SecurityPanel />
@@ -903,7 +895,7 @@ export default function Settings() {
                 loading={saving}
                 style={{ marginTop: 24 }}
               >
-                {saved ? '已保存 ✓' : '保存配置'}
+                {saved ? '设置已保存' : '保存更改'}
               </Button>
             </Form>
           )}

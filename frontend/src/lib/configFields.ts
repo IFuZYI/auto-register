@@ -23,10 +23,6 @@ export const SELECT_FIELDS: Record<string, { label: string; value: string }[]> =
     { label: 'Graph（默认）', value: 'graph' },
     { label: 'IMAP', value: 'imap' },
   ],
-  cpa_cleanup_enabled: [
-    { label: '关闭', value: '0' },
-    { label: '开启', value: '1' },
-  ],
   sms_provider: [
     { label: 'SmsBower', value: 'smsbower' },
     { label: 'HeroSMS', value: 'herosms' },

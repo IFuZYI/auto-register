@@ -178,6 +178,28 @@ class CpaAutoMaintenanceRemovedTests(unittest.TestCase):
         self.assertNotIn("CPA 自动维护", src)
         self.assertNotIn("cpa_cleanup_enabled", src)
 
+    def test_no_frontend_option_table_references_the_deleted_key(self):
+        """前端任何文件都不该再给这个已删的键配选项。
+
+        原先只扫 `PanelConfigPanel.tsx`，漏了 `lib/configFields.ts` 里那张
+        全局选项表 —— 后端已删、界面还留着一个永远不生效的下拉
+        （`test_config_keys_are_gone` 只查后端，管不到这里）。
+        """
+        offenders = []
+        for path in (ROOT / "frontend" / "src").rglob("*"):
+            if path.suffix not in {".ts", ".tsx"}:
+                continue
+            try:
+                text = path.read_text(encoding="utf-8")
+            except Exception:
+                continue
+            if "cpa_cleanup_enabled" in text:
+                offenders.append(str(path.relative_to(ROOT)))
+        self.assertEqual(
+            offenders, [],
+            f"前端仍引用已删除的配置键 cpa_cleanup_enabled: {offenders}",
+        )
+
     def test_scheduler_extension_point_survives(self):
         """删的是那个任务，不是调度器的扩展点（新增业务任务还要靠它）。"""
         from core.scheduler import register_job, registered_jobs

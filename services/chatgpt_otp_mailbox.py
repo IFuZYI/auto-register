@@ -116,7 +116,15 @@ class ICloudAliasMailProvider(MailProvider):
             self._task_control.checkpoint(attempt_id=self._attempt_id)
 
     def _sleep(self, seconds: float) -> None:
-        """碎步睡，好让"停止任务"在几百毫秒内生效而不是等满一个轮询间隔。"""
+        """睡 `seconds` 秒，可被停止/跳过立刻打断。
+
+        走控制器的 Event 唤醒而不是碎步轮询：这样「把轮询间隔调大以降低
+        上游压力」不会拖慢停止响应。
+        """
+        sleeper = getattr(self._task_control, "sleep", None)
+        if callable(sleeper):
+            sleeper(seconds, attempt_id=self._attempt_id)
+            return
         remaining = max(float(seconds), 0.0)
         while remaining > 0:
             self._checkpoint()

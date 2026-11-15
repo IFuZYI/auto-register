@@ -5,13 +5,25 @@
 两者同成败 → 是 x.ai 的全局窗口，跟出口无关。
 """
 import json
+import os
 import subprocess
 import time
 import urllib.request
 
 API = "http://127.0.0.1:8000"
 RESIN_ACCOUNTS = ["User_201", "User_202", "User_203", "User_204", "User_205", "User_206"]
-EXIT6 = "socks5h://gobngawr:06pk6as8qlwu@9.142.37.16:5187"
+
+#: 出口 #6 的完整代理串（`socks5h://user:pass@host:port`）。
+#:
+#: **凭据不进版本库**：这段曾经硬编码在源码里，`git log` 里可查到明文口令。
+#: 现在只从环境变量读；没设就直接失败，而不是拿一个空串去跑实验。
+#: 旧口令已随历史提交泄漏，必须去代理商后台**轮换**（改代码不会让它失效）。
+EXIT6 = os.getenv("RESIN_EXIT6_PROXY", "").strip()
+if not EXIT6:
+    raise SystemExit(
+        "缺少 RESIN_EXIT6_PROXY（形如 socks5h://user:pass@host:port）—— "
+        "出口凭据不进版本库，请用环境变量传入"
+    )
 
 
 def post(path, payload):

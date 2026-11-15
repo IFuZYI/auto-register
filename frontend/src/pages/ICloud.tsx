@@ -662,13 +662,13 @@ export default function ICloudPage() {
     <div>
       <PageHeader
         title="iCloud 隐私邮箱"
-        subtitle="主号管理与 Hide My Email 别名"
+        subtitle="维护 iCloud 主号，生成用于注册的隐私邮箱并查看邮件。"
         actions={
           <Space>
             <Button icon={<LoginOutlined />} type="primary" onClick={() => setLoginOpen(true)}>
               应用内登录
             </Button>
-            <Button onClick={() => setCookieOpen(true)}>手工导入 Cookie</Button>
+            <Button onClick={() => setCookieOpen(true)}>导入 Cookie</Button>
             <Button icon={<CloudServerOutlined />} onClick={() => setRemoteOpen(true)}>
               添加远程服务
             </Button>
@@ -707,7 +707,12 @@ export default function ICloudPage() {
                   pagination={false}
                   locale={{
                     emptyText: (
-                      <Empty description="还没有 iCloud 主号，点击右上角完成 Apple ID 登录" />
+                      <Empty description="还没有 iCloud 主号。登录 Apple ID 或导入 Cookie 后，即可创建隐私邮箱。">
+                        <Space wrap>
+                          <Button type="primary" icon={<LoginOutlined />} onClick={() => setLoginOpen(true)}>登录 Apple ID</Button>
+                          <Button onClick={() => setCookieOpen(true)}>导入 Cookie</Button>
+                        </Space>
+                      </Empty>
                     ),
                   }}
                 />
@@ -926,10 +931,12 @@ export default function ICloudPage() {
                             : aliasFilterActive
                               // 有筛选条件时「还没有隐私邮箱」是误导 —— 邮箱在，
                               // 只是被筛掉了。
-                              ? '当前筛选条件下没有匹配的隐私邮箱'
-                              : '还没有隐私邮箱，点击“生成隐私邮箱”开始'
+                              ? '没有符合筛选条件的隐私邮箱，可清除筛选后查看全部。'
+                              : '还没有隐私邮箱，点击“生成隐私邮箱”开始。'
                         }
-                      />
+                      >
+                        {aliasFilterActive ? <Button size="small" onClick={clearAliasFilters}>清除筛选</Button> : null}
+                      </Empty>
                     ),
                   }}
                 />

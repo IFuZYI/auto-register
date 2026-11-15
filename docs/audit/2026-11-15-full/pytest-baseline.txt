@@ -1,0 +1,16 @@
+# 全量 pytest（pytest.ini: testpaths=tests；不要用裸 pytest，会递归进 .worktrees/reference 撞 import mismatch）
+
+## 运行 1 — 修复前基线（HEAD fca2eec + dirty，未含本轮修复）
+```
+$ .venv/bin/python -m pytest tests/ -q
+3928 passed, 1 skipped, 5 warnings, 243 subtests passed in 961.63s (0:16:01)
+```
+
+## 运行 2 — 修复后（含 P0/P1 修复 + 6 条新回归）
+```
+$ .venv/bin/python -m pytest tests/ -q
+3934 passed, 1 skipped, 5 warnings, 243 subtests passed in 465.25s (0:07:45)
+EXIT=0
+```
+
+3934 = 3928 + 6（新增回归测试），其余 0 变化。

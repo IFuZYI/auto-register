@@ -140,7 +140,9 @@ class ChatGPTRegistrationEngine:
                 result = flow.run_register(provider)
         except Exception as exc:
             registration = self._salvage(flow, exc)
-            self._set_mailbox_status(provider, "used" if registration.success else "failed")
+            self._set_mailbox_status(
+                provider, "used" if registration.success else "failed", error=exc
+            )
             return self._attach_mailbox_credentials(registration, provider)
 
         self._ensure_two_factor(flow, provider)
@@ -222,8 +224,18 @@ class ChatGPTRegistrationEngine:
 
     @staticmethod
     def _set_mailbox_status(
-        provider: Optional[MailboxProviderAdapter], status: str
+        provider: Optional[MailboxProviderAdapter],
+        status: str,
+        *,
+        error: Optional[BaseException] = None,
     ) -> None:
+        """把注册结果记回邮箱池。
+
+        `error` 只用于 `failed`：iCloud 号池要靠它区分「这个地址不好」与
+        「iCloud 网关挂了」。后者不该算在别名头上（见
+        `services.icloud.aliases.release_alias_claim`）。邮箱没有这个钩子时
+        就按老样子只传状态 —— `set_account_status` 的第三参数是可选的。
+        """
         if provider is None:
             return
         mailbox = getattr(provider, "_mailbox", None)
@@ -231,6 +243,13 @@ class ChatGPTRegistrationEngine:
         setter = getattr(mailbox, "set_account_status", None)
         if callable(setter) and account is not None:
             try:
+                if error is not None:
+                    try:
+                        setter(account, status, error=error)
+                        return
+                    except TypeError:
+                        # 老接口只收两个参数 —— 退回原签名，别让记账整体失败。
+                        pass
                 setter(account, status)
             except Exception:
                 logger.debug("更新邮箱池状态失败", exc_info=True)

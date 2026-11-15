@@ -186,6 +186,24 @@ class TestRemoteListing:
         assert response.status_code == 200
         assert response.json()["status"] == "active"
 
+    def test_check_succeeds_with_a_read_only_key(self, client):
+        """只读秘钥下「检测」必须可用 —— 否则界面恒报「API 秘钥权限不足」。
+
+        2026-11-14 线上：这把 sk- 读接口全 200、只有 `/check`（写级）被拒，
+        于是 4 个远程主号的检测按钮全是红的。HTTP 层要回 200，而不是把上游
+        的 `PERMISSION_DENIED` 原样映射成 403（`api/icloud.py` 的 `_ERROR_STATUS`）。
+        """
+        account = _add_remote(client)
+        client.remote.check_error = {
+            "code": "PERMISSION_DENIED",
+            "message": "API 秘钥权限不足",
+        }
+
+        response = client.post(f"/api/icloud/accounts/{account['id']}/check")
+
+        assert response.status_code == 200, response.text
+        assert response.json()["status"] == "active"
+
     def test_delete_remote_account(self, client):
         account = _add_remote(client)
         response = client.delete(f"/api/icloud/accounts/{account['id']}")

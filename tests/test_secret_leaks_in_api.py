@@ -76,7 +76,9 @@ class GrokSsoLeakTests(unittest.TestCase):
 
 
 class ProxyListPayloadTests(unittest.TestCase):
-    URL = "socks5h://gobngawr:06pk6as8qlwu@9.142.194.72:6740"
+    #: 测试夹具用**假凭据**：这里曾经是真实出口的账号口令，与 tools/ 里那份
+    #: 一起进了版本库。断言用的是夹具值，换成假的照样能证伪「打码漏了」。
+    URL = "socks5h://probe-user:probe-pass-9f3a@192.0.2.10:6740"
 
     def _record(self) -> ProxyRecord:
         return ProxyRecord(
@@ -98,9 +100,9 @@ class ProxyListPayloadTests(unittest.TestCase):
 
         self.assertEqual(len(rows), 1)
         url = rows[0]["url"]
-        self.assertNotIn("06pk6as8qlwu", url, f"代理密码仍在响应里: {url}")
-        self.assertNotIn("gobngawr", url, f"代理用户名仍在响应里: {url}")
-        self.assertIn("9.142.194.72:6740", url, "打码不该把主机端口也抹掉")
+        self.assertNotIn("probe-pass-9f3a", url, f"代理密码仍在响应里: {url}")
+        self.assertNotIn("probe-user", url, f"代理用户名仍在响应里: {url}")
+        self.assertIn("192.0.2.10:6740", url, "打码不该把主机端口也抹掉")
         # 其余字段原样保留（前端表格要用）
         self.assertEqual(rows[0]["id"], 7)
         self.assertEqual(rows[0]["tags"], ["bind"])

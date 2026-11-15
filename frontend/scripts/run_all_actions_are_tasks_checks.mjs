@@ -37,11 +37,19 @@ ok(!/TASK_BACKED_ACTIONS/.test(page),
 const runAsTaskBody = (() => {
   const s = page.indexOf('const runAsTask = async')
   const e = page.indexOf('const handleAction = async', s)
-  return s === -1 || e === -1 ? '' : page.slice(s, e)
+  // 锚点找不到时必须**显式报错**，不能返回空串 —— 空串会让下面两条「不许
+  // 出现 message.success」的断言在什么都没检查的情况下自动通过（假绿）。
+  // 代码改名/重构后，这条会立刻变红，提醒把锚点更新到新名字。
+  if (s === -1 || e === -1) {
+    failures.push('找不到 runAsTask 的源码锚点 —— 断言无法执行（改过名字？）')
+    checked++
+    return ''
+  }
+  return page.slice(s, e)
 })()
-ok(!/message\.success/.test(runAsTaskBody),
+if (runAsTaskBody) ok(!/message\.success/.test(runAsTaskBody),
    '单动作成功后仍用 Toast —— 结果应在任务日志窗口里显示')
-ok(!/message\.loading/.test(runAsTaskBody),
+if (runAsTaskBody) ok(!/message\.loading/.test(runAsTaskBody),
    '单动作仍在用 Toast loading —— 任务日志窗口自带进度')
 // 失败时允许 Toast：那是「任务都没建成」，没有任务日志可看
 

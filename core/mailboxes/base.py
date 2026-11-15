@@ -45,6 +45,16 @@ class BaseMailbox(ABC):
         )
 
     def _sleep_with_checkpoint(self, seconds: float) -> None:
+        """睡 `seconds` 秒，可被停止/跳过立刻打断。
+
+        优先走控制器的 `sleep()`（Event 唤醒，响应性与等待长度无关）；
+        控制器没提供时退回碎步轮询 —— 测试替身和旧实现都能用。
+        """
+        control = getattr(self, "_task_control", None)
+        sleeper = getattr(control, "sleep", None) if control is not None else None
+        if callable(sleeper):
+            sleeper(seconds, attempt_id=getattr(self, "_task_attempt_token", None))
+            return
         remaining = max(float(seconds or 0), 0.0)
         while remaining > 0:
             self._checkpoint()
@@ -59,28 +69,105 @@ class BaseMailbox(ABC):
         poll_interval: float,
         poll_once: Callable[[], Optional[str]],
         timeout_message: str | None = None,
+        is_transient: Callable[[BaseException], bool] | None = None,
+        max_consecutive_errors: int = 0,
+        interval_schedule: tuple | None = None,
+        is_fatal_busy: Callable[[BaseException], bool] | None = None,
     ) -> str:
+        """轮询直到拿到码或超时。
+
+        `is_transient` 是**可选**的容错钩子：给了它，`poll_once()` 抛出的
+        异常若是「暂时性」的就只当这一轮没读到、继续轮询；没给则完全维持
+        旧行为（异常直接穿透）—— 其它渠道零风险。
+
+        为什么需要它：实测 2026-11-13，`icloud-hme` 读超时抛的
+        `ICloudError("upstream_unavailable")` 会穿透整个循环，**一次 30 秒
+        超时就判整轮注册失败**，既不会补发重试也不会多等一个周期。两批任务
+        里约 80% 的失败是这一条。
+
+        `max_consecutive_errors` 是**放弃阈值**（0 = 不因错误放弃）：
+        服务真挂时不能让每个 worker 陪跑到时限，连续失败够多就把最后一次
+        错误原样抛出去 —— 上层据此判断是「服务问题」而不是「没收到码」。
+        """
         timeout_seconds = max(int(timeout or 0), 1)
         deadline = time.monotonic() + timeout_seconds
+        consecutive_errors = 0
 
         while time.monotonic() < deadline:
             self._checkpoint()
-            code = poll_once()
-            if code:
-                return code
+            try:
+                code = poll_once()
+            except Exception as exc:
+                # **先问「熔断了吗」，再问「能不能等」** —— 顺序不能反。
+                #
+                # 熔断表达的是「这个服务现在不值得试」：再等一个轮询周期只会
+                # 被同一条熔断再拒一次。它的判据与「暂时性错误」是两套东西，
+                # 所以不能挂在 `is_transient` 后面：那样只要熔断异常没被列进
+                # 可恢复集合，这条分支就永远走不到（2026-11-14 实测：它确实是
+                # 死代码 —— `is_recoverable(UpstreamBusy)` 为 False，异常在上一
+                # 行就穿透了）。反过来，一旦有人把熔断加进可恢复集合，5 个
+                # worker 就会各自空等到时限，正是熔断想避免的浪费。
+                if is_fatal_busy is not None and is_fatal_busy(exc):
+                    self._log(f"[收码] 上游熔断中，本轮立刻放弃（不空等）: {exc}")
+                    raise
+                if is_transient is None or not is_transient(exc):
+                    raise
+                consecutive_errors += 1
+                self._log(
+                    f"[收码] 收件通道暂时不可用（连续第 {consecutive_errors} 次），"
+                    f"继续轮询: {exc}"
+                )
+                if max_consecutive_errors and consecutive_errors >= max_consecutive_errors:
+                    self._log(
+                        f"[收码] 连续 {consecutive_errors} 次读不到收件箱，"
+                        f"本轮放弃（服务疑似不可用，而非没收到码）"
+                    )
+                    raise
+            else:
+                if code:
+                    return code
+                consecutive_errors = 0
 
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 break
-            self._sleep_with_checkpoint(min(float(poll_interval), remaining))
+            if interval_schedule:
+                elapsed = timeout_seconds - max(remaining, 0.0)
+                interval = self._poll_interval_for(elapsed, interval_schedule)
+            else:
+                interval = float(poll_interval)
+            self._sleep_with_checkpoint(min(interval, remaining))
 
         self._checkpoint()
+        # 走到这里说明时限用尽；此时抛超时（而不是上一次的上游错误）——
+        # 中途有过的暂时失败已经被上面的容错循环吸收了。
         raise TimeoutError(timeout_message or f"等待验证码超时 ({timeout_seconds}s)")
 
     @abstractmethod
     def get_email(self) -> MailboxAccount:
         """获取一个可用邮箱"""
         ...
+
+    @staticmethod
+    def _poll_interval_for(elapsed: float, schedule: tuple | None = None) -> float:
+        """按「已经等了多久」选轮询间隔。
+
+        验证码通常在前 20 秒就到了；后面那一百多秒的恒定 5 秒轮询基本是
+        空转 —— 实测一个 180 秒窗口要打出 30 次请求，其中 24 次是白打。
+        分段退避能在命中延迟几乎不变的前提下把请求量砍掉一半。
+
+        `schedule` 形如 `((0, 3.0), (20, 5.0), (60, 10.0))`：每项是
+        「从第几秒起」+「间隔」，按 elapsed 落在哪一段取。
+        """
+        if not schedule:
+            return 5.0
+        interval = schedule[0][1]
+        for threshold, value in schedule:
+            if elapsed >= threshold:
+                interval = value
+            else:
+                break
+        return float(interval)
 
     @abstractmethod
     def wait_for_code(

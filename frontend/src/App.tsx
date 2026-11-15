@@ -12,7 +12,6 @@ import {
   MoonOutlined,
   LogoutOutlined,
   PlayCircleOutlined,
-  ThunderboltFilled,
   AppstoreOutlined,
   SafetyCertificateOutlined,
 } from '@ant-design/icons'
@@ -50,14 +49,15 @@ const PanelManagement = lazy(PAGE_LOADERS.PanelManagement)
 const TaskHistory = lazy(PAGE_LOADERS.TaskHistory)
 const RunningTasks = lazy(PAGE_LOADERS.RunningTasks)
 const Login = lazy(PAGE_LOADERS.Login)
-import { applyThemeVars, darkTheme, lightTheme } from './theme'
+import { applyThemeVars, darkTheme, lightTheme, navigationTheme } from './theme'
 import { apiFetch, clearToken, getToken } from '@/lib/utils'
 import { MobileNavContext } from '@/hooks/useMobileNav'
+import { ConsoleBrand } from '@/components/ConsoleBrand'
 
 const { Sider, Content } = Layout
 
 /** 侧栏宽度（展开 / 折叠），抽屉与常驻侧栏共用展开值。 */
-const SIDER_WIDTH = 232
+const SIDER_WIDTH = 248
 const SIDER_COLLAPSED_WIDTH = 72
 
 /** 移动端抽屉宽度：上限 280px，且至少给视口留 48px 露出背后的页面。 */
@@ -100,6 +100,7 @@ const MENU_KEYS: ReadonlySet<string> = new Set([
 function getSelectedKey(pathname: string): string[] {
   const key = SELECTED_KEY_ALIASES[pathname] ?? pathname
   if (MENU_KEYS.has(key)) return [key]
+  if (key === '/register') return []
   // 子路径：同时选中自己与父项。
   //
   // 只给子 key 的话，父项高亮依赖 rc-menu 内部「子项注册路径 → 重算」的时序，
@@ -155,12 +156,13 @@ function ProtectedLayout() {
         }
       })
       .catch(() => setReady(true))
-  }, [])
+  }, [navigate])
 
   if (!ready) {
     return (
-      <div style={{ minHeight: 'var(--app-vh)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+      <div className="app-boot" role="status" aria-label="正在打开管理台">
         <Spin size="large" />
+        <span>正在打开管理台</span>
       </div>
     )
   }
@@ -180,20 +182,28 @@ function RouteLoading() {
       }}
     >
       <Spin />
+      <span className="sr-only">正在加载页面</span>
     </div>
   )
 }
 
 function AppContent() {
+  const location = useLocation()
+  // 侧栏的平台/面板列表失败时要出声（见下面两个 effect）。`App.useApp()` 取
+  // 的是外层 `<AntdApp>` 的实例，theme 与 locale 都已继承，弹窗样式不会漂。
+  const { message } = AntdApp.useApp()
   const [themeMode, setThemeMode] = useState<'dark' | 'light'>(() =>
-    (localStorage.getItem('theme') as 'dark' | 'light') || 'dark'
+    (localStorage.getItem('theme') as 'dark' | 'light') || 'light'
   )
   const [collapsed, setCollapsed] = useState(false)
+  const [openMenuKeys, setOpenMenuKeys] = useState<string[]>(() => {
+    const selected = getSelectedKey(location.pathname)
+    return selected.filter(key => ['/', '/history', '/proxies', '/settings', '/running-tasks'].indexOf(key) === -1)
+  })
   const [navOpen, setNavOpen] = useState(false)
   const [platforms, setPlatforms] = useState<{ key: string; label: string }[]>([])
   const [panels, setPanels] = useState<{ key: string; label: string }[]>([])
   const [hasPassword, setHasPassword] = useState(false)
-  const location = useLocation()
   const navigate = useNavigate()
   const contentRef = useRef<HTMLDivElement>(null)
   const screens = Grid.useBreakpoint()
@@ -238,9 +248,18 @@ function AppContent() {
 
   useEffect(() => {
     apiFetch('/platforms')
-      .then(d => setPlatforms((d || []).map((p: any) => ({ key: p.name, label: p.display_name }))))
-      .catch(() => {})
-  }, [])
+      .then(d => setPlatforms(
+        ((d || []) as { name: string; display_name: string }[])
+          .map(p => ({ key: p.name, label: p.display_name })),
+      ))
+      .catch((error: unknown) => {
+        // 静默清空会让「账号管理」变成一个展不开的空分组 —— 用户只能猜是
+        // 没有平台还是接口挂了。菜单本身仍保留一级入口（页面可直接访问），
+        // 这里只补一句原因。
+        setPlatforms([])
+        message.error(`平台列表加载失败：${error instanceof Error ? error.message : String(error)}`)
+      })
+  }, [message])
 
   // 面板列表用于侧栏二级项。取不到就只留一级入口（页面本身仍是可用的）——
   // 菜单不该因为一个接口失败而消失。
@@ -250,15 +269,28 @@ function AppContent() {
         ((d?.items || []) as { key: string; label: string }[])
           .map(p => ({ key: p.key, label: p.label })),
       ))
-      .catch(() => {})
-  }, [])
+      .catch((error: unknown) => {
+        setPanels([])
+        message.error(`面板列表加载失败：${error instanceof Error ? error.message : String(error)}`)
+      })
+  }, [message])
 
-  // 切路由时把内容区滚回顶部：苹果式页面切换不应该停在半路。
-  // 顺手关掉移动端抽屉 —— 点完菜单项它就该收起来，而不是盖在新页面上。
+  // 切页回到顶部；移动端抽屉由菜单点击主动关闭，不在 effect 里同步 setState。
   useEffect(() => {
-    contentRef.current?.scrollTo({ top: 0, behavior: 'smooth' })
-    setNavOpen(false)
+    const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    contentRef.current?.scrollTo({ top: 0, behavior: reduceMotion ? 'instant' : 'smooth' })
   }, [location.pathname])
+
+  // 浏览器前进/后退、首页链接也能展开当前分组；在渲染期响应路由变化，
+  // 不在 effect 里再同步一轮状态。手动展开过的其它分组保持原样。
+  const [previousPath, setPreviousPath] = useState(location.pathname)
+  if (previousPath !== location.pathname) {
+    setPreviousPath(location.pathname)
+    const parentKey = getSelectedKey(location.pathname)[0]
+    if (parentKey && ['/accounts', '/mail', '/panel-management', '/authorized-accounts'].includes(parentKey)) {
+      setOpenMenuKeys(keys => keys.includes(parentKey) ? keys : [...keys, parentKey])
+    }
+  }
 
   // 视口跨过 lg 断点时收起抽屉。
   //
@@ -341,17 +373,17 @@ function AppContent() {
     {
       key: '/',
       icon: <DashboardOutlined />,
-      label: '仪表盘',
+      label: '工作台',
     },
     {
       key: '/running-tasks',
       icon: <PlayCircleOutlined />,
-      label: '任务运行',
+      label: '任务中心',
     },
     {
       key: '/accounts',
       icon: <UserOutlined />,
-      label: '平台管理',
+      label: '账号管理',
       // iCloud 不在这里 —— 它的控制台（主号 + 隐私邮箱别名）是「邮箱服务」下的
       // 一个二级页（/mail/icloud）。iCloud 在 `uses_mailbox: False` 的平台里
       // 是个特例：它本身就是邮箱来源，管理界面跟其它平台的通用账号列表不是一回事。
@@ -381,16 +413,16 @@ function AppContent() {
       // 二级页，按用户要求整体删除。
       key: '/mail',
       icon: <MailOutlined />,
-      label: '邮箱服务',
+      label: '邮箱管理',
       children: [
-        { key: '/mail/icloud', label: 'iCloud 隐私邮箱（本地）' },
-        { key: '/mail/outlook', label: 'Outlook（本地）' },
+        { key: '/mail/icloud', label: 'iCloud 隐私邮箱' },
+        { key: '/mail/outlook', label: 'Outlook 邮箱' },
       ],
     },
     {
       key: '/panel-management',
       icon: <AppstoreOutlined />,
-      label: '面板管理',
+      label: '面板对接',
       // 二级按面板分（CPA 面板 / Sub2API / grok2api），与「平台管理」按平台分
       // 是同一种结构：一级是入口，二级是具体目标。面板列表由
       // `/api/integrations/panels` 下发，不硬编码 —— 注册表加面板这里自动多一项。
@@ -407,12 +439,12 @@ function AppContent() {
     {
       key: '/history',
       icon: <HistoryOutlined />,
-      label: '任务历史',
+      label: '注册记录',
     },
     {
       key: '/settings',
       icon: <SettingOutlined />,
-      label: '全局配置',
+      label: '设置',
     },
   ]
 
@@ -431,20 +463,18 @@ function AppContent() {
     return (
       <>
         <div className="sider-logo" style={{ justifyContent: align }}>
-          <div className="sider-logo__mark">
-            <ThunderboltFilled />
-          </div>
-          <span className={`sider-logo__text${compact ? ' sider-logo__text--hidden' : ''}`}>
-            账号管理台
-          </span>
+          <ConsoleBrand compact={compact} />
         </div>
         <nav aria-label="主导航" className="sider-menu">
           <Menu
             mode="inline"
+            theme="dark"
             selectedKeys={getSelectedKey(location.pathname)}
-            defaultOpenKeys={['/accounts', '/mail', '/panel-management', '/authorized-accounts']}
+            className={compact ? 'ant-menu--compact' : undefined}
+            openKeys={compact ? undefined : openMenuKeys}
+            onOpenChange={keys => setOpenMenuKeys(keys)}
             items={menuItems}
-            onClick={({ key }) => navigate(key)}
+            onClick={({ key }) => { navigate(key); setNavOpen(false) }}
             // 子项缩进从默认 24 收到 16：232px 侧栏里
             // 「iCloud 隐私邮箱（本地）」只差 2px 被省略号截掉，
             // 收窄缩进比加宽侧栏更划算（后者会挤压内容区）
@@ -462,6 +492,8 @@ function AppContent() {
               type="text"
               icon={isLight ? <MoonOutlined /> : <SunOutlined />}
               onClick={() => setThemeMode(isLight ? 'dark' : 'light')}
+              aria-label={isLight ? '切换到深色外观' : '切换到浅色外观'}
+              className="sider-footer__button"
               style={{
                 display: 'flex',
                 alignItems: 'center',
@@ -470,7 +502,7 @@ function AppContent() {
                 color: 'var(--text-secondary)',
               }}
             >
-              {label(isLight ? '切换到暗色' : '切换到亮色')}
+              {label(isLight ? '使用深色外观' : '使用浅色外观')}
             </Button>
           </Tooltip>
           {hasPassword && (
@@ -480,7 +512,21 @@ function AppContent() {
                 type="text"
                 danger
                 icon={<LogoutOutlined />}
-                onClick={() => { clearToken(); navigate('/login') }}
+                aria-label="退出登录"
+                className="sider-footer__button"
+                onClick={() => {
+                  // 先让服务端作废已签发的令牌，再清本地状态。
+                  //
+                  // 后端 `/api/auth/logout` 会轮换 JWT 密钥（该端点为安全审查
+                  // F6 而加），但此前前端只删 localStorage —— 令牌在服务端
+                  // 仍有效 7 天，任何拿到过它的人可以继续访问。
+                  //
+                  // 用 `finally` 而不是 `then`：网络失败时也必须退出本地会话，
+                  // 否则用户点了「退出登录」却还停在管理台里，更危险。
+                  void apiFetch('/auth/logout', { method: 'POST' })
+                    .catch(() => undefined)
+                    .finally(() => { clearToken(); navigate('/login') })
+                }}
                 style={{
                   display: 'flex',
                   alignItems: 'center',
@@ -518,12 +564,20 @@ function AppContent() {
               className="sider-shell"
               width={SIDER_WIDTH}
               collapsedWidth={SIDER_COLLAPSED_WIDTH}
+              trigger={
+                <span className="sider-collapse" aria-label={collapsed ? '展开导航' : '收起导航'}>
+                  {collapsed ? '展开导航' : '收起导航'}
+                </span>
+              }
             >
-              {navContent(false)}
+              <ConfigProvider theme={navigationTheme}>
+                {navContent(false)}
+              </ConfigProvider>
             </Sider>
           )}
 
           <Content
+            className="app-content"
             ref={contentRef}
             id="main-content"
             tabIndex={-1}
@@ -563,6 +617,10 @@ function AppContent() {
                       和各 provider 的连接参数不是一回事。旧路径重定向，老书签不 404。
                       「临时邮箱」与「远程 icloud-hme」两个页面已删除，旧路径同样
                       重定向到邮箱服务下的 iCloud 页，免得老书签落到空白路由。 */}
+                  {/* `/mail` 只是菜单分组，本身没有页面。同级的
+                      `/authorized-accounts`、`/panel-management` 都有兜底，
+                      这里缺一条时直接访问 /mail 会落到 NotFound。 */}
+                  <Route path="/mail" element={<Navigate to="/mail/icloud" replace />} />
                   <Route path="/mail/default" element={<Navigate to="/settings" replace />} />
                   <Route path="/mail/icloud" element={<MailICloudLocalPage />} />
                   <Route path="/mail/outlook" element={<MailOutlookPage />} />
@@ -579,20 +637,22 @@ function AppContent() {
         </Layout>
 
         {/* 移动端导航抽屉：宽度按视口收，避免在窄机上占满整屏 */}
-        <Drawer
-          placement="left"
-          open={isMobile && navOpen}
-          onClose={() => setNavOpen(false)}
-          width={Math.min(
-            DRAWER_MAX_WIDTH,
-            typeof window !== 'undefined' ? window.innerWidth - DRAWER_VIEWPORT_GUTTER : DRAWER_MAX_WIDTH,
-          )}
-          closable={false}
-          styles={{ body: { padding: 0, display: 'flex', flexDirection: 'column' } }}
-          className="mobile-nav-drawer"
-        >
-          {navContent(true)}
-        </Drawer>
+        <ConfigProvider theme={navigationTheme}>
+          <Drawer
+            placement="left"
+            open={isMobile && navOpen}
+            onClose={() => setNavOpen(false)}
+            width={Math.min(
+              DRAWER_MAX_WIDTH,
+              typeof window !== 'undefined' ? window.innerWidth - DRAWER_VIEWPORT_GUTTER : DRAWER_MAX_WIDTH,
+            )}
+            closable={false}
+            styles={{ body: { padding: 0, display: 'flex', flexDirection: 'column' } }}
+            className="mobile-nav-drawer"
+          >
+            {navContent(true)}
+          </Drawer>
+        </ConfigProvider>
       </AntdApp>
     </ConfigProvider>
   )

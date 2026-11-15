@@ -777,3 +777,72 @@ class ParseIntervalNeverRaisesTests(unittest.TestCase):
         self.assertEqual(parse_interval("60d"), 2592000, "高于上限压到 30 天")
         self.assertEqual(parse_interval("abc"), 0)
         self.assertEqual(parse_interval("299s"), 0, "s 不是合法单位")
+
+
+class RunLogCleanupOnSqliteTests(unittest.TestCase):
+    """`run_log_cleanup` 在 **SQLite**（生产后端）下必须真的能删。
+
+    2026-11-15 实测（T8-1 Critical）：
+    - `services/local_maintenance.py:648` 用 `with get_session() as session`，
+      但 `core.db.get_session` 是 **FastAPI 依赖生成器**（`core/db/base.py:121`，
+      函数体是 `yield`），不是上下文管理器 → `TypeError: 'generator' object
+      does not support the context manager protocol`。
+    - 即便修掉这层，`:654` 又把 **naive** cutoff 传给 **aware** 列 →
+      `StatementError: Datetime values must have timezone information`。
+    - 失败时 `core/scheduler.py` 不推进 `last_run_at` → 每 60s 重试一次、永远。
+    净效果：任务历史**永不清理**，日志里每 60 秒一条错误。
+
+    仓库里已有正确实现 `services/log_cleanup.py::cleanup_task_logs`
+    （基类仓储 + 真实 `Session` + aware cutoff 由实参保证）。这里钉的行为是：
+    **生产后端下调用 `run_log_cleanup` 必须成功删掉过期行**。
+    """
+
+    def setUp(self):
+        import tempfile
+
+        from sqlmodel import SQLModel, create_engine
+
+        from core.db import platform_database_registry
+
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        url = f"sqlite:///{self._tmp.name}/infra.db"
+        self._engine = create_engine(url)
+        SQLModel.metadata.create_all(self._engine)
+        platform_database_registry.configure({})
+        self._orig_engine = platform_database_registry
+        # 让默认库指向临时库
+        # `services/log_cleanup.py` 在**模块顶层** `from core.db import current_engine`，
+        # 所以必须 patch 它自己的名字，patch `core.db.base` 对它无效。
+        import services.log_cleanup as log_cleanup_mod
+
+        self._patch = mock.patch.object(log_cleanup_mod, "current_engine", lambda: self._engine)
+        self._patch.start()
+        self.addCleanup(self._patch.stop)
+
+    def test_cleanup_deletes_expired_rows_on_sqlite(self):
+        from datetime import datetime, timedelta, timezone
+
+        from sqlmodel import Session, select
+
+        from core.db.models_infra import TaskLog
+        from services.local_maintenance import run_log_cleanup
+
+        now = datetime.now(timezone.utc)
+        with Session(self._engine) as s:
+            s.add(TaskLog(platform="chatgpt", email="old@x.c", status="success",
+                        created_at=now - timedelta(days=30)))
+            s.add(TaskLog(platform="chatgpt", email="fresh@x.c", status="success",
+                        created_at=now - timedelta(hours=1)))
+            s.commit()
+
+        summary = run_log_cleanup()
+
+        self.assertGreaterEqual(
+            summary["deleted"], 1,
+            f"SQLite 下没删掉过期任务历史: {summary}",
+        )
+        with Session(self._engine) as s:
+            left = [row.email for row in s.exec(select(TaskLog)).all()]
+        self.assertNotIn("old@x.c", left, "过期行没被删")
+        self.assertIn("fresh@x.c", left, "未过期行被误删")

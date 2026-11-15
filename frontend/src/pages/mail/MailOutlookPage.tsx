@@ -14,8 +14,8 @@ export default function MailOutlookPage() {
 
   return (
     <MailServicePage
-      title="Outlook（本地）"
-      subtitle="微软邮箱号池：导入后注册时按需取号，走 Graph / IMAP 收信"
+      title="Outlook 邮箱"
+      subtitle="导入 Outlook 邮箱供注册使用，并设置邮件读取方式。"
       sections={sections}
       defaults={{ outlook_backend: 'graph' }}
     >

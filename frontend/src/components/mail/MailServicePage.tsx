@@ -204,7 +204,7 @@ export function MailServicePage({
       dropEmptySecrets(all, SECRET_KEYS)
 
       await apiFetch('/config', { method: 'PUT', body: JSON.stringify({ data: all }) })
-      message.success('保存成功')
+      message.success('邮箱设置已保存')
       setSaved(true)
       setTimeout(() => setSaved(false), 2000)
     } finally {
@@ -227,10 +227,10 @@ export function MailServicePage({
         {loadFailed ? (
           <Space>
             <Button danger icon={<ReloadOutlined />} onClick={loadConfig}>
-              重新加载
+              重新读取设置
             </Button>
             <Typography.Text type="secondary">
-              配置没读出来，重新加载后再保存（避免用空表单覆盖已有配置）
+              未能读取现有设置。重新读取后再保存，以免空表单覆盖原设置。
             </Typography.Text>
           </Space>
         ) : (
@@ -242,7 +242,7 @@ export function MailServicePage({
             disabled={!loaded}
             style={{ marginTop: 8 }}
           >
-            {saved ? '已保存 ✓' : '保存配置'}
+            {saved ? '邮箱设置已保存' : '保存更改'}
           </Button>
         )}
       </Form>

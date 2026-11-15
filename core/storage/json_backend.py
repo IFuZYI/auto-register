@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+import uuid
 from pathlib import Path
 from typing import Any, Optional
 
@@ -29,12 +30,43 @@ class JsonStoreError(RuntimeError):
     """JSON 库文件损坏或结构非法。"""
 
 
+#: 进程内按路径共享的锁。
+#:
+#: 为什么需要它：`AccountRepository._json_store()` **每次调用都新建**
+#: `AccountStoreJson`，也就新建一个 `JsonStore`。实例级锁在这种情况下等于
+#: 没有锁 —— 两个实例各自 `_read()` 整个文件、各自合并、各自 `_write()`，
+#: 后写的把先写的覆盖掉。实测（2026-11-15）40 个线程并发 update 同一记录，
+#: 只有 11 个字段生效（丢 29 个）。
+#:
+#: 锁按**文件路径**分键而不是挂在类上：不同文件（不同平台库）之间没有理由
+#: 互相阻塞。
+_LOCKS: dict[str, threading.RLock] = {}
+_LOCKS_GUARD = threading.Lock()
+
+
+def _lock_for(path: Path) -> threading.RLock:
+    """取该路径的共享锁（同一路径 → 同一把锁，跨实例生效）。"""
+    key = str(path.resolve())
+    with _LOCKS_GUARD:
+        return _LOCKS.setdefault(key, threading.RLock())
+
+
 class JsonStore:
-    """单文件 JSON 存储。线程安全（进程内）。"""
+    """单文件 JSON 存储。线程安全（**跨实例**，按文件路径共享锁）。"""
 
     def __init__(self, path: Path | str):
         self.path = Path(path)
+        # 实例级锁保留（同实例重入更快），但跨实例的互斥靠 `_shared`。
         self._lock = threading.RLock()
+        self._shared = _lock_for(self.path)
+        #: 本实例专属的临时文件后缀 —— 两个实例（或两个进程）不能共用同一个
+        #: `.tmp`，否则 A 的 `os.replace` 会把 B 正在写的临时文件搬走，
+        #: B 再 `os.replace` 就 `FileNotFoundError`（实测）。
+        self._tmp_suffix = f".{os.getpid()}-{uuid.uuid4().hex}.tmp"
+
+    def _tmp_path(self) -> Path:
+        """本次写入使用的临时文件（每实例唯一，防跨实例/跨进程互撞）。"""
+        return self.path.with_suffix(self.path.suffix + self._tmp_suffix)
 
     # ---------------------------------------------------------------- 内部
 
@@ -61,9 +93,14 @@ class JsonStore:
         return data
 
     def _write(self, data: dict[str, dict[str, Any]]) -> None:
-        """原子写：临时文件 → fsync → replace。"""
+        """原子写：临时文件 → fsync → replace。
+
+        临时文件名**每实例唯一**：`.tmp` 固定名会让两个写入者互相搬走对方的
+        临时文件（实测 `FileNotFoundError`，以及 `_read` 读到半写内容后
+        `Extra data` 判成损坏）。
+        """
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_suffix(self.path.suffix + ".tmp")
+        tmp = self._tmp_path()
         payload = json.dumps(data, ensure_ascii=False, indent=1, sort_keys=True)
         with open(tmp, "w", encoding="utf-8") as handle:
             handle.write(payload)
@@ -75,20 +112,20 @@ class JsonStore:
 
     def all(self, table: str) -> list[dict[str, Any]]:
         """某张表的全部记录（按主键字符串排序，保证顺序稳定）。"""
-        with self._lock:
+        with self._lock, self._shared:
             rows = self._read().get(str(table)) or {}
         if not isinstance(rows, dict):
             raise JsonStoreError(f"表 {table} 应为对象，实际是 {type(rows).__name__}")
         return [dict(rows[key]) for key in sorted(rows, key=_sort_key)]
 
     def get(self, table: str, key: Any) -> Optional[dict[str, Any]]:
-        with self._lock:
+        with self._lock, self._shared:
             rows = self._read().get(str(table)) or {}
         record = rows.get(str(key))
         return dict(record) if isinstance(record, dict) else None
 
     def put(self, table: str, key: Any, record: dict[str, Any]) -> None:
-        with self._lock:
+        with self._lock, self._shared:
             data = self._read()
             bucket = data.setdefault(str(table), {})
             if not isinstance(bucket, dict):
@@ -97,7 +134,7 @@ class JsonStore:
             self._write(data)
 
     def delete(self, table: str, key: Any) -> bool:
-        with self._lock:
+        with self._lock, self._shared:
             data = self._read()
             bucket = data.get(str(table))
             if not isinstance(bucket, dict) or str(key) not in bucket:
@@ -108,7 +145,7 @@ class JsonStore:
 
     def update(self, table: str, key: Any, patch: dict[str, Any]) -> Optional[dict[str, Any]]:
         """局部更新；记录不存在时返回 None（不新建）。"""
-        with self._lock:
+        with self._lock, self._shared:
             data = self._read()
             bucket = data.get(str(table))
             if not isinstance(bucket, dict):
@@ -122,7 +159,7 @@ class JsonStore:
             return dict(merged)
 
     def count(self, table: str) -> int:
-        with self._lock:
+        with self._lock, self._shared:
             rows = self._read().get(str(table)) or {}
         return len(rows) if isinstance(rows, dict) else 0
 

@@ -327,6 +327,18 @@ def execute_batch_action(
 ):
     PlatformCls = _get_platform_cls_or_404(platform)
     instance = PlatformCls(config=RegisterConfig(extra=config_store.get_all()))
+    # 动作白名单：必须与 `/tasks/batch-action` 同一道门。
+    #
+    # 没有它时，未知 action 会进执行循环、在逐条 `except` 里被吞成 item
+    # 失败 —— 接口返回 200 + `failed=total`，看起来像「账号都有问题」，
+    # 实际是我们发了一个平台根本不支持的动作，还白白打了 N 次上游。
+    known_actions = {str(a.get("id") or "") for a in instance.get_platform_actions()}
+    if action_id not in known_actions:
+        raise HTTPException(
+            400,
+            f"平台 {platform} 不支持操作 {action_id}"
+            f"（可用: {sorted(known_actions)}）",
+        )
     accounts, missing_ids = _resolve_batch_accounts(platform, body, session)
 
     if not accounts and not missing_ids:

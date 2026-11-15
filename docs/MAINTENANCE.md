@@ -417,6 +417,16 @@ Agent2API 导出，同步 `to_auth_token_entry` 与
 | `test_chatgpt_token_refresh_verification.py` | 刷出的 AT 真校验（`/backend-api/me`）、**只返还原本 AT（未换发）→ 走登录流程换发**、登录链兜底、封禁识别、轮换 ST 不被冲空 | 改 `platforms/chatgpt/token_refresh.py` 的校验或登录兜底 |
 | `test_environment_preflight.py` | 环境预检与错误分类：camoufox 配对探测、Node 运行时探测、任务级预检（runner 在分配邮箱前拦截）、环境错误判不可重试（dead-end 提前收手） | 改 `core/environment.py` 的判定；平台去掉 `check_environment` 钩子 |
 | `test_chatgpt_auto_maintenance.py` | ChatGPT Token 自动维护：临期窗口内随机时刻（至少提前 1h）、**失效/过期账号进重试队列**（不看临期窗口）、封禁/达失败上限不重复尝试、**自动链检测出封禁 → 状态落 banned + 移出队列**、失败退避 1h→6h、未换发算失败、每轮限量防高并发、stale 计划清理、scheduler 注册与配置白名单、前端开关接线 | 改 `services/chatgpt_maintenance.py` 的窗口/退避/限量逻辑；失效账号不再自动尝试；封禁检测不再落状态；去掉周期任务注册；开关漏进 CONFIG_KEYS 或前端 BOOLEAN_KEYS |
+| `test_kiro_platform.py::KiroSourceSelectionTests` | 来源选择的失败记忆：复用失败后本任务换候选、**跨 attempt 实例重建仍有效**、手动停止不算失败、不污染其它任务 | 有人把失败表放回实例字段（生产链路每 attempt 都新建实例，会失效） |
+| `test_kiro_platform.py` / `test_kiro_source_claim_lifecycle.py` | Kiro 的 AWS 来源独占：并发不重复选号、认领后重新判重、新建先认领再发布、登录到落库全程持有、失败/停止释放 | 改 `platforms/kiro/source_claims.py`、Kiro 来源选择或注册任务的资源收尾 |
+| `test_icloud_upstream_gate.py` | 上游熔断语义：阈值、冷却、指数退避、**两级分键（服务级 / 主号级）**、多主号同时失败升级为服务级、半开恢复、线程安全 | 改 `services/icloud/upstream_gate.py` 的阈值/退避/分键策略 |
+| `test_icloud_polling_resilience.py` | 等码轮询的容错口径：暂时性错误继续轮询、非暂时性立刻抛、错误预算耗尽放弃、分段退避间隔、**熔断先于容错判定（熔断必须立刻放弃，哪怕它看起来「可恢复」）** | 改 `_run_polling_wait` 的容错分支或 `RECOVERABLE_CODES` |
+| `test_icloud_otp_read_scope.py` | 等码收件范围：渠道**实际传下去的** limit ≤10、时间窗 ≤7 天、降级经 `warning` 上报、降级时基线标不可信且等码继续轮询（不是当成「没信」） | 有人把 limit 调回 50 / days 调回 3650，或去掉降级判定 |
+| `test_icloud_read_throttle.py` | 收件请求量控制：`previews` 摘要缓存（同 id 只补一次、空摘要记哨兵不重问、有界淘汰、不跨服务串号）、主号级读信信号量 | 改 `_PreviewCache` / `read_semaphore`，或 `fetch_remote_messages` 的补摘要路径 |
+| `test_resilience_ordering_guard.py` | **熔断先于容错**：熔断打开时一个 HTTP 请求都不发；熔断打开后立刻放弃而不是空等到时限 | 把熔断检查移到请求之后、或从收件路径上摘掉 |
+| `test_control_event_wakeup.py` | 停止/跳过的唤醒机制：长睡能被立刻打断（毫秒级，不靠碎步轮询）、唤醒后不忙等 | 改 `RegisterTaskControl.sleep`，或把 `_sleep_with_checkpoint` 改回碎步 |
+| `test_upstream_outage_classification.py` | 服务故障 vs 账号问题：读超时/连接拒绝/熔断算服务故障（不烧重试轮次），等码超时/额度用完不算 | 改 `is_upstream_outage` 的归因范围 |
+| `test_icloud_baseline_degraded.py` | 收件基线降级：首读失败必须置 `_baseline_degraded`、读到后清标记、**基线不可信且无时间窗时不猜码**（宁可超时也不返回历史验证码） | 改 `get_current_ids` 的失败分支或等码过滤逻辑 |
 | `test_icloud_remote_columns.py` | 远程仓库的库结构：source / base_url / remote_account_id 列、老库回填 `local`、email 单列唯一被移除（同邮箱允许两边各一行）、(base_url, remote_account_id) 部分唯一索引、迁移幂等 | 改 `core/db/models_platform.py` 或 `_migrate_icloud_remote_schema` |
 | `test_icloud_remote_client.py` | 远程客户端契约：API 秘钥 `X-API-Key`（唯一鉴权，无登录/Cookie/CSRF）、缺钥与错钥的错误映射、写操作也走秘钥、错误码映射（冷却 → `provider_rate_limited`）、inbox limit/offset/start/end/refresh | 改 `platforms/icloud/remote_client.py` |
 | `test_icloud_remote_service.py` | 远程服务层：接入（加密落库 / 重复接入拒绝）、同步与**本地优先去重**（`skipped_local`）、**远程账号拒绝生成隐私邮箱**（`invalid_config`）、远程停用/删除、远程收件映射 | 改 `services/icloud/remote.py` 的去重或写路径 |
@@ -498,10 +508,12 @@ python scripts/check_kiro_agent2api_export.py
 cd frontend && npx tsc -b && npm run lint && npm run build
 ```
 
-**eslint 的基线是 38 problems（33 errors + 5 warnings）** —— 这是历史存量，
+**eslint 的基线是 32 problems（28 errors + 4 warnings）** —— 这是历史存量，
 不是「0 才算过」。改动不应让这个数字变大；顺手修可以，但别为了清零做大改。
 （2026-10-27：55 → 51，清理账号页的同步批量死代码时顺带删掉 4 处 `any`。）
 （2026-10-28：51 → 48，所有动作改走任务后删掉结果弹窗与同步动作死代码。）
+（2026-11-14：48 → 32，账号页去掉面板上传与 2API 列后，随之失效的类型与
+图标导入一并删除；批量入口改为能力驱动，少了一批平台名硬编码分支。）
 
 ### 4.2 测试没有覆盖到的（要人工确认）
 
@@ -556,6 +568,13 @@ git diff --stat
 | Grok 账号没有 AT / RT | **不是故障**：2026-10-23 起注册只产 SSO（device flow 每次都 `授权未确认`，白烧 4 分钟/号），且 SSO 是 HS256 JWT、载荷只有 `session_id`、没有 `exp` | 刷新走 SSO → 登录协议；列表看「2API 接入 / 探测」，不看「AT 到期」（那一列只给 ChatGPT） |
 | 窄屏表格「内容被裁、也没有滚动条」 | 只把 `tr` 设成 `block`，`table` 还是 `display: table` —— 浏览器把 block 级 tbody 包进匿名 table-cell，宽度仍按列算 | `table` / `tbody` 都设 `display: block`，并 `col { width: auto }`（见 §5.1） |
 | 两个注册任务领到**同一个隐私邮箱**、两边都失败（日志里看不出原因） | 同一份 SQLite 库上起了**多个**后端进程：iCloud 取号的互斥是进程内 `RLock`，跨进程不互斥（§1.6） | 保证单进程（不加 `--workers` / 不 scale、不跑第二个 `main.py`）；真要扩进程先把锁换成跨进程原语（§1.6） |
+| Kiro 任务 28 轮全失败，日志里反复出现同一个「复用 AWS 账号登录」 | 复用失败不留任何标记（`source_email` 只在**成功**落库时写），而候选池按 FIFO 排序 → 每轮都重新选中同一个号。实测 2026-11-14：55 个 AWS 里 52 个已被 Kiro 用掉，剩下的候选只有 3 个，排第一的那个被连续选中 **55 次** | 失败记进**按任务分键**的进程内表（`source_claims._FAILED_SOURCES`），同一任务后续轮次换候选；不写库、不跨任务，一次抖动不永久判死（§5.5） |
+| 信明明到了，任务却一直等到「等码超时」 | 上游 IMAP 超时后**降级 Web API**，而降级路径的按收件人过滤不可靠：`WebClient.FindByAlias` 只对 To/主题/发件人做子串匹配，收件人信息缺失时命中 0 封。实测同一封存在的邮件 `method=imap` 读到 1 封、`method=web_api` 读到 0 封 | 等码读窄但**不能太小**（`OTP_READ_LIMIT=20` 是实测能稳定读到信的最小档位；`DEFAULT_READ_DAYS=2`），别把自己推过上游 15s 信封预算；降级信号经 `warning` 上报，等码当可恢复错误继续等（§5.5） |
+| 收件箱读一次要 20–35s，还时不时降级 | 等码发 `limit=50, days=3650`：上游信封预算是 `max(15s, limit×0.3s)`，`limit=50` 正好顶到 15s 悬崖；10 年窗口还要 SEARCH 上千封（实测同一主号 `total=1447`） | 等码收窄时间窗（`days=2`）+ 取 `limit=20`：实测 2–6s 且稳定 `imap`；`limit=5/10` 会被上游候选截断而**丢信**（同一别名读到 0 封），`limit=50` 会顶到 15s 预算悬崖并降级（§5.5） |
+| 上游明明能用，注册却一批一批报「熔断中，约 Ns 后重试」 | 熔断键只有 `base_url`：一个主号的收件读超时把**整台服务**判死，同一服务的其它主号一起被拒。2026-11-14 实测 212 次失败是这条 | 熔断分两级（服务级 / 主号级），单主号超时只挡自己；多个主号同时失败才升级为服务级（§5.5） |
+| 「检测」按钮对每个远程主号都报「API 秘钥权限不足」 | `POST /accounts/:id/check` 要写级权限，而注册用的 sk- 通常只有只读档 —— 读接口全 200，只有它 403 | 客户端在 `permission_denied` 时降级成只读探活（`GET /api/accounts`）；其它错误照抛（§5.5） |
+| 上游没挂，却不断出现 `Read timed out (read timeout=20)` | 客户端读超时（20s）短于上游自己的单请求预算（信封阶段最高 45s），于是「慢」必然被客户端先判死，再被记成一次上游失败 | 读超时 50s（长于上游预算），且工厂不写死更小的值（§5.5） |
+| 加了「上游抖动重试」之后，服务故障时日志反而更吵、请求更多 | 容错循环单独上线：失败一次就重试，等于**对已经故障的上游加倍请求**。实测同一窗口 fail-fast 发 1 次、容错后发 4 次 | 熔断必须先于容错上线：让 `services/icloud/upstream_gate.py` 在发请求前就拦住，容错才有意义（§5.5） |
 
 ### 5.1 窄屏（< 768px）的表格折叠
 
@@ -658,4 +677,26 @@ GUID 就交换；**两段都像或都不像时不动** —— 猜错比不猜更
 三条路都在真浏览器里用合成页验过（可见按钮 → `button`；禁用按钮 → `form`；
 `display:none` 的按钮 → `form`；无 form 无按钮 → `enter`；空输入框 → 不提交；
 没有 `#email` 只有 `data-testid=email` → 靠属性兜底仍能提交）。
+
+### 5.5 韧性改动的上线顺序：先熔断，后容错
+
+改「等验证码 / 调上游」这类链路时，**两项改动的顺序会决定它们互相抵消还是互相增强**：
+
+| 改动 | 单独上线 | 与熔断一起上线 |
+| --- | --- | --- |
+| 轮询容错（暂时性错误继续等） | 故障上游的请求数 **↑**（1 → 4） | 故障上游的请求数 **↓**（4 → 2） |
+| 熔断（连续失败后拒绝新请求） | 请求数 **↓**，但会把还在等码的任务一起判失败 | 两者互补 |
+
+判断依据不是「谁更简单」，而是**这项改动对「正在故障的那个资源」是加压还是减压**。
+容错本身是减压（少丢号），但它增加了对上游的尝试次数 —— 只有熔断能把这个增量收回去。
+
+落地时的两条硬约束：
+
+1. 熔断的键按**服务地址**分（`base_url`），不要用一个全局开关：挂 A 服务不该停 B；
+2. 熔断抛的是**可重试**失败（`UpstreamBusy`），地址不消耗 —— 否则「服务恢复」这件事会变成一批被标死的邮箱。
+
+回归护栏：`tests/test_icloud_upstream_gate.py`（熔断语义）+
+`tests/test_icloud_polling_resilience.py`（容错与错误预算）+
+`tests/test_icloud_read_throttle.py`（请求量控制）。
+
 

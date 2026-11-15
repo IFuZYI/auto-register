@@ -81,10 +81,14 @@ class RegisterTaskControl:
         self._next_attempt_id = 1
         self._active_attempt_ids: set[int] = set()
         self._skip_active_attempt_ids: set[int] = set()
+        #: 唤醒所有正在等的人。停止/跳过一置位就 set，等待方不用碎步轮询
+        #: —— 否则「把等待放长」会直接拖慢停止响应，两者被迫互相牵制。
+        self._wake = threading.Event()
 
     def request_stop(self) -> None:
         with self._lock:
             self._stop_requested = True
+        self._wake.set()
 
     def request_skip_current(self) -> None:
         with self._lock:
@@ -92,6 +96,7 @@ class RegisterTaskControl:
                 self._skip_active_attempt_ids.update(self._active_attempt_ids)
             else:
                 self._pending_skip_requests += 1
+        self._wake.set()
 
     def start_attempt(self) -> int:
         with self._lock:
@@ -106,6 +111,10 @@ class RegisterTaskControl:
         with self._lock:
             self._active_attempt_ids.discard(attempt_id)
             self._skip_active_attempt_ids.discard(attempt_id)
+            # 全部 worker 收尾后清掉唤醒信号：否则下一次 sleep 会被上一轮的
+            # 残留信号立刻唤醒，变成忙等。
+            if not self._active_attempt_ids:
+                self._wake.clear()
 
     def checkpoint(
         self,
@@ -130,6 +139,33 @@ class RegisterTaskControl:
     def is_stop_requested(self) -> bool:
         with self._lock:
             return self._stop_requested
+
+    def sleep(self, seconds: float, *, attempt_id: int | None = None) -> None:
+        """睡 `seconds` 秒，被停止/跳过则立刻醒来并抛对应中断。
+
+        与「碎步睡 + 反复 checkpoint」的区别：等待长度不再影响响应性。
+        睡 30 秒时点停止仍是毫秒级返回 —— 于是调用方可以放心把间隔调大
+        （降低上游压力），而不必担心停止按钮失灵。
+
+        实现上不用 `_wake.clear()`：多个 worker 共用一个 Event，谁 clear 谁
+        就可能吃掉别人的唤醒。这里只在 `wait()` 超时上做文章 —— 被 set 时
+        立即返回并查状态，没被 set 就睡到剩余时间用完。
+        """
+        remaining = max(float(seconds or 0), 0.0)
+        # 先查一次：已经叫停时不该白睡一整段
+        self.checkpoint(attempt_id=attempt_id)
+        if remaining <= 0:
+            return
+        deadline = time.monotonic() + remaining
+        while True:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                break
+            if not self._wake.wait(timeout=left):
+                break  # 睡满了
+            # 被唤醒：可能是停止、可能是跳过（也可能已被别的 worker 消费）
+            self.checkpoint(attempt_id=attempt_id)
+        self.checkpoint(attempt_id=attempt_id)
 
     def snapshot(self) -> dict[str, Any]:
         with self._lock:

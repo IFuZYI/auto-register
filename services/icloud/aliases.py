@@ -206,6 +206,13 @@ def claim_alias(
             icloud_alias_repository.set_fields(
                 existing["id"], pool_status=POOL_STATUS_IN_USE
             )
+            # 领到了 = 这个号是可用的，把历史失败计数清零。
+            #
+            # `mark_failed` 的 docstring 一直写着「领取成功时用 reset=True
+            # 清零」，但全仓没有生产调用点 —— 于是累计 3 次失败后
+            # `find_candidates` 会**永久**跳过这个别名，哪怕它后来每次都正常。
+            # Apple 每小时只给 5 个新地址，误杀一个好号的代价很高。
+            icloud_alias_repository.mark_failed(existing["id"], reset=True)
             logger.info("iCloud 号池：复用已入池的隐私邮箱 %s", existing.get("address"))
             refreshed = icloud_alias_repository.get(existing["id"]) or existing
             return _alias_to_dict(
@@ -259,8 +266,19 @@ def mark_alias_used(alias_id: int, *, platform: str = "") -> None:
     )
 
 
-def release_alias_claim(alias_id: int) -> None:
-    """把没跑完就被放弃的 `in_use` 别名放回 `available`。"""
+def release_alias_claim(alias_id: int, *, error: BaseException | None = None) -> None:
+    """把没跑完就被放弃的 `in_use` 别名放回 `available`。
+
+    `error` 是导致这次放弃的异常（调用方有就传）。它决定**要不要记这一次失败**：
+
+    * 上游故障（iCloud 网关挂掉、会话过期、限流）不是这个地址的问题 ——
+      记到它头上会让整池好号在几分钟内被集体判死，而 Apple 每小时只给
+      5 个新地址。这类情况只放回 `available`，计数不动。
+    * 其余失败（地址已被占用、被上游拒绝）照旧累加，让撞墙的地址排到队尾。
+
+    判据复用 `platforms.icloud.errors.is_upstream_outage`（仓库里已有的分类），
+    不在这里另造一套语义。
+    """
     from core.db.icloud_alias_repository import icloud_alias_repository
 
     alias = icloud_alias_repository.get(alias_id)
@@ -269,6 +287,17 @@ def release_alias_claim(alias_id: int) -> None:
     if (alias.get("pool_status") or "") != POOL_STATUS_IN_USE:
         return
     icloud_alias_repository.set_fields(alias_id, pool_status=POOL_STATUS_AVAILABLE)
+
+    if error is not None:
+        from platforms.icloud.errors import is_upstream_outage
+
+        if is_upstream_outage(error):
+            logger.info(
+                "iCloud 号池：%s 因上游不可用被放回（不计入失败）: %s",
+                alias.get("address"), error,
+            )
+            return
+
     # **记一次失败**：只放回 available 而不记账，等于把「这个号刚失败过」
     # 丢掉 —— 它回到队首，下次任务还是它，每次都撞同一堵墙（实测 2026-10-28：
     # 两次冒烟都取到同一个地址、两次都 429）。

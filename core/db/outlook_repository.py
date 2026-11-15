@@ -241,6 +241,81 @@ class OutlookRepository:
             s.refresh(row)
             return _from_model(row)
 
+    def release_stale_claims(self, *, lease_hours: float = 2.0) -> dict[str, Any]:
+        """回收租约过期的 `in_use` 行，返回 `{"released": n}`。
+
+        为什么需要它（2026-11-15 实测，T7-4）：领取时把号标成 `in_use` 并写
+        `last_used`；复位只发生在正常收尾（`set_account_status` /
+        `requeue_account`）。可一旦进程被 kill、任务在收尾前被 stop、或代码抛在
+        复位之前，这个号就**永久**停在 `in_use` —— 因为 `find_claimable` 的候选
+        状态是 `available / used / NULL / ""`，从不包含 `in_use`。
+
+        iCloud 渠道有 `release_stale_claims()`（2 小时租约）兜底，Outlook 一直没有。
+        候选池被吃干之后，界面还会提示「请先在设置页批量导入」，
+        把用户引向「再烧一批库存」而不是「回收泄漏的号」。
+
+        租约默认 2 小时：与 iCloud 别名池一致。注册单个号通常几分钟，
+        2 小时远大于任何正常路径，只回收真正被遗弃的号。
+        """
+        from datetime import datetime, timedelta, timezone
+
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=float(lease_hours or 2))
+        released = 0
+
+        store = OutlookRepository._store()
+        if store is not None:
+            for row in list(store.all()):
+                if str(row.get("status") or "") != "in_use":
+                    continue
+                last = row.get("last_used")
+                if last is None or str(last) == "":
+                    # 没有时间戳的 in_use 无法判定新旧 —— 也回收，
+                    # 否则它会永远卡住（这种行只可能来自异常路径）。
+                    store.update(row.get("id"), {"status": "available"})
+                    released += 1
+                    continue
+                try:
+                    when = last if isinstance(last, datetime) else datetime.fromisoformat(
+                        str(last).replace("Z", "+00:00")
+                    )
+                except (TypeError, ValueError):
+                    store.update(row.get("id"), {"status": "available"})
+                    released += 1
+                    continue
+                if when.tzinfo is None:
+                    when = when.replace(tzinfo=timezone.utc)
+                if when < cutoff:
+                    store.update(row.get("id"), {"status": "available"})
+                    released += 1
+            return {"released": released}
+
+        from sqlmodel import select
+
+        from . import mailbox_pool_session
+
+        with mailbox_pool_session("outlook") as s:
+            rows = list(s.exec(select(OutlookAccountModel)).all())
+            for row in rows:
+                if str(row.status or "") != "in_use":
+                    continue
+                when = getattr(row, "last_used", None)
+                if when is None:
+                    row.status = "available"
+                    row.updated_at = datetime.now(timezone.utc)
+                    s.add(row)
+                    released += 1
+                    continue
+                if when.tzinfo is None:
+                    when = when.replace(tzinfo=timezone.utc)
+                if when < cutoff:
+                    row.status = "available"
+                    row.updated_at = datetime.now(timezone.utc)
+                    s.add(row)
+                    released += 1
+            if released:
+                s.commit()
+        return {"released": released}
+
     @staticmethod
     def delete(row_id: Any) -> bool:
         store = OutlookRepository._store()

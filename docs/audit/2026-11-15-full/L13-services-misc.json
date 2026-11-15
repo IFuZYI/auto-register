@@ -1,0 +1,299 @@
+{
+  "lane": "L13-services-misc",
+  "head": "fca2eec",
+  "dirty": true,
+  "reviewed_files": [
+    "api/sms.py",
+    "core/base_captcha.py",
+    "core/captcha_providers.py",
+    "core/mail_import_sources.py",
+    "services/__init__.py",
+    "services/chatgpt_maintenance.py",
+    "services/local_maintenance.py",
+    "services/log_cleanup.py",
+    "services/sms/__init__.py",
+    "services/sms/constants.py",
+    "services/sms/controller.py",
+    "services/sms/parsing.py",
+    "services/sms/providers.py",
+    "services/sms_service.py",
+    "services/solver_manager.py",
+    "services/turnstile_solver/__init__.py",
+    "services/turnstile_solver/api_solver.py",
+    "services/turnstile_solver/browser_configs.py",
+    "services/turnstile_solver/db_results.py",
+    "services/turnstile_solver/start.py"
+  ],
+  "findings": [
+    {
+      "id": "L13-1",
+      "title": "solver 代理格式错误时把带口令的代理 URL 写进 solver.log（异常消息 + debug 行）",
+      "severity": "P1",
+      "file": "services/turnstile_solver/api_solver.py",
+      "line": 942,
+      "evidence": "`api_solver.py:942`（以及 :979）`raise ValueError(f\"Invalid proxy format: {proxy}\")` —— `proxy` 是原始 URL，含 `user:pass`。`grep -n \"Invalid proxy format\\|Proxy: {proxy}\" services/turnstile_solver/api_solver.py` → 942/979/1028；`:1028` 还有 `logger.debug(f\"... | Proxy: {proxy}\")`（未打码，`--debug` 时每次求解都打）。触发路径：`SOLVER_PROXY`/`proxies.url` 是 `user:pass@host:1080`（无 `://`，正是 L04-3 记录的常见粘贴格式）→ `:914 proxy.split('://')` 抛 ValueError → 消息带完整口令；密码里含 `:` 时 `:916 auth.split(':')` 同样炸。该协程由 `:1231 self._spawn(...)` 起、从不 `await`/取 `.result()`（`_solve_tasks` 完成即 discard，:1235），所以 asyncio 在 GC 时按默认 handler 打印 `Task exception was never retrieved` + 异常文本；`services/solver_manager.py:108-109` 把 solver 的 stdout/stderr 重定向到 `LOG_DIR/solver.log`（`core/paths.py:102` = `DATA_DIR/logs`，持久卷）。",
+      "impact": "生产住宅代理的账号口令明文落到持久化的 solver.log（还会随 DATA_DIR 备份/导出走）。运维把日志贴进 issue、或备份卷被拿到，代理即失守；同一个出口还被上千个账号绑定。",
+      "fix_hint": "异常消息里改用 `self._redact(proxy)`（同文件 :207 已有）；`logger.debug` 的 Proxy 字段同样换成 `_redact(proxy)`；`_spawn` 的 done_callback 里 `task.exception()` 显式取一次并只记录 `type(exc).__name__`，避免 asyncio 把原始消息打进 stderr。",
+      "class": "credential-leak"
+    },
+    {
+      "id": "L13-2",
+      "title": "代理/new_context 失败发生在 try/finally 之外：浏览器既不归还也不关闭，任务永不落结果",
+      "severity": "P1",
+      "file": "services/turnstile_solver/api_solver.py",
+      "line": 942,
+      "evidence": "`:895 index, browser, browser_config = await self.browser_pool.get()` 之后，代理解析与 `context = await browser.new_context(...)`（:940/:963/:977/:990/:999）都在 `try:`（:1026）**之前**；关闭 context、归还浏览器的 `finally` 在 :1176-1196。`:942`/`:979` 的 `raise ValueError` 一抛，协程直接结束：既不 `save_result`（`/result` 永远返回 `{\"status\":\"processing\"}`，:1270-1271），也不 `browser.close()`/`browser_pool.put()`。`_ensure_pool`（:308）随后按 `missing = thread_count - qsize - active_tasks` 再建一只，旧浏览器进程（camoufox 约 250MB）成为无引用孤儿。",
+      "impact": "一次格式不合法的代理 → 该任务被调用方 `core/base_captcha.py:99-125` 轮询满 60×2s=120s 才超时（不是立刻失败），同时泄漏一个浏览器进程；反复触发会把 2G 机器打爆。",
+      "fix_hint": "把代理解析 + `new_context` 一起包进 :1026 的 try（或单独 try/except：失败时 `save_result(..., CAPTCHA_FAIL)` 并 `browser_pool.put` 回去）；代理解析失败属于配置错误，应在 `_pick_proxy` 里就校验并降级直连，而不是让单个任务炸掉整只浏览器。",
+      "class": "functional"
+    },
+    {
+      "id": "L13-3",
+      "title": "崩溃的浏览器被放回池里，且空闲回收在持续流量下永不触发 → 该槽位永久 CAPTCHA_FAIL",
+      "severity": "P1",
+      "file": "services/turnstile_solver/api_solver.py",
+      "line": 901,
+      "evidence": "`:897-904`：`if hasattr(browser,'is_connected') and not browser.is_connected(): ... await self.browser_pool.put((index, browser, browser_config)); await save_result(..., {\"value\":\"CAPTCHA_FAIL\"}); return` —— 断连的浏览器被原样放回。`_ensure_pool`（:308）`missing = thread_count - qsize - active_tasks` 把它算作「在池」，不会补新的。唯一自愈路径是空闲回收：`_reap_allowed`（:315）要求 `time.time() - self._last_used_at >= ttl`（默认 300s），而 `_solve_turnstile` 的 finally（:884-890）在**每次**请求结束时都刷新 `_last_used_at` —— 只要注册任务每 5 分钟来一次，回收就永不发生。",
+      "impact": "一次浏览器崩溃/OOM 之后，抽到该槽位的求解全部秒回 `ERROR_CAPTCHA_UNSOLVABLE`；`SOLVER_THREADS=1`（<4GB 机器的默认，solver_manager.py:43-44）时等于 Turnstile 全链路瘫痪，直到手动重启 solver。",
+      "fix_hint": "断连分支改成 `await browser.close()`（吞异常）后直接 `return`，让 `_ensure_pool` 下一轮补新的；或 `put` 前打标记、`get` 时跳过并重建。另加一个「连续 N 次 CAPTCHA_FAIL 就重建整池」的熔断。",
+      "class": "functional"
+    },
+    {
+      "id": "L13-4",
+      "title": "/turnstile 接受任意 URL 且无鉴权：盲 SSRF + 把住宅代理当开放代理用",
+      "severity": "P2",
+      "file": "services/turnstile_solver/api_solver.py",
+      "line": 1034,
+      "evidence": "`:1205-1225` `url = request.args.get('url')` → 存结果 → `_spawn(self._solve_turnstile(...))`；`:1034 await page.goto(url, wait_until='networkidle', timeout=30000)`。全文件没有任何 scheme/host 白名单（`grep -n \"urlparse\\|allowlist\\|private\\|169.254\\|127.0.0.1\" services/turnstile_solver/api_solver.py` 只命中代理解析），`file://`、`http://169.254.169.254/latest/meta-data/`、`http://127.0.0.1:8000/api/...` 都会被真实浏览器打开。路由注册在 :253，`GET` 方法、无任何鉴权。",
+      "impact": "任何能连到 8889 的进程/网页都能让服务器用自己的出口（且是付费住宅代理）访问任意地址。因为方法是 GET 且无鉴权，运维浏览任意恶意页面时一个 `<img src=\"http://127.0.0.1:8889/turnstile?url=...\">` 就能触发（盲 SSRF，响应跨域读不到，故 P2）：可用于探测内网/打满浏览器池（每请求一个后台任务、无并发上限，见 L13-20）。",
+      "fix_hint": "`process_turnstile` 里先 `urlsplit`：只允许 `http/https`，解析 host 后拒绝私网/回环/链路本地（`ipaddress.ip_address(...).is_private` 等）与 `file:`/`data:`；再加一个可选的共享 token（`SOLVER_AUTH_TOKEN`）校验 header/query，默认只绑 127.0.0.1。",
+      "class": "functional"
+    },
+    {
+      "id": "L13-5",
+      "title": "solver 自己的 CLI 默认 --host 0.0.0.0：README 的手动启动方式绕过 127.0.0.1 兜底",
+      "severity": "P2",
+      "file": "services/turnstile_solver/api_solver.py",
+      "line": 1367,
+      "evidence": "`api_solver.py:1367` `parser.add_argument('--host', type=str, default='0.0.0.0', ...)`；`start.py:45 app.run(host=args.host, port=int(args.port))`。`README.md:345` 教用户手动跑 `python services/turnstile_solver/start.py --browser_type camoufox --port 8889`（不带 `--host`）→ 监听所有网卡。只有 `services/solver_manager.py:56-67 _solver_bind_host()` 在自动拉起时才显式传 `127.0.0.1`；`core/base_captcha.py:130-145 LocalSolverCaptcha.start_solver` 同样不传 `--host`（直接 `Popen`），也走 0.0.0.0。",
+      "impact": "照 README 手动启动、或用 `LocalSolverCaptcha.start_solver()` 的部署，会把**无鉴权**的 `/turnstile`（任意 URL + 代理）暴露到局域网/公网，与 solver_manager 注释里「绝不能直接对外」的结论自相矛盾。",
+      "fix_hint": "`--host` 默认改 `127.0.0.1`，跨容器场景显式 `--host 0.0.0.0`（compose 已经这么设 `SOLVER_BIND_HOST`）；`start_solver()` 补 `--host 127.0.0.1`；README 的示例同步。",
+      "class": "functional"
+    },
+    {
+      "id": "L13-6",
+      "title": "results_db 对「已解出」的结果永不清理：每解一次泄漏一个 dict，进程内无上界",
+      "severity": "P2",
+      "file": "services/turnstile_solver/db_results.py",
+      "line": 23,
+      "evidence": "`db_results.py:23` `if isinstance(res, dict) and now - res.get('createTime', now) > days_old * 86400:` —— 已解出的结果由 `api_solver.py:1140/1168` 存成 `{\"value\": token, \"elapsed_time\": ...}`，**没有 createTime**，`get('createTime', now)` 取默认 `now` → 差值 0 → 永远不删；只有 pending 项（`api_solver.py:1220-1227` 带 createTime）会被清。实测（只读探针，直接 import 该模块，无网络/无文件写入）：\n```\npython3 - <<'PY'\nimport sys, asyncio, time\nsys.path.insert(0, \"services/turnstile_solver\")\nimport db_results as d\nasync def main():\n    await d.save_result(\"t1\",\"turnstile\",{\"value\":\"TOKEN\",\"elapsed_time\":1.2})\n    await d.save_result(\"t2\",\"turnstile\",{\"status\":\"CAPTCHA_NOT_READY\",\"createTime\":int(time.time())-8*86400})\n    n = await d.cleanup_old_results(days_old=7)\n    print(\"deleted:\", n, \"remaining:\", sorted(d.results_db))\nasyncio.run(main())\nPY\n```\n→ `deleted: 1 remaining: ['t1']`（只有带 createTime 的 pending 项被删，已解出的 t1 留下）。",
+      "impact": "solver 是常驻进程，`results_db` 每条求解留一个 dict（token 字符串 + 计时）永不释放；按每天数百次求解、跑几周算，内存单调上涨，最终把本已紧张的 2G 机器压到 swap。",
+      "fix_hint": "solved 结果也写入 `createTime`（或统一用 `finishedAt`）；`cleanup_old_results` 用 `res.get('createTime') or res.get('finishedAt')`，取不到时按 `now` 之外的值处理（如直接删）；再给 dict 加个硬上限（>10000 条时淘汰最旧）。",
+      "class": "perf"
+    },
+    {
+      "id": "L13-7",
+      "title": "_close_pool 从不 playwright.stop()，重建时又覆盖 _playwright → 每次回收泄漏一个 driver 进程",
+      "severity": "P2",
+      "file": "services/turnstile_solver/api_solver.py",
+      "line": 373,
+      "evidence": "`_close_pool`（:347-373）关掉池内 browser、`session.__aexit__`，最后只 `self._playwright = None`；`grep -n \"playwright.stop\" services/turnstile_solver/api_solver.py` → 无命中。`_initialize_browser`（:404-419）每次补齐都 `playwright = await async_playwright().start(); self._playwright = playwright`，直接覆盖上一个实例。仅 chromium/chrome/msedge 模式（:412-419）走这条；camoufox 由 `AsyncCamoufox` 会话管理。",
+      "impact": "空闲回收（默认 300s TTL）+ 下一次请求重建，每个周期泄漏一个 node driver 进程（几十 MB）；跑几天就是几十个孤儿，正是 :257-261 注释声称已修好的那个问题在 chromium 模式下的残留。",
+      "fix_hint": "`_close_pool` 末尾 `if self._playwright is not None: try: await self._playwright.stop() except Exception: ...; self._playwright = None`；`_initialize_browser` 里先复用已有的 `self._playwright`，不要无条件 `start()`。",
+      "class": "perf"
+    },
+    {
+      "id": "L13-8",
+      "title": "is_running() 把「任何 <500 的响应」当成自己在跑：端口被别的服务占用时永不启动、请求全打到错的服务",
+      "severity": "P2",
+      "file": "services/solver_manager.py",
+      "line": 89,
+      "evidence": "`solver_manager.py:86-91`：`r = requests.get(f\"{_solver_url()}/\", timeout=2); return r.status_code < 500`；`start()` :100-102 `if is_running(): print(\"[Solver] 已在运行\"); return`。404/401/403 都算「在跑」。`_solver_url()` 默认 `http://127.0.0.1:8889`（:52-53）。",
+      "impact": "8889 被任何别的进程占用（另一个 checkout 的 solver、开发服务器、反代）时，管理器不启动自己的 solver，`LocalSolverCaptcha` 把 `/turnstile` 发给陌生服务 → 404/HTML → `raise_for_status()`/`r.json()` 抛错，所有 Turnstile 求解失败；而 `/api/solver/status` 还报「运行中」，排查方向被带偏。",
+      "fix_hint": "加一个可识别的健康端点（如 `/healthz` 返回 `{\"service\":\"turnstile-solver\",\"pid\":...}`），`is_running()` 校验该字段而不是状态码；不匹配时明确报「8889 被其它进程占用」并拒绝启动/重启。",
+      "class": "functional"
+    },
+    {
+      "id": "L13-9",
+      "title": "solver 崩溃后无人重启，且 stop() 对已退出的子进程不 wait() → 永久僵尸 + 只能手动恢复",
+      "severity": "P2",
+      "file": "services/solver_manager.py",
+      "line": 166,
+      "evidence": "`start_async()` 只在 `main.py:193` 的 lifespan 里调一次；`grep -rn \"solver_manager\" --include=*.py .`（排除 .worktrees）只命中 main.py 的 `/api/solver/status`、`/api/solver/restart` 与启动/停止，没有任何周期性探活。`stop()` :166 `if _proc and _proc.poll() is None:` —— 子进程已经退出时整段被跳过，`_proc.wait()` 不会执行，随后 :179 `_proc = None` 丢掉句柄。",
+      "impact": "solver 被 OOM/segfault 杀掉后（2G 机器上 camoufox 很常见），Turnstile 全链路一直失败到有人手动点重启；死掉的子进程留在进程表里当 `<defunct>`，容器里 `init: true` 也不会替父进程收尸。",
+      "fix_hint": "在 scheduler 或一个 daemon 线程里每 30-60s `poll()` 一次 `_proc`：已退出 → `wait()` 收尸并 `start()`；`stop()` 里无论 `poll()` 结果都 `try: _proc.wait(timeout=1) except: ...`。",
+      "class": "functional"
+    },
+    {
+      "id": "L13-10",
+      "title": "接码 API Key 走 query string，requests 的 HTTPError 把整条 URL（含 api_key）带进日志/响应",
+      "severity": "P2",
+      "file": "services/sms/providers.py",
+      "line": 186,
+      "evidence": "`providers.py:181-187`：`payload[\"api_key\"] = self.api_key` → `requests.get(self.base_url, params=payload, ...)` → `resp.raise_for_status()`。requests 的 HTTPError 文本包含完整 URL。只读复现（不联网，构造 Response）：`python3 -c \"import requests;r=requests.Response();r.status_code=401;r.url='https://smsbower.page/stubs/handler_api.php?api_key=SECRETKEY123&action=getBalance';r.reason='Unauthorized';r.raise_for_status()\"` → `HTTPError -> 401 Client Error: Unauthorized for url: https://smsbower.page/stubs/handler_api.php?api_key=SECRETKEY123&action=getBalance`。`api/sms.py:97` 把这个 `exc` 原样打进日志：`logger.warning(\"查询短信余额失败（上游原文只进日志）: %s\", exc)`（注释只说「上游原文」，没意识到 URL 里有 key）；`api/sms.py:112` 还会 `detail=f\"查询国家排名失败: {exc}\"` 回给前端。",
+      "impact": "任何 4xx（key 失效、限流、IP 被封——正是用户会来点「查余额」的场景）都会把付费接码平台的 key 写进服务端日志，并被用户截图/贴日志带走；命中 :112 时直接回显到浏览器。",
+      "fix_hint": "`_request` 里 `try: resp.raise_for_status() except requests.HTTPError as exc: raise RuntimeError(f\"HTTP {resp.status_code} {resp.reason}\") from None`（不要带 URL）；`api/sms.py` 的 detail 用固定文案 + 状态码，绝不插值 requests 异常。",
+      "class": "credential-leak"
+    },
+    {
+      "id": "L13-11",
+      "title": "自动维护复用同一个平台实例，代理只在非空时赋值 → 没代理的账号继承上一个账号的代理",
+      "severity": "P1",
+      "file": "services/local_maintenance.py",
+      "line": 457,
+      "evidence": "`local_maintenance.py:435 instance = get(platform)(config=RegisterConfig(extra=config_store.get_all()))` 在循环外只建一次；循环内 `:455-457 proxy = resolve_action_proxy(acc); if proxy: instance.config.proxy = proxy` —— 没有 `else: instance.config.proxy = \"\"`。`resolve_action_proxy`（services/action_execution.py:44-69）在「无绑定且代理池取不到」时返回空串。",
+      "impact": "一轮自动检测/刷新里，只要前面某个账号拿到了代理、后面某个账号解析为空（池耗尽、绑定失效且池空），后者就会用**前一个账号的代理出口（含其账号口令）**去探活/刷 token。刷新请求从错误 IP 发出，可能直接把会话打成失效/风控；日志里完全看不出来。",
+      "fix_hint": "无条件赋值：`instance.config.proxy = proxy or \"\"`；更稳的是每个账号新建实例（或 `instance.config = RegisterConfig(...)` 重置）。加一条用例：两个账号，第一个有代理第二个没有，断言第二次 execute_action 时 config.proxy 为空。",
+      "class": "functional"
+    },
+    {
+      "id": "L13-12",
+      "title": "全局 _SMS_VERIFY_LOCK 在「不复用号码」的默认配置下也被持有整个验证窗口，所有接码任务被串行化",
+      "severity": "P2",
+      "file": "services/sms/controller.py",
+      "line": 94,
+      "evidence": "`controller.py:93-95`：`if isinstance(provider, SmsActivateProvider) and not self._verify_lock_acquired: _facade._SMS_VERIFY_LOCK.acquire()`，只在 `report_success()`（:201）或 `cleanup()`（:240）释放。`create_sms_provider` 传的是 `reuse_phone_to_max=_safe_bool(config.get(\"sms_reuse_phone\"), False)`（:54）→ 默认关闭复用，但锁照拿。缓存本身的读写早已由 `_SMS_CACHE_LOCK` 保护（providers.py:457）。`_release_lock`（:242-248）吞掉 `RuntimeError`，acquire 也没有超时。",
+      "impact": "并发的注册任务在 add-phone 这一步全部排队：一个号从租到收码最长 80s×3 次尝试，期间其它任务的 `get_phone()` 全阻塞——默认配置下这个串行化没有任何收益。更糟的是没有超时：某个任务因异常没走到 cleanup（或跨线程 release 失败被吞），这把 RLock 就永久被占，之后所有接码任务无限期挂起。",
+      "fix_hint": "只有 `provider.reuse_phone_to_max` 为真时才拿锁；`acquire(timeout=…)` 并在超时时抛出可读错误；`_release_lock` 记录 `RuntimeError` 而不是静默吞掉（跨线程 release 是真实风险）。",
+      "class": "perf"
+    },
+    {
+      "id": "L13-13",
+      "title": "wait_for_code 把 unknown 状态（BAD_KEY/无余额/服务码错）当成「还没来短信」，白等满超时后再租一个号",
+      "severity": "P2",
+      "file": "services/sms/providers.py",
+      "line": 639,
+      "evidence": "`providers.py:625-660` 的轮询只处理两种状态：`:639 if result.get(\"status\") == \"cancel\"`、`:642 if result.get(\"status\") == \"ok\"`，其余（含 `unknown`）直接进入下一轮 `time.sleep(poll)`。而 `get_status_v2` 把平台错误映射成 `{\"status\":\"unknown\",\"raw\":...}`（:579-580），v1 的 `_parse_sms_status_text` 对 `BAD_KEY` 之类也返回 `unknown`（services/sms/parsing.py:72）。",
+      "impact": "key 失效/余额不足/服务码配错这类**永久错误**与「暂时没短信」不可区分：每次尝试都等满 timeout（add_phone 传 80s），然后上层 cancel + 换号，最多 3 次 → 为一个配置错误白付 2-3 个号的租金，日志里只有一行 `v2=unknown BAD_KEY`。",
+      "fix_hint": "在 wait_for_code 里识别致命 token（`BAD_KEY`/`NO_BALANCE`/`BANNED`/`WRONG_SERVICE_ID`/`WRONG_COUNTRY`）立即抛 `RuntimeError`；或「连续 N 次 unknown 且 raw 不变」就中止。",
+      "class": "functional"
+    },
+    {
+      "id": "L13-14",
+      "title": "接码号缓存写死 <repo>/data，绕过 DATA_DIR：容器里落在镜像层，且 0644 含 key 指纹",
+      "severity": "P2",
+      "file": "services/sms_service.py",
+      "line": 57,
+      "evidence": "`services/sms_service.py:55-59`：`cache_dir = Path(__file__).resolve().parents[1] / \"data\"; cache_dir.mkdir(parents=True, exist_ok=True); return cache_dir / \".sms_phone_cache.json\"`。而 `core/paths.py:77` 是唯一口径：`DATA_DIR = _resolve_dir(_env(\"DATA_DIR\"), project_root() / \"data\")`；`docker-compose.yml:47` 设 `DATA_DIR: /runtime` 并把 `./data` 挂到 `/runtime`，`.dockerignore:8` 又把 `data/` 排除出镜像 → 容器里 `/app/data` 根本不存在，运行时 `mkdir` 出来的是**镜像层**，不是持久卷。`_save_cache`（providers.py:370-382）用 `path.write_text(...)`，默认 0644，内容含 `api_key_hash`（sha256，parsing.py:19-20）、`phone_number`、`activation_id`。",
+      "impact": "（1）号池复用缓存不随 DATA_DIR 走：容器重建即丢、备份/导出不含它，和 docs/DATA_DIRECTORY.md 承诺的「只挂一个卷」相悖；（2）只读根文件系统的加固部署里 `mkdir` 会抛 PermissionError，而它在 `get_number` 已经租到号之后执行（providers.py:493），异常冒出去时 `controller.activation` 还没赋值 → `cleanup()` 无从 cancel，白付一个号；（3）同机其它用户可读手机号与 key 指纹。",
+      "fix_hint": "改成 `from core.paths import DATA_DIR; return DATA_DIR / \".sms_phone_cache.json\"`；写入用 `os.open(..., 0o600)`/`path.chmod(0o600)`；`api_key_hash` 换成 HMAC（带进程内随机 key）或直接去掉（只用于区分不同 key 的缓存，sha256 前缀足够且不可逆性不是重点）。",
+      "class": "data-integrity"
+    },
+    {
+      "id": "L13-15",
+      "title": "调度器失败不推进 last_run_at 且无退避：永久失败的维护任务每 60s 重试一次并 print 到 stdout",
+      "severity": "P2",
+      "file": "core/scheduler.py",
+      "line": 181,
+      "evidence": "`core/scheduler.py:173-186`：`try: job.runner(); job.last_run_at = time.time() except Exception as e: print(f\"[Scheduler] 周期任务 {job.name} 错误: {e}\")` —— 注释明确「失败时不推进 last_run_at，下一次 tick（默认 60s）就重试」，没有失败计数、没有退避上限。`_loop` 是单线程串行（:151-152），一个 job 跑多久，后面的 job 就等多久；`local_maintenance.py:447-448` 每个账号 `time.sleep(3)`，全量探活 200 个号 ≈ 10 分钟。",
+      "impact": "配置错误/DB 锁/平台未注册这类永久失败会以 60s 频率无限重试，日志被刷屏（异常文本还可能带上游 URL 与 key，见 L13-10）；同时长任务把 `log_auto_cleanup`、面板同步等其它 job 全部饿住，维护窗口内其它任务实际停摆。",
+      "fix_hint": "失败计数 + 指数退避（60s→5m→30m→1h 封顶），连续 N 次后把 job 标记为 degraded 并只在状态变化时打日志；用 `logger.exception` 代替 `print`；长任务改成线程池/子线程执行，避免串行饿死。",
+      "class": "perf"
+    },
+    {
+      "id": "L13-16",
+      "title": "run_log_cleanup(now=...) 在 SQLite 后端被忽略：cutoff 由墙钟重算，与 JSON 后端行为不一致",
+      "severity": "P3",
+      "file": "services/local_maintenance.py",
+      "line": 665,
+      "evidence": "`local_maintenance.py:636 cutoff_dt = (now or datetime.now(timezone.utc)) - timedelta(days=keep_days)` 只用于 `:641 task_log_repository.cleanup_json(cutoff_dt)`；SQLite 分支 `:665 summary[\"deleted\"] = int(cleanup_task_logs(keep_days))`，而 `services/log_cleanup.py:41` 内部又 `cutoff = retention_cutoff(older_than_days)` = `datetime.now(timezone.utc) - timedelta(days=...)` —— 传进来的 `now` 完全没参与。",
+      "impact": "默认（SQLite）后端下 `now=` 参数是摆设：测试/回填想用固定时间点做确定性清理时，实际按墙钟删；同一函数在 JSON 后端却按 `now` 删，两个后端语义分叉。正常生产调用（now=None）无影响，故 P3。",
+      "fix_hint": "给 `cleanup_task_logs` 加可选 `now`/`cutoff` 参数并在 SQL 分支使用同一个 `cutoff_dt`；`run_log_cleanup` 两个分支都传 `cutoff_dt`。",
+      "class": "contract"
+    },
+    {
+      "id": "L13-17",
+      "title": "CaptchaChain 缺 solve_image 且 solve_turnstile 只收 **kwargs，与 VerificationHandler 的调用签名不兼容（当前是死代码）",
+      "severity": "P3",
+      "file": "core/captcha_providers.py",
+      "line": 382,
+      "evidence": "`core/captcha_providers.py:353 class CaptchaChain` 只有 `solve_aws_waf(**kwargs)`（:379）与 `solve_turnstile(**kwargs)`（:382），**没有** `solve_image`（文件里两个 `solve_image` 分别属于 CapMonster :179 与 AiVision :275）。`modules/verification/challenges.py:26-29` 却按位置调用：`self._captcha.solve_turnstile(challenge.page_url, challenge.site_key)` / `self._captcha.solve_image(challenge.image_b64)`。`build_captcha_chain()` 被注入 `platforms/aws/plugin.py:98`、`platforms/kiro/plugin.py:364`，但下游 `AwsBuilderIdClient` 只调 `solve_aws_waf`（platforms/aws/client.py:269）；`grep -rn \"VerificationHandler\" --include=*.py .` 只有定义与 `modules/verification/__init__.py` 的导出，无调用方。",
+      "impact": "今天不触发；一旦有人把 CaptchaChain 接到 VerificationHandler（它本来就是「把 captcha solver 适配成 challenge」的适配器），turnstile 会 `TypeError: takes 1 positional argument`，image 会 `AttributeError: no attribute 'solve_image'`——错误点在离配置很远的验证步骤。",
+      "fix_hint": "给 CaptchaChain 补 `solve_image`（转发给实现了该能力的 provider，全不支持时抛 CaptchaProviderError）并把 `solve_turnstile` 改成 `(website_url, website_key)` 位置参数；或者删掉 VerificationHandler，改用 Protocol 约束。",
+      "class": "dead-code"
+    },
+    {
+      "id": "L13-18",
+      "title": "已分配到号但信息不完整时直接 continue 再租：前一个 activation 既不取消也不记录，可能一次租号扣两次费",
+      "severity": "P3",
+      "file": "services/sms/providers.py",
+      "line": 489,
+      "evidence": "`providers.py:479 for action in (\"getNumberV2\", \"getNumber\")`；成功返回后 `:487-491 activation_id = str(info.get(\"activationId\") or \"\"); phone = self._format_phone(info); if not activation_id or not phone.strip(\"+\"): failures.append(...); continue` —— 这里没有 `self.cancel(activation_id)`，循环继续用下一个 action 再租一个。`_format_phone`（:432-441）只认 `phoneNumber`/`countryPhoneCode` 两个键。",
+      "impact": "平台返回 `activationId` 但号码字段缺失/改名（getNumberV2 各站字段不完全一致）时，第一次分配已经计费且没有被取消、也没有写进 `current_activation`，上层之后想 cancel 都找不到 id；第二次 getNumber 再扣一次。",
+      "fix_hint": "`if activation_id: self.cancel(activation_id)` 后再 continue；`_format_phone` 兼容 `phone`/`number` 别名；把「已分配未使用」的 id 记进日志便于对账。",
+      "class": "functional"
+    },
+    {
+      "id": "L13-19",
+      "title": "solver.log 无轮转，且每次求解固定 print 两行：长期运行磁盘单调增长",
+      "severity": "P3",
+      "file": "services/solver_manager.py",
+      "line": 109,
+      "evidence": "`services/solver_manager.py:108-109` `log_path = str(LOG_DIR / \"solver.log\"); _log_file = open(log_path, \"a\", encoding=\"utf-8\")`，`stop()` 只 close，从不 rotate/truncate；`services/turnstile_solver/db_results.py:13` 每次 `save_result` 都 `print(f\"[系统] 任务 {task_id} 状态更新: {data.get('value','正在处理')}\")` —— 每个 /turnstile 请求至少 2 行（提交 + 结果）。`services/log_cleanup.py` 只删 `task_logs`/`task_runs` 表行，不碰这个文件。",
+      "impact": "长跑实例的 solver.log 在 DATA_DIR 卷里无上界增长（还混着 L13-1 的口令泄漏）；compose 的 json-file 10m×3 限制只作用于容器 stdout，管不到这个文件。",
+      "fix_hint": "用 `logging.handlers.RotatingFileHandler(maxBytes=10MB, backupCount=3)` 或给 solver.log 配 logrotate；`save_result` 的 print 降到 debug 级。",
+      "class": "perf"
+    },
+    {
+      "id": "L13-20",
+      "title": "/turnstile 无并发上限：每个请求起一个后台任务并无限期阻塞在 browser_pool.get()，可被打满内存",
+      "severity": "P2",
+      "file": "services/turnstile_solver/api_solver.py",
+      "line": 1231,
+      "evidence": "`:1205-1235` 每个请求 `save_result`（写一条带 url 的 pending 项）后 `_solve_task = self._spawn(self._solve_turnstile(...)); self._solve_tasks.add(_solve_task)`，没有信号量/队列上限/按 IP 限流；`_solve_turnstile` 先 `_ensure_pool()` 再 `:895 await self.browser_pool.get()` —— 池只有 `thread_count`（默认 1-2）只浏览器，第 3 个及以后的任务会**无限期**挂在 `Queue.get()` 上。`_ensure_pool`（:308）只补浏览器、不看排队任务数。",
+      "impact": "无鉴权的 GET 循环（或 L13-4 里任意网页的 `<img>` 批量触发）可以在几秒内堆出上千个协程 + 上千条 pending dict（每条含完整 url/sitekey），内存单调上涨；真正的注册任务排在它们后面，`/result` 一直 processing。属于低成本 DoS。",
+      "fix_hint": "用 `asyncio.Semaphore(thread_count*2)` 包住求解（超限直接回 `ERROR_BUSY`），或对 `_solve_tasks` 设上限（如 200）并在 `/turnstile` 入口 429；pending 项加 TTL，任务结束/超时即删。",
+      "class": "perf"
+    }
+  ],
+  "checked_and_clean": [
+    {
+      "item": "services/turnstile_solver/start.py",
+      "how": "读全文（45 行）：只做 sys.path 插入、camoufox LD_LIBRARY_PATH 预处理和 parse_args/create_app/app.run 转发，无业务逻辑、无硬编码凭据。`--host` 默认值的问题在 api_solver.py:1367（L13-5），不在本文件。"
+    },
+    {
+      "item": "services/turnstile_solver/browser_configs.py",
+      "how": "读全文：纯 UA / Sec-CH-UA 生成，版本从 4 个常量里 random.choice，无 IO、无状态、无密钥。"
+    },
+    {
+      "item": "services/__init__.py / services/turnstile_solver/__init__.py",
+      "how": "`wc -c` 均为 0 字节，无导出、无副作用。"
+    },
+    {
+      "item": "core/mail_import_sources.py",
+      "how": "读全文：纯映射表。`_LEGACY_PROVIDER_ALIASES` 把已删渠道收敛成空串是刻意行为（注释说明「不悄悄改写会让任务消耗号池」）；`normalize_mail_provider` 的透传值与注册表一致（core/mailboxes/channels/outlook/__init__.py:35-42 注册 outlook/microsoft/mail_import），hotmail 只作为 mail_import_source 存在、由 resolve_mail_provider_from_source 固定返回 microsoft。未发现读写分叉。"
+    },
+    {
+      "item": "services/log_cleanup.py 的删除边界与路径",
+      "how": "`MAX_RETENTION_DAYS=3650`、`retention_cutoff` 用 aware UTC（:34-36）、API 侧 `LogCleanupRequest.older_than_days = Field(ge=1, le=MAX_RETENTION_DAYS)`（api/tasks.py:98）、自动清理侧 `clamp_days` 同样 max(1,min(3650,...))（local_maintenance.py:171-177）→ 不存在 0 天/负天全删路径。`cleanup_task_runs` 只删 done/failed/stopped（:68-73），running/pending 不动；`cleanup_json` 在非 JSON 后端返回 None（core/db/task_log_repository.py:110-114），SQLite 分支才会执行。只按 DB 行删除，无文件路径参数，无路径穿越面。"
+    },
+    {
+      "item": "services/chatgpt_maintenance.py 的重试与禁用策略",
+      "how": "`record_auto_refresh_result`（:125-179）：失败 attempts+1、退避 1h→6h、`MAX_ATTEMPTS` 后 disabled；落 `banned` 仅在 `_refresh_kind_of(extra) != \"configuration\"` 时（:174），即配置错误不误杀账号，与注释一致。`run_panel_auto_sync` 每个面板独立 try/except（:4xx），单面板失败不影响其它面板。"
+    },
+    {
+      "item": "core/base_captcha.py 的 TLS 与结果解析",
+      "how": "YesCaptcha 两个请求都 `verify=True`（:39/:47），不再有 verify=False；LocalSolverCaptcha 先认 `errorCode`（:113-117）再认 `status`，`CAPTCHA_FAIL` 立即抛错，不会把失败当 processing 白等；轮询上限 60×2s。"
+    },
+    {
+      "item": "core/captcha_providers.py 的降级链与 key 处理",
+      "how": "`build_captcha_chain` 只把「配了 key」的 provider 放进链（:455-476），顺序可配、未知名字 warning 后忽略；`_run` 按能力 `getattr` 跳过不支持的 provider（:363-367），全部失败时抛 `CaptchaProviderError(\"chain\", …)` 且错误串截断 400 字符；`_post_json` 只发 JSON body、不把 payload 写日志，`_check_error` 符合两家 `errorId` 约定。除 L13-17（签名不兼容的死适配器）外未发现 key 泄漏或静默成功。"
+    },
+    {
+      "item": "api/sms.py 的鉴权与入参边界",
+      "how": "路由挂在 main.py:289 的 `/api` 前缀下，`auth_middleware`（main.py:221-266）对非 `/api/auth/*` 一律要求 Bearer 或本机回环；`limit` 被 `max(1, min(int(body.limit or 20), 200))` 夹住（:114）；balance 的 detail 是固定文案（:98-101），不回显上游 JSON（key 泄漏在日志行，见 L13-10）。"
+    },
+    {
+      "item": "services/sms/constants.py / parsing.py",
+      "how": "纯数据/纯函数：`SMS_PHONE_LIFETIME=1200`、`OPENAI_SMS_COUNTRIES={'52'}`；`_status_token` 丢弃 >60 字符或含 `<` 的响应体（防把错误页写进任务日志）；`_make_sms_candidate` 拒绝空/null 码；`_safe_*` 全部有默认值不抛异常。未发现状态/金额计算错误。"
+    },
+    {
+      "item": "services/sms/providers.py 的取消/结算语义",
+      "how": "`cancel` 先 cancelActivation（204/ACCESS_CANCEL 判定）失败再退 setStatus=8（:687-704）；`report_success` 按 use_count/剩余寿命决定 finishActivation 或保留复用，并同步清缓存（:706-742）；`mark_send_failed` 用 setStatus=8 退款（:769-789）；三处都只清「同一个 activation_id」的缓存条目，不会误删别的号。语义与 sms-activate 文档一致。"
+    },
+    {
+      "item": "services/local_maintenance.py 的选择/间隔纯函数",
+      "how": "`clamp_days` 1..3650、`parse_interval` 单位 m/h/d 且 `max(300, …)` 下限（:141-168）、`select_probe_targets`/`select_refresh_targets` 纯函数且对空列表/未知 scope 返回 []；`_run_actions` 对单账号异常 try/except 计数（:476-479），不会一个坏号毁整轮；`_close_auto_task` 按 stopped/done 收尾。"
+    }
+  ]
+}

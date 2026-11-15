@@ -16,6 +16,21 @@ from platforms.icloud.remote_client import RemoteHMEClient
 from tests.remote_hme_double import API_KEY, RemoteHMEDouble
 
 
+@pytest.fixture(autouse=True)
+def _isolated_gate():
+    """每个测试用自己的熔断器。
+
+    熔断是进程内单例，测试之间共享会让「上一个测试把 127.0.0.1:1 判成挂了」
+    传染给下一个测试 —— 表现为莫名其妙的 UpstreamBusy 而不是真实结果。
+    生产代码要的正是这种跨 worker 共享，测试要的恰恰相反。
+    """
+    from services.icloud.upstream_gate import UpstreamGate
+
+    gate = UpstreamGate()
+    yield gate
+    gate.reset()
+
+
 @pytest.fixture
 def remote():
     double = RemoteHMEDouble()
@@ -27,8 +42,8 @@ def remote():
 
 
 @pytest.fixture
-def client(remote):
-    return RemoteHMEClient(remote.base_url, API_KEY, timeout=5)
+def client(remote, _isolated_gate):
+    return RemoteHMEClient(remote.base_url, API_KEY, timeout=5, gate=_isolated_gate)
 
 
 # ------------------------------------------------------------------ 鉴权
@@ -314,6 +329,257 @@ class TestDataEndpoints:
     def test_check_account(self, remote, client):
         summary = client.check_account("acc_1")
         assert summary["status"] == "active"
+
+
+# ------------------------------------------------------- 分层超时与连接复用
+
+
+class TestLayeredTimeout:
+    """读超时 30s 意味着「服务卡死」时每个 worker 白等 30s 才失败。
+
+    建连不通（DNS 错、路由不可达）应该在几秒内失败 —— 那和「服务活着但慢」
+    是两个不同的故障，用一个 30s 的单值超时会把它们混为一谈。
+    """
+
+    def test_connect_and_read_timeouts_are_separate(self):
+        """建连要快、读要耐心：两者是不同故障，不能共用一个数。"""
+        client = RemoteHMEClient("http://127.0.0.1:1", API_KEY, timeout=120)
+        connect, read = client.timeout_pair()
+        assert connect == 5, "建连超时该保持小值，否则 DNS/路由不通要白等"
+        assert read > connect, "读超时不该小于建连超时"
+
+    def test_explicit_timeout_still_feeds_both_halves(self):
+        """显式给了一个小 timeout 时，两半都不能超过它 —— 否则测试会变慢。"""
+        client = RemoteHMEClient("http://127.0.0.1:1", API_KEY, timeout=3)
+        assert client.timeout_pair() == (3, 3)
+
+    def test_unreachable_host_fails_within_connect_timeout(self):
+        """端口 1 没有监听：建连立刻被拒，不该等满读超时。"""
+        import time
+
+        client = RemoteHMEClient("http://127.0.0.1:1", API_KEY, timeout=30)
+        started = time.monotonic()
+        with pytest.raises(ICloudError) as excinfo:
+            client.list_accounts()
+        elapsed = time.monotonic() - started
+        assert excinfo.value.code == "upstream_unavailable"
+        assert elapsed < 10, f"建连失败等了 {elapsed:.1f}s，说明还在用单个长超时"
+
+
+class TestConnectionReuse:
+    """每个 worker 每次读信都新建 TCP+TLS 连接，在 5 并发下是纯浪费。"""
+
+    def test_session_carries_a_pooling_adapter(self):
+        from requests.adapters import HTTPAdapter
+
+        client = RemoteHMEClient("http://127.0.0.1:1", API_KEY)
+        adapters = client._session.adapters
+        assert adapters, "Session 没有挂 adapter"
+        assert all(
+            isinstance(adapter, HTTPAdapter) and adapter._pool_maxsize > 1
+            for adapter in adapters.values()
+        ), f"连接池大小没有放大: {adapters}"
+
+    def test_repeated_calls_reuse_one_session(self, remote, client):
+        client.list_accounts()
+        client.list_accounts()
+        # 同一个 Session 两次请求；连接池复用由 adapter 保证，这里钉住
+        # 「没有为每次请求新建 Session 或 adapter」。
+        assert len(client._session.adapters) >= 1
+        assert len(remote.requests) == 2
+
+
+class TestGateWiring:
+    """客户端必须把「连不上」记进熔断，且在发请求前就拦住。"""
+
+    def test_client_uses_injected_gate(self, _isolated_gate):
+        client = RemoteHMEClient(
+            "http://127.0.0.1:1", API_KEY, timeout=1, gate=_isolated_gate
+        )
+        with pytest.raises(ICloudError):
+            client.list_accounts()
+        assert _isolated_gate.failure_count("http://127.0.0.1:1") == 1
+
+    def test_open_gate_blocks_before_any_request(self, remote, _isolated_gate):
+        """熔断打开后不该再发请求 —— 请求次数要停在 0。"""
+        from services.icloud.upstream_gate import UpstreamGate
+
+        gate = UpstreamGate(threshold=1, cooldown_seconds=60)
+        gate.note_failure(remote.base_url)
+        client = RemoteHMEClient(remote.base_url, API_KEY, timeout=5, gate=gate)
+        with pytest.raises(Exception) as excinfo:
+            client.list_accounts()
+        assert "熔断" in str(excinfo.value)
+        assert remote.requests == [], "熔断打开时仍然发了请求"
+
+    def test_success_clears_failure_count(self, remote, _isolated_gate):
+        _isolated_gate.note_failure(remote.base_url)
+        client = RemoteHMEClient(
+            remote.base_url, API_KEY, timeout=5, gate=_isolated_gate
+        )
+        client.list_accounts()
+        assert _isolated_gate.failure_count(remote.base_url) == 0
+
+    def test_http_error_status_does_not_open_gate(self, remote, _isolated_gate):
+        """4xx 是业务语义（秘钥错/参数错），不是「服务挂了」，不该熔断。"""
+        remote.create_error = {"code": "CREATION_COOLDOWN", "message": "冷却中"}
+        client = RemoteHMEClient(
+            remote.base_url, API_KEY, timeout=5, gate=_isolated_gate
+        )
+        with pytest.raises(ICloudError):
+            client.create_alias("acc_1", "GitHub")
+        assert _isolated_gate.failure_count(remote.base_url) == 0
+
+    def test_gate_can_be_disabled_for_probes(self, remote):
+        """探活/测试要真实结果，不能被别的 worker 的失败记账挡住。"""
+        from services.icloud.upstream_gate import UpstreamGate
+
+        gate = UpstreamGate(threshold=1, cooldown_seconds=60)
+        gate.note_failure(remote.base_url)
+        client = RemoteHMEClient(remote.base_url, API_KEY, timeout=5, use_gate=False)
+        assert client.list_accounts()[0]["id"] == "acc_1"
+
+
+# --------------------------------------------------- 只读秘钥下的「检测」
+
+
+class TestCheckWithReadOnlyKey:
+    """`POST /accounts/:id/check` 要写级权限，而注册用的那把 sk- 通常只有只读档。
+
+    2026-11-14 线上实测：库里的秘钥 `GET /api/accounts`、`/api/inbox`、
+    `/api/aliases` 全部 200，只有 `/check` 回 403 `PERMISSION_DENIED` ——
+    于是 iCloud 页的「检测」按钮对每个远程主号恒失败，报「API 秘钥权限不足」。
+    检测是只读语义，不该因为「这把钥匙不能写」而彻底不可用。
+    """
+
+    def test_falls_back_to_read_only_probe_when_check_is_denied(self, remote, client):
+        remote.check_error = {"code": "PERMISSION_DENIED", "message": "API 秘钥权限不足"}
+
+        summary = client.check_account("acc_1")
+
+        assert summary["status"] == "active"
+        # 走的必须是读接口，而不是偷偷又打了一次 /check 然后吞掉 403
+        assert ("GET", "/api/accounts") in [
+            (method, path) for method, path, _ in remote.requests
+        ]
+
+    def test_denied_check_does_not_survive_as_an_error(self, remote, client):
+        """降级成功就是成功 —— 不能让 permission_denied 冒到上层变成 403。"""
+        remote.check_error = {"code": "PERMISSION_DENIED", "message": "API 秘钥权限不足"}
+        assert client.check_account("acc_1")["id"] == "acc_1"
+
+    def test_other_check_failures_still_raise(self, remote, client):
+        """只对「权限不足」降级。上游真挂了要报错，不能一律假装正常。"""
+        remote.check_error = {"code": "UPSTREAM_FAILURE", "message": "上游故障"}
+
+        with pytest.raises(ICloudError) as ctx:
+            client.check_account("acc_1")
+        assert ctx.value.code == "upstream_unavailable"
+
+    def test_read_only_probe_reports_a_missing_account(self, remote, client):
+        """降级探测不是「无条件成功」：远端没有这个账号时要照样报错。"""
+        remote.check_error = {"code": "PERMISSION_DENIED", "message": "API 秘钥权限不足"}
+
+        with pytest.raises(ICloudError) as ctx:
+            client.check_account("acc_missing")
+        assert ctx.value.code == "invalid_config"
+
+    def test_read_only_probe_surfaces_a_broken_service(self, remote, client):
+        """降级路径自己撞上 5xx 时必须如实抛出，不能把「读不出来」当成 active。"""
+        remote.check_error = {"code": "PERMISSION_DENIED", "message": "API 秘钥权限不足"}
+        remote.accounts_error = {"code": "INTERNAL_ERROR", "message": "内部错误"}
+
+        with pytest.raises(ICloudError):
+            client.check_account("acc_1")
+
+
+# ------------------------------------------------ 慢 ≠ 挂；一个主号 ≠ 全部主号
+
+
+class TestSlowUpstreamIsNotAnOutage:
+    """读超时必须比上游自己的预算长，否则「慢」会被记成「挂」。
+
+    2026-11-14 实测：上游 IMAP 整体预算 30s（信封阶段 45s），客户端读超时
+    只有 20s —— 客户端**必然**先放弃，然后把这次「上游还在正常干活」的请求
+    记成一次传输失败。5 个 worker 各撞一次，熔断阈值（5）就到了。
+    """
+
+    def test_default_read_timeout_covers_the_upstream_budget(self):
+        """默认客户端（生产就用这套默认值）的读超时不得短于上游自己的预算。
+
+        上游 `imapEnvelopeBudget` 最高 45s：客户端若比它短，正常但慢的收件
+        一定被客户端先判死，而这次「成功前的等待」会被记成一次上游失败。
+        """
+        client = RemoteHMEClient("http://127.0.0.1:1", API_KEY)
+        connect, read = client.timeout_pair()
+        assert read >= 45, f"读超时 {read}s 短于上游 IMAP 预算（最高 45s）"
+        assert connect <= 5, "建连超时不该跟着读超时一起放大"
+
+    def test_production_factory_does_not_shorten_the_read_timeout(self, monkeypatch):
+        """`services.icloud.remote.remote_client()` 也要给足读预算。
+
+        生产链路从不显式传 timeout，用的是工厂默认值 —— 工厂自己写死 30 的话，
+        客户端常量改成 45 也白改。
+        """
+        from services.icloud import remote as remote_module
+
+        monkeypatch.setattr(remote_module, "remote_api_key", lambda row: "sk-x")
+        row = type(
+            "Row",
+            (),
+            {"source": "remote", "base_url": "http://127.0.0.1:1",
+             "email": "a@icloud.com", "proxy": ""},
+        )()
+
+        _, read = remote_module.remote_client(row).timeout_pair()
+
+        assert read >= 45
+
+
+
+class TestBreakerIsScopedPerAccount:
+    """熔断按「服务」分键时，一个主号的收件箱卡死会封掉同一服务下的**所有**主号。
+
+    2026-11-14 实测：4 个远程主号共用一个 icloud-hme，`fuzy202609` 的读请求
+    超时把 `base_url` 这个键顶开，`fuzy_public` / `fuzy202610` / `fuzy202611`
+    立刻全部被拒（376 行「熔断中」日志、212 次直接失败）。故障面从「一个
+    信箱」放大成了「整批任务」。
+    """
+
+    def test_one_stuck_account_does_not_block_the_others(self, remote, _isolated_gate):
+        # acc_1 的读请求永远等不到（客户端 1s 读超时），acc_2 正常。
+        from services.icloud.upstream_gate import UpstreamBusy, UpstreamGate
+
+        remote.slow_accounts = {"acc_1": 5.0}
+        gate = UpstreamGate(threshold=2, cooldown_seconds=60)
+        client = RemoteHMEClient(remote.base_url, API_KEY, timeout=1, gate=gate)
+
+        # 撞满阈值（2 次传输失败），随后这个主号被熔断挡住
+        for _ in range(2):
+            with pytest.raises(ICloudError):
+                client.fetch_inbox("acc_1", limit=5)
+        with pytest.raises(UpstreamBusy):
+            client.fetch_inbox("acc_1", limit=5)
+
+        # 同一个服务、另一个主号：必须还能读
+        assert client.fetch_inbox("acc_2", limit=5)["messages"] == []
+
+    def test_service_level_outage_still_blocks_every_account(
+        self, remote, _isolated_gate
+    ):
+        """按主号分键不能把「整个服务挂了」也拆散 —— 那时谁都不该再试。"""
+        from services.icloud.upstream_gate import UpstreamBusy, UpstreamGate
+
+        remote.down = True
+        gate = UpstreamGate(threshold=2, cooldown_seconds=60)
+        client = RemoteHMEClient(remote.base_url, API_KEY, timeout=2, gate=gate)
+        for _ in range(2):
+            with pytest.raises(ICloudError):
+                client.fetch_inbox("acc_1", limit=5)
+
+        # 换一个从没失败过的主号也照样被挡：服务级已经打开
+        with pytest.raises(UpstreamBusy):
+            client.fetch_inbox("acc_9", limit=5)
 
 
 if __name__ == "__main__":

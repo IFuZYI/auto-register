@@ -610,3 +610,65 @@ class WalSidecarImportTests(_HermeticBundleTest):
             self.assertNotIn(b"stale-wal-frames", wal.read_bytes(), "旧 -wal 内容仍在，会被重放")
         if shm.exists():
             self.assertNotIn(b"stale-shm", shm.read_bytes(), "旧 -shm 内容仍在")
+
+
+class GarbageKeyMemberMustBeRejectedTests(_HermeticBundleTest):
+    """备份里的密钥成员必须**校验内容**，不能只查大小。
+
+    2026-11-15 实测（T3-2 Critical）：`apply_import_bundle` 对
+    `secrets/credential_key` 只做 `file_size > MAX_KEY_BYTES` 检查，然后
+    `staged_key.write_bytes(zf.read(...))`。于是自造一个内容为 `garbage` 的包
+    也能通过校验，把这个垃圾写进**活跃密钥文件**，此后任何
+    `secret_box.encrypt/decrypt` 都抛 `CredentialKeyError` —— 整个凭据体系失效
+    且无法自愈（新密钥已经覆盖旧密钥）。
+
+    密钥的可判定形态：base64 或 hex 解码后必须是 32 字节（`core/secret_box.py`
+    的 `_decode_key`）。导入端应当在**替换活跃文件之前**验这一点。
+    """
+
+    def _bundle_with_key(self, key_bytes: bytes) -> bytes:
+        """导出一个正常包，然后把密钥成员替换成给定内容，并重算 sha256。"""
+        import hashlib
+        import base64 as _b64
+
+        from core.paths import CREDENTIAL_KEY_FILE
+
+        CREDENTIAL_KEY_FILE.parent.mkdir(parents=True, exist_ok=True)
+        CREDENTIAL_KEY_FILE.write_text(_b64.b64encode(b"k" * 32).decode())
+        good, _ = build_export_bundle()
+
+        src = zipfile.ZipFile(io.BytesIO(good))
+        members = {n: src.read(n) for n in src.namelist()}
+        members["secrets/credential_key"] = key_bytes
+
+        manifest = json.loads(members[MANIFEST_NAME])
+        for entry in manifest.get("files") or []:
+            name = entry.get("name") or entry.get("path") or ""
+            if name == "secrets/credential_key":
+                entry["sha256"] = hashlib.sha256(key_bytes).hexdigest()
+                entry["size"] = len(key_bytes)
+        members[MANIFEST_NAME] = json.dumps(manifest).encode()
+
+        out = io.BytesIO()
+        with zipfile.ZipFile(out, "w") as zf:
+            for name, data in members.items():
+                zf.writestr(name, data)
+        return out.getvalue()
+
+    def test_garbage_key_is_rejected_before_overwriting_the_live_file(self):
+        from core.paths import CREDENTIAL_KEY_FILE
+
+        payload = self._bundle_with_key(b"garbage")
+
+        with self.assertRaises(Exception):
+            apply_import_bundle(payload)
+
+        # 活跃密钥文件必须是旧的好密钥（仍然是 32 字节 base64 可解码），
+        # 而不是那 7 字节垃圾。
+        import base64 as _b64
+
+        material = CREDENTIAL_KEY_FILE.read_text().strip()
+        self.assertEqual(
+            len(_b64.b64decode(material)), 32,
+            f"垃圾密钥被写进了活跃密钥文件（{material!r}）→ 凭据体系永久失效",
+        )

@@ -282,7 +282,7 @@ export function DataBackupPanel() {
             type="warning"
             showIcon
             message="有运行中的注册任务"
-            description="导入会替换任务脚下的数据库，请先在「任务运行」页停止全部任务再导入。"
+            description="导入会替换任务正在使用的数据库，请先在「任务中心」停止全部任务再导入。"
           />
         ) : null}
       </Card>
@@ -309,7 +309,8 @@ export function DataBackupPanel() {
             style={{ marginTop: 8 }}
             type="info"
             showIcon
-            message="导入后可刷新页面查看新数据；如需回退，用上面路径里的备份文件再导入一次。"
+            message="刷新页面即可查看导入的数据。上面是自动备份目录，不是可直接导入的 ZIP；如需回退，请按该目录中的数据备份恢复，操作前先另存当前数据。"
+            description="恢复前请先停止所有任务，避免数据库被同时写入。"
           />
         </Card>
       ) : null}

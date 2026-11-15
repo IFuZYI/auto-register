@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import {
   App,
+  Alert,
   Badge,
   Button,
   Card,
@@ -18,6 +19,7 @@ import {
 import {
   DeleteOutlined,
   FileTextOutlined,
+  PlayCircleOutlined,
   LoadingOutlined,
   ReloadOutlined,
   ClearOutlined,
@@ -32,6 +34,7 @@ import { apiFetch } from '@/lib/utils'
 import { TaskLogPanel } from '@/components/TaskLogPanel'
 import type { TaskKind } from '@/components/TaskLogPanel'
 import { PageHeader } from '@/components/PageHeader'
+import { Link } from 'react-router-dom'
 
 const { Text } = Typography
 
@@ -95,6 +98,8 @@ function formatDuration(startTs: unknown, endTs?: unknown): string {
 export default function RunningTasks() {
   const [tasks, setTasks] = useState<TaskSnapshot[]>([])
   const [loading, setLoading] = useState(false)
+  const [loadError, setLoadError] = useState('')
+  const [hasLoaded, setHasLoaded] = useState(false)
   const [logTaskId, setLogTaskId] = useState<string | null>(null)
   const [now, setNow] = useState(() => Date.now() / 1000)
   const [cleaning, setCleaning] = useState(false)
@@ -121,10 +126,16 @@ export default function RunningTasks() {
         return tb - ta
       })
       setTasks(sorted)
+      setLoadError('')
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error)
+      setLoadError(detail)
+      msg.error({ content: `任务列表加载失败：${detail}。请刷新重试。`, key: 'task-list-load-error' })
     } finally {
       setLoading(false)
+      setHasLoaded(true)
     }
-  }, [])
+  }, [msg])
 
   // 轮询间隔跟着「有没有运行中任务」走：实测 715 个任务全结束时页面仍每
   // 2.5 秒拉一次大响应，60 秒内 24 次请求而内容没变（见 lib/pollBackoff.ts）。
@@ -178,7 +189,7 @@ export default function RunningTasks() {
 
   const handleCleanup = (days: number) => {
     modal.confirm({
-      title: `确认清理 ${retentionLabel(days)}的任务记录？`,
+      title: `清理${retentionLabel(days)}的任务记录？`,
       content: '仅清理已结束的任务；进行中的任务与保留期内的记录不受影响。',
       okText: '清理',
       cancelText: '取消',
@@ -307,7 +318,8 @@ export default function RunningTasks() {
               </Button>
               {!isActive(task) && (
                 <Popconfirm
-                  title="确认删除该任务记录？"
+                  title="删除这条任务记录？"
+                  description="仅删除任务记录和日志，不影响已注册的账号。删除后无法恢复。"
                   okText="删除"
                   cancelText="取消"
                   okButtonProps={{ danger: true }}
@@ -386,11 +398,15 @@ export default function RunningTasks() {
   return (
     <div>
       <PageHeader
-        title="任务运行"
+        title="任务中心"
         subtitle={
-          activeTasks.length > 0
-            ? `${activeTasks.length} 个任务进行中 · 共 ${tasks.length} 个`
-            : `共 ${tasks.length} 个任务`
+          !hasLoaded
+            ? '正在读取任务状态…'
+            : loadError
+            ? '任务状态未能更新，以下显示的是最近一次成功读取的内容。'
+            : activeTasks.length > 0
+            ? `${activeTasks.length} 个任务待处理或进行中，共 ${tasks.length} 个任务。`
+            : `当前没有进行中任务，共 ${tasks.length} 条任务记录。`
         }
         actions={
           <>
@@ -408,24 +424,36 @@ export default function RunningTasks() {
               }}
             >
               <Button icon={<ClearOutlined />} loading={cleaning}>
-                清理日志 <DownOutlined />
+                清理任务记录 <DownOutlined />
               </Button>
             </Dropdown>
             <Button icon={<ReloadOutlined />} loading={loading} onClick={load}>
-              刷新
+              刷新任务
             </Button>
           </>
         }
       />
+
+      {loadError ? (
+        <Alert
+          type="error"
+          showIcon
+          style={{ marginBottom: 16 }}
+          message="无法读取最新任务状态"
+          description={`${loadError}。${tasks.length ? '当前列表可能不是最新状态，' : ''}请检查服务连接后重试。`}
+          action={<Button size="small" onClick={() => void load()} loading={loading}>重试</Button>}
+        />
+      ) : null}
 
       {/* Active tasks */}
       {activeTasks.length > 0 && (
         <div style={{ marginBottom: 28 }}>
           <Text
             strong
-            style={{ display: 'block', marginBottom: 10, fontSize: 13, color: 'var(--accent)' }}
+            className="task-section-title"
+            style={{ color: 'var(--accent-text)' }}
           >
-            进行中 ({activeTasks.length})
+            进行中（{activeTasks.length}）
           </Text>
           {activeTasks.map(renderTask)}
         </div>
@@ -434,18 +462,17 @@ export default function RunningTasks() {
       {/* Finished tasks */}
       {finishedTasks.length > 0 && (
         <div>
-          <Text
-            strong
-            style={{ display: 'block', marginBottom: 10, fontSize: 13, color: 'var(--text-muted)' }}
-          >
-            已完成 ({finishedTasks.length})
+          <Text className="task-section-title" style={{ color: 'var(--text-secondary)' }}>
+            已结束（{finishedTasks.length}）
           </Text>
-          {visibleFinished.map(renderCompactTask)}
+          <div className="task-history-list">
+            {visibleFinished.map(renderCompactTask)}
+          </div>
           {finishedTasks.length > visibleFinished.length && (
             <Button
               block
               type="dashed"
-              style={{ marginTop: 8 }}
+              className="task-history-list__more"
               onClick={() => setShowAllFinished((prev) => !prev)}
             >
               {showAllFinished
@@ -456,8 +483,16 @@ export default function RunningTasks() {
         </div>
       )}
 
-      {tasks.length === 0 && !loading && (
-        <Empty description="暂无任务记录" style={{ marginTop: 60 }} />
+      {tasks.length === 0 && hasLoaded && !loading && !loadError && (
+        <div className="task-empty">
+          <Empty
+            image={Empty.PRESENTED_IMAGE_SIMPLE}
+            description="还没有任务。开始一次注册后，可在这里查看进度与日志。"
+          />
+          <div style={{ textAlign: 'center' }}>
+            <Link to="/register" className="task-empty__action"><Button type="primary" icon={<PlayCircleOutlined />}>开始注册</Button></Link>
+          </div>
+        </div>
       )}
 
       {/* Log drawer */}

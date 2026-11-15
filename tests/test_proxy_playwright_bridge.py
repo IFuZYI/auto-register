@@ -128,46 +128,31 @@ class ProxyPoolReactivateTests(unittest.TestCase):
     """被自动停用的代理要能一键复活。"""
 
     def test_reactivate_all_turns_inactive_back_on(self):
+        """一键复活被自动停用的代理。
+
+        桩打在**仓储**上（`proxy_repository.list_all/save`），不是 `Session`：
+        代理池现在统一走仓储（`proxies` 在 `JSON_TABLES` 里，JSON 部署下没有
+        对应的 SQLite 表 —— 自己开 `Session` 会 `no such table`）。
+        打在仓储上既符合现在的依赖方向，也不会因为内部换了存储而失效。
+        """
         from core.db import ProxyModel
         from core.proxy_pool import ProxyPool
 
+        dead = ProxyModel(url="socks5://dead:1", is_active=False, fail_count=6)
+        alive = ProxyModel(url="http://alive:2", is_active=True, fail_count=0)
+        saved: list = []
+
         pool = ProxyPool()
-        # 造两个代理：一个被停用、一个本来就好
-        with patch.object(pool, "_find_by_url", return_value=None):
-            pass
-
-        calls = {"saved": []}
-
-        class _FakeSession:
-            def exec(self, *_a, **_k):
-                class _R:
-                    def all(self_inner):
-                        dead = ProxyModel(url="socks5://dead:1", is_active=False, fail_count=6)
-                        alive = ProxyModel(url="http://alive:2", is_active=True, fail_count=0)
-                        return [dead, alive]
-
-                return _R()
-
-            def add(self, obj):
-                calls["saved"].append(obj)
-
-            def commit(self):
-                pass
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *a):
-                return False
-
-        with patch("core.proxy_pool.Session", return_value=_FakeSession()):
+        with patch("core.proxy_pool.proxy_repository.list_all", return_value=[dead, alive]), \
+             patch("core.proxy_pool.proxy_repository.save", side_effect=saved.append):
             n = pool.reactivate_all()
 
         self.assertEqual(n, 1, "只该复活被停用的那一条")
-        revived = [o for o in calls["saved"] if o.url == "socks5://dead:1"]
+        revived = [o for o in saved if o.url == "socks5://dead:1"]
         self.assertTrue(revived, "被停用的代理应被写回")
         self.assertTrue(revived[0].is_active)
         self.assertEqual(revived[0].fail_count, 0, "复活时失败计数要清零")
+        self.assertEqual(len(saved), 1, "本来正常的代理不该被重写")
 
 
 if __name__ == "__main__":

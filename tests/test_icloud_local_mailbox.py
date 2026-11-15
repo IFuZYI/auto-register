@@ -423,11 +423,23 @@ class TestPoolAccountingHook:
         service.return_value.mark_alias_used.assert_called_once_with(42, platform="grok")
 
     def test_failed_releases_claim(self):
-        """失败要把号放回去复用，而不是标死 —— 地址本身还是好的。"""
+        """失败要把号放回去复用，而不是标死 —— 地址本身还是好的。
+
+        2026-11-14 起多传一个 `error=`：号池要靠它区分「地址不好」与
+        「iCloud 网关挂了」，后者不该算到别名头上。
+        """
         mailbox = ICloudLocalMailbox()
         with patch.object(mailbox, "_service") as service:
             mailbox.set_account_status(self._account_with_alias(), "failed")
-        service.return_value.release_alias_claim.assert_called_once_with(42)
+        service.return_value.release_alias_claim.assert_called_once_with(42, error=None)
+
+    def test_failed_passes_the_cause_through(self):
+        """失败原因要传给号池 —— 否则上游故障会被记成别名失败。"""
+        mailbox = ICloudLocalMailbox()
+        boom = RuntimeError("upstream 503")
+        with patch.object(mailbox, "_service") as service:
+            mailbox.set_account_status(self._account_with_alias(), "failed", error=boom)
+        service.return_value.release_alias_claim.assert_called_once_with(42, error=boom)
 
     def test_available_maps_to_pool_status(self):
         mailbox = ICloudLocalMailbox()

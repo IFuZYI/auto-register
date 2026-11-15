@@ -94,3 +94,36 @@ class EvidenceSub2ApiProxyCreationTests(unittest.TestCase):
         )
         ids = sorted(str(r[0]) for r in results)
         self.assertEqual(ids, ["1", "1"], f"两个调用方应当拿到**同一个** proxy_id，实际 {ids}")
+
+
+class Grok2ApiEgressWrapperTests(unittest.TestCase):
+    """`ensure_grok2api_egress` 的公开包装必须与**真实调用方的形状**一致。
+
+    公开符号签名是 `(api_url, api_key, proxy_url, *, timeout=20)`，但函数体把这三个
+    值直接转发给 `_ensure_grok2api_egress_unlocked(client, proxy_url, *, scope=...)`
+    —— 后者收的是**客户端对象**，没有 api_key、没有 timeout。于是这个公开包装
+    一被调用就 `TypeError`。
+
+    实测（2026-11-15）：`platforms/grok/grok2api.py:423` 是唯一调用方，它传的是
+    `(self, proxy_url)`（正确形状，直接调 `_unlocked`），所以这条包装是**死接口**；
+    但死接口一旦被当成对外契约使用就 100% 失败，而异常会被
+    `platforms/grok/plugin.py:900` 的宽 except 吞成"接入失败" —— 表现为
+    "代理永远绑不上面板"，日志里没有 TypeError 痕迹。
+
+    钉的行为：公开符号与真实调用方之间的**形状一致性**。
+    选择"让它转发到正确实现"而不是"删掉"：它在 `__all__` 里是公开名字，
+    删掉会让调用方拿到 AttributeError（更差），而不是一个可用函数。
+    """
+
+    def test_public_wrapper_accepts_the_client_form_used_by_callers(self):
+        """按真实调用方形状 `(client, proxy_url)` 调用，不应 TypeError。"""
+        from services import panel_proxy_binding as binding
+
+        client = mock.Mock()
+        with mock.patch.object(
+            binding, "_ensure_grok2api_egress_unlocked", return_value=("node-1", "ok")
+        ) as impl:
+            result = binding.ensure_grok2api_egress(client, PROXY_URL)
+
+        self.assertEqual(result, ("node-1", "ok"))
+        impl.assert_called_once_with(client, PROXY_URL, scope="grok_web")

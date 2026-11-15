@@ -126,6 +126,19 @@ def redact_proxy_url(proxy_url: Optional[str]) -> str:
     if not value:
         return ""
 
+    # 无 scheme 的两种带认证写法：`urlsplit` 在没有 `//` 时把整串当 path，
+    # 于是 `u:p@h:8080` 会被原样回吐（scheme 猜成 "u"、hostname 为 None），
+    # `h:8080:u:p:ss` 同理 —— 打码等于没打。必须先于 legacy 解析拦掉。
+    if "://" not in value:
+        if "@" in value and ":" in value.split("@", 1)[0]:
+            return f"***:***@{value.split('@', 1)[1]}"
+        fields = value.split(":")
+        # `host:port:user:pass`（4 段）交给下面的 legacy 解析器 —— 它已经能
+        # 正确输出 `host:port:***:***`，保住既有契约（字段形状不变）。
+        # 这里只兜 legacy 认不出的 `host:port:user:pass:extra`（≥5 段）。
+        if len(fields) > 4 and fields[1].isdigit():
+            return f"{fields[0]}:{fields[1]}:***"
+
     legacy = _parse_legacy_proxy(value)
     if legacy and "://" not in value:
         if legacy.username or legacy.password:

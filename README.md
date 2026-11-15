@@ -34,7 +34,7 @@ docker compose pull && docker compose up -d
 docker compose up -d --build
 ```
 
-镜像：`ghcr.io/ifuzyi/auto-register`（公开包，匿名可拉），可用 tag `0.1.0` / `0.1` / `latest`。
+镜像：`ghcr.io/ifuzyi/auto-register`（公开包，匿名可拉），可用 tag `1.0.0` / `1.0` / `latest`。
 换版本：`APP_IMAGE=ghcr.io/ifuzyi/auto-register:latest docker compose up -d`
 
 | 端点 | 说明 |

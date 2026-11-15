@@ -492,6 +492,30 @@ def _backup_current_data(reason: str = "import") -> Optional[Path]:
     return backup_root
 
 
+def _decode_key_or_reject(material: bytes) -> None:
+    """导入前校验密钥成员：必须是 base64 或 hex 编码的 32 字节。
+
+    与 `core.secret_box._decode_key` 同一口径。这里只做形状校验（不比对旧密钥）：
+    导出端就是原样复制密钥文件，形状不对说明这个包不是本应用产出的，或者是坏的。
+    """
+    import base64
+    import binascii
+
+    text = material.decode("utf-8", errors="ignore").strip()
+    if not text:
+        raise BundleError("备份里的凭据密钥为空，拒绝导入")
+    for decode in (base64.b64decode, binascii.unhexlify):
+        try:
+            if len(decode(text)) == 32:
+                return
+        except (binascii.Error, ValueError):
+            continue
+    raise BundleError(
+        "备份里的凭据密钥格式非法（应为 base64 或 hex 编码的 32 字节）—— "
+        "拒绝导入，否则会把活跃密钥覆盖成不可用内容"
+    )
+
+
 def _dispose_all_engines() -> None:
     """释放所有数据库连接（导入替换文件前必须做）。
 
@@ -634,7 +658,14 @@ def apply_import_bundle(bundle_bytes: bytes, *, filename: str = "") -> dict[str,
                     raise BundleError(
                         f"凭据密钥文件异常过大（{key_info.file_size} 字节），拒绝导入"
                     )
-                staged_key.write_bytes(zf.read(key_member))
+                key_material = zf.read(key_member)
+                # **内容也要验**，不能只查大小：这个文件是活跃的加密密钥，
+                # 写坏了之后 `secret_box` 的每次 encrypt/decrypt 都会抛
+                # `CredentialKeyError`，且旧密钥已被覆盖、无法自愈。
+                # 实测 2026-11-15：内容为 `garbage` 的包通过校验并把 7 字节
+                # 垃圾写进活跃密钥文件。
+                _decode_key_or_reject(key_material)
+                staged_key.write_bytes(key_material)
 
             # 替换前先断开所有连接（SQLite 打开的文件句柄在 Windows 上还会
             # 阻止替换；Linux 上虽可替换，但旧连接继续指向旧 inode，

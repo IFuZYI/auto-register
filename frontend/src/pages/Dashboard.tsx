@@ -1,51 +1,41 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Link, useNavigate } from 'react-router-dom'
 import { Button, Empty, Skeleton, App } from 'antd'
-import { ReloadOutlined } from '@ant-design/icons'
+import {
+  ArrowRightOutlined,
+  CheckCircleFilled,
+  PlusOutlined,
+  ReloadOutlined,
+} from '@ant-design/icons'
 import { getPlatformColor, getPlatformLabel } from '@/lib/platforms'
 import { accountStatusMeta } from '@/lib/accountFormat'
+import { summarizeDashboardTasks } from '@/lib/dashboardTasks'
+import { createDashboardDataLoader } from '@/lib/dashboardData'
+import { readAttention } from '@/lib/attention'
+import { AttentionBar } from '@/components/AttentionBar'
 import { apiFetch } from '@/lib/utils'
 import { PageHeader } from '@/components/PageHeader'
 import { HelpTip } from '@/components/settings/SettingsPrimitives'
 
-/** 状态色：与表格里的 Tag 同一套语义，但这里用点 + 细条，不用药丸。 */
+/** 状态色与表格的标签共用语义色，不只靠颜色区分，旁边始终有名称与数量。 */
 function statusColor(status: string): string {
   switch (String(status || '').toLowerCase()) {
-    case 'registered':
-      return 'var(--success)'
+    case 'registered': return 'var(--success)'
     case 'expired':
-    case 'limited':
-      return 'var(--warning)'
-    case 'invalid':
-      return 'var(--danger)'
-    case 'banned':
-      return 'var(--purple)'
-    default:
-      return 'var(--text-muted)'
+    case 'limited': return 'var(--warning)'
+    case 'invalid': return 'var(--danger)'
+    case 'banned': return 'var(--danger)'
+    default: return 'var(--text-muted)'
   }
 }
 
-/**
- * 请求失败时占位：**不能**复用「暂无账号数据」那套文案。
- *
- * `/accounts/stats` 挂掉时 `stats` 是 null，所有 `?? 0` 都落到 0，分布区也走
- * 空分支 —— 屏幕上写着「暂无账号数据」，用户读到的是「我的账号没了」，而事实
- * 只是「这一次没拉到」。两件事必须分开说。
- */
-function LoadFailed({ what }: { what: string }) {
+function LoadFailed({ what, retry }: { what: string; retry: () => void }) {
   return (
-    <Empty
-      image={Empty.PRESENTED_IMAGE_SIMPLE}
-      description={
-        <span style={{ fontSize: 13 }}>
-          {what}加载失败
-          <br />
-          <span style={{ color: 'var(--text-muted)' }}>
-            不是没有数据，是这次没拉到；点右上角「刷新」重试
-          </span>
-        </span>
-      }
-      style={{ margin: '8px 0' }}
-    />
+    <div className="dash-error" role="alert">
+      <strong>无法读取{what}</strong>
+      <span>请检查服务连接后重试，当前不会显示为 0。</span>
+      <Button size="small" onClick={retry}>重试</Button>
+    </div>
   )
 }
 
@@ -57,7 +47,7 @@ interface RowItem {
   hint?: string
 }
 
-function DistributionRows({ items, total }: { items: RowItem[]; total: number }) {
+function DistributionRows({ items, total, linkedPlatforms = false }: { items: RowItem[]; total: number; linkedPlatforms?: boolean }) {
   return (
     <>
       {items.map((item) => {
@@ -65,17 +55,25 @@ function DistributionRows({ items, total }: { items: RowItem[]; total: number })
         return (
           <div className="dash-row" key={item.key}>
             <div className="dash-row__top">
-              <span className="dash-row__label">
-                <i className="dash-dot" style={{ background: item.color }} />
-                {item.label}
-                {item.hint ? <HelpTip text={item.hint} /> : null}
-              </span>
+              {linkedPlatforms ? (
+                <Link className="dash-row__label dash-row__label--link" to={`/accounts/${item.key}`}>
+                  <i className="dash-dot" style={{ background: item.color }} />
+                  {item.label}
+                  {item.hint ? <HelpTip text={item.hint} /> : null}
+                </Link>
+              ) : (
+                <span className="dash-row__label">
+                  <i className="dash-dot" style={{ background: item.color }} />
+                  {item.label}
+                  {item.hint ? <HelpTip text={item.hint} /> : null}
+                </span>
+              )}
               <span className="dash-row__value">
-                {item.value}
+                <b>{item.value.toLocaleString()}</b>
                 <span>{pct}%</span>
               </span>
             </div>
-            <div className="dash-row__track">
+            <div className="dash-row__track" aria-hidden="true">
               <span style={{ width: `${pct}%`, background: item.color }} />
             </div>
           </div>
@@ -87,67 +85,80 @@ function DistributionRows({ items, total }: { items: RowItem[]; total: number })
 
 export default function Dashboard() {
   const { message } = App.useApp()
-  const [stats, setStats] = useState<any>(null)
-  // 初值就是 true：effect 要等 paint 之后才跑，false 会让首帧先亮一个 0。
-  const [loading, setLoading] = useState(true)
-  /** 本次加载是否抛错。只由 catch 置位，成功路径永远清掉 —— 空数组 ≠ 出错。 */
-  const [loadFailed, setLoadFailed] = useState(false)
+  const navigate = useNavigate()
+  const [loader] = useState(() => createDashboardDataLoader({
+    fetchStats: signal => apiFetch('/accounts/stats', { signal }),
+    fetchTasks: signal => apiFetch('/tasks', { signal }),
+  }))
+  const [data, setData] = useState(loader.getSnapshot)
+  const [refreshing, setRefreshing] = useState(false)
+  const requestGeneration = useRef(0)
+  const { stats, statsLoaded, statsFailed, tasks, tasksLoaded, tasksFailed } = data
+  const statsLoading = !statsLoaded
+  const tasksLoading = !tasksLoaded
 
-  const load = useCallback(async () => {
-    setLoading(true)
-    try {
-      const data = await apiFetch('/accounts/stats')
-      setStats(data)
-      setLoadFailed(false)
-    } catch (error) {
-      // 原来这里只有 try/finally，没有 catch：异常静默冒泡，四张卡全显 0。
-      const detail = error instanceof Error ? error.message : String(error)
-      setLoadFailed(true)
-      message.error(`总览数据加载失败：${detail}，下方数字不代表真实账号数`)
-    } finally {
-      setLoading(false)
+  const load = useCallback(async (announce = false) => {
+    const request = ++requestGeneration.current
+    if (announce) setRefreshing(true)
+    const result = await loader.load(next => {
+      if (request === requestGeneration.current) setData(next)
+    })
+    if (request !== requestGeneration.current) return
+    setRefreshing(false)
+    if (announce && result.applied) {
+      if (result.statsError) message.error(`账号数据加载失败：${result.statsError}`)
+      if (result.tasksError) message.error(`任务状态加载失败：${result.tasksError}`)
     }
-  }, [message])
+  }, [loader, message])
+
+  const taskSummary = useMemo(() => summarizeDashboardTasks(tasks), [tasks])
+  const activeTasks = taskSummary.running + taskSummary.pending
+  const hasActiveTasks = activeTasks > 0
 
   useEffect(() => {
-    load()
-  }, [load])
+    const initial = window.setTimeout(() => void load(), 0)
+    // 有任务时及时看到进度；空闲时降频，后台标签页不继续轮询。
+    //
+    // **上一轮还没回来就不发新的。** `/api/accounts/stats` 实测要 3.5–6s：
+    // 只要它还在路上就重发，新请求会 abort 掉旧的，那一半数据永远不落地，
+    // 界面停在骨架屏（实测抓到 net::ERR_ABORTED）。让它自然完成。
+    const timer = window.setInterval(() => {
+      if (document.visibilityState !== 'visible') return
+      if (loader.isBusy()) return
+      void load()
+    }, hasActiveTasks ? 15000 : 60000)
+    return () => {
+      window.clearTimeout(initial)
+      window.clearInterval(timer)
+    }
+  }, [load, hasActiveTasks])
+
+  useEffect(() => () => {
+    requestGeneration.current += 1
+    loader.dispose()
+  }, [loader])
 
   const total = stats?.total ?? 0
-  // 首屏还在加载时不要先亮一个 0：0 是「真的没有账号」，加载中是「还不知道」。
-  const num = (v: number | undefined) =>
-    loadFailed || (loading && stats === null) ? '—' : (v ?? 0)
+  const registered = stats?.by_status?.registered ?? 0
+  const recover = (stats?.by_status?.expired ?? 0) +
+    (stats?.by_status?.invalid ?? 0) + (stats?.by_status?.limited ?? 0)
+  const banned = stats?.by_status?.banned ?? 0
+  const availability = total ? Math.round((registered / total) * 100) : 0
+  const num = (value: number) => statsFailed || (statsLoading && stats === null)
+    ? '—'
+    : value.toLocaleString()
 
-  // 三档状态：正常 / 待恢复（过期+失效）/ 禁用。与下方「状态分布」的明细
-  // 口径一致：合计项写明构成，别让两个同名数字对不上。
   const segments: RowItem[] = [
-    {
-      key: 'registered',
-      label: '正常',
-      value: stats?.by_status?.registered ?? 0,
-      color: 'var(--success)',
-    },
+    { key: 'registered', label: '正常可用', value: registered, color: 'var(--success)' },
     {
       key: 'recover',
       label: '待恢复',
-      // 限流也是「等额度恢复/刷新」这一档，不能漏（漏了条带就加不出总数）
-      value:
-        (stats?.by_status?.expired ?? 0) +
-        (stats?.by_status?.invalid ?? 0) +
-        (stats?.by_status?.limited ?? 0),
+      value: recover,
       color: 'var(--warning)',
-      hint: `过期 ${stats?.by_status?.expired ?? 0} + 失效 ${stats?.by_status?.invalid ?? 0} + 限流 ${stats?.by_status?.limited ?? 0}。这些都能靠刷新 Token 或等额度恢复救回来，所以合成一档看量；下方的状态分布里仍分开列。`,
+      hint: `过期 ${stats?.by_status?.expired ?? 0}，失效 ${stats?.by_status?.invalid ?? 0}，限流 ${stats?.by_status?.limited ?? 0}。这些账号可在账号管理中刷新凭据或等待额度恢复。`,
     },
-    {
-      key: 'banned',
-      label: '禁用',
-      value: stats?.by_status?.banned ?? 0,
-      color: 'var(--purple)',
-    },
+    { key: 'banned', label: '已禁用', value: banned, color: 'var(--danger)' },
   ]
-
-  // 段和必须等于总数：出现没列进三档的状态时补一段「其他」，
-  // 否则 100% 宽的条带只代表部分账号（图例也加不出上面的总数）。
   const covered = segments.reduce((sum, item) => sum + item.value, 0)
   const remainder = Math.max(total - covered, 0)
   const barSegments = remainder
@@ -162,109 +173,162 @@ export default function Dashboard() {
       color: getPlatformColor(platform),
     }))
     .sort((a, b) => b.value - a.value)
-
   const statusItems: RowItem[] = Object.entries(stats?.by_status || {})
     .map(([status, count]) => ({
       key: status,
-      label: accountStatusMeta(status).label,
+      label: status === 'registered' ? '正常可用' : accountStatusMeta(status).label,
       value: Number(count) || 0,
       color: statusColor(status),
     }))
     .sort((a, b) => b.value - a.value)
 
+  // 「现在要紧吗」的一句话结论。数据未加载完成时传 loaded:false，
+  // 让它说「正在读取」而不是报「一切正常」—— 后者是用户会信任的错误结论。
+  const attention = readAttention({
+    // 两个接口速度差一个数量级（任务 0.5s / 账号统计 2–4s）：分开传，
+    // 让「有任务在跑」这类结论不被慢接口拖住。
+    tasksLoaded,
+    statsLoaded,
+    total,
+    byStatus: stats?.by_status ?? {},
+    running: taskSummary.running,
+    queued: taskSummary.pending,
+    failed: taskSummary.failed,
+  })
+
   return (
-    <div>
+    <div className="dashboard-page">
       <PageHeader
-        title="仪表盘"
-        subtitle="账号总览与分布"
+        title="工作台"
+        subtitle="查看账号可用性，跟进注册任务与面板对接。"
         actions={
-          <Button icon={<ReloadOutlined spin={loading} />} onClick={load} loading={loading}>
-            刷新
-          </Button>
+          <>
+            <Button icon={<ReloadOutlined spin={refreshing} />} onClick={() => void load(true)} loading={refreshing}>
+              刷新数据
+            </Button>
+            <Button type="primary" icon={<PlusOutlined />} onClick={() => navigate('/register')}>
+              注册账号
+            </Button>
+          </>
         }
       />
 
-      <section className="inventory" aria-label="账号总览">
-        <div className="inventory__head">
-          <div>
-            <div className="inventory__label">总账号数</div>
-            <div className="inventory__value">{num(total)}</div>
-          </div>
-          <div className="inventory__legend">
-            {barSegments.map((item) => (
-              <span className="inventory__legend-item" key={item.key}>
-                <i className="dash-dot" style={{ background: item.color }} />
-                {item.label}
-                {item.hint ? <HelpTip text={item.hint} /> : null}
-                <b>{num(item.value)}</b>
-              </span>
-            ))}
-          </div>
-        </div>
-        <div className="inventory__bar" aria-hidden>
-          {barSegments.map((item) => (
-            <span
-              key={item.key}
-              style={{
-                flexGrow: item.value || 0,
-                background: item.color,
-                opacity: item.value ? 1 : 0.25,
-              }}
-            />
-          ))}
-        </div>
-      </section>
+      <AttentionBar reading={attention} />
 
-      <div className="dash-grid">
-        <section className="dash-section" aria-label="平台分布">
-          <div className="dash-section__head">
-            <h2>平台分布</h2>
-            <span>{platformItems.length} 个平台</span>
+      <div className="dashboard-focus">
+        <section className="inventory" aria-labelledby="inventory-title" aria-busy={statsLoading && !stats}>
+          <div className="inventory__head">
+            <div className="inventory__title-row">
+              <h2 className="inventory__label" id="inventory-title">账号可用性</h2>
+              <span>共 {num(total)} 个账号</span>
+            </div>
+            <div className="inventory__legend">
+              {barSegments.map((item) => (
+                <div className={`inventory__legend-item inventory__legend-item--${item.key}`} key={item.key}>
+                  <span className="inventory__legend-label">
+                    <i className="dash-dot" style={{ background: item.color }} />
+                    {item.label}
+                    {item.hint ? <HelpTip text={item.hint} /> : null}
+                  </span>
+                  <b>{num(item.value)}</b>
+                  <span className="inventory__legend-caption">
+                    {item.key === 'registered' ? '按当前状态可使用' : item.key === 'recover' ? '需要恢复或等待额度' : item.key === 'banned' ? '已禁用的账号' : '其他状态'}
+                  </span>
+                </div>
+              ))}
+            </div>
           </div>
-          {loading && !stats ? (
-            <Skeleton active paragraph={{ rows: 4 }} title={false} style={{ marginTop: 18 }} />
-          ) : loadFailed ? (
-            <LoadFailed what="平台分布" />
-          ) : platformItems.length ? (
-            <DistributionRows items={platformItems} total={total} />
+          {statsLoading || statsFailed ? (
+            <div className="inventory__unavailable" role={statsFailed ? 'status' : undefined}>
+              <span>{statsLoading ? '正在读取账号状态…' : '暂时无法计算可用比例，请重试。'}</span>
+              {statsFailed && <Button size="small" onClick={() => void load(true)}>重试</Button>}
+            </div>
           ) : (
-            <Empty
-              image={Empty.PRESENTED_IMAGE_SIMPLE}
-              description={
-                <span style={{ fontSize: 13 }}>
-                  暂无账号数据
-                  <br />
-                  <span style={{ color: 'var(--text-muted)' }}>注册成功后这里会显示各平台占比</span>
-                </span>
-              }
-              style={{ margin: '8px 0' }}
-            />
+            <>
+              <div className="inventory__bar" aria-hidden="true">
+                {barSegments.map((item) => (
+                  <span key={item.key} style={{ flexGrow: item.value || 0, background: item.color }} />
+                ))}
+              </div>
+              <div className="inventory__foot">
+                <span><CheckCircleFilled /> 正常账号占比</span>
+                <strong>{availability}%</strong>
+                <span className="inventory__foot-note">按当前账号状态计算</span>
+              </div>
+            </>
           )}
         </section>
 
-        <section className="dash-section" aria-label="状态分布">
+        <section className="task-summary" aria-labelledby="task-summary-title" aria-busy={tasksLoading && !tasks.length}>
           <div className="dash-section__head">
-            <h2>状态分布</h2>
-            <span>{statusItems.length} 种状态</span>
+            <h2 id="task-summary-title">任务状态</h2>
+            <span className={`live-status${hasActiveTasks ? ' is-active' : ''}`}>
+              <i />{tasksFailed ? '状态未知' : hasActiveTasks ? '执行中' : '队列空闲'}
+            </span>
           </div>
-          {loading && !stats ? (
-            <Skeleton active paragraph={{ rows: 4 }} title={false} style={{ marginTop: 18 }} />
-          ) : loadFailed ? (
-            <LoadFailed what="状态分布" />
+          {tasksLoading && !tasks.length ? (
+            <Skeleton active paragraph={{ rows: 3 }} title={false} className="dashboard-skeleton" />
+          ) : tasksFailed ? (
+            <LoadFailed what="任务状态" retry={() => void load(true)} />
+          ) : (
+            <div className="task-summary__metrics">
+              <Link to="/running-tasks" className="task-summary__metric">
+                <span className="task-summary__metric-label"><i className="is-running" />进行中</span>
+                <strong>{taskSummary.running}</strong>
+                <span>查看实时进度</span>
+              </Link>
+              <Link to="/running-tasks" className="task-summary__metric">
+                <span className="task-summary__metric-label"><i className="is-pending" />等待中</span>
+                <strong>{taskSummary.pending}</strong>
+                <span>查看任务队列</span>
+              </Link>
+              <Link to="/history" className={`task-summary__metric${taskSummary.failed ? ' has-failures' : ''}`}>
+                <span className="task-summary__metric-label"><i className="is-failed" />失败</span>
+                <strong>{taskSummary.failed}</strong>
+                <span>查看注册结果</span>
+              </Link>
+            </div>
+          )}
+          <div className="task-summary__foot">
+            <span>{tasksFailed ? '任务信息尚未更新，请重试。' : hasActiveTasks ? '进行中任务每 15 秒更新' : '查看进度、日志或停止任务'}</span>
+            <Link to="/running-tasks" aria-label="查看全部任务"><ArrowRightOutlined /></Link>
+          </div>
+        </section>
+      </div>
+
+      <div className="dash-grid">
+        <section className="dash-section" aria-labelledby="platform-title" aria-busy={statsLoading && !stats}>
+          <div className="dash-section__head">
+            <h2 id="platform-title">各平台账号</h2>
+            <span className="dash-section__hint">点击平台管理账号</span>
+          </div>
+          {statsLoading && !stats ? (
+            <Skeleton active paragraph={{ rows: 4 }} title={false} className="dashboard-skeleton" />
+          ) : statsFailed ? (
+            <LoadFailed what="账号分布" retry={() => void load(true)} />
+          ) : platformItems.length ? (
+            <DistributionRows items={platformItems} total={total} linkedPlatforms />
+          ) : (
+            <div className="dashboard-empty">
+              <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="还没有账号，注册第一批账号开始使用。" />
+              <Link to="/register">注册账号 <ArrowRightOutlined /></Link>
+            </div>
+          )}
+        </section>
+
+        <section className="dash-section" aria-labelledby="status-title" aria-busy={statsLoading && !stats}>
+          <div className="dash-section__head">
+            <h2 id="status-title">账号状态明细</h2>
+            <span>{statsFailed ? '状态未知' : statsLoading ? '正在读取' : `${statusItems.length} 种状态`}</span>
+          </div>
+          {statsLoading && !stats ? (
+            <Skeleton active paragraph={{ rows: 4 }} title={false} className="dashboard-skeleton" />
+          ) : statsFailed ? (
+            <LoadFailed what="账号状态" retry={() => void load(true)} />
           ) : statusItems.length ? (
             <DistributionRows items={statusItems} total={total} />
           ) : (
-            <Empty
-              image={Empty.PRESENTED_IMAGE_SIMPLE}
-              description={
-                <span style={{ fontSize: 13 }}>
-                  暂无状态数据
-                  <br />
-                  <span style={{ color: 'var(--text-muted)' }}>账号注册与检测结果会汇总到这里</span>
-                </span>
-              }
-              style={{ margin: '8px 0' }}
-            />
+            <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="注册与检测结果会汇总到这里" />
           )}
         </section>
       </div>

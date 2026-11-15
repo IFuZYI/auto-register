@@ -403,13 +403,15 @@ class FrontendStatusRemovalTests(unittest.TestCase):
         self.assertNotIn("'trial'", src, "账号页还有 trial 状态值")
 
     def test_dashboard_shows_registered_segment_instead(self):
-        """删掉的两张卡由「正常」替代（保留总数 / 好 / 坏三档结构）。
+        """删掉的两张卡由「正常可用」替代（保留总数 / 好 / 坏三档结构）。
 
         2026-10-06 用户要求改名：「已注册」→「正常」（正常能使用的账号）。
-        2026-11-13 仪表盘改成「库存带」，卡片 → 状态档；锚点跟着改。
+        2026-11-13 仪表盘改成「库存带」，卡片 → 状态档。
+        2026-11-14 文案统一为「正常可用」：与账号表的 `registered` 标签、
+        以及「已禁用 / 待恢复」并列时语义才完整（「正常」单字看不出是否可登录）。
         """
         src = self._src("pages/Dashboard.tsx")
-        self.assertIn("label: '正常'", src)
+        self.assertIn("label: '正常可用'", src)
         self.assertIn("by_status?.registered", src)
 
     def test_add_modal_has_no_status_field(self):

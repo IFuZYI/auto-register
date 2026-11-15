@@ -28,6 +28,7 @@ import {
   MoreOutlined,
   PlusOutlined,
   ReloadOutlined,
+  SyncOutlined,
 } from '@ant-design/icons'
 import { PageHeader } from '@/components/PageHeader'
 import { TaskLogPanel } from '@/components/TaskLogPanel'
@@ -208,6 +209,33 @@ export default function AuthorizedAccounts() {
   const [importText, setImportText] = useState('')
   const [importing, setImporting] = useState(false)
 
+  /** 单次请求的分页大小。后端 `page_size` 上界刻意是 200（1000 时实测
+   *  988ms / 3.5MB），所以取全要靠翻页，不能靠调大参数。 */
+  const KIRO_PAGE_SIZE = 200
+  /** 翻页上限兜底：后端 `total` 异常时不能无限翻。 */
+  const MAX_KIRO_PAGES = 50
+
+  /**
+   * 取全 Kiro 账号（派生判定要覆盖所有派生账号）。
+   *
+   * 原来只取 `page=1&page_size=200`：超过 200 个 Kiro 账号时，后面的账号不在
+   * `derivedMap` 里，于是对应的 AWS 号被显示成「未派生」，点「补 Kiro」必然
+   * 重复注册同一个来源。
+   */
+  const fetchAllKiro = useCallback(async (): Promise<AccountRow[]> => {
+    const all: AccountRow[] = []
+    for (let page = 1; page <= MAX_KIRO_PAGES; page += 1) {
+      const data = (await apiFetch(
+        `/accounts?platform=kiro&page=${page}&page_size=${KIRO_PAGE_SIZE}`,
+      )) as AccountList
+      const items = data?.items || []
+      all.push(...items)
+      const total = Number(data?.total || 0)
+      if (items.length === 0 || all.length >= total) break
+    }
+    return all
+  }, [])
+
   const load = useCallback(async () => {
     const seq = ++loadSeq.current
     setLoading(true)
@@ -222,7 +250,7 @@ export default function AuthorizedAccounts() {
       // Kiro 派生数据失败不该让整页变空：分开 settle，AWS 列表照常显示。
       const [awsResult, kiroResult] = await Promise.allSettled([
         apiFetch(`/accounts?${params.toString()}`) as Promise<AccountList>,
-        apiFetch('/accounts?platform=kiro&page=1&page_size=200') as Promise<AccountList>,
+        fetchAllKiro(),
       ])
       // 过期响应守卫：快速翻页/改筛选时，先发的慢响应不能覆盖后发的
       if (seq !== loadSeq.current) return
@@ -231,7 +259,7 @@ export default function AuthorizedAccounts() {
       setTotal(awsResult.value.total || 0)
       setLoadFailed(false)
       if (kiroResult.status === 'fulfilled') {
-        setDerivedMap(buildDerived(kiroResult.value.items || []))
+        setDerivedMap(buildDerived(kiroResult.value || []))
       } else {
         setDerivedMap({})
         message.warning('Kiro 派生数据加载失败，授权链暂不可用（可点刷新重试）')
@@ -244,7 +272,7 @@ export default function AuthorizedAccounts() {
     } finally {
       if (seq === loadSeq.current) setLoading(false)
     }
-  }, [page, pageSize, email, status])
+  }, [page, pageSize, email, status, fetchAllKiro])
 
   useEffect(() => {
     void load()
@@ -288,6 +316,48 @@ export default function AuthorizedAccounts() {
       setActionTask({ id: result.task_id, title: `${actionId === 'probe' ? '测活' : '刷新凭据'} · ${row.email}`, kind: 'batch_action' })
     } catch (error) {
       message.error(`任务启动失败：${errMessage(error)}`)
+    }
+  }
+
+  /**
+   * 批量测活 / 刷新：作用于**当前筛选结果**。
+   *
+   * 这页没有行选择（组织原则是「根 → 派生」），所以批量范围的默认口径就是
+   * 筛选结果 —— 与账号页「没勾选就处理筛选结果」同一条约定。后端
+   * `/tasks/batch-action` 平台无关，AWS 插件声明了 probe 与 refresh_token。
+   */
+  const [bulkRunning, setBulkRunning] = useState<'probe' | 'refresh_token' | ''>('')
+
+  const runBulkAction = async (actionId: 'probe' | 'refresh_token') => {
+    if (total === 0) {
+      message.warning('当前没有可处理的账号')
+      return
+    }
+    setBulkRunning(actionId)
+    try {
+      const payload: Record<string, unknown> = {
+        platform: 'aws',
+        action_id: actionId,
+        action_label: actionId === 'probe' ? '批量测活' : '批量刷新凭据',
+        all_filtered: true,
+        concurrency: 1,
+      }
+      if (email) payload.email = email
+      if (status) payload.status = status
+      const result = (await apiFetch('/tasks/batch-action', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      })) as { task_id: string; total: number }
+      setActionTask({
+        id: result.task_id,
+        title: `${actionId === 'probe' ? '批量测活' : '批量刷新凭据'} · ${result.total} 个账号`,
+        kind: 'batch_action',
+      })
+      message.success(`已开始处理 ${result.total} 个账号，可在任务弹窗里看进度`)
+    } catch (error) {
+      message.error(`任务启动失败：${errMessage(error)}`)
+    } finally {
+      setBulkRunning('')
     }
   }
 
@@ -560,15 +630,32 @@ export default function AuthorizedAccounts() {
   return (
     <div className="auth-page">
       <PageHeader
-        title="AWS"
+        title="AWS 授权账号"
         subtitle={
           <span className="auth-summary">
-            AWS Builder ID 是 Kiro 的授权根。<strong>{total}</strong> 个账号；Kiro 侧{' '}
-            <strong>{derivedTotal}</strong> 个来源邮箱已换取凭据（按前 200 条 Kiro 记录统计）。
+            管理用于 Kiro 授权的 AWS 账号，共 <strong>{total}</strong> 个；{' '}
+            <strong>{derivedTotal}</strong> 个来源邮箱已换取 Kiro 凭据。
           </span>
         }
         actions={
           <Space wrap>
+            {/* 批量入口与行内动作同源（probe / refresh_token），避免两套口径 */}
+            <Button
+              icon={<SyncOutlined />}
+              loading={bulkRunning === 'probe'}
+              disabled={total === 0}
+              onClick={() => void runBulkAction('probe')}
+            >
+              批量测活
+            </Button>
+            <Button
+              icon={<SyncOutlined />}
+              loading={bulkRunning === 'refresh_token'}
+              disabled={total === 0}
+              onClick={() => void runBulkAction('refresh_token')}
+            >
+              批量刷新凭据
+            </Button>
             <Button icon={<DownloadOutlined />} loading={exporting} onClick={exportJson}>
               导出
             </Button>
@@ -699,7 +786,7 @@ export default function AuthorizedAccounts() {
       />
 
       <p className="auth-footnote">
-        Kiro 凭据在「平台管理 → Kiro」。删除本地记录不会注销 AWS 号；测活与刷新凭据走后台任务，日志在弹窗里。
+        Kiro 凭据在「账号管理 → Kiro」。删除本地记录不会注销 AWS 账号；测活与刷新凭据通过后台任务执行，可在任务日志中查看结果。
       </p>
 
       <Drawer

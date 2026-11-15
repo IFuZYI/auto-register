@@ -645,17 +645,24 @@ def run_log_cleanup(*, now: Optional[datetime] = None) -> dict[str, Any]:
         logger.info("自动清理任务历史：%s 条（保留 %s 天）", summary["deleted"], keep_days)
         return summary
 
-    from core.db import get_session
-    from core.db.models_infra import TaskLog
-    from sqlmodel import delete as sqlmodel_delete
+    # SQLite 走**已有**的正确实现，不要在这里另写一份 DELETE。
+    #
+    # 原先这里是：
+    #   with get_session() as session:      ← get_session 是 FastAPI 依赖生成器
+    #       session.exec(delete(TaskLog)...)   （core/db/base.py 里函数体是 yield）
+    # 两层都是坏的（2026-11-15 实测，T8-1 / T8-2）：
+    #   1. `get_session()` 返回生成器，`with` 直接
+    #      `TypeError: 'generator' object does not support the context manager protocol`；
+    #   2. 即便包成上下文管理器，这里传的是 **naive** cutoff，而列是 **aware** →
+    #      `StatementError: Datetime values must have timezone information`。
+    # 而调度器失败时不推进 `last_run_at`（`core/scheduler.py`）—— 于是「清理任务历史」
+    # 这个 job **在生产上每 60 秒失败一次、永不成功**，任务历史从来不清理。
+    #
+    # `services/log_cleanup.py::cleanup_task_logs` 已经处理了 JSON/SQLite 两条路径
+    # 与 cutoff 的时区口径（`retention_cutoff`），复用它而不是复制一份。
+    from services.log_cleanup import cleanup_task_logs
 
-    # SQLite 存的是 naive UTC 字符串比较；用不带时区的时间戳去比，
-    # 免得 `2026-10-31 12:00:00` 和 `2026-10-31T12:00:00+00:00` 直接比字符串。
-    naive_cutoff = cutoff_dt.replace(tzinfo=None)
-    with get_session() as session:
-        result = session.exec(sqlmodel_delete(TaskLog).where(TaskLog.created_at < naive_cutoff))
-        session.commit()
-        summary["deleted"] = int(getattr(result, "rowcount", 0) or 0)
+    summary["deleted"] = int(cleanup_task_logs(keep_days))
     logger.info("自动清理任务历史：%s 条（保留 %s 天）", summary["deleted"], keep_days)
     return summary
 
