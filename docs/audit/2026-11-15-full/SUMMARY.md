@@ -53,6 +53,16 @@
 | L04-2 | `POST /api/proxies` 回显未打码的 `ProxyRecord`，新建即把口令写进响应 | 返回值过 `_public_proxy()` |
 | L04-3 | `redact_proxy_url("u:p@h:8080")` / `("h:8080:u:p:ss")` 整串放行（urlsplit 把 `u` 当 scheme） | 无 scheme 的两种写法前置拦截，只留 host:port |
 | L06-2 | JSON 部署下「导入邮箱池」500（`no such table: outlook_accounts`） | 改走 `outlook_repository.list_all/set_fields` |
+| L16-2 | `sso_token` 是 `sso` 的别名却不在 `SENSITIVE_EXTRA_KEYS` → 明文落盘且列表不打码 | 补该键（打码集合由同一 frozenset 派生，一处修两处生效） |
+| L13-1 | solver 的 `ValueError(f"Invalid proxy format: {proxy}")` 把带口令的代理串写进 `solver.log` | 两处都改 `redact_proxy_url(proxy)`（只改一处时回归测试当场抓到第二处） |
+
+## 四之二、伪证（falsified，不要当缺陷去「修」）
+
+| id | lane 的断言 | 证伪方式 |
+|---|---|---|
+| L14-1 | `release.yml:112` 的 `Authorization: Bearer ***` 是字面量，所有 tag 推送都会 401、镜像 job 被跳过 | **工具脱敏假象**。`sed -n '112p' … \| od -c` 显示真值是 `AUTH="Authorization: Bearer ${GH_TOKEN}"`；且 v1.0.0 实跑已建出 Release（HTTP 200，正文 2756 字符）并推送镜像（manifest 200，digest `sha256:8b7da3c9…`）。若照 lane 的话去「修」，会把一个能用的 workflow 改坏。 |
+
+同类需要留意的：常规工具输出会把 `password`/`token`/`Authorization` 一类值显示成 `***`（harness 脱敏）。凡 lane 的结论引用了带 `***` 的源码行，必须 `od -c` 复核原始字节再动手 —— 本轮的 P0-1 也是靠这一步才确认「`***` 背后是真口令」的。
 
 **登记未修（按影响排序，逐条可复现）：**
 

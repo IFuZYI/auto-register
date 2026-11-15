@@ -52,6 +52,8 @@ SECRETS = {
     "sessionToken": "ST-camel-plain",
     "clientSecret": "CS-camel-plain",
     "ssoToken": "SSO-camel-plain",
+    # grok2api 导出格式的拼写（L16-2）：同一份 SSO 的另一个名字，必须同等对待
+    "sso_token": "SSO-snake-plain",
     "device_code": "device-code-plain",
 }
 

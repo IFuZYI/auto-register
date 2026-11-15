@@ -82,7 +82,7 @@
    "severity": "P1",
    "file": "docker-compose.yml",
    "line": 39,
-   "evidence": "`grep -n 'APP_ALLOW_REMOTE_SETUP' .env.example docker-compose.yml README.md docs/DEPLOYMENT.md` -> no matches. api/auth.py:355-362: `if not is_loopback_client(request) and os.getenv(\"APP_ALLOW_REMOTE_SETUP\", \"\") != \"1\": raise HTTPException(403, ...\"或显式设置 APP_ALLOW_REMOTE_SETUP=1（容器部署用）\")`. main.py:224-247 returns 503 for non-loopback `/api/*` when no password is set. DEPLOYMENT.md:50-55 tells users to use the panel or `curl -X POST http://127.0.0.1:8000/api/auth/setup` from the host; with Docker's default userland proxy a published port sees the bridge gateway (e.g. 172.17.0.1), not 127.0.0.1.",
+   "evidence": "`grep -n 'APP_ALLOW_REMOTE_SETUP' .env.example docker-compose.yml README.md docs/DEPLOYMENT.md` -> no matches. api/auth.py:355-362: `if not is_loopback_client(request) and os.getenv(\"APP_ALLOW_REMOTE_SETUP\", \"\") != \"1\": raise HTTPException(403, ...\"或显式设置 APP_ALLOW_REMOTE_SETUP=1（容器部署用）\")`. main.py:224-247 returns 503 for non-loopback `/api/*` when no password is set. DEPLOYMENT.md:50-55 tells users to use the panel or `curl -X POST http://127.0.0.1:8000/api/auth/setup` from the host; with Docker's default userland proxy a published port sees the bridge gateway (e.g. 172.17.0.1), not 127.0.0.1. docs/API_REFERENCE.md:89 documents `POST /api/auth/setup` as `首次设置面板密码；已有密码时须 Bearer 鉴权` without the loopback/403 precondition.",
    "impact": "In the recommended Docker deployment the operator cannot set the first password through the panel or the documented curl (403/503). The only workaround is APP_ALLOW_REMOTE_SETUP=1, which opens first-setup to anyone who can reach the port; neither compose nor .env.example mentions it.",
    "fix_hint": "Add `APP_ALLOW_REMOTE_SETUP: \"1\"` to compose environment (and the docker run example) with a warning to set the password before exposing the port, or document `docker exec account-manager curl -fsS -X POST http://127.0.0.1:8000/api/auth/setup ...`; add the key to .env.example and the DEPLOYMENT env table.",
    "class": "functional"
@@ -122,19 +122,8 @@
   },
   {
    "id": "L14-7",
-   "title": "v1.0.0 release notes ship an empty GATES placeholder that the release workflow never fills",
-   "severity": "P2",
-   "file": "docs/releases/v1.0.0.md",
-   "line": 24,
-   "evidence": "docs/releases/v1.0.0.md:23-25: `<!-- GATES:BEGIN -->` / `（门禁跑完后由发布流程填入：全量 pytest 计数 / tsc -b / npm run check / 结构门禁 / 真库凭据复核）` / `<!-- GATES:END -->`. release.yml:78-81 only does `cp \"$NOTES_FILE\" /tmp/notes.md`; there is no gate generation step anywhere in the workflow.",
-   "impact": "The 1.0.0 release notes will be published with an empty '本版验证' section, so the release has no recorded gate numbers (v0.1.0 at least recorded them).",
-   "fix_hint": "Fill the block before tagging (current pytest/tsc/npm run check/structural/credential-verify numbers) or add a job that renders the numbers into the notes file.",
-   "class": "doc-drift"
-  },
-  {
-   "id": "L14-8",
-   "title": "v0.1.0 release notes' eslint baseline is stale (33 errors/5 warnings vs current 28/4)",
-   "severity": "P2",
+   "title": "v0.1.0 historical release note's eslint number is not marked historical (33/5 vs current 28/4)",
+   "severity": "P3",
    "file": "docs/releases/v0.1.0.md",
    "line": 18,
    "evidence": "docs/releases/v0.1.0.md:18: `eslint 33 errors / 5 warnings（与既有基线一致）`. docs/audit/2026-11-15-full/gates-baseline.md:25-26 records baseline fca2eec `33 errors / 5 warnings` and current worktree `28 errors / 4 warnings`; line 46 explicitly says the v0.1.0 note is stale and L14 should record it. MAINTENANCE.md:511 also states the current baseline is 32 problems (28E+4W).",
@@ -143,18 +132,18 @@
    "class": "doc-drift"
   },
   {
-   "id": "L14-9",
+   "id": "L14-8",
    "title": "MAINTENANCE test-scale claim (2300+ cases / 150s) contradicts README (3500+ / ~5min) and pytest.ini (3514 collected)",
    "severity": "P2",
    "file": "docs/MAINTENANCE.md",
    "line": 502,
-   "evidence": "MAINTENANCE.md:502: `# 后端全量（约 150 秒，2300+ 用例）`; README.md:137: `# 3500+ 条，约 5 分钟`; pytest.ini:12: `pytest tests/   → 3514 collected + 0 error`; docs/REPORT_2026-11-13_AWS_KIRO.md:11: `当前全量测试 3758 passed / 1 skipped`.",
+   "evidence": "MAINTENANCE.md:502: `# 后端全量（约 150 秒，2300+ 用例）`; README.md:137: `# 3500+ 条，约 5 分钟`; pytest.ini:12: `pytest tests/   → 3514 collected + 0 error`; docs/REPORT_2026-11-13_AWS_KIRO.md:11: `当前全量测试 3758 passed / 1 skipped`. docs/releases/v1.0.0.md:24 now records the current 3934 passed / 1 skipped.",
    "impact": "Two current docs disagree by >50% on suite size and by 2x on runtime; capacity/CI planning and 'is the suite complete?' checks use the wrong number.",
    "fix_hint": "Measure once on fca2eec and put the same count/duration in README and MAINTENANCE (or make MAINTENANCE point at README instead of repeating).",
    "class": "doc-drift"
   },
   {
-   "id": "L14-10",
+   "id": "L14-9",
    "title": "workflow_dispatch re-run cannot publish the requested tag: image job ignores inputs.tag and builds github.ref",
    "severity": "P2",
    "file": ".github/workflows/release.yml",
@@ -165,7 +154,7 @@
    "class": "functional"
   },
   {
-   "id": "L14-11",
+   "id": "L14-10",
    "title": "Runtime image runs as root and creates /runtime root-owned; compose has no user/capability hardening",
    "severity": "P2",
    "file": "Dockerfile",
@@ -176,18 +165,18 @@
    "class": "functional"
   },
   {
-   "id": "L14-12",
+   "id": "L14-11",
    "title": "Dockerfile never installs the patchright browser, although chromium solver mode is documented and uses patchright",
    "severity": "P2",
    "file": "Dockerfile",
    "line": 72,
-   "evidence": "Dockerfile:72 installs only `python -m playwright install --with-deps chromium firefox`; there is no `patchright install`. api_solver.py:20 imports `patchright.async_api`, and :413-416 selects it for `chromium/chrome/msedge`; .env.example:53-54 documents `SOLVER_BROWSER_TYPE=chromium`; deploy/account-manager.service:11 explicitly runs `python -m patchright install chromium`. Installed patchright 1.63 wants chromium revision 1243 while playwright 1.62 installs 1234 (`browsers.json`), i.e. separate browser revisions/caches.",
+   "evidence": "Dockerfile:72 installs only `python -m playwright install --with-deps chromium firefox`; there is no `patchright install`. api_solver.py:20 imports `patchright.async_api`, and :413-416 selects it for `chromium/chrome/msedge`; .env.example:53-54 documents `SOLVER_BROWSER_TYPE=chromium`; deploy/account-manager.service:11 explicitly runs `python -m patchright install chromium`. Installed patchright 1.63 wants chromium revision 1243 while playwright 1.62 installs 1234 (`browsers.json`), i.e. separate browser revisions/caches. README.md:55 bare-metal instructions likewise install only `playwright chromium` (no `patchright install`), while deploy/account-manager.service:11 does include it.",
    "impact": "Setting the documented `SOLVER_BROWSER_TYPE=chromium` in the image can fail at runtime with 'Executable doesn't exist' unless the two packages' browser revisions happen to coincide; only the camoufox default is guaranteed to work.",
    "fix_hint": "Add `python -m patchright install --with-deps chromium` to the Dockerfile (and README bare-metal prerequisites), or drop the chromium option from .env.example if unsupported in the image.",
    "class": "functional"
   },
   {
-   "id": "L14-13",
+   "id": "L14-12",
    "title": ".dockerignore excludes only `.env`; `COPY . .` can bake `.env.*`, legacy DBs, and account/proxy files into the image",
    "severity": "P2",
    "file": ".dockerignore",
@@ -198,7 +187,7 @@
    "class": "credential-leak"
   },
   {
-   "id": "L14-14",
+   "id": "L14-13",
    "title": "Shipped systemd unit binds HOST=0.0.0.0, contradicting README's '本机自用请显式写 127.0.0.1'",
    "severity": "P2",
    "file": "deploy/account-manager.service",
@@ -209,7 +198,7 @@
    "class": "doc-drift"
   },
   {
-   "id": "L14-15",
+   "id": "L14-14",
    "title": "DATA_DIRECTORY says the TOTP journal is plaintext; code now stores `totp_secret_cipher` encrypted",
    "severity": "P3",
    "file": "docs/DATA_DIRECTORY.md",
@@ -220,7 +209,7 @@
    "class": "doc-drift"
   },
   {
-   "id": "L14-16",
+   "id": "L14-15",
    "title": "APP_TRUST_PROXY is read by code but absent from all deploy docs; behind nginx all clients share one backoff key",
    "severity": "P2",
    "file": "docs/DEPLOYMENT.md",
@@ -231,7 +220,7 @@
    "class": "doc-drift"
   },
   {
-   "id": "L14-17",
+   "id": "L14-16",
    "title": "README calls pytest/tsc/eslint '质量门禁' but release.yml has no test/lint job",
    "severity": "P2",
    "file": ".github/workflows/release.yml",
@@ -242,7 +231,7 @@
    "class": "contract"
   },
   {
-   "id": "L14-18",
+   "id": "L14-17",
    "title": ".env.example image example still shows tag `:0.1` while the release convention is 1.0.0 / 1.0 / latest",
    "severity": "P3",
    "file": ".env.example",
@@ -253,7 +242,7 @@
    "class": "doc-drift"
   },
   {
-   "id": "L14-19",
+   "id": "L14-18",
    "title": "DEPLOYMENT/FEATURES link to a nonexistent README anchor `#部署方式`",
    "severity": "P3",
    "file": "docs/DEPLOYMENT.md",
@@ -264,7 +253,7 @@
    "class": "doc-drift"
   },
   {
-   "id": "L14-20",
+   "id": "L14-19",
    "title": "Dockerfile base images are floating tags, not digest-pinned",
    "severity": "P3",
    "file": "Dockerfile",
@@ -275,7 +264,7 @@
    "class": "contract"
   },
   {
-   "id": "L14-21",
+   "id": "L14-20",
    "title": "Dockerfile installs Playwright Firefox that no code path uses",
    "severity": "P3",
    "file": "Dockerfile",
@@ -286,8 +275,8 @@
    "class": "perf"
   },
   {
-   "id": "L14-22",
-   "title": "requirements.txt declares five unused packages and relies on an undeclared transitive (platformdirs)",
+   "id": "L14-21",
+   "title": "requirements.txt declares four unused packages and relies on an undeclared transitive (platformdirs)",
    "severity": "P3",
    "file": "requirements.txt",
    "line": 11,
@@ -297,7 +286,7 @@
    "class": "dead-code"
   },
   {
-   "id": "L14-23",
+   "id": "L14-22",
    "title": ".env.example says the solver pool defaults to 4 threads / 1.0 GiB, but solver_manager defaults to 1-2 threads",
    "severity": "P3",
    "file": ".env.example",
@@ -308,7 +297,7 @@
    "class": "doc-drift"
   },
   {
-   "id": "L14-24",
+   "id": "L14-23",
    "title": "DEPLOYMENT env table calls STORAGE_BACKEND default 'sqlite' while code defaults fresh deployments to json",
    "severity": "P3",
    "file": "docs/DEPLOYMENT.md",
@@ -345,7 +334,7 @@
    "how_verified": "core/browser_runtime.py:14-28 `parse_env_bool` returns None for an empty/whitespace value, so `resolve_browser_headless` (:31-47) falls through to the caller/default (headless)."
   },
   {
-   "claim": "`.env` is kept out of git and out of the Docker context (the broader `.env.*`/DB gap is L14-13).",
+   "claim": "`.env` is kept out of git and out of the Docker context (the broader `.env.*`/DB gap is L14-12).",
    "how_verified": ".gitignore:47-52 ignores `.env`, `.env.local`, `.env.*` and un-ignores only `.env.example`; .dockerignore:15 excludes `.env`; no `.env` exists in the worktree (`ls -la .env*` -> only `.env.example`)."
   },
   {
@@ -378,7 +367,7 @@
   },
   {
    "claim": "The Docker build context excludes the main secret/data directories.",
-   "how_verified": ".dockerignore:1-27 excludes `.venv/`, `frontend/node_modules/`, `.git/`, `data/`, `static/`, `reference/`, `.worktrees/`, `.secrets/`, `tests/`; Dockerfile:83 `COPY . .` therefore does not include those (the `.env.*`/legacy-DB gap is separately reported as L14-13)."
+   "how_verified": ".dockerignore:1-27 excludes `.venv/`, `frontend/node_modules/`, `.git/`, `data/`, `static/`, `reference/`, `.worktrees/`, `.secrets/`, `tests/`; Dockerfile:83 `COPY . .` therefore does not include those (the `.env.*`/legacy-DB gap is separately reported as L14-12)."
   },
   {
    "claim": "The compose memory/PID/logging limits and `mem_limit` rationale are valid.",
@@ -386,7 +375,7 @@
   },
   {
    "claim": "The systemd unit's single-process/xvfb setup matches its description and MAINTENANCE §1.6.",
-   "how_verified": "deploy/account-manager.service:22-42 is `Type=simple` with one `ExecStart=/usr/bin/xvfb-run ... /home/Register/.venv/bin/python main.py`; `KillMode=control-group`, `Restart=always`; MAINTENANCE.md:169-175 cites the same unit. (HOST=0.0.0.0 is L14-14.)"
+   "how_verified": "deploy/account-manager.service:22-42 is `Type=simple` with one `ExecStart=/usr/bin/xvfb-run ... /home/Register/.venv/bin/python main.py`; `KillMode=control-group`, `Restart=always`; MAINTENANCE.md:169-175 cites the same unit. (HOST=0.0.0.0 is L14-13.)"
   },
   {
    "claim": "The README `scripts/encrypt_existing_credentials.py --verify` claim is real.",
@@ -414,7 +403,7 @@
   },
   {
    "claim": "GHCR image availability, a real `docker build`/`docker compose up`, and a live GitHub Actions run were NOT verified.",
-   "how_verified": "This lane is read-only and the environment forbids docker/build/network; conclusions about 1.0.0 publication, image contents, and CI behavior are static (git tags, workflow YAML, Dockerfile). The concrete static evidence is in L14-1/L14-2/L14-13."
+   "how_verified": "This lane is read-only and the environment forbids docker/build/network; conclusions about 1.0.0 publication, image contents, and CI behavior are static (git tags, workflow YAML, Dockerfile). The concrete static evidence is in L14-1/L14-2/L14-12."
   }
  ]
 }

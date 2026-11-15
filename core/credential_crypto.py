@@ -45,6 +45,11 @@ SENSITIVE_EXTRA_KEYS: frozenset[str] = frozenset(
         "id_token",
         "session_token",
         "sso",
+        # grok2api 导出/导入用 `sso_token` 这个拼写（见 `credential_fields.py`
+        # 的别名表）。只列 `sso` 的话：导入进来带 `sso_token` 的行既**不加密
+        # 落盘**，也**不在列表响应里被打码** —— 同一份 SSO 两个拼写，两套待遇
+        # （2026-11-15 全量检测 L16-2）。
+        "sso_token",
         "totp_secret",
         # `cookies` 是**会话凭据**：带着它就能免密续上已登录会话，与 AT 同级。
         # 原来是明文（真库 607 行），理由是「需要被 SQL 查询」—— 实际全仓没有

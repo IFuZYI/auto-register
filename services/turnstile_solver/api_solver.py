@@ -939,7 +939,14 @@ class TurnstileAPIServer:
                         
                         context = await browser.new_context(**context_options)
                     except ValueError:
-                        raise ValueError(f"Invalid proxy format: {proxy}")
+                        # 异常消息会进 solver.log（该协程从不被 await，asyncio
+                        # 会把 "Task exception was never retrieved" 连同消息
+                        # 写盘），所以这里绝不能带原始 proxy —— 它含口令。
+                        from core.proxy_utils import redact_proxy_url
+
+                        raise ValueError(
+                            f"Invalid proxy format: {redact_proxy_url(proxy)}"
+                        )
                 else:
                     parts = proxy.split(':')
                     if len(parts) == 5:
@@ -976,7 +983,11 @@ class TurnstileAPIServer:
                         
                         context = await browser.new_context(**context_options)
                     else:
-                        raise ValueError(f"Invalid proxy format: {proxy}")
+                        from core.proxy_utils import redact_proxy_url
+
+                        raise ValueError(
+                            f"Invalid proxy format: {redact_proxy_url(proxy)}"
+                        )
             else:
                 if self.debug:
                     logger.debug(f"Browser {index}: Creating context without proxy")

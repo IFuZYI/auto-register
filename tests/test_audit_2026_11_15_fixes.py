@@ -101,5 +101,42 @@ class ImportAccountsToPoolTests(unittest.TestCase):
         self.assertEqual(touched, [1, 3], "只有 unpooled 行该被改成 available")
 
 
+class SsoTokenAliasTests(unittest.TestCase):
+    """L16-2：`sso_token` 是 `sso` 的别名，但不在 SENSITIVE_EXTRA_KEYS 里 →
+    既不加密落盘，也不在列表响应里打码。"""
+
+    def test_sso_token_counts_as_secret(self):
+        from core.credential_crypto import SENSITIVE_EXTRA_KEYS
+        from core.credential_fields import CREDENTIAL_FIELDS
+
+        # 正控：别名表确实把 sso_token 当成 SSO
+        aliases = {a for f in CREDENTIAL_FIELDS for a in f.aliases}
+        self.assertIn("sso_token", aliases)
+        self.assertIn("sso", SENSITIVE_EXTRA_KEYS)
+        self.assertIn("sso_token", SENSITIVE_EXTRA_KEYS, "sso_token 仍会明文落盘")
+
+
+class SolverLogHygieneTests(unittest.TestCase):
+    """L13-1：解析失败的异常消息会进 solver.log，不能带原始 proxy（含口令）。"""
+
+    def test_error_message_does_not_interpolate_raw_proxy(self):
+        # 不 import 该模块：solver 依赖（flask/camoufox）不在主 venv 里，
+        # 导入会 ModuleNotFoundError。读源码文本 —— 与 test_panel_tls_verification
+        # 同一套「生产代码里不许再出现 X」的守卫写法。
+        from pathlib import Path
+
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "services"
+            / "turnstile_solver"
+            / "api_solver.py"
+        ).read_text(encoding="utf-8")
+
+        # 正控：确实读到了那个文件（否则这条断言可以靠"什么都没读到"通过）
+        self.assertIn("Invalid proxy format", source)
+        self.assertNotIn('f"Invalid proxy format: {proxy}"', source)
+        self.assertIn("redact_proxy_url(proxy)", source)
+
+
 if __name__ == "__main__":
     unittest.main()
